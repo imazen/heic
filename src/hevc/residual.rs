@@ -178,13 +178,6 @@ pub fn decode_residual(
     // Decode last significant coefficient position
     let (last_x, last_y) = decode_last_sig_coeff_pos(cabac, ctx, log2_size, c_idx)?;
 
-    // DEBUG: Print first few last_sig positions
-    static DEBUG_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-    let count = DEBUG_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    if count < 5 && c_idx == 0 {
-        eprintln!("DEBUG: last_sig_coeff_pos: ({},{}) scan_order={:?} size={}", last_x, last_y, scan_order, size);
-    }
-
     // Swap coordinates for vertical scan
     let (last_x, last_y) = if scan_order == ScanOrder::Vertical {
         (last_y, last_x)
@@ -216,10 +209,14 @@ pub fn decode_residual(
         let (sb_x, sb_y) = scan_sub[sb_idx as usize];
 
         // Check if sub-block is coded
-        let sb_coded = if sb_idx > 0 && sb_idx < last_sb_idx {
-            decode_coded_sub_block_flag(cabac, ctx, c_idx)?
+        // Middle sub-blocks need coded_sub_block_flag decoded
+        // First (i=0) and last sub-blocks are always considered coded
+        let (sb_coded, infer_sb_dc_sig) = if sb_idx > 0 && sb_idx < last_sb_idx {
+            let coded = decode_coded_sub_block_flag(cabac, ctx, c_idx)?;
+            // If sub-block is coded, we may need to infer DC later
+            (coded, coded)
         } else {
-            true // First and last sub-blocks are always coded
+            (true, false) // First and last sub-blocks don't use DC inference
         };
 
         if !sb_coded {
@@ -236,21 +233,53 @@ pub fn decode_residual(
         let mut coeff_values = [0i16; 16];
         let mut coeff_flags = [false; 16];
         let mut num_coeffs = 0u8;
+        let mut can_infer_dc = infer_sb_dc_sig;
 
-        // Last coefficient in last sub-block
-        if sb_idx == last_sb_idx {
+        // Determine the last position to check
+        // For last sub-block: start from last_pos_in_sb (the known last significant coeff)
+        // For other sub-blocks: start from position 15
+        let last_coeff = if sb_idx == last_sb_idx {
+            // Set the known last significant coefficient (no need to decode sig_coeff_flag)
             coeff_flags[start_pos as usize] = true;
             coeff_values[start_pos as usize] = 1;
             num_coeffs = 1;
-        }
+            can_infer_dc = false; // Can't infer DC if we have other coeffs
+            // Then check positions from start_pos-1 down to 1
+            start_pos.saturating_sub(1)
+        } else {
+            // For non-last sub-blocks, check all positions from 15 down to 1
+            15
+        };
 
-        // Decode significant_coeff_flags
-        for n in (0..start_pos).rev() {
+        // Decode significant_coeff_flags for positions last_coeff down to 1
+        // (DC at position 0 is handled separately for inference)
+        for n in (1..=last_coeff).rev() {
             let sig = decode_sig_coeff_flag(cabac, ctx, c_idx, n)?;
             if sig {
                 coeff_flags[n as usize] = true;
                 coeff_values[n as usize] = 1;
                 num_coeffs += 1;
+                can_infer_dc = false; // Found a coefficient, can't infer DC
+            }
+        }
+
+        // Handle DC coefficient (position 0)
+        // Per H.265: if sub-block is coded but no other coefficients found,
+        // DC is inferred to be significant (otherwise the sub-block would be all zeros)
+        if start_pos > 0 {
+            if can_infer_dc {
+                // Infer DC is present - don't decode, just set it
+                coeff_flags[0] = true;
+                coeff_values[0] = 1;
+                num_coeffs += 1;
+            } else {
+                // Decode sig_coeff_flag for DC
+                let sig = decode_sig_coeff_flag(cabac, ctx, c_idx, 0)?;
+                if sig {
+                    coeff_flags[0] = true;
+                    coeff_values[0] = 1;
+                    num_coeffs += 1;
+                }
             }
         }
 
@@ -331,6 +360,8 @@ pub fn decode_residual(
             && !cu_transquant_bypass
             && (last_sig_pos - first_sig_pos) > 3;
 
+
+
         // Decode signs (bypass mode)
         // Following libde265's approach: decode signs in coefficient order (high scan pos to low)
         // The LAST coefficient (at first_sig_pos) has its sign hidden when sign_hidden=true
@@ -345,17 +376,24 @@ pub fn decode_residual(
             }
         }
 
-        // Decode signs for ALL coefficients (ignoring sign_hidden for now)
-        // The sign_hidden feature causes CABAC desync - needs more investigation
-        // TODO: Investigate why sign hiding causes early end_of_slice
-        let _ = sign_hidden; // silence unused warning
-        for i in 0..n_sig {
-            let n = sig_positions[i] as usize;
-            let sign = cabac.decode_bypass()?;
-            if sign != 0 {
-                coeff_values[n] = -coeff_values[n];
-            }
+        // Decode signs following libde265 order:
+        // - Decode signs for coefficients 0 to n_sig-2 (high scan pos to low)
+        // - For coefficient at n_sig-1 (lowest scan pos, first in scan order):
+        //   - If sign_hidden: skip decoding, will infer from parity later
+        //   - Otherwise: decode the sign
+        //
+        // This matches the H.265 spec and libde265: the FIRST coefficient in
+        // scanning order (lowest scan position) has its sign hidden.
+        let mut coeff_signs = [0u8; 16];
+        for (i, sign) in coeff_signs[..n_sig.saturating_sub(1)].iter_mut().enumerate() {
+            *sign = cabac.decode_bypass()?;
+            let _ = i; // Silence unused warning if needed
         }
+        // Last coefficient (lowest scan pos, first in scan order)
+        if n_sig > 0 && !sign_hidden {
+            coeff_signs[n_sig - 1] = cabac.decode_bypass()?;
+        }
+        // If sign_hidden, coeff_signs[n_sig-1] stays 0 (will be inferred later)
 
         // Decode remaining levels for all coefficients that need it
         // Rice parameter starts at 0 and is updated adaptively
@@ -366,20 +404,26 @@ pub fn decode_residual(
                 let (remaining, new_rice) =
                     decode_coeff_abs_level_remaining(cabac, rice_param, base)?;
                 rice_param = new_rice;
-                if base > 0 {
-                    coeff_values[n as usize] = base + remaining;
-                } else {
-                    coeff_values[n as usize] = base - remaining;
-                }
+                coeff_values[n as usize] = base + remaining;
             }
         }
 
-        // Infer hidden sign from parity
-        // Per H.265: if sum of |levels| is odd, the hidden sign coeff is negative
-        // NOTE: Sign hiding is disabled due to CABAC desync issues
-        // This code would apply if sign_hidden were used
-        let _ = first_sig_pos; // silence unused warning
-        let _ = last_sig_pos;
+        // Apply signs and compute sum for parity inference
+        // At this point coeff_values[] are all positive (absolute values)
+        let mut sum_abs_level = 0i32;
+        for (i, &pos) in sig_positions[..n_sig].iter().enumerate() {
+            let pos = pos as usize;
+            if coeff_signs[i] != 0 {
+                coeff_values[pos] = -coeff_values[pos];
+            }
+            sum_abs_level += coeff_values[pos] as i32;
+
+            // Infer hidden sign at the last coefficient (first in scan order)
+            // Per H.265: if sum of signed coefficients is odd, flip the hidden sign
+            if i == n_sig - 1 && sign_hidden && (sum_abs_level & 1) != 0 {
+                coeff_values[pos] = -coeff_values[pos];
+            }
+        }
 
         // Store coefficients in buffer
         for (n, &(px, py)) in scan_pos.iter().enumerate() {
@@ -395,17 +439,35 @@ pub fn decode_residual(
 }
 
 /// Get sub-block scan order
+/// For TU of size 2^log2_size, sub-blocks are arranged in a grid of size 2^(log2_size-2)
+/// This function returns the diagonal scan order for sub-blocks
 fn get_scan_sub_block(log2_size: u8, order: ScanOrder) -> &'static [(u8, u8)] {
-    // For simplicity, always use diagonal scan for sub-blocks
-    // A full implementation would have different tables for each size
-    static SCAN_2X2_DIAG: [(u8, u8); 4] = [(0, 0), (1, 0), (0, 1), (1, 1)];
+    // Sub-block scan tables
+    // Note: The order here must match how coefficients are accessed in the decoder
     static SCAN_1X1: [(u8, u8); 1] = [(0, 0)];
+    static SCAN_2X2_DIAG: [(u8, u8); 4] = [(0, 0), (1, 0), (0, 1), (1, 1)];
+    static SCAN_4X4_DIAG: [(u8, u8); 16] = [
+        (0, 0), (1, 0), (0, 1), (2, 0), (1, 1), (0, 2), (3, 0), (2, 1),
+        (1, 2), (0, 3), (3, 1), (2, 2), (1, 3), (3, 2), (2, 3), (3, 3),
+    ];
+    static SCAN_8X8_DIAG: [(u8, u8); 64] = [
+        (0, 0), (1, 0), (0, 1), (2, 0), (1, 1), (0, 2), (3, 0), (2, 1),
+        (1, 2), (0, 3), (4, 0), (3, 1), (2, 2), (1, 3), (0, 4), (5, 0),
+        (4, 1), (3, 2), (2, 3), (1, 4), (0, 5), (6, 0), (5, 1), (4, 2),
+        (3, 3), (2, 4), (1, 5), (0, 6), (7, 0), (6, 1), (5, 2), (4, 3),
+        (3, 4), (2, 5), (1, 6), (0, 7), (7, 1), (6, 2), (5, 3), (4, 4),
+        (3, 5), (2, 6), (1, 7), (7, 2), (6, 3), (5, 4), (4, 5), (3, 6),
+        (2, 7), (7, 3), (6, 4), (5, 5), (4, 6), (3, 7), (7, 4), (6, 5),
+        (5, 6), (4, 7), (7, 5), (6, 6), (5, 7), (7, 6), (6, 7), (7, 7),
+    ];
 
-    let _ = order;
+    let _ = order; // TODO: Use horizontal/vertical scan when appropriate
     match log2_size {
         2 => &SCAN_1X1,
         3 => &SCAN_2X2_DIAG,
-        _ => &SCAN_2X2_DIAG, // Simplified
+        4 => &SCAN_4X4_DIAG,
+        5 => &SCAN_8X8_DIAG,
+        _ => &SCAN_1X1,
     }
 }
 

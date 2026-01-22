@@ -90,10 +90,11 @@ pub fn decode_rgba_into(
 - Frame buffer with YCbCr→RGB conversion (picture.rs)
 - Transform coefficient parsing via CABAC (residual.rs)
 - Adaptive Golomb-Rice coefficient decoding
-- All 280 CTUs decode successfully for example.heic
+- DC coefficient inference for coded sub-blocks
+- Sign data hiding (partial: 269/280 CTUs decode)
 
 ### In Progress
-- Chroma plane accuracy (Cb=167, Cr=209 should be ~128)
+- Sign data hiding edge case (11 CTUs fail with sign hiding enabled)
 - Sub-block scan tables for 16x16 and 32x32 TUs
 
 ### Pending
@@ -113,48 +114,39 @@ pub fn decode_rgba_into(
 
 ## Known Bugs
 
-- Chroma planes have wrong averages (Cb=167, Cr=209 vs ~128), causing wrong RGB colors
-  - Y plane average (152) is reasonable
-  - Root cause: **Sign Data Hiding not implemented** (see Investigation Notes)
-  - Implementing sign_data_hiding per spec causes CABAC desync at CTU 49
-  - For now, all sign bits are decoded (ignoring sign_data_hiding_enabled_flag)
-  - This produces biased chroma but stable decoding of all 280 CTUs
+- Sign data hiding causes CABAC desync at CTU 269 (11/280 CTUs fail)
+  - With sign hiding enabled: 269/280 CTUs decode successfully
+  - Without sign hiding: all 280 CTUs decode but with wrong chroma values
 - Output dimensions 1280x856 vs reference 1280x854 (missing conformance window cropping)
 
 ## Investigation Notes
 
-### Sign Data Hiding Issue (2026-01-21 Session 2)
+### Sign Data Hiding Progress (2026-01-21)
 
 **Background:** HEVC has a "sign data hiding" feature (`sign_data_hiding_enabled_flag` in PPS)
-that allows the encoder to infer one sign bit per 4x4 sub-block from coefficient parity,
-reducing bit rate. This file has sign_data_hiding_enabled_flag=true.
+that allows the encoder to infer one sign bit per 4x4 sub-block from coefficient parity.
 
-**The Problem:**
-1. Without sign hiding: decoder reads all sign bits, produces wrong coefficients (e.g., Cr coeff of 502),
-   but all 280 CTUs decode and CABAC stays aligned
-2. With sign hiding implemented per spec: CABAC desync at CTU 49, only partial image decoded
+**Fixes implemented:**
+1. DC coefficient inference for coded sub-blocks (was decoding instead of inferring)
+2. sig_coeff_flag decoding for position 15 in non-last sub-blocks (was skipping)
+3. Sign decoding order matches libde265 (high scan pos to low)
+4. Parity inference for hidden sign (sum & 1 flips sign)
 
-**What was tried:**
-- Implemented sign hiding: skip sign bit for first significant coefficient when lastScanPos - firstScanPos > 3
-- Added cu_transquant_bypass check (should disable sign hiding)
-- Verified coefficient order matches libde265 (high scan pos to low)
-- Parity inference for hidden sign
+**Progress:**
+- Initially: CABAC desync at CTU 49 (49/280)
+- After DC inference fix: CTU 161 (161/280)
+- After position 15 fix: CTU 272 (272/280)
+- After scan table investigation: CTU 269 (269/280)
 
-**libde265 reference (slice.cc:3301-3403):**
-- Signs decoded for indices 0 to nCoefficients-2
-- Last coefficient (index nCoefficients-1) sign hidden when signHidden=true
-- signHidden = (coeff_scan_pos[0] - coeff_scan_pos[nCoefficients-1] > 3)
-- Parity: sumAbsLevel accumulates signed values, flips hidden sign if sum is odd
+**Remaining issue at CTU 269:**
+- 11 CTUs near end of image fail to decode with sign hiding enabled
+- Sign hiding disabled allows all 280 CTUs to decode
+- The exact cause is not yet identified
 
-**Hypothesis:**
-The decoder has another bug that compensates for missing sign hiding. The wrong coefficient
-values (like 502 for Cr) may actually be keeping CABAC aligned through error propagation.
-Implementing sign hiding correctly exposes the CABAC being out of sync with the bitstream.
-
-**Next steps:**
-- Compare exact CABAC state with libde265 at sub-block boundaries
-- Check if there's a bug in sig_coeff_flag or coded_sub_block_flag context selection
-- Verify coefficient base levels (greater1/greater2 flags) are correct
+**hevc-compare crate (crates/hevc-compare/):**
+- Comparison crate for testing C++/Rust CABAC functions
+- All basic CABAC tests pass (bypass decode, bypass bits, coeff_abs_level_remaining)
+- Can be extended to test more coefficient decoding operations
 
 ### Chroma Bias Analysis (2026-01-21 Session 1)
 - Test image: example.heic (1280x854)
