@@ -66,6 +66,8 @@ pub struct SliceContext<'a> {
     pub cu_transquant_bypass_flag: bool,
     /// Debug flag for current CTU
     debug_ctu: bool,
+    /// Debug: track chroma prediction calls
+    chroma_pred_count: u32,
 }
 
 impl<'a> SliceContext<'a> {
@@ -107,6 +109,7 @@ impl<'a> SliceContext<'a> {
         let qp_cr = chroma_qp_mapping(qp_i_cr.clamp(0, 57));
 
         eprintln!("DEBUG: Chroma QP: qp_y={}, qp_cb={}, qp_cr={}", slice_qp, qp_cb, qp_cr);
+        eprintln!("DEBUG: sign_data_hiding_enabled_flag={}", pps.sign_data_hiding_enabled_flag);
 
         Ok(Self {
             sps,
@@ -123,6 +126,7 @@ impl<'a> SliceContext<'a> {
             cu_qp_delta: 0,
             cu_transquant_bypass_flag: false,
             debug_ctu: false,
+            chroma_pred_count: 0,
         })
     }
 
@@ -629,6 +633,12 @@ impl<'a> SliceContext<'a> {
         scan_order: ScanOrder,
         frame: &mut DecodedFrame,
     ) -> Result<()> {
+        // Track chroma decode statistics
+        static CB_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        static CR_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        static CB_RESIDUAL_SUM: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(0);
+        static CR_RESIDUAL_SUM: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(0);
+
         // Decode coefficients via CABAC
         let coeff_buf = residual::decode_residual(
             &mut self.cabac,
@@ -636,6 +646,8 @@ impl<'a> SliceContext<'a> {
             log2_size,
             c_idx,
             scan_order,
+            self.pps.sign_data_hiding_enabled_flag,
+            self.cu_transquant_bypass_flag,
         )?;
 
         if coeff_buf.is_zero() {
@@ -646,6 +658,25 @@ impl<'a> SliceContext<'a> {
         if x0 < 8 && y0 < 8 && c_idx == 0 {
             let size = 1usize << log2_size;
             eprintln!("DEBUG: coeffs at ({},{}) c_idx={} size={}:", x0, y0, c_idx, size);
+            for y in 0..size.min(4) {
+                let row: Vec<i16> = (0..size.min(4)).map(|x| coeff_buf.get(x, y)).collect();
+                eprintln!("  {:?}", row);
+            }
+        }
+
+        // DEBUG: Print Cr coefficients at CTU 1 boundary
+        if x0 == 32 && y0 == 0 && c_idx == 2 {
+            let size = 1usize << log2_size;
+            eprintln!("DEBUG: Cr coeffs at (32,0) raw:");
+            for y in 0..size.min(4) {
+                let row: Vec<i16> = (0..size.min(4)).map(|x| coeff_buf.get(x, y)).collect();
+                eprintln!("  {:?}", row);
+            }
+        }
+        // DEBUG: Print Cb coefficients at CTU 1 boundary for comparison
+        if x0 == 32 && y0 == 0 && c_idx == 1 {
+            let size = 1usize << log2_size;
+            eprintln!("DEBUG: Cb coeffs at (32,0) raw:");
             for y in 0..size.min(4) {
                 let row: Vec<i16> = (0..size.min(4)).map(|x| coeff_buf.get(x, y)).collect();
                 eprintln!("  {:?}", row);
@@ -683,6 +714,22 @@ impl<'a> SliceContext<'a> {
             }
         }
 
+        // DEBUG: Print dequantized Cr coefficients at CTU 1 boundary
+        if x0 == 32 && y0 == 0 && c_idx == 2 {
+            eprintln!("DEBUG: Cr at (32,0) dequant QP={}, bit_depth={}:", qp, bit_depth);
+            for y in 0..size.min(4) {
+                let row: Vec<i16> = (0..size.min(4)).map(|px| coeffs[y * size + px]).collect();
+                eprintln!("  {:?}", row);
+            }
+        }
+        if x0 == 32 && y0 == 0 && c_idx == 1 {
+            eprintln!("DEBUG: Cb at (32,0) dequant QP={}, bit_depth={}:", qp, bit_depth);
+            for y in 0..size.min(4) {
+                let row: Vec<i16> = (0..size.min(4)).map(|px| coeffs[y * size + px]).collect();
+                eprintln!("  {:?}", row);
+            }
+        }
+
         // Apply inverse transform
         let mut residual = [0i16; 1024];
         let is_intra_4x4_luma = log2_size == 2 && c_idx == 0;
@@ -697,8 +744,53 @@ impl<'a> SliceContext<'a> {
             }
         }
 
+        // DEBUG: Print residuals for Cb/Cr at CTU 1 boundary
+        if x0 == 32 && y0 == 0 && (c_idx == 1 || c_idx == 2) {
+            eprintln!("DEBUG: {} residuals at (32,0):", if c_idx == 1 { "Cb" } else { "Cr" });
+            for y in 0..size.min(4) {
+                let row: Vec<i16> = (0..size.min(4)).map(|px| residual[y * size + px]).collect();
+                eprintln!("  {:?}", row);
+            }
+        }
+
         // Add residual to prediction
         let max_val = (1i32 << bit_depth) - 1;
+
+        // Track chroma residual sums and prediction sums
+        static CB_PRED_SUM: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(0);
+        static CR_PRED_SUM: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(0);
+
+        if c_idx == 1 {
+            let res_sum: i64 = residual[..num_coeffs].iter().map(|&r| r as i64).sum();
+            let mut pred_sum: i64 = 0;
+            for py in 0..size {
+                for px in 0..size {
+                    pred_sum += frame.get_cb(x0 + px as u32, y0 + py as u32) as i64;
+                }
+            }
+            CB_RESIDUAL_SUM.fetch_add(res_sum, core::sync::atomic::Ordering::Relaxed);
+            CB_PRED_SUM.fetch_add(pred_sum, core::sync::atomic::Ordering::Relaxed);
+            let count = CB_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            let pred_avg = pred_sum as f64 / num_coeffs as f64;
+            if count < 5 || (count >= 50 && count < 55) || (pred_avg > 240.0 && count < 30) {
+                eprintln!("DEBUG: Cb TU at ({},{}) size={} residual_sum={} pred_avg={:.1}", x0, y0, size, res_sum, pred_avg);
+            }
+        } else if c_idx == 2 {
+            let res_sum: i64 = residual[..num_coeffs].iter().map(|&r| r as i64).sum();
+            let mut pred_sum: i64 = 0;
+            for py in 0..size {
+                for px in 0..size {
+                    pred_sum += frame.get_cr(x0 + px as u32, y0 + py as u32) as i64;
+                }
+            }
+            CR_RESIDUAL_SUM.fetch_add(res_sum, core::sync::atomic::Ordering::Relaxed);
+            CR_PRED_SUM.fetch_add(pred_sum, core::sync::atomic::Ordering::Relaxed);
+            let count = CR_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            let pred_avg = pred_sum as f64 / num_coeffs as f64;
+            if count < 5 || (count >= 50 && count < 55) || (pred_avg > 240.0 && count < 30) {
+                eprintln!("DEBUG: Cr TU at ({},{}) size={} residual_sum={} pred_avg={:.1}", x0, y0, size, res_sum, pred_avg);
+            }
+        }
 
         // DEBUG: Print first sample reconstruction for chroma
         if x0 == 0 && y0 == 0 && c_idx > 0 {
@@ -726,12 +818,37 @@ impl<'a> SliceContext<'a> {
 
                 let recon = (pred + r).clamp(0, max_val) as u16;
 
+                // DEBUG: Track Cb writes from residual application at the CTU 1 boundary
+                if c_idx == 1 && y <= 3 && x >= 32 && x <= 35 {
+                    eprintln!("DEBUG: residual set_cb({},{}) = {} (pred={} r={})", x, y, recon, pred, r);
+                }
+                // DEBUG: Track Cr writes at CTU 1 boundary
+                if c_idx == 2 && y <= 3 && x >= 32 && x <= 35 {
+                    eprintln!("DEBUG: residual set_cr({},{}) = {} (pred={} r={})", x, y, recon, pred, r);
+                }
+
                 match c_idx {
                     0 => frame.set_y(x, y, recon),
                     1 => frame.set_cb(x, y, recon),
                     2 => frame.set_cr(x, y, recon),
                     _ => {}
                 }
+            }
+        }
+
+        // Print final chroma statistics
+        if c_idx == 2 {
+            let cr_count = CR_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+            if cr_count == 100 || cr_count == 500 || cr_count == 1000 {
+                let cb_count = CB_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+                let cb_res_sum = CB_RESIDUAL_SUM.load(core::sync::atomic::Ordering::Relaxed);
+                let cr_res_sum = CR_RESIDUAL_SUM.load(core::sync::atomic::Ordering::Relaxed);
+                let cb_pred_sum = CB_PRED_SUM.load(core::sync::atomic::Ordering::Relaxed);
+                let cr_pred_sum = CR_PRED_SUM.load(core::sync::atomic::Ordering::Relaxed);
+                eprintln!("DEBUG CHROMA STATS: Cb count={} res_sum={} pred_sum={} pred_avg={:.1}",
+                    cb_count, cb_res_sum, cb_pred_sum, cb_pred_sum as f64 / (cb_count * 16) as f64);
+                eprintln!("DEBUG CHROMA STATS: Cr count={} res_sum={} pred_sum={} pred_avg={:.1}",
+                    cr_count, cr_res_sum, cr_pred_sum, cr_pred_sum as f64 / (cr_count * 16) as f64);
             }
         }
 

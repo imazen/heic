@@ -59,11 +59,21 @@ pub fn predict_intra(
 
     fill_border_samples(frame, x, y, size, c_idx, &mut border, border_center);
 
-    // DEBUG: Print border samples for first blocks
-    if x == 0 && y == 0 {
-        eprintln!("DEBUG: predict_intra at ({},{}) mode={:?} size={} c_idx={}", x, y, mode, size, c_idx);
-        eprintln!("  border[-4..0]: {:?}", &border[border_center - 4..border_center]);
-        eprintln!("  border[0..5]: {:?}", &border[border_center..border_center + 5]);
+    // DEBUG: Track order and print border samples for chroma blocks near the problem area
+    static PRED_SEQ: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    let debug_output = c_idx == 1 && y == 0 && x >= 16 && x <= 36;
+    let seq = if debug_output {
+        PRED_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+    } else {
+        0
+    };
+
+    // Print BEFORE prediction to see what border samples are read
+    if c_idx == 1 && y == 0 && x >= 20 && x <= 28 {
+        let left_samples: Vec<i32> = (0..size as usize).map(|i| border[border_center - 1 - i]).collect();
+        let actual_frame_val = frame.get_cb(x.saturating_sub(1), y);
+        eprintln!("DEBUG Cb[{}]: at ({},{}) BEFORE predict: border_left[0]={} frame.get_cb({},0)={}",
+            seq, x, y, left_samples[0], x.saturating_sub(1), actual_frame_val);
     }
 
     // Apply prediction based on mode
@@ -87,6 +97,14 @@ pub fn predict_intra(
             let row: Vec<u16> = (0..size.min(4)).map(|px| frame.get_y(x + px, y + py)).collect();
             eprintln!("  {:?}", row);
         }
+    }
+
+    // DEBUG: Print Cb output after prediction for problem area
+    if debug_output {
+        // Print the right edge of the block (which will be read by the next block)
+        let right_edge: Vec<u16> = (0..size).map(|py| frame.get_cb(x + size - 1, y + py)).collect();
+        eprintln!("DEBUG Cb: predicted at ({},{}) size={} mode={:?} right_edge={:?}",
+            x, y, size, mode, right_edge);
     }
 }
 
@@ -239,6 +257,14 @@ fn get_sample(frame: &DecodedFrame, x: u32, y: u32, c_idx: u8) -> u16 {
 
 /// Set a sample in the frame
 fn set_sample(frame: &mut DecodedFrame, x: u32, y: u32, c_idx: u8, value: u16) {
+    // DEBUG: Track Cb writes at (23, 0)
+    static WRITE_COUNT_23_0: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    if c_idx == 1 && x == 23 && y == 0 {
+        let count = WRITE_COUNT_23_0.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let old_val = frame.get_cb(x, y);
+        eprintln!("DEBUG: set_cb(23,0) = {} (was {}, write #{})", value, old_val, count + 1);
+    }
+
     match c_idx {
         0 => frame.set_y(x, y, value),
         1 => frame.set_cb(x, y, value),

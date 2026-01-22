@@ -169,6 +169,8 @@ pub fn decode_residual(
     log2_size: u8,
     c_idx: u8, // 0=Y, 1=Cb, 2=Cr
     scan_order: ScanOrder,
+    sign_data_hiding_enabled: bool,
+    cu_transquant_bypass: bool,
 ) -> Result<CoeffBuffer> {
     let mut buffer = CoeffBuffer::new(log2_size);
     let size = 1u32 << log2_size;
@@ -305,13 +307,53 @@ pub fn decode_residual(
             }
         }
 
+        // Find first and last significant positions in this sub-block
+        let mut first_sig_pos = None;
+        let mut last_sig_pos = None;
+        for n in 0..=start_pos {
+            if coeff_flags[n as usize] {
+                if first_sig_pos.is_none() {
+                    first_sig_pos = Some(n);
+                }
+                last_sig_pos = Some(n);
+            }
+        }
+        let first_sig_pos = first_sig_pos.unwrap_or(0);
+        let last_sig_pos = last_sig_pos.unwrap_or(start_pos);
+
+        // Determine if sign is hidden for this sub-block
+        // Per H.265 9.3.4.3: sign is hidden if:
+        // - sign_data_hiding_enabled_flag is true
+        // - cu_transquant_bypass_flag is false
+        // - lastScanPos - firstScanPos > 3
+        // Note: also disabled for RDPCM modes (not implemented here)
+        let sign_hidden = sign_data_hiding_enabled
+            && !cu_transquant_bypass
+            && (last_sig_pos - first_sig_pos) > 3;
+
         // Decode signs (bypass mode)
+        // Following libde265's approach: decode signs in coefficient order (high scan pos to low)
+        // The LAST coefficient (at first_sig_pos) has its sign hidden when sign_hidden=true
+        //
+        // Build list of significant positions in reverse scan order (high to low)
+        let mut sig_positions = [0u8; 16];
+        let mut n_sig = 0usize;
         for n in (0..=start_pos).rev() {
             if coeff_flags[n as usize] {
-                let sign = cabac.decode_bypass()?;
-                if sign != 0 {
-                    coeff_values[n as usize] = -coeff_values[n as usize];
-                }
+                sig_positions[n_sig] = n;
+                n_sig += 1;
+            }
+        }
+
+        // Decode signs for ALL coefficients (ignoring sign_hidden for now)
+        // The sign_hidden feature causes CABAC desync - needs more investigation
+        // TODO: Investigate why sign hiding causes early end_of_slice
+        let _ = sign_hidden; // silence unused warning
+        for i in 0..n_sig {
+            let n = sig_positions[i] as usize;
+            let sign = cabac.decode_bypass()?;
+            if sign != 0 {
+                coeff_values[n] = -coeff_values[n];
             }
         }
 
@@ -331,6 +373,13 @@ pub fn decode_residual(
                 }
             }
         }
+
+        // Infer hidden sign from parity
+        // Per H.265: if sum of |levels| is odd, the hidden sign coeff is negative
+        // NOTE: Sign hiding is disabled due to CABAC desync issues
+        // This code would apply if sign_hidden were used
+        let _ = first_sig_pos; // silence unused warning
+        let _ = last_sig_pos;
 
         // Store coefficients in buffer
         for (n, &(px, py)) in scan_pos.iter().enumerate() {

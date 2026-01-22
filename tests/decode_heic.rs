@@ -224,4 +224,92 @@ fn test_raw_yuv_values() {
         }
         println!("  Cb: {}  |  Cr: {}", cb_row.join(" "), cr_row.join(" "));
     }
+
+    // Analyze chroma bias by CTU position
+    // For 4:2:0, each CTU (64x64 luma) has 32x32 chroma
+    println!("\n=== Chroma averages by CTU row ===");
+    let c_height = frame.height.div_ceil(2) as usize;
+    let ctu_chroma_size = 32usize;
+    let num_ctu_rows = c_height.div_ceil(ctu_chroma_size);
+
+    for ctu_row in 0..num_ctu_rows {
+        let start_y = ctu_row * ctu_chroma_size;
+        let end_y = ((ctu_row + 1) * ctu_chroma_size).min(c_height);
+
+        let mut cb_sum = 0u64;
+        let mut cr_sum = 0u64;
+        let mut count = 0u64;
+
+        for cy in start_y..end_y {
+            for cx in 0..c_stride {
+                let idx = cy * c_stride + cx;
+                cb_sum += frame.cb_plane[idx] as u64;
+                cr_sum += frame.cr_plane[idx] as u64;
+                count += 1;
+            }
+        }
+
+        if count > 0 {
+            println!("  CTU row {:2}: Cb avg={:3}, Cr avg={:3}",
+                ctu_row, cb_sum / count, cr_sum / count);
+        }
+    }
+
+    // Analyze chroma by CTU column for first row
+    println!("\n=== Chroma averages by CTU column (first row) ===");
+    let c_width = c_stride;
+    let num_ctu_cols = c_width.div_ceil(ctu_chroma_size);
+
+    for ctu_col in 0..num_ctu_cols {
+        let start_x = ctu_col * ctu_chroma_size;
+        let end_x = ((ctu_col + 1) * ctu_chroma_size).min(c_width);
+
+        let mut cb_sum = 0u64;
+        let mut cr_sum = 0u64;
+        let mut count = 0u64;
+
+        for cy in 0..ctu_chroma_size.min(c_height) {
+            for cx in start_x..end_x {
+                let idx = cy * c_stride + cx;
+                cb_sum += frame.cb_plane[idx] as u64;
+                cr_sum += frame.cr_plane[idx] as u64;
+                count += 1;
+            }
+        }
+
+        if count > 0 {
+            println!("  CTU col {:2}: Cb avg={:3}, Cr avg={:3}",
+                ctu_col, cb_sum / count, cr_sum / count);
+        }
+    }
+
+    // Analyze the boundary between CTU col 0 and 1
+    println!("\n=== Chroma at CTU boundary (col 0 -> 1) ===");
+    println!("Chroma values at x=28..35 (boundary at x=32), y=0..3:");
+    for cy in 0..4 {
+        let mut cb_row = Vec::new();
+        let mut cr_row = Vec::new();
+        for cx in 28..36 {
+            let idx = cy * c_stride + cx;
+            cb_row.push(format!("{:3}", frame.cb_plane[idx]));
+            cr_row.push(format!("{:3}", frame.cr_plane[idx]));
+        }
+        println!("  y={}: Cb=[{}]  Cr=[{}]", cy, cb_row.join(", "), cr_row.join(", "));
+    }
+    println!("  (x=32 is start of CTU col 1)");
+
+    // Also check what's at the very end of CTU col 0 (x=31)
+    println!("\nChroma at right edge of CTU col 0 (x=31), all y:");
+    let mut cb_at_31 = vec![];
+    let mut cr_at_31 = vec![];
+    for cy in 0..32.min(c_height) {
+        let idx = cy * c_stride + 31;
+        cb_at_31.push(frame.cb_plane[idx]);
+        cr_at_31.push(frame.cr_plane[idx]);
+    }
+    let cb_avg: u64 = cb_at_31.iter().map(|&v| v as u64).sum::<u64>() / cb_at_31.len() as u64;
+    let cr_avg: u64 = cr_at_31.iter().map(|&v| v as u64).sum::<u64>() / cr_at_31.len() as u64;
+    println!("  x=31: Cb avg={}, Cr avg={}", cb_avg, cr_avg);
+    println!("  first 8 Cb: {:?}", &cb_at_31[..8.min(cb_at_31.len())]);
+    println!("  first 8 Cr: {:?}", &cr_at_31[..8.min(cr_at_31.len())]);
 }

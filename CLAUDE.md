@@ -115,16 +115,48 @@ pub fn decode_rgba_into(
 
 - Chroma planes have wrong averages (Cb=167, Cr=209 vs ~128), causing wrong RGB colors
   - Y plane average (152) is reasonable
-  - First 4x4 chroma block has reasonable values (~100-150)
-  - Systematic bias affects whole image, not just individual blocks
-  - Investigated: NOT caused by chroma QP (same as luma=17 for this image)
-  - Investigated: NOT caused by scan table ordering (tested multiple variations)
-  - Possible causes remaining: cbf_cb/cbf_cr flag decoding, chroma prediction mode
+  - Root cause: **Sign Data Hiding not implemented** (see Investigation Notes)
+  - Implementing sign_data_hiding per spec causes CABAC desync at CTU 49
+  - For now, all sign bits are decoded (ignoring sign_data_hiding_enabled_flag)
+  - This produces biased chroma but stable decoding of all 280 CTUs
 - Output dimensions 1280x856 vs reference 1280x854 (missing conformance window cropping)
 
 ## Investigation Notes
 
-### Chroma Bias Analysis (2026-01-21)
+### Sign Data Hiding Issue (2026-01-21 Session 2)
+
+**Background:** HEVC has a "sign data hiding" feature (`sign_data_hiding_enabled_flag` in PPS)
+that allows the encoder to infer one sign bit per 4x4 sub-block from coefficient parity,
+reducing bit rate. This file has sign_data_hiding_enabled_flag=true.
+
+**The Problem:**
+1. Without sign hiding: decoder reads all sign bits, produces wrong coefficients (e.g., Cr coeff of 502),
+   but all 280 CTUs decode and CABAC stays aligned
+2. With sign hiding implemented per spec: CABAC desync at CTU 49, only partial image decoded
+
+**What was tried:**
+- Implemented sign hiding: skip sign bit for first significant coefficient when lastScanPos - firstScanPos > 3
+- Added cu_transquant_bypass check (should disable sign hiding)
+- Verified coefficient order matches libde265 (high scan pos to low)
+- Parity inference for hidden sign
+
+**libde265 reference (slice.cc:3301-3403):**
+- Signs decoded for indices 0 to nCoefficients-2
+- Last coefficient (index nCoefficients-1) sign hidden when signHidden=true
+- signHidden = (coeff_scan_pos[0] - coeff_scan_pos[nCoefficients-1] > 3)
+- Parity: sumAbsLevel accumulates signed values, flips hidden sign if sum is odd
+
+**Hypothesis:**
+The decoder has another bug that compensates for missing sign hiding. The wrong coefficient
+values (like 502 for Cr) may actually be keeping CABAC aligned through error propagation.
+Implementing sign hiding correctly exposes the CABAC being out of sync with the bitstream.
+
+**Next steps:**
+- Compare exact CABAC state with libde265 at sub-block boundaries
+- Check if there's a bug in sig_coeff_flag or coded_sub_block_flag context selection
+- Verify coefficient base levels (greater1/greater2 flags) are correct
+
+### Chroma Bias Analysis (2026-01-21 Session 1)
 - Test image: example.heic (1280x854)
 - Y plane: avg=152 (reasonable for outdoor scene)
 - Cb plane: avg=167 (should be ~128, ~39 too high)
@@ -134,6 +166,7 @@ pub fn decode_rgba_into(
 - Chroma QP = 17 (same as luma, PPS/slice offsets are 0)
 - Diagonal scan tables have unconventional order but consistently so for both
   coefficient and sub-block scanning, suggesting they compensate for each other
+- CTU column 0 chroma values are reasonable (avg ~128), bias appears starting at column 1+
 
 ## Module Structure
 
