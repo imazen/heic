@@ -42,11 +42,9 @@ fn test_get_info() {
     let info = decoder.get_info(&data).expect("Failed to get info");
     println!("Decoded info: {}x{}", info.width, info.height);
 
-    // example.heic is 1280x856 (SPS reports 856 due to 8-pixel rounding)
-    // The ispe reports 1280x854 which is the actual cropped size
+    // example.heic is 1280x854 (cropped from 1280x856 via conformance window)
     assert_eq!(info.width, 1280, "Expected width 1280");
-    // Height from SPS is 856 (rounded to 8), but ispe says 854
-    assert!((854..=856).contains(&info.height), "Expected height ~854-856");
+    assert_eq!(info.height, 854, "Expected height 854 (cropped)");
 }
 
 #[test]
@@ -57,9 +55,9 @@ fn test_decode() {
 
     let image = decoder.decode(&data).expect("Failed to decode");
 
-    // example.heic is 1280x856 (SPS has 856 due to 8-pixel rounding, ispe says 854)
+    // example.heic is 1280x854 (cropped from 1280x856 via conformance window)
     assert_eq!(image.width, 1280, "Expected width 1280");
-    assert!((854..=856).contains(&image.height), "Expected height ~854-856");
+    assert_eq!(image.height, 854, "Expected height 854 (cropped)");
 
     // Check that we got RGB data (3 bytes per pixel)
     let expected_size = (image.width * image.height * 3) as usize;

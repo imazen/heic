@@ -165,6 +165,11 @@ impl<'a> CabacDecoder<'a> {
         (self.range as u16, (self.value >> 7) as u16)
     }
 
+    /// Get extended CABAC state including bits_needed
+    pub fn get_state_extended(&self) -> (u32, u32, i32) {
+        (self.range, self.value, self.bits_needed)
+    }
+
     /// Get current bitstream position for debugging
     pub fn get_position(&self) -> (usize, usize, u32) {
         (self.byte_pos, self.data.len(), self.byte_pos as u32 * 8)

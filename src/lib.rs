@@ -95,8 +95,8 @@ impl HeicDecoder {
 
         Ok(DecodedImage {
             data: frame.to_rgb(),
-            width: frame.width,
-            height: frame.height,
+            width: frame.cropped_width(),
+            height: frame.cropped_height(),
             has_alpha: false, // TODO: handle alpha plane
         })
     }

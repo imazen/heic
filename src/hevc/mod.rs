@@ -58,10 +58,8 @@ pub fn get_info_from_config(config: &HevcDecoderConfig) -> Result<ImageInfo> {
             && nal.nal_type == bitstream::NalType::SpsNut
         {
             let sps = params::parse_sps(&nal.payload)?;
-            return Ok(ImageInfo {
-                width: sps.pic_width_in_luma_samples,
-                height: sps.pic_height_in_luma_samples,
-            });
+            let (width, height) = get_cropped_dimensions(&sps);
+            return Ok(ImageInfo { width, height });
         }
     }
     Err(HevcError::MissingParameterSet("SPS"))
@@ -98,6 +96,24 @@ fn decode_nal_units(nal_units: &[bitstream::NalUnit<'_>]) -> Result<DecodedFrame
         sps.pic_height_in_luma_samples,
     );
 
+    // Set conformance window cropping from SPS
+    // Offsets are in units of SubWidthC/SubHeightC, need to convert to luma samples
+    if sps.conformance_window_flag {
+        let (sub_width_c, sub_height_c) = match sps.chroma_format_idc {
+            0 => (1, 1), // Monochrome
+            1 => (2, 2), // 4:2:0
+            2 => (2, 1), // 4:2:2
+            3 => (1, 1), // 4:4:4
+            _ => (2, 2), // Default to 4:2:0
+        };
+        frame.set_crop(
+            sps.conf_win_offset.0 * sub_width_c,  // left
+            sps.conf_win_offset.1 * sub_width_c,  // right
+            sps.conf_win_offset.2 * sub_height_c, // top
+            sps.conf_win_offset.3 * sub_height_c, // bottom
+        );
+    }
+
     // Decode slice data
     for nal in nal_units {
         if nal.nal_type.is_slice() {
@@ -115,14 +131,35 @@ pub fn get_info(data: &[u8]) -> Result<ImageInfo> {
     for nal in &nal_units {
         if nal.nal_type == bitstream::NalType::SpsNut {
             let sps = params::parse_sps(&nal.payload)?;
-            return Ok(ImageInfo {
-                width: sps.pic_width_in_luma_samples,
-                height: sps.pic_height_in_luma_samples,
-            });
+            let (width, height) = get_cropped_dimensions(&sps);
+            return Ok(ImageInfo { width, height });
         }
     }
 
     Err(HevcError::MissingParameterSet("SPS"))
+}
+
+/// Calculate cropped dimensions from SPS conformance window
+fn get_cropped_dimensions(sps: &params::Sps) -> (u32, u32) {
+    if sps.conformance_window_flag {
+        let (sub_width_c, sub_height_c) = match sps.chroma_format_idc {
+            0 => (1, 1), // Monochrome
+            1 => (2, 2), // 4:2:0
+            2 => (2, 1), // 4:2:2
+            3 => (1, 1), // 4:4:4
+            _ => (2, 2), // Default to 4:2:0
+        };
+        let crop_left = sps.conf_win_offset.0 * sub_width_c;
+        let crop_right = sps.conf_win_offset.1 * sub_width_c;
+        let crop_top = sps.conf_win_offset.2 * sub_height_c;
+        let crop_bottom = sps.conf_win_offset.3 * sub_height_c;
+        (
+            sps.pic_width_in_luma_samples - crop_left - crop_right,
+            sps.pic_height_in_luma_samples - crop_top - crop_bottom,
+        )
+    } else {
+        (sps.pic_width_in_luma_samples, sps.pic_height_in_luma_samples)
+    }
 }
 
 /// Image info from SPS

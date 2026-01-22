@@ -6,9 +6,9 @@ use alloc::vec::Vec;
 /// Decoded video frame
 #[derive(Debug)]
 pub struct DecodedFrame {
-    /// Width in pixels
+    /// Width in pixels (full frame, before cropping)
     pub width: u32,
-    /// Height in pixels
+    /// Height in pixels (full frame, before cropping)
     pub height: u32,
     /// Luma (Y) plane
     pub y_plane: Vec<u16>,
@@ -20,6 +20,14 @@ pub struct DecodedFrame {
     pub bit_depth: u8,
     /// Chroma format (1=4:2:0, 2=4:2:2, 3=4:4:4)
     pub chroma_format: u8,
+    /// Conformance window left offset (in luma samples)
+    pub crop_left: u32,
+    /// Conformance window right offset (in luma samples)
+    pub crop_right: u32,
+    /// Conformance window top offset (in luma samples)
+    pub crop_top: u32,
+    /// Conformance window bottom offset (in luma samples)
+    pub crop_bottom: u32,
 }
 
 impl DecodedFrame {
@@ -39,6 +47,10 @@ impl DecodedFrame {
             cr_plane: vec![0; chroma_size],
             bit_depth: 8,
             chroma_format: 1, // 4:2:0
+            crop_left: 0,
+            crop_right: 0,
+            crop_top: 0,
+            crop_bottom: 0,
         }
     }
 
@@ -64,7 +76,29 @@ impl DecodedFrame {
             cr_plane: vec![0; chroma_size],
             bit_depth,
             chroma_format,
+            crop_left: 0,
+            crop_right: 0,
+            crop_top: 0,
+            crop_bottom: 0,
         }
+    }
+
+    /// Set conformance window cropping
+    pub fn set_crop(&mut self, left: u32, right: u32, top: u32, bottom: u32) {
+        self.crop_left = left;
+        self.crop_right = right;
+        self.crop_top = top;
+        self.crop_bottom = bottom;
+    }
+
+    /// Get cropped width
+    pub fn cropped_width(&self) -> u32 {
+        self.width - self.crop_left - self.crop_right
+    }
+
+    /// Get cropped height
+    pub fn cropped_height(&self) -> u32 {
+        self.height - self.crop_top - self.crop_bottom
     }
 
     /// Get luma stride (width)
@@ -82,13 +116,21 @@ impl DecodedFrame {
         }
     }
 
-    /// Convert YCbCr to RGB
+    /// Convert YCbCr to RGB with conformance window cropping
     pub fn to_rgb(&self) -> Vec<u8> {
-        let mut rgb = Vec::with_capacity((self.width * self.height * 3) as usize);
+        let out_width = self.cropped_width();
+        let out_height = self.cropped_height();
+        let mut rgb = Vec::with_capacity((out_width * out_height * 3) as usize);
         let shift = self.bit_depth - 8;
 
-        for y in 0..self.height {
-            for x in 0..self.width {
+        // Iterate over cropped region
+        let y_start = self.crop_top;
+        let y_end = self.height - self.crop_bottom;
+        let x_start = self.crop_left;
+        let x_end = self.width - self.crop_right;
+
+        for y in y_start..y_end {
+            for x in x_start..x_end {
                 let y_idx = (y * self.width + x) as usize;
                 let y_val = (self.y_plane[y_idx] >> shift) as i32;
 
@@ -116,13 +158,21 @@ impl DecodedFrame {
         rgb
     }
 
-    /// Convert YCbCr to RGBA
+    /// Convert YCbCr to RGBA with conformance window cropping
     pub fn to_rgba(&self) -> Vec<u8> {
-        let mut rgba = Vec::with_capacity((self.width * self.height * 4) as usize);
+        let out_width = self.cropped_width();
+        let out_height = self.cropped_height();
+        let mut rgba = Vec::with_capacity((out_width * out_height * 4) as usize);
         let shift = self.bit_depth - 8;
 
-        for y in 0..self.height {
-            for x in 0..self.width {
+        // Iterate over cropped region
+        let y_start = self.crop_top;
+        let y_end = self.height - self.crop_bottom;
+        let x_start = self.crop_left;
+        let x_end = self.width - self.crop_right;
+
+        for y in y_start..y_end {
+            for x in x_start..x_end {
                 let y_idx = (y * self.width + x) as usize;
                 let y_val = (self.y_plane[y_idx] >> shift) as i32;
 

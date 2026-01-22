@@ -182,11 +182,21 @@ pub fn decode_residual(
     // Increment and capture counter for debugging
     let residual_call_num = DEBUG_RESIDUAL_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
+    // Verbose debug for specific call (disabled by default)
+    #[allow(unused_variables)]
+    let debug_call = false;
+    if debug_call {
+        let (byte_pos, _, _) = cabac.get_position();
+        eprintln!("DEBUG call#{}: START log2={} c_idx={} scan={:?} byte={} cabac=({},{})",
+            residual_call_num, log2_size, c_idx, scan_order, byte_pos, init_range, init_offset);
+    }
+
     let mut buffer = CoeffBuffer::new(log2_size);
     let size = 1u32 << log2_size;
 
     // Decode last significant coefficient position
     let (last_x, last_y) = decode_last_sig_coeff_pos(cabac, ctx, log2_size, c_idx)?;
+
 
     // Swap coordinates for vertical scan
     let (last_x, last_y) = if scan_order == ScanOrder::Vertical {
@@ -421,15 +431,6 @@ pub fn decode_residual(
             }
         }
 
-        // Debug for problematic call #285
-        if residual_call_num == 285 {
-            let (range, offset) = cabac.get_state();
-            let (byte_pos, _, _) = cabac.get_position();
-            eprintln!("DEBUG #285: after g1/g2: first_g1_idx={:?} byte={} cabac=({},{})", first_g1_idx, byte_pos, range, offset);
-            eprintln!("  coeff_flags={:?}", &coeff_flags[..16]);
-            eprintln!("  coeff_values={:?}", &coeff_values[..16]);
-            eprintln!("  needs_remaining={:?}", &needs_remaining[..16]);
-        }
 
         // Find first and last significant positions in this sub-block
         let mut first_sig_pos = None;
@@ -490,13 +491,6 @@ pub fn decode_residual(
         }
         // If sign_hidden, coeff_signs[n_sig-1] stays 0 (will be inferred later)
 
-        // Debug for call #285 - state after sign decoding
-        if residual_call_num == 285 {
-            let (range, offset) = cabac.get_state();
-            let (byte_pos, _, _) = cabac.get_position();
-            eprintln!("DEBUG #285: after signs: n_sig={} sign_hidden={} byte={} cabac=({},{}) signs={:?}",
-                n_sig, sign_hidden, byte_pos, range, offset, &coeff_signs[..n_sig]);
-        }
 
         // Decode remaining levels for all coefficients that need it
         // Rice parameter starts at 0 and is updated adaptively
@@ -509,13 +503,6 @@ pub fn decode_residual(
 
                 let (remaining, new_rice) =
                     decode_coeff_abs_level_remaining(cabac, rice_param, base)?;
-
-                // Debug for problematic call #285
-                if residual_call_num == 285 {
-                    let (range, offset) = cabac.get_state();
-                    eprintln!("DEBUG #285: pos={} base={} rice={} remaining={} new_rice={} cabac=({},{})",
-                        n, base, rice_param, remaining, new_rice, range, offset);
-                }
 
                 rice_param = new_rice;
                 let final_value = base + remaining;
@@ -552,6 +539,8 @@ pub fn decode_residual(
                 // Invariant check: track large coefficients (indicates CABAC desync)
                 if coeff_values[n].abs() > 500 {
                     let (byte_pos, _, _) = cabac.get_position();
+                    eprintln!("LARGE COEFF: call#{} c_idx={} pos=({},{}) sb=({},{}) n={} val={} byte={}",
+                        residual_call_num, c_idx, x, y, sb_x, sb_y, n, coeff_values[n], byte_pos);
                     debug::track_large_coeff(byte_pos);
                 }
             }
@@ -705,7 +694,6 @@ fn decode_coded_sub_block_flag_simple(
 /// Per H.265 section 9.3.4.2.4, context depends on neighbor coded_sub_block_flags:
 /// - csbfCtx = (csbf_right | csbf_below) ? 1 : 0
 /// - ctx_idx = base + csbfCtx + c_idx_offset
-#[allow(dead_code)]
 fn decode_coded_sub_block_flag(
     cabac: &mut CabacDecoder<'_>,
     ctx: &mut [ContextModel],
@@ -889,18 +877,8 @@ fn decode_coeff_abs_level_remaining(
 ) -> Result<(i16, u8)> {
     // Decode prefix (unary part)
     let mut prefix = 0u32;
-    let (range_before, offset_before) = cabac.get_state();
     while cabac.decode_bypass()? != 0 && prefix < 32 {
         prefix += 1;
-    }
-
-    // Debug for very large prefixes during problematic decoding
-    let call_num = DEBUG_RESIDUAL_COUNTER.load(core::sync::atomic::Ordering::Relaxed);
-    if call_num == 286 && prefix > 8 {  // call #285 already incremented to 286
-        let (range_after, offset_after) = cabac.get_state();
-        let (byte_pos, _, _) = cabac.get_position();
-        eprintln!("DEBUG #285 REMAINING: prefix={} rice={} cabac_before=({},{}) cabac_after=({},{}) byte={}",
-            prefix, rice_param, range_before, offset_before, range_after, offset_after, byte_pos);
     }
 
     let value = if prefix <= 3 {
