@@ -224,4 +224,225 @@ int cabac_decode_bin(CabacState* decoder, ContextModel* model) {
     return decoded_bit;
 }
 
+// Decode last_significant_coeff_prefix - first stage of coefficient decode
+// Returns the prefix value (0 to cMax)
+int decode_last_significant_coeff_prefix(
+    CabacState* decoder,
+    ContextModel* contexts,  // Array of context models
+    int log2_size,
+    int c_idx
+) {
+    int cMax = (log2_size << 1) - 1;
+
+    int ctxOffset, ctxShift;
+    if (c_idx == 0) {
+        ctxOffset = 3 * (log2_size - 2) + ((log2_size - 1) >> 2);
+        ctxShift = (log2_size + 1) >> 2;
+    } else {
+        ctxOffset = 15;
+        ctxShift = log2_size - 2;
+    }
+
+    int value = cMax;
+    for (int binIdx = 0; binIdx < cMax; binIdx++) {
+        int ctxIdxInc = binIdx >> ctxShift;
+        int bit = cabac_decode_bin(decoder, &contexts[ctxOffset + ctxIdxInc]);
+        if (bit == 0) {
+            value = binIdx;
+            break;
+        }
+    }
+
+    return value;
+}
+
+// Decode last_significant_coeff suffix (if prefix > 3)
+int decode_last_significant_coeff_suffix(CabacState* decoder, int prefix) {
+    if (prefix > 3) {
+        int nBits = (prefix >> 1) - 1;
+        int suffix = cabac_decode_bypass_bits(decoder, nBits);
+        return ((2 + (prefix & 1)) << nBits) + suffix;
+    } else {
+        return prefix;
+    }
+}
+
+// Full last_significant_coeff decode (x or y)
+// contexts should point to LAST_SIGNIFICANT_COEFFICIENT_X_PREFIX or Y_PREFIX
+int decode_last_significant_coeff(
+    CabacState* decoder,
+    ContextModel* contexts,
+    int log2_size,
+    int c_idx
+) {
+    int prefix = decode_last_significant_coeff_prefix(decoder, contexts, log2_size, c_idx);
+    return decode_last_significant_coeff_suffix(decoder, prefix);
+}
+
+// Structure to hold result of last_sig decode for comparison
+struct LastSigResult {
+    int x;
+    int y;
+    uint32_t cabac_range;
+    uint32_t cabac_value;
+    int cabac_bits_needed;
+};
+
+// Decode both last_x and last_y and return results for comparison
+void decode_last_significant_coeff_xy(
+    CabacState* decoder,
+    ContextModel* ctx_x,  // LAST_SIGNIFICANT_COEFFICIENT_X_PREFIX contexts
+    ContextModel* ctx_y,  // LAST_SIGNIFICANT_COEFFICIENT_Y_PREFIX contexts
+    int log2_size,
+    int c_idx,
+    int scan_idx,  // 0=diag, 1=horiz, 2=vert
+    LastSigResult* result
+) {
+    int last_x = decode_last_significant_coeff(decoder, ctx_x, log2_size, c_idx);
+    int last_y = decode_last_significant_coeff(decoder, ctx_y, log2_size, c_idx);
+
+    // Swap for vertical scan
+    if (scan_idx == 2) {
+        int tmp = last_x;
+        last_x = last_y;
+        last_y = tmp;
+    }
+
+    result->x = last_x;
+    result->y = last_y;
+    result->cabac_range = decoder->range;
+    result->cabac_value = decoder->value;
+    result->cabac_bits_needed = decoder->bits_needed;
+}
+
+// Decode coded_sub_block_flag
+int decode_coded_sub_block_flag(
+    CabacState* decoder,
+    ContextModel* contexts,  // CODED_SUB_BLOCK_FLAG contexts (4 total)
+    int c_idx,
+    int csbf_neighbors  // bit0=right, bit1=below
+) {
+    // csbfCtx = 1 if either neighbor is coded, else 0
+    int csbfCtx = ((csbf_neighbors & 1) | (csbf_neighbors >> 1)) ? 1 : 0;
+    int ctxIdx = csbfCtx + (c_idx != 0 ? 2 : 0);
+    return cabac_decode_bin(decoder, &contexts[ctxIdx]);
+}
+
+// Decode sig_coeff_flag with full context derivation
+int decode_sig_coeff_flag(
+    CabacState* decoder,
+    ContextModel* contexts,  // SIG_COEFF_FLAG contexts (44 for luma, 16 for chroma)
+    int x_c,       // x position in TU
+    int y_c,       // y position in TU
+    int log2_size, // log2 of TU size
+    int c_idx,     // 0=luma, 1/2=chroma
+    int scan_idx,  // 0=diag, 1=horiz, 2=vert
+    int prev_csbf  // neighbor coded sub-block flags: bit0=right, bit1=below
+) {
+    int sb_width = 1 << (log2_size - 2);
+    int sigCtx;
+
+    // 4x4 TU special case
+    if (sb_width == 1) {
+        static const uint8_t ctxIdxMap[16] = {
+            0, 1, 4, 5, 2, 3, 4, 5, 6, 6, 8, 8, 7, 7, 8, 8
+        };
+        sigCtx = ctxIdxMap[(y_c << 2) + x_c];
+    }
+    else if (x_c == 0 && y_c == 0) {
+        sigCtx = 0;
+    }
+    else {
+        int x_s = x_c >> 2;
+        int y_s = y_c >> 2;
+        int x_p = x_c & 3;
+        int y_p = y_c & 3;
+
+        switch (prev_csbf) {
+            case 0:
+                sigCtx = (x_p + y_p >= 3) ? 0 : (x_p + y_p > 0) ? 1 : 2;
+                break;
+            case 1:  // Right neighbor coded (bit0=1)
+                sigCtx = (y_p == 0) ? 2 : (y_p == 1) ? 1 : 0;
+                break;
+            case 2:  // Below neighbor coded (bit1=1)
+                sigCtx = (x_p == 0) ? 2 : (x_p == 1) ? 1 : 0;
+                break;
+            default:  // Both neighbors coded
+                sigCtx = 2;
+                break;
+        }
+
+        if (c_idx == 0) {
+            if (x_s + y_s > 0) sigCtx += 3;
+
+            if (sb_width == 2) {  // 8x8 TU
+                sigCtx += (scan_idx == 0) ? 9 : 15;
+            } else {
+                sigCtx += 21;
+            }
+        } else {
+            if (sb_width == 2) {
+                sigCtx += 9;
+            } else {
+                sigCtx += 12;
+            }
+        }
+    }
+
+    int ctxIdxInc = (c_idx == 0) ? sigCtx : (27 + sigCtx);
+    return cabac_decode_bin(decoder, &contexts[ctxIdxInc]);
+}
+
+// Decode coeff_abs_level_greater1_flag
+// Per H.265 section 9.3.4.2.7
+int decode_coeff_abs_level_greater1_flag(
+    CabacState* decoder,
+    ContextModel* contexts,  // COEFF_ABS_LEVEL_GREATER1_FLAG contexts (24 total: 16 luma + 8 chroma)
+    int c_idx,              // 0=luma, 1/2=chroma
+    int ctx_set,            // 0-3, based on sub-block position and previous sub-block c1
+    int greater1_ctx        // 0-3, state machine for this sub-block
+) {
+    // ctxIdx = ctxSet*4 + min(greater1Ctx, 3) + (c_idx > 0 ? 16 : 0)
+    int ctx_inc = ctx_set * 4 + (greater1_ctx < 4 ? greater1_ctx : 3);
+    if (c_idx > 0) ctx_inc += 16;
+    return cabac_decode_bin(decoder, &contexts[ctx_inc]);
+}
+
+// Decode coeff_abs_level_greater2_flag
+// Per H.265 section 9.3.4.2.8
+int decode_coeff_abs_level_greater2_flag(
+    CabacState* decoder,
+    ContextModel* contexts,  // COEFF_ABS_LEVEL_GREATER2_FLAG contexts (6 total: 4 luma + 2 chroma)
+    int c_idx,              // 0=luma, 1/2=chroma
+    int ctx_set             // 0-3 for luma, 0-1 for chroma
+) {
+    // ctxIdx = ctxSet + (c_idx > 0 ? 4 : 0)
+    int ctx_inc = ctx_set + (c_idx > 0 ? 4 : 0);
+    return cabac_decode_bin(decoder, &contexts[ctx_inc]);
+}
+
+// Calculate ctxSet for greater1_flag/greater2_flag
+// Returns: ctxSet (0-3)
+// Per H.265:
+//   - For luma non-DC subblock: base = 2
+//   - For DC subblock or chroma: base = 0
+//   - If previous subblock ended with c1 == 0: ctxSet = base + 1, else ctxSet = base
+int calc_ctx_set(
+    int sb_idx,      // sub-block index (0 = DC sub-block)
+    int c_idx,       // 0=luma, 1/2=chroma
+    int prev_gt1     // 1 if previous sub-block had any greater1_flag == 1
+) {
+    int base;
+    if (sb_idx == 0 || c_idx != 0) {
+        base = 0;
+    } else {
+        base = 2;
+    }
+
+    // prev_gt1 indicates whether the previous sub-block's c1 ended at 0
+    // c1 == 0 when any coefficient in prev subblock had greater1_flag == 1
+    return base + (prev_gt1 ? 1 : 0);
+}
+
 } // extern "C"

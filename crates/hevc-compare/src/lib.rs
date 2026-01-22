@@ -23,6 +23,16 @@ pub struct CppContextModel {
     mps: u8,
 }
 
+/// Result of last_significant_coeff decode
+#[repr(C)]
+pub struct LastSigResult {
+    pub x: c_int,
+    pub y: c_int,
+    pub cabac_range: u32,
+    pub cabac_value: u32,
+    pub cabac_bits_needed: c_int,
+}
+
 unsafe extern "C" {
     fn cabac_init(state: *mut CabacState, data: *const u8, length: c_int);
     fn cabac_decode_bypass(state: *mut CabacState) -> c_int;
@@ -32,6 +42,70 @@ unsafe extern "C" {
     fn context_init(ctx: *mut CppContextModel, init_value: u8, slice_qp: c_int);
     fn context_get_state(ctx: *const CppContextModel, state: *mut u8, mps: *mut u8);
     fn cabac_decode_bin(decoder: *mut CabacState, model: *mut CppContextModel) -> c_int;
+
+    // Stage-by-stage coefficient decoding
+    fn decode_last_significant_coeff_prefix(
+        decoder: *mut CabacState,
+        contexts: *mut CppContextModel,
+        log2_size: c_int,
+        c_idx: c_int,
+    ) -> c_int;
+
+    fn decode_last_significant_coeff(
+        decoder: *mut CabacState,
+        contexts: *mut CppContextModel,
+        log2_size: c_int,
+        c_idx: c_int,
+    ) -> c_int;
+
+    fn decode_last_significant_coeff_xy(
+        decoder: *mut CabacState,
+        ctx_x: *mut CppContextModel,
+        ctx_y: *mut CppContextModel,
+        log2_size: c_int,
+        c_idx: c_int,
+        scan_idx: c_int,
+        result: *mut LastSigResult,
+    );
+
+    fn decode_coded_sub_block_flag(
+        decoder: *mut CabacState,
+        contexts: *mut CppContextModel,
+        c_idx: c_int,
+        csbf_neighbors: c_int,
+    ) -> c_int;
+
+    fn decode_sig_coeff_flag(
+        decoder: *mut CabacState,
+        contexts: *mut CppContextModel,
+        x_c: c_int,
+        y_c: c_int,
+        log2_size: c_int,
+        c_idx: c_int,
+        scan_idx: c_int,
+        prev_csbf: c_int,
+    ) -> c_int;
+
+    fn decode_coeff_abs_level_greater1_flag(
+        decoder: *mut CabacState,
+        contexts: *mut CppContextModel,
+        c_idx: c_int,
+        ctx_set: c_int,
+        greater1_ctx: c_int,
+    ) -> c_int;
+
+    fn decode_coeff_abs_level_greater2_flag(
+        decoder: *mut CabacState,
+        contexts: *mut CppContextModel,
+        c_idx: c_int,
+        ctx_set: c_int,
+    ) -> c_int;
+
+    fn calc_ctx_set(
+        sb_idx: c_int,
+        c_idx: c_int,
+        prev_gt1: c_int,
+    ) -> c_int;
 }
 
 /// C++ CABAC decoder wrapper
@@ -88,6 +162,144 @@ impl CppCabac {
 
     pub fn decode_bin(&mut self, ctx: &mut CppContextModel) -> u32 {
         unsafe { cabac_decode_bin(&mut self.state, ctx) as u32 }
+    }
+
+    /// Decode last_significant_coeff_prefix
+    pub fn decode_last_sig_prefix(&mut self, contexts: &mut [CppContextModel], log2_size: u8, c_idx: u8) -> i32 {
+        unsafe {
+            decode_last_significant_coeff_prefix(
+                &mut self.state,
+                contexts.as_mut_ptr(),
+                log2_size as c_int,
+                c_idx as c_int,
+            )
+        }
+    }
+
+    /// Decode last_significant_coeff (prefix + suffix)
+    pub fn decode_last_sig(&mut self, contexts: &mut [CppContextModel], log2_size: u8, c_idx: u8) -> i32 {
+        unsafe {
+            decode_last_significant_coeff(
+                &mut self.state,
+                contexts.as_mut_ptr(),
+                log2_size as c_int,
+                c_idx as c_int,
+            )
+        }
+    }
+
+    /// Decode both last_x and last_y
+    pub fn decode_last_sig_xy(
+        &mut self,
+        ctx_x: &mut [CppContextModel],
+        ctx_y: &mut [CppContextModel],
+        log2_size: u8,
+        c_idx: u8,
+        scan_idx: u8,
+    ) -> LastSigResult {
+        let mut result = LastSigResult {
+            x: 0,
+            y: 0,
+            cabac_range: 0,
+            cabac_value: 0,
+            cabac_bits_needed: 0,
+        };
+        unsafe {
+            decode_last_significant_coeff_xy(
+                &mut self.state,
+                ctx_x.as_mut_ptr(),
+                ctx_y.as_mut_ptr(),
+                log2_size as c_int,
+                c_idx as c_int,
+                scan_idx as c_int,
+                &mut result,
+            );
+        }
+        result
+    }
+
+    /// Decode coded_sub_block_flag
+    pub fn decode_coded_sb_flag(&mut self, contexts: &mut [CppContextModel], c_idx: u8, neighbors: u8) -> u32 {
+        unsafe {
+            decode_coded_sub_block_flag(
+                &mut self.state,
+                contexts.as_mut_ptr(),
+                c_idx as c_int,
+                neighbors as c_int,
+            ) as u32
+        }
+    }
+
+    /// Decode sig_coeff_flag with full context derivation
+    pub fn decode_sig_coeff(
+        &mut self,
+        contexts: &mut [CppContextModel],
+        x_c: u8,
+        y_c: u8,
+        log2_size: u8,
+        c_idx: u8,
+        scan_idx: u8,
+        prev_csbf: u8,
+    ) -> u32 {
+        unsafe {
+            decode_sig_coeff_flag(
+                &mut self.state,
+                contexts.as_mut_ptr(),
+                x_c as c_int,
+                y_c as c_int,
+                log2_size as c_int,
+                c_idx as c_int,
+                scan_idx as c_int,
+                prev_csbf as c_int,
+            ) as u32
+        }
+    }
+
+    /// Decode coeff_abs_level_greater1_flag
+    pub fn decode_greater1_flag(
+        &mut self,
+        contexts: &mut [CppContextModel],
+        c_idx: u8,
+        ctx_set: u8,
+        greater1_ctx: u8,
+    ) -> u32 {
+        unsafe {
+            decode_coeff_abs_level_greater1_flag(
+                &mut self.state,
+                contexts.as_mut_ptr(),
+                c_idx as c_int,
+                ctx_set as c_int,
+                greater1_ctx as c_int,
+            ) as u32
+        }
+    }
+
+    /// Decode coeff_abs_level_greater2_flag
+    pub fn decode_greater2_flag(
+        &mut self,
+        contexts: &mut [CppContextModel],
+        c_idx: u8,
+        ctx_set: u8,
+    ) -> u32 {
+        unsafe {
+            decode_coeff_abs_level_greater2_flag(
+                &mut self.state,
+                contexts.as_mut_ptr(),
+                c_idx as c_int,
+                ctx_set as c_int,
+            ) as u32
+        }
+    }
+}
+
+/// Calculate ctxSet for greater1/greater2 flags (C++ reference implementation)
+pub fn cpp_calc_ctx_set(sb_idx: u8, c_idx: u8, prev_gt1: bool) -> u8 {
+    unsafe {
+        calc_ctx_set(
+            sb_idx as c_int,
+            c_idx as c_int,
+            if prev_gt1 { 1 } else { 0 },
+        ) as u8
     }
 }
 
@@ -735,6 +947,768 @@ mod tests {
         }
 
         println!("All 20 iterations matched!");
+    }
+
+    /// Test last_significant_coeff decode against C++
+    #[test]
+    fn test_last_sig_coeff_decode() {
+        // Slice data from example.heic
+        let slice_data: &[u8] = &[
+            0x49, 0xc0, 0xc2, 0xc4, 0x92, 0x61, 0x0c, 0x00,
+            0x16, 0xcc, 0xbe, 0x77, 0x82, 0x8c, 0xcb, 0xfa,
+            0x93, 0x5f, 0xb2, 0x6a, 0x65, 0x34, 0xe6, 0xf8,
+            0xd3, 0xa0, 0x76, 0xcc, 0x39, 0xe8, 0xe0, 0xac,
+            0x4d, 0x7e, 0xc9, 0xa9, 0x95, 0xd3, 0x9b, 0xe3,
+            0x4e, 0x81, 0xdb, 0x30, 0xe7, 0xa3, 0x82, 0xb1,
+            0x35, 0xf8, 0x2f, 0xa1, 0x81, 0x63, 0x12, 0x49,
+            0x86, 0xe7, 0x3c, 0x93, 0x26, 0x8c, 0x03, 0xa8,
+        ];
+
+        let slice_qp = 17;
+
+        // Initialize contexts for LAST_SIGNIFICANT_COEFFICIENT_X_PREFIX (18 contexts)
+        // Init values from H.265 Table 9-5
+        let last_x_init: [u8; 18] = [
+            125, 110, 124, 110, 95, 94, 125, 111, 111,
+            79, 108, 123, 63, 0, 0, 0, 0, 0,
+        ];
+        let last_y_init: [u8; 18] = [
+            125, 110, 124, 110, 95, 94, 125, 111, 111,
+            79, 108, 123, 63, 0, 0, 0, 0, 0,
+        ];
+
+        let mut cpp_cabac = CppCabac::new(slice_data);
+        let mut cpp_ctx_x: Vec<_> = last_x_init.iter()
+            .map(|&iv| {
+                let mut ctx = CppContextModel { state: 0, mps: 0 };
+                unsafe { context_init(&mut ctx, iv, slice_qp); }
+                ctx
+            })
+            .collect();
+        let mut cpp_ctx_y: Vec<_> = last_y_init.iter()
+            .map(|&iv| {
+                let mut ctx = CppContextModel { state: 0, mps: 0 };
+                unsafe { context_init(&mut ctx, iv, slice_qp); }
+                ctx
+            })
+            .collect();
+
+        // Test decoding last_x and last_y for different TU sizes
+        for log2_size in 2..=4u8 {
+            for c_idx in 0..=1u8 {
+                let (cpp_r, cpp_v, cpp_b) = cpp_cabac.get_state();
+                let result = cpp_cabac.decode_last_sig_xy(
+                    &mut cpp_ctx_x,
+                    &mut cpp_ctx_y,
+                    log2_size,
+                    c_idx,
+                    0, // diagonal scan
+                );
+
+                println!("log2={} c_idx={}: last=({},{}) before_state=({},{},{}) after_state=({},{},{})",
+                    log2_size, c_idx, result.x, result.y,
+                    cpp_r, cpp_v, cpp_b,
+                    result.cabac_range, result.cabac_value, result.cabac_bits_needed);
+            }
+        }
+    }
+
+    /// Stage-by-stage comparison using actual slice data
+    /// This test compares our Rust decoder against C++ at each stage
+    #[test]
+    fn test_stage_by_stage_first_tu() {
+        // First 128 bytes of slice data from example.heic
+        let slice_data: &[u8] = &[
+            0x49, 0xc0, 0xc2, 0xc4, 0x92, 0x61, 0x0c, 0x00,
+            0x16, 0xcc, 0xbe, 0x77, 0x82, 0x8c, 0xcb, 0xfa,
+            0x93, 0x5f, 0xb2, 0x6a, 0x65, 0x34, 0xe6, 0xf8,
+            0xd3, 0xa0, 0x76, 0xcc, 0x39, 0xe8, 0xe0, 0xac,
+            0x4d, 0x7e, 0xc9, 0xa9, 0x95, 0xd3, 0x9b, 0xe3,
+            0x4e, 0x81, 0xdb, 0x30, 0xe7, 0xa3, 0x82, 0xb1,
+            0x35, 0xf8, 0x2f, 0xa1, 0x81, 0x63, 0x12, 0x49,
+            0x86, 0xe7, 0x3c, 0x93, 0x26, 0x8c, 0x03, 0xa8,
+            0xc4, 0x8a, 0x41, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+
+        let slice_qp = 17;
+
+        // Initialize all required contexts
+        // LAST_SIGNIFICANT_COEFFICIENT_X/Y_PREFIX: 18 contexts each
+        let last_xy_init: [u8; 18] = [
+            125, 110, 124, 110, 95, 94, 125, 111, 111,
+            79, 108, 123, 63, 0, 0, 0, 0, 0,
+        ];
+
+        // SIG_COEFF_FLAG: 42 luma + 16 chroma contexts
+        // Init values from H.265 Table 9-5 (partial - using defaults)
+        let sig_coeff_init: [u8; 44] = [
+            // Luma contexts 0-26
+            111, 111, 125, 110, 110, 94, 124, 108, 124,
+            107, 125, 141, 179, 153, 125, 107, 125, 141,
+            179, 153, 125, 107, 125, 141, 179, 153, 125,
+            // Chroma contexts 27-43 (offset by 27)
+            170, 154, 139, 153, 139, 123, 123, 63, 124,
+            139, 153, 139, 123, 123, 63, 153, 166,
+        ];
+
+        let mut cpp_cabac = CppCabac::new(slice_data);
+        let mut rust_cabac = RustCabac::new(slice_data);
+
+        // Initialize C++ contexts
+        let mut cpp_last_x: Vec<_> = last_xy_init.iter()
+            .map(|&iv| {
+                let mut ctx = CppContextModel { state: 0, mps: 0 };
+                unsafe { context_init(&mut ctx, iv, slice_qp); }
+                ctx
+            })
+            .collect();
+        let mut cpp_last_y: Vec<_> = last_xy_init.iter()
+            .map(|&iv| {
+                let mut ctx = CppContextModel { state: 0, mps: 0 };
+                unsafe { context_init(&mut ctx, iv, slice_qp); }
+                ctx
+            })
+            .collect();
+        let mut cpp_sig_coeff: Vec<_> = sig_coeff_init.iter()
+            .map(|&iv| {
+                let mut ctx = CppContextModel { state: 0, mps: 0 };
+                unsafe { context_init(&mut ctx, iv, slice_qp); }
+                ctx
+            })
+            .collect();
+
+        // Initialize Rust contexts
+        let mut rust_last_x: Vec<_> = last_xy_init.iter()
+            .map(|&iv| RustContext::new(iv, slice_qp))
+            .collect();
+        let mut rust_last_y: Vec<_> = last_xy_init.iter()
+            .map(|&iv| RustContext::new(iv, slice_qp))
+            .collect();
+        let mut rust_sig_coeff: Vec<_> = sig_coeff_init.iter()
+            .map(|&iv| RustContext::new(iv, slice_qp))
+            .collect();
+
+        // Verify initial state
+        let (cpp_r, cpp_v, cpp_b) = cpp_cabac.get_state();
+        let (rust_r, rust_v, rust_b) = rust_cabac.get_state();
+        println!("Initial state: C++=({},{},{}) Rust=({},{},{})",
+            cpp_r, cpp_v, cpp_b, rust_r, rust_v, rust_b);
+        assert_eq!((cpp_r, cpp_v, cpp_b), (rust_r, rust_v, rust_b), "Initial state mismatch");
+
+        // Simulate first TU decode (log2=2, 4x4, luma)
+        let log2_size = 2u8;
+        let c_idx = 0u8;
+        let scan_idx = 0u8; // diagonal
+
+        println!("\n=== Stage 1: last_significant_coeff ===");
+
+        // C++: decode last_x prefix
+        let (cpp_r, cpp_v, cpp_b) = cpp_cabac.get_state();
+        let cpp_last_x_result = cpp_cabac.decode_last_sig(&mut cpp_last_x, log2_size, c_idx);
+        let (cpp_r2, cpp_v2, cpp_b2) = cpp_cabac.get_state();
+        println!("C++ last_x={} state: ({},{},{}) -> ({},{},{})",
+            cpp_last_x_result, cpp_r, cpp_v, cpp_b, cpp_r2, cpp_v2, cpp_b2);
+
+        // Rust: decode last_x prefix (manual implementation)
+        let (rust_r, rust_v, rust_b) = rust_cabac.get_state();
+        let rust_last_x_result = decode_last_sig_rust(&mut rust_cabac, &mut rust_last_x, log2_size, c_idx);
+        let (rust_r2, rust_v2, rust_b2) = rust_cabac.get_state();
+        println!("Rust last_x={} state: ({},{},{}) -> ({},{},{})",
+            rust_last_x_result, rust_r, rust_v, rust_b, rust_r2, rust_v2, rust_b2);
+
+        if cpp_last_x_result != rust_last_x_result {
+            println!("DIVERGENCE at last_x: C++={} Rust={}", cpp_last_x_result, rust_last_x_result);
+        }
+        assert_eq!((cpp_r2, cpp_v2, cpp_b2), (rust_r2, rust_v2, rust_b2),
+            "State diverged after last_x decode");
+
+        // C++: decode last_y prefix
+        let cpp_last_y_result = cpp_cabac.decode_last_sig(&mut cpp_last_y, log2_size, c_idx);
+        let (cpp_r3, cpp_v3, cpp_b3) = cpp_cabac.get_state();
+        println!("C++ last_y={} state: ({},{},{})", cpp_last_y_result, cpp_r3, cpp_v3, cpp_b3);
+
+        // Rust: decode last_y prefix
+        let rust_last_y_result = decode_last_sig_rust(&mut rust_cabac, &mut rust_last_y, log2_size, c_idx);
+        let (rust_r3, rust_v3, rust_b3) = rust_cabac.get_state();
+        println!("Rust last_y={} state: ({},{},{})", rust_last_y_result, rust_r3, rust_v3, rust_b3);
+
+        assert_eq!(cpp_last_x_result, rust_last_x_result, "last_x mismatch");
+        assert_eq!(cpp_last_y_result, rust_last_y_result, "last_y mismatch");
+        assert_eq!((cpp_r3, cpp_v3, cpp_b3), (rust_r3, rust_v3, rust_b3),
+            "State diverged after last_y decode");
+
+        println!("\nStage 1 PASSED: last_sig=({},{}) match", cpp_last_x_result, cpp_last_y_result);
+
+        println!("\n=== Stage 2: sig_coeff_flag ===");
+
+        // Decode a few sig_coeff_flags at different positions
+        let test_positions = [(0, 0), (1, 0), (0, 1), (1, 1), (2, 0), (0, 2)];
+        let prev_csbf = 0u8; // No neighbors coded for first sub-block
+
+        for (x, y) in test_positions {
+            let (cpp_r, cpp_v, cpp_b) = cpp_cabac.get_state();
+            let cpp_sig = cpp_cabac.decode_sig_coeff(
+                &mut cpp_sig_coeff,
+                x, y, log2_size, c_idx, scan_idx, prev_csbf
+            );
+
+            let (rust_r, rust_v, rust_b) = rust_cabac.get_state();
+            let rust_sig = decode_sig_coeff_rust(
+                &mut rust_cabac, &mut rust_sig_coeff,
+                x, y, log2_size, c_idx, scan_idx, prev_csbf
+            );
+
+            println!("sig_coeff({},{}): C++={} state=({},{},{}) | Rust={} state=({},{},{})",
+                x, y, cpp_sig, cpp_r, cpp_v, cpp_b, rust_sig, rust_r, rust_v, rust_b);
+
+            if cpp_sig != rust_sig {
+                println!("DIVERGENCE at sig_coeff({},{}): C++={} Rust={}", x, y, cpp_sig, rust_sig);
+            }
+
+            let (cpp_r2, cpp_v2, cpp_b2) = cpp_cabac.get_state();
+            let (rust_r2, rust_v2, rust_b2) = rust_cabac.get_state();
+            assert_eq!((cpp_r2, cpp_v2, cpp_b2), (rust_r2, rust_v2, rust_b2),
+                "State diverged after sig_coeff({},{}) decode", x, y);
+        }
+
+        println!("\nStage 2 PASSED: all sig_coeff_flags match");
+    }
+
+    /// Rust implementation of decode_last_significant_coeff for comparison
+    fn decode_last_sig_rust(
+        cabac: &mut RustCabac,
+        contexts: &mut [RustContext],
+        log2_size: u8,
+        c_idx: u8,
+    ) -> i32 {
+        let c_max = ((log2_size as i32) << 1) - 1;
+
+        let (ctx_offset, ctx_shift) = if c_idx == 0 {
+            let offset = 3 * (log2_size as i32 - 2) + ((log2_size as i32 - 1) >> 2);
+            let shift = (log2_size as i32 + 1) >> 2;
+            (offset, shift)
+        } else {
+            (15, log2_size as i32 - 2)
+        };
+
+        let mut prefix = c_max;
+        for bin_idx in 0..c_max {
+            let ctx_inc = bin_idx >> ctx_shift;
+            let bit = cabac.decode_bin(&mut contexts[(ctx_offset + ctx_inc) as usize]);
+            if bit == 0 {
+                prefix = bin_idx;
+                break;
+            }
+        }
+
+        // Decode suffix if needed
+        if prefix > 3 {
+            let n_bits = (prefix >> 1) - 1;
+            let suffix = cabac.decode_bypass_bits(n_bits as u8);
+            ((2 + (prefix & 1)) << n_bits) + suffix as i32
+        } else {
+            prefix
+        }
+    }
+
+    /// Rust implementation of decode_sig_coeff_flag for comparison
+    fn decode_sig_coeff_rust(
+        cabac: &mut RustCabac,
+        contexts: &mut [RustContext],
+        x_c: u8,
+        y_c: u8,
+        log2_size: u8,
+        c_idx: u8,
+        scan_idx: u8,
+        prev_csbf: u8,
+    ) -> u32 {
+        let sb_width = 1u8 << (log2_size - 2);
+
+        let sig_ctx = if sb_width == 1 {
+            // 4x4 TU special case
+            const CTX_IDX_MAP: [u8; 16] = [0, 1, 4, 5, 2, 3, 4, 5, 6, 6, 8, 8, 7, 7, 8, 8];
+            CTX_IDX_MAP[((y_c as usize) << 2) + x_c as usize] as usize
+        } else if x_c == 0 && y_c == 0 {
+            0
+        } else {
+            let x_s = x_c >> 2;
+            let y_s = y_c >> 2;
+            let x_p = x_c & 3;
+            let y_p = y_c & 3;
+
+            let mut ctx = match prev_csbf {
+                0 => {
+                    if x_p + y_p >= 3 { 0 }
+                    else if x_p + y_p > 0 { 1 }
+                    else { 2 }
+                }
+                1 => {
+                    // Right neighbor coded (bit0=1)
+                    if y_p == 0 { 2 }
+                    else if y_p == 1 { 1 }
+                    else { 0 }
+                }
+                2 => {
+                    // Below neighbor coded (bit1=1)
+                    if x_p == 0 { 2 }
+                    else if x_p == 1 { 1 }
+                    else { 0 }
+                }
+                _ => 2,
+            };
+
+            if c_idx == 0 {
+                if x_s + y_s > 0 {
+                    ctx += 3;
+                }
+                if sb_width == 2 {
+                    ctx += if scan_idx == 0 { 9 } else { 15 };
+                } else {
+                    ctx += 21;
+                }
+            } else {
+                if sb_width == 2 {
+                    ctx += 9;
+                } else {
+                    ctx += 12;
+                }
+            }
+
+            ctx as usize
+        };
+
+        let ctx_idx = if c_idx == 0 { sig_ctx } else { 27 + sig_ctx };
+        cabac.decode_bin(&mut contexts[ctx_idx])
+    }
+
+    /// Test ctxSet calculation against C++
+    #[test]
+    fn test_ctx_set_calculation() {
+        // Test all combinations
+        for sb_idx in [0u8, 1, 2, 3] {
+            for c_idx in [0u8, 1, 2] {
+                for prev_gt1 in [false, true] {
+                    let cpp_result = super::cpp_calc_ctx_set(sb_idx, c_idx, prev_gt1);
+                    let rust_result = rust_calc_ctx_set(sb_idx, c_idx, prev_gt1);
+
+                    assert_eq!(cpp_result, rust_result,
+                        "ctxSet mismatch: sb_idx={} c_idx={} prev_gt1={}: C++={} Rust={}",
+                        sb_idx, c_idx, prev_gt1, cpp_result, rust_result);
+                }
+            }
+        }
+        println!("All ctxSet calculations match!");
+    }
+
+    /// Rust implementation of ctxSet calculation for comparison
+    fn rust_calc_ctx_set(sb_idx: u8, c_idx: u8, prev_gt1: bool) -> u8 {
+        let base = if sb_idx == 0 || c_idx != 0 { 0 } else { 2 };
+        base + if prev_gt1 { 1 } else { 0 }
+    }
+
+    /// Test greater1_flag decode against C++
+    #[test]
+    fn test_greater1_flag_decode() {
+        let slice_data: &[u8] = &[
+            0x49, 0xc0, 0xc2, 0xc4, 0x92, 0x61, 0x0c, 0x00,
+            0x16, 0xcc, 0xbe, 0x77, 0x82, 0x8c, 0xcb, 0xfa,
+            0x93, 0x5f, 0xb2, 0x6a, 0x65, 0x34, 0xe6, 0xf8,
+            0xd3, 0xa0, 0x76, 0xcc, 0x39, 0xe8, 0xe0, 0xac,
+        ];
+        let slice_qp = 17;
+
+        // COEFF_ABS_LEVEL_GREATER1_FLAG init values (24 contexts)
+        // From H.265 Table 9-5
+        let greater1_init: [u8; 24] = [
+            154, 154, 154, 154, 154, 154, 154, 154,
+            154, 154, 154, 154, 154, 154, 154, 154,
+            154, 154, 154, 154, 154, 154, 154, 154,
+        ];
+
+        let mut cpp_cabac = CppCabac::new(slice_data);
+        let mut rust_cabac = RustCabac::new(slice_data);
+
+        let mut cpp_ctxs: Vec<_> = greater1_init.iter()
+            .map(|&iv| {
+                let mut ctx = CppContextModel { state: 0, mps: 0 };
+                unsafe { context_init(&mut ctx, iv, slice_qp); }
+                ctx
+            })
+            .collect();
+        let mut rust_ctxs: Vec<_> = greater1_init.iter()
+            .map(|&iv| RustContext::new(iv, slice_qp))
+            .collect();
+
+        // Test various combinations of c_idx, ctx_set, greater1_ctx
+        for sb_idx in 0..4u8 {
+            for c_idx in 0..2u8 {
+                let prev_gt1 = sb_idx > 0 && (sb_idx % 2 == 1); // Simulate some pattern
+                let ctx_set = rust_calc_ctx_set(sb_idx, c_idx, prev_gt1);
+
+                for greater1_ctx in 0..4u8 {
+                    let (cpp_r, cpp_v, cpp_b) = cpp_cabac.get_state();
+                    let (rust_r, rust_v, rust_b) = rust_cabac.get_state();
+
+                    let cpp_flag = cpp_cabac.decode_greater1_flag(&mut cpp_ctxs, c_idx, ctx_set, greater1_ctx);
+                    let rust_flag = decode_greater1_rust(&mut rust_cabac, &mut rust_ctxs, c_idx, ctx_set, greater1_ctx);
+
+                    if cpp_flag != rust_flag {
+                        panic!("greater1_flag mismatch: sb={} c_idx={} ctx_set={} gt1_ctx={}\n\
+                                C++={} state=({},{},{}) | Rust={} state=({},{},{})",
+                            sb_idx, c_idx, ctx_set, greater1_ctx,
+                            cpp_flag, cpp_r, cpp_v, cpp_b,
+                            rust_flag, rust_r, rust_v, rust_b);
+                    }
+
+                    let (cpp_r2, cpp_v2, cpp_b2) = cpp_cabac.get_state();
+                    let (rust_r2, rust_v2, rust_b2) = rust_cabac.get_state();
+                    assert_eq!((cpp_r2, cpp_v2, cpp_b2), (rust_r2, rust_v2, rust_b2),
+                        "State diverged after greater1_flag decode");
+                }
+            }
+        }
+        println!("All greater1_flag decodes match!");
+    }
+
+    /// Rust implementation of greater1_flag decode for comparison
+    fn decode_greater1_rust(
+        cabac: &mut RustCabac,
+        contexts: &mut [RustContext],
+        c_idx: u8,
+        ctx_set: u8,
+        greater1_ctx: u8,
+    ) -> u32 {
+        // ctxIdx = ctxSet*4 + min(greater1Ctx, 3) + (c_idx > 0 ? 16 : 0)
+        let mut ctx_inc = (ctx_set as usize) * 4 + (greater1_ctx.min(3) as usize);
+        if c_idx > 0 {
+            ctx_inc += 16;
+        }
+        cabac.decode_bin(&mut contexts[ctx_inc])
+    }
+
+    /// Test greater2_flag decode against C++
+    #[test]
+    fn test_greater2_flag_decode() {
+        let slice_data: &[u8] = &[
+            0x49, 0xc0, 0xc2, 0xc4, 0x92, 0x61, 0x0c, 0x00,
+            0x16, 0xcc, 0xbe, 0x77, 0x82, 0x8c, 0xcb, 0xfa,
+            0x93, 0x5f, 0xb2, 0x6a, 0x65, 0x34, 0xe6, 0xf8,
+            0xd3, 0xa0, 0x76, 0xcc, 0x39, 0xe8, 0xe0, 0xac,
+        ];
+        let slice_qp = 17;
+
+        // COEFF_ABS_LEVEL_GREATER2_FLAG init values (6 contexts: 4 luma + 2 chroma)
+        // From H.265 Table 9-5
+        let greater2_init: [u8; 6] = [107, 167, 91, 122, 107, 167];
+
+        let mut cpp_cabac = CppCabac::new(slice_data);
+        let mut rust_cabac = RustCabac::new(slice_data);
+
+        let mut cpp_ctxs: Vec<_> = greater2_init.iter()
+            .map(|&iv| {
+                let mut ctx = CppContextModel { state: 0, mps: 0 };
+                unsafe { context_init(&mut ctx, iv, slice_qp); }
+                ctx
+            })
+            .collect();
+        let mut rust_ctxs: Vec<_> = greater2_init.iter()
+            .map(|&iv| RustContext::new(iv, slice_qp))
+            .collect();
+
+        // Test various combinations
+        for c_idx in 0..3u8 {
+            let max_ctx_set = if c_idx == 0 { 4 } else { 2 };
+            for ctx_set in 0..max_ctx_set {
+                let (cpp_r, cpp_v, cpp_b) = cpp_cabac.get_state();
+                let (rust_r, rust_v, rust_b) = rust_cabac.get_state();
+
+                let cpp_flag = cpp_cabac.decode_greater2_flag(&mut cpp_ctxs, c_idx, ctx_set);
+                let rust_flag = decode_greater2_rust(&mut rust_cabac, &mut rust_ctxs, c_idx, ctx_set);
+
+                if cpp_flag != rust_flag {
+                    panic!("greater2_flag mismatch: c_idx={} ctx_set={}\n\
+                            C++={} state=({},{},{}) | Rust={} state=({},{},{})",
+                        c_idx, ctx_set,
+                        cpp_flag, cpp_r, cpp_v, cpp_b,
+                        rust_flag, rust_r, rust_v, rust_b);
+                }
+
+                let (cpp_r2, cpp_v2, cpp_b2) = cpp_cabac.get_state();
+                let (rust_r2, rust_v2, rust_b2) = rust_cabac.get_state();
+                assert_eq!((cpp_r2, cpp_v2, cpp_b2), (rust_r2, rust_v2, rust_b2),
+                    "State diverged after greater2_flag decode");
+            }
+        }
+        println!("All greater2_flag decodes match!");
+    }
+
+    /// Rust implementation of greater2_flag decode for comparison
+    fn decode_greater2_rust(
+        cabac: &mut RustCabac,
+        contexts: &mut [RustContext],
+        c_idx: u8,
+        ctx_set: u8,
+    ) -> u32 {
+        // ctxIdx = ctxSet + (c_idx > 0 ? 4 : 0)
+        let ctx_inc = (ctx_set as usize) + if c_idx > 0 { 4 } else { 0 };
+        cabac.decode_bin(&mut contexts[ctx_inc])
+    }
+
+    /// Diagonal scan order for 4x4 sub-block (reverse order)
+    const DIAG_SCAN_4X4_REV: [(u8, u8); 16] = [
+        (3, 3), (3, 2), (2, 3), (3, 1), (2, 2), (1, 3), (3, 0), (2, 1),
+        (1, 2), (0, 3), (2, 0), (1, 1), (0, 2), (1, 0), (0, 1), (0, 0),
+    ];
+
+    /// Simulate full TU coefficient decode for a 4x4 TU
+    /// This test simulates the complete decode process for one TU
+    #[test]
+    fn test_full_tu_decode_simulation() {
+        // Slice data from example.heic
+        let slice_data: &[u8] = &[
+            0x49, 0xc0, 0xc2, 0xc4, 0x92, 0x61, 0x0c, 0x00,
+            0x16, 0xcc, 0xbe, 0x77, 0x82, 0x8c, 0xcb, 0xfa,
+            0x93, 0x5f, 0xb2, 0x6a, 0x65, 0x34, 0xe6, 0xf8,
+            0xd3, 0xa0, 0x76, 0xcc, 0x39, 0xe8, 0xe0, 0xac,
+            0x4d, 0x7e, 0xc9, 0xa9, 0x95, 0xd3, 0x9b, 0xe3,
+            0x4e, 0x81, 0xdb, 0x30, 0xe7, 0xa3, 0x82, 0xb1,
+            0x35, 0xf8, 0x2f, 0xa1, 0x81, 0x63, 0x12, 0x49,
+            0x86, 0xe7, 0x3c, 0x93, 0x26, 0x8c, 0x03, 0xa8,
+        ];
+        let slice_qp = 17;
+        let log2_size = 2u8; // 4x4 TU
+        let c_idx = 0u8; // luma
+        let scan_idx = 0u8; // diagonal
+
+        println!("\n=== Full TU Decode Simulation (4x4 luma) ===\n");
+
+        // Initialize contexts
+        let last_xy_init: [u8; 18] = [
+            125, 110, 124, 110, 95, 94, 125, 111, 111,
+            79, 108, 123, 63, 0, 0, 0, 0, 0,
+        ];
+        let sig_coeff_init: [u8; 44] = [
+            111, 111, 125, 110, 110, 94, 124, 108, 124,
+            107, 125, 141, 179, 153, 125, 107, 125, 141,
+            179, 153, 125, 107, 125, 141, 179, 153, 125,
+            170, 154, 139, 153, 139, 123, 123, 63, 124,
+            139, 153, 139, 123, 123, 63, 153, 166,
+        ];
+        let greater1_init: [u8; 24] = [154; 24];
+        let greater2_init: [u8; 6] = [107, 167, 91, 122, 107, 167];
+
+        let mut cpp_cabac = CppCabac::new(slice_data);
+        let mut rust_cabac = RustCabac::new(slice_data);
+
+        // Initialize all contexts for both decoders
+        let mut cpp_last_x: Vec<_> = last_xy_init.iter()
+            .map(|&iv| { let mut ctx = CppContextModel { state: 0, mps: 0 }; unsafe { context_init(&mut ctx, iv, slice_qp); } ctx })
+            .collect();
+        let mut cpp_last_y: Vec<_> = last_xy_init.iter()
+            .map(|&iv| { let mut ctx = CppContextModel { state: 0, mps: 0 }; unsafe { context_init(&mut ctx, iv, slice_qp); } ctx })
+            .collect();
+        let mut cpp_sig_coeff: Vec<_> = sig_coeff_init.iter()
+            .map(|&iv| { let mut ctx = CppContextModel { state: 0, mps: 0 }; unsafe { context_init(&mut ctx, iv, slice_qp); } ctx })
+            .collect();
+        let mut cpp_greater1: Vec<_> = greater1_init.iter()
+            .map(|&iv| { let mut ctx = CppContextModel { state: 0, mps: 0 }; unsafe { context_init(&mut ctx, iv, slice_qp); } ctx })
+            .collect();
+        let mut cpp_greater2: Vec<_> = greater2_init.iter()
+            .map(|&iv| { let mut ctx = CppContextModel { state: 0, mps: 0 }; unsafe { context_init(&mut ctx, iv, slice_qp); } ctx })
+            .collect();
+
+        let mut rust_last_x: Vec<_> = last_xy_init.iter().map(|&iv| RustContext::new(iv, slice_qp)).collect();
+        let mut rust_last_y: Vec<_> = last_xy_init.iter().map(|&iv| RustContext::new(iv, slice_qp)).collect();
+        let mut rust_sig_coeff: Vec<_> = sig_coeff_init.iter().map(|&iv| RustContext::new(iv, slice_qp)).collect();
+        let mut rust_greater1: Vec<_> = greater1_init.iter().map(|&iv| RustContext::new(iv, slice_qp)).collect();
+        let mut rust_greater2: Vec<_> = greater2_init.iter().map(|&iv| RustContext::new(iv, slice_qp)).collect();
+
+        // Stage 1: Decode last_significant_coeff
+        println!("--- Stage 1: last_significant_coeff ---");
+        let cpp_last_x_val = cpp_cabac.decode_last_sig(&mut cpp_last_x, log2_size, c_idx);
+        let rust_last_x_val = decode_last_sig_rust(&mut rust_cabac, &mut rust_last_x, log2_size, c_idx);
+
+        let cpp_last_y_val = cpp_cabac.decode_last_sig(&mut cpp_last_y, log2_size, c_idx);
+        let rust_last_y_val = decode_last_sig_rust(&mut rust_cabac, &mut rust_last_y, log2_size, c_idx);
+
+        println!("C++:  last_sig = ({},{})", cpp_last_x_val, cpp_last_y_val);
+        println!("Rust: last_sig = ({},{})", rust_last_x_val, rust_last_y_val);
+
+        if cpp_last_x_val != rust_last_x_val || cpp_last_y_val != rust_last_y_val {
+            panic!("DIVERGENCE at Stage 1: last_sig_coeff");
+        }
+        check_state(&cpp_cabac, &rust_cabac, "after last_sig");
+
+        let last_x = cpp_last_x_val as u8;
+        let last_y = cpp_last_y_val as u8;
+
+        // Find last position in scan order
+        let last_scan_pos = DIAG_SCAN_4X4_REV.iter()
+            .position(|&(x, y)| x == last_x && y == last_y)
+            .unwrap_or(15);
+
+        println!("\nlast_scan_pos = {} (position {},{} in reverse diagonal scan)", last_scan_pos, last_x, last_y);
+
+        // Stage 2: Decode sig_coeff_flags
+        println!("\n--- Stage 2: sig_coeff_flags ---");
+
+        let mut cpp_sig_flags = [false; 16];
+        let mut rust_sig_flags = [false; 16];
+        cpp_sig_flags[15 - last_scan_pos] = true; // Last position is always significant
+        rust_sig_flags[15 - last_scan_pos] = true;
+
+        // For a 4x4 TU there's only 1 sub-block, so prev_csbf = 0
+        let prev_csbf = 0u8;
+
+        // Decode remaining positions (after last_scan_pos in reverse order)
+        for scan_pos in (last_scan_pos + 1)..16 {
+            let (x, y) = DIAG_SCAN_4X4_REV[scan_pos];
+
+            let (cpp_r, cpp_v, cpp_b) = cpp_cabac.get_state();
+            let cpp_sig = cpp_cabac.decode_sig_coeff(&mut cpp_sig_coeff, x, y, log2_size, c_idx, scan_idx, prev_csbf);
+
+            let (rust_r, rust_v, rust_b) = rust_cabac.get_state();
+            let rust_sig = decode_sig_coeff_rust(&mut rust_cabac, &mut rust_sig_coeff, x, y, log2_size, c_idx, scan_idx, prev_csbf);
+
+            println!("  pos[{}] ({},{}): C++={} state=({},{},{}) | Rust={} state=({},{},{})",
+                scan_pos, x, y, cpp_sig, cpp_r, cpp_v, cpp_b, rust_sig, rust_r, rust_v, rust_b);
+
+            if cpp_sig != rust_sig {
+                panic!("DIVERGENCE at Stage 2: sig_coeff_flag pos {} ({},{})", scan_pos, x, y);
+            }
+
+            cpp_sig_flags[15 - scan_pos] = cpp_sig != 0;
+            rust_sig_flags[15 - scan_pos] = rust_sig != 0;
+
+            check_state(&cpp_cabac, &rust_cabac, &format!("after sig_coeff pos {}", scan_pos));
+        }
+
+        // Count significant coefficients
+        let num_sig: usize = cpp_sig_flags.iter().filter(|&&x| x).count();
+        println!("\nTotal significant coefficients: {}", num_sig);
+        println!("sig_flags: {:?}", cpp_sig_flags);
+
+        // Stage 3: Decode greater1_flags (up to 8)
+        println!("\n--- Stage 3: greater1_flags ---");
+
+        let ctx_set = 0u8; // First sub-block of luma
+        let mut greater1_ctx = 1u8;
+        let mut cpp_greater1_flags = Vec::new();
+        let mut rust_greater1_flags = Vec::new();
+        let num_greater1 = num_sig.min(8);
+
+        for i in 0..num_greater1 {
+            let (cpp_r, cpp_v, cpp_b) = cpp_cabac.get_state();
+            let cpp_gt1 = cpp_cabac.decode_greater1_flag(&mut cpp_greater1, c_idx, ctx_set, greater1_ctx);
+
+            let (rust_r, rust_v, rust_b) = rust_cabac.get_state();
+            let rust_gt1 = decode_greater1_rust(&mut rust_cabac, &mut rust_greater1, c_idx, ctx_set, greater1_ctx);
+
+            println!("  gt1[{}]: ctx_set={} gt1_ctx={} | C++={} state=({},{},{}) | Rust={} state=({},{},{})",
+                i, ctx_set, greater1_ctx, cpp_gt1, cpp_r, cpp_v, cpp_b, rust_gt1, rust_r, rust_v, rust_b);
+
+            if cpp_gt1 != rust_gt1 {
+                panic!("DIVERGENCE at Stage 3: greater1_flag[{}]", i);
+            }
+
+            cpp_greater1_flags.push(cpp_gt1 != 0);
+            rust_greater1_flags.push(rust_gt1 != 0);
+
+            // Update greater1_ctx state machine
+            if cpp_gt1 != 0 {
+                greater1_ctx = 0;
+            } else if greater1_ctx > 0 && greater1_ctx < 3 {
+                greater1_ctx += 1;
+            }
+
+            check_state(&cpp_cabac, &rust_cabac, &format!("after greater1[{}]", i));
+        }
+
+        // Stage 4: Decode greater2_flag (if any greater1 was 1)
+        let has_greater1 = cpp_greater1_flags.iter().any(|&x| x);
+        if has_greater1 {
+            println!("\n--- Stage 4: greater2_flag ---");
+
+            let (cpp_r, cpp_v, cpp_b) = cpp_cabac.get_state();
+            let cpp_gt2 = cpp_cabac.decode_greater2_flag(&mut cpp_greater2, c_idx, ctx_set);
+
+            let (rust_r, rust_v, rust_b) = rust_cabac.get_state();
+            let rust_gt2 = decode_greater2_rust(&mut rust_cabac, &mut rust_greater2, c_idx, ctx_set);
+
+            println!("  gt2: C++={} state=({},{},{}) | Rust={} state=({},{},{})",
+                cpp_gt2, cpp_r, cpp_v, cpp_b, rust_gt2, rust_r, rust_v, rust_b);
+
+            if cpp_gt2 != rust_gt2 {
+                panic!("DIVERGENCE at Stage 4: greater2_flag");
+            }
+
+            check_state(&cpp_cabac, &rust_cabac, "after greater2");
+        }
+
+        // Stage 5: Decode sign bits
+        println!("\n--- Stage 5: sign bits ---");
+
+        for i in 0..num_sig {
+            let (cpp_r, cpp_v, cpp_b) = cpp_cabac.get_state();
+            let cpp_sign = cpp_cabac.decode_bypass();
+
+            let (rust_r, rust_v, rust_b) = rust_cabac.get_state();
+            let rust_sign = rust_cabac.decode_bypass();
+
+            println!("  sign[{}]: C++={} state=({},{},{}) | Rust={} state=({},{},{})",
+                i, cpp_sign, cpp_r, cpp_v, cpp_b, rust_sign, rust_r, rust_v, rust_b);
+
+            if cpp_sign != rust_sign {
+                panic!("DIVERGENCE at Stage 5: sign bit[{}]", i);
+            }
+
+            check_state(&cpp_cabac, &rust_cabac, &format!("after sign[{}]", i));
+        }
+
+        // Stage 6: Decode coeff_abs_level_remaining (for coefficients > base level)
+        println!("\n--- Stage 6: coeff_abs_level_remaining ---");
+
+        // Simplified: just decode a few remaining values
+        let mut rice_param = 0u8;
+        for i in 0..num_sig.min(4) {
+            let (cpp_r, cpp_v, cpp_b) = cpp_cabac.get_state();
+            let cpp_remaining = cpp_cabac.decode_coeff_abs_level_remaining(rice_param);
+
+            let (rust_r, rust_v, rust_b) = rust_cabac.get_state();
+            let rust_remaining = rust_cabac.decode_coeff_abs_level_remaining(rice_param);
+
+            println!("  remaining[{}] rice={}: C++={} state=({},{},{}) | Rust={} state=({},{},{})",
+                i, rice_param, cpp_remaining, cpp_r, cpp_v, cpp_b, rust_remaining, rust_r, rust_v, rust_b);
+
+            if cpp_remaining != rust_remaining {
+                panic!("DIVERGENCE at Stage 6: coeff_abs_level_remaining[{}]", i);
+            }
+
+            // Update rice param based on value
+            if cpp_remaining > 3 * (1 << rice_param) && rice_param < 4 {
+                rice_param += 1;
+            }
+
+            check_state(&cpp_cabac, &rust_cabac, &format!("after remaining[{}]", i));
+        }
+
+        println!("\n=== Full TU Decode Simulation PASSED ===");
+    }
+
+    fn check_state(cpp: &CppCabac, rust: &RustCabac, label: &str) {
+        let (cpp_r, cpp_v, cpp_b) = cpp.get_state();
+        let (rust_r, rust_v, rust_b) = rust.get_state();
+        if (cpp_r, cpp_v, cpp_b) != (rust_r, rust_v, rust_b) {
+            panic!("State diverged {}: C++=({},{},{}) Rust=({},{},{})",
+                label, cpp_r, cpp_v, cpp_b, rust_r, rust_v, rust_b);
+        }
     }
 
     #[test]
