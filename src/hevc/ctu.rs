@@ -69,6 +69,10 @@ pub struct SliceContext<'a> {
     debug_ctu: bool,
     /// Debug: track chroma prediction calls
     chroma_pred_count: u32,
+    /// CT depth map for split_cu_flag context derivation (indexed by min_cb_size grid)
+    ct_depth_map: Vec<u8>,
+    /// Width of ct_depth_map in min_cb_size units
+    ct_depth_map_stride: u32,
 }
 
 impl<'a> SliceContext<'a> {
@@ -112,6 +116,13 @@ impl<'a> SliceContext<'a> {
         eprintln!("DEBUG: Chroma QP: qp_y={}, qp_cb={}, qp_cr={}", slice_qp, qp_cb, qp_cr);
         eprintln!("DEBUG: sign_data_hiding_enabled_flag={}", pps.sign_data_hiding_enabled_flag);
 
+        // Initialize ct_depth_map for split_cu_flag context derivation
+        // Map is in units of min_cb_size (typically 8x8)
+        let min_cb_size = 1u32 << sps.log2_min_cb_size();
+        let ct_depth_map_stride = sps.pic_width_in_luma_samples.div_ceil(min_cb_size);
+        let ct_depth_map_height = sps.pic_height_in_luma_samples.div_ceil(min_cb_size);
+        let ct_depth_map = vec![0xFF; (ct_depth_map_stride * ct_depth_map_height) as usize];
+
         Ok(Self {
             sps,
             pps,
@@ -128,6 +139,8 @@ impl<'a> SliceContext<'a> {
             cu_transquant_bypass_flag: false,
             debug_ctu: false,
             chroma_pred_count: 0,
+            ct_depth_map,
+            ct_depth_map_stride,
         })
     }
 
@@ -282,18 +295,84 @@ impl<'a> SliceContext<'a> {
         Ok(())
     }
 
+    /// Get ctDepth at a pixel position (returns 0xFF if not yet decoded)
+    fn get_ct_depth(&self, x: u32, y: u32) -> u8 {
+        let min_cb_size = 1u32 << self.sps.log2_min_cb_size();
+        let map_x = x / min_cb_size;
+        let map_y = y / min_cb_size;
+
+        if map_x >= self.ct_depth_map_stride || map_y * self.ct_depth_map_stride + map_x >= self.ct_depth_map.len() as u32 {
+            return 0xFF; // Out of bounds
+        }
+
+        self.ct_depth_map[(map_y * self.ct_depth_map_stride + map_x) as usize]
+    }
+
+    /// Set ctDepth for a CU region
+    fn set_ct_depth(&mut self, x0: u32, y0: u32, log2_cb_size: u8, ct_depth: u8) {
+        let min_cb_size = 1u32 << self.sps.log2_min_cb_size();
+        let cb_size = 1u32 << log2_cb_size;
+
+        // Fill the ct_depth_map for this CU region
+        let start_x = x0 / min_cb_size;
+        let start_y = y0 / min_cb_size;
+        let num_blocks = cb_size / min_cb_size;
+
+        for dy in 0..num_blocks {
+            for dx in 0..num_blocks {
+                let map_x = start_x + dx;
+                let map_y = start_y + dy;
+                if map_x < self.ct_depth_map_stride {
+                    let idx = (map_y * self.ct_depth_map_stride + map_x) as usize;
+                    if idx < self.ct_depth_map.len() {
+                        self.ct_depth_map[idx] = ct_depth;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check if a neighbor position is available (within picture bounds)
+    fn is_neighbor_available(&self, x: i32, y: i32) -> bool {
+        x >= 0 && y >= 0
+            && (x as u32) < self.sps.pic_width_in_luma_samples
+            && (y as u32) < self.sps.pic_height_in_luma_samples
+    }
+
     /// Decode split_cu_flag using CABAC
     fn decode_split_cu_flag(&mut self, x0: u32, y0: u32, ct_depth: u8) -> Result<bool> {
-        // Context selection based on neighboring split flags and depth
-        // For simplicity, use depth-based context (0, 1, or 2)
-        // TODO: Proper context selection uses availability of left and above neighbors
-        let ctx_idx = context::SPLIT_CU_FLAG + (ct_depth as usize).min(2);
+        // Context selection based on neighboring CU depths (H.265 9.3.4.2.2)
+        // condTermL: 1 if left neighbor has larger depth (was split more)
+        // condTermA: 1 if above neighbor has larger depth
+        // ctxInc = condTermL + condTermA
 
+        let available_l = self.is_neighbor_available(x0 as i32 - 1, y0 as i32);
+        let available_a = self.is_neighbor_available(x0 as i32, y0 as i32 - 1);
+
+        let mut cond_l = 0;
+        let mut cond_a = 0;
+
+        if available_l {
+            let depth_l = self.get_ct_depth(x0 - 1, y0);
+            if depth_l != 0xFF && depth_l > ct_depth {
+                cond_l = 1;
+            }
+        }
+
+        if available_a {
+            let depth_a = self.get_ct_depth(x0, y0 - 1);
+            if depth_a != 0xFF && depth_a > ct_depth {
+                cond_a = 1;
+            }
+        }
+
+        let ctx_idx = context::SPLIT_CU_FLAG + cond_l + cond_a;
         let bin = self.cabac.decode_bin(&mut self.ctx[ctx_idx])?;
 
         // DEBUG: Print first few split decisions
-        if x0 < 16 && y0 < 16 {
-            eprintln!("DEBUG: split_cu_flag at ({},{}) depth={} ctx={} = {}", x0, y0, ct_depth, ctx_idx, bin);
+        if x0 < 64 && y0 < 64 {
+            eprintln!("DEBUG: split_cu_flag at ({},{}) depth={} ctx={} (condL={} condA={}) = {}",
+                x0, y0, ct_depth, ctx_idx, cond_l, cond_a, bin);
         }
 
         Ok(bin != 0)
@@ -305,11 +384,14 @@ impl<'a> SliceContext<'a> {
         x0: u32,
         y0: u32,
         log2_cb_size: u8,
-        _ct_depth: u8,
+        ct_depth: u8,
         frame: &mut DecodedFrame,
     ) -> Result<()> {
         let cb_size = 1u32 << log2_cb_size;
         let _ = cb_size; // Used in PartNxN
+
+        // Set ct_depth for this CU (used by split_cu_flag context derivation)
+        self.set_ct_depth(x0, y0, log2_cb_size, ct_depth);
 
         // For I-slices, prediction mode is always INTRA
         let pred_mode = PredMode::Intra;

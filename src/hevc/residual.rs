@@ -225,12 +225,8 @@ pub fn decode_residual(
     // Max sub-block grid is 8x8 for 32x32 TU
     let mut coded_sb_flags = [[false; 8]; 8];
 
-    // Track c1 state across subblocks for ctxSet derivation
-    // Per libde265: c1 is set to 0 when any greater1_flag is 1 in the subblock,
-    // and this affects the ctxSet for the NEXT subblock.
-    // c1 is reset to 1 at the start of each subblock.
-    let mut last_subblock_c1_was_zero = false;
-    let mut first_subblock = true;
+    // Per libde265 HM algorithm: ctxSet = c1, which is reset to 1 each subblock
+    // and becomes 0 if any greater1_flag is 1. Cross-subblock state not needed.
 
     // Decode coefficients
     for sb_idx in (0..=last_sb_idx).rev() {
@@ -354,18 +350,9 @@ pub fn decode_residual(
             continue;
         }
 
-        // Compute ctxSet for this sub-block
-        // Per H.265/libde265:
-        // - DC block (sb_idx==0) or chroma (c_idx>0): base ctxSet = 0
-        // - Non-DC luma: base ctxSet = 2
-        // - If previous subblock ended with c1==0 (any greater1_flag was 1): ctxSet++
-        let mut ctx_set = if sb_idx == 0 || c_idx > 0 { 0u8 } else { 2 };
-        if !first_subblock && last_subblock_c1_was_zero {
-            ctx_set += 1;
-        }
-
         // c1 tracks if any greater1_flag is 1 (for next subblock's ctxSet)
         // Reset to 1 at start of each subblock
+        // Per libde265: ctxSet = c1 directly (HM algorithm)
         let mut c1 = 1u8;
 
         // greater1Ctx: context index component, reset to 1 each subblock
@@ -395,17 +382,17 @@ pub fn decode_residual(
 
             // Update greater1Ctx BEFORE decoding, using PREVIOUS flag
             // (skip for first coefficient in subblock)
-            if g1_count > 0 {
-                if greater1_ctx > 0 {
-                    if last_greater1_flag {
-                        greater1_ctx = 0;
-                    } else {
-                        greater1_ctx = (greater1_ctx + 1).min(3);
-                    }
+            // Per libde265: greater1Ctx increments without clamping (clamped in ctx calc)
+            if g1_count > 0 && greater1_ctx > 0 {
+                if last_greater1_flag {
+                    greater1_ctx = 0;
+                } else {
+                    greater1_ctx += 1;
                 }
             }
 
-            let g1 = decode_coeff_greater1_flag(cabac, ctx, c_idx, ctx_set, greater1_ctx)?;
+            // Per libde265: ctxSet = c1 (HM algorithm)
+            let g1 = decode_coeff_greater1_flag(cabac, ctx, c_idx, c1, greater1_ctx)?;
             last_greater1_flag = g1;
 
             if g1 {
@@ -418,20 +405,16 @@ pub fn decode_residual(
                     // Non-first g1=1: base=2, needs remaining for values > 2
                     needs_remaining[n as usize] = true;
                 }
-            } else if c1 > 0 && c1 < 3 {
-                c1 += 1;
             }
+            // Note: c1 stays 1 if no g1=1 yet, becomes 0 when any g1=1
             g1_count += 1;
         }
 
-        // Update state for next subblock
-        last_subblock_c1_was_zero = c1 == 0;
-        first_subblock = false;
 
         // Decode greater-2 flag (only for first coefficient with greater-1)
-        // Uses ctxSet directly (not greater1Ctx)
+        // Per libde265: uses ctxSet from last greater1 decode, which is c1
         if let Some(g1_idx) = first_g1_idx {
-            let g2 = decode_coeff_greater2_flag(cabac, ctx, c_idx, ctx_set)?;
+            let g2 = decode_coeff_greater2_flag(cabac, ctx, c_idx, c1)?;
             if g2 {
                 coeff_values[g1_idx as usize] = 3;
                 needs_remaining[g1_idx as usize] = true;
@@ -671,25 +654,31 @@ fn decode_last_sig_coeff_prefix(
     c_idx: u8,
     is_x: bool,
 ) -> Result<u32> {
-    let ctx_offset = if is_x {
+    let ctx_base = if is_x {
         context::LAST_SIG_COEFF_X_PREFIX
     } else {
         context::LAST_SIG_COEFF_Y_PREFIX
     };
 
-    // Context offset based on component and size
-    let ctx_shift = if c_idx == 0 {
-        (log2_size + 1) >> 2
+    // Context offset and shift based on component and size
+    // Per H.265 spec (matches libde265):
+    // Luma: ctxOffset = 3*(log2Size-2) + ((log2Size-1)>>2), ctxShift = (log2Size+1)>>2
+    // Chroma: ctxOffset = 15, ctxShift = log2Size-2
+    let (ctx_offset, ctx_shift) = if c_idx == 0 {
+        // Luma
+        let offset = 3 * (log2_size as usize - 2) + ((log2_size as usize - 1) >> 2);
+        let shift = (log2_size + 1) >> 2;
+        (offset, shift)
     } else {
-        log2_size - 2
+        // Chroma
+        (15, log2_size - 2)
     };
 
-    let ctx_base = ctx_offset + if c_idx > 0 { 15 } else { 0 };
     let max_prefix = (log2_size << 1) - 1;
 
     let mut prefix = 0u32;
     while prefix < max_prefix as u32 {
-        let ctx_idx = ctx_base + ((prefix as usize) >> ctx_shift as usize).min(3);
+        let ctx_idx = ctx_base + ctx_offset + ((prefix as usize) >> ctx_shift as usize).min(3);
         let bin = cabac.decode_bin(&mut ctx[ctx_idx])?;
         if bin == 0 {
             break;
