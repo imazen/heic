@@ -113,8 +113,27 @@ pub fn decode_rgba_into(
 
 ## Known Bugs
 
-- Chroma planes have wrong averages (167/209 vs ~128), causing wrong RGB colors
+- Chroma planes have wrong averages (Cb=167, Cr=209 vs ~128), causing wrong RGB colors
+  - Y plane average (152) is reasonable
+  - First 4x4 chroma block has reasonable values (~100-150)
+  - Systematic bias affects whole image, not just individual blocks
+  - Investigated: NOT caused by chroma QP (same as luma=17 for this image)
+  - Investigated: NOT caused by scan table ordering (tested multiple variations)
+  - Possible causes remaining: cbf_cb/cbf_cr flag decoding, chroma prediction mode
 - Output dimensions 1280x856 vs reference 1280x854 (missing conformance window cropping)
+
+## Investigation Notes
+
+### Chroma Bias Analysis (2026-01-21)
+- Test image: example.heic (1280x854)
+- Y plane: avg=152 (reasonable for outdoor scene)
+- Cb plane: avg=167 (should be ~128, ~39 too high)
+- Cr plane: avg=209 (should be ~128, ~81 too high)
+- First chroma block at (0,0) has values ~100-150 (reasonable)
+- Bias is not uniform - some regions more affected than others
+- Chroma QP = 17 (same as luma, PPS/slice offsets are 0)
+- Diagonal scan tables have unconventional order but consistently so for both
+  coefficient and sub-block scanning, suggesting they compensate for each other
 
 ## Module Structure
 
