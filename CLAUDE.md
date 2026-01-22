@@ -171,7 +171,34 @@ Comparison against reference decoder (heic-wasm-rs / libheif):
 - Rice parameter reaches max (4) due to accumulating high coefficients
 - Pattern suggests bitstream desync starting very early
 
-**Next step:** Create comparison test with hevc-compare crate to compare our CABAC output against libde265 step-by-step, starting from byte 0.
+## Debugging Strategy: Avoid Local Optima
+
+**Problem:** With multiple interacting bugs, optimizing for "CTUs decoded" or "SSIM score" leads to local optima. The prev_csbf fix demonstrated this: wrong code decoded all 280 CTUs, correct code only decodes 109. Wrong contexts produce wrong-but-plausible values that don't trigger early termination.
+
+**Solution:** Compare at the coefficient level, not end-to-end metrics.
+
+### Correct Approach
+1. **Differential testing per TU**: Compare decoded coefficients against libde265
+   ```
+   libde265 TU(0,0): [1, -3, -2, 1, 2, -1, ...]
+   our decoder:      [1, -3, -2, 1, ?, ?, ...]  ← find first mismatch
+   ```
+2. **First divergence point** tells us exactly where to focus
+3. **Don't use "decode success" as metric** - a decoder can "succeed" with wrong values
+
+### Implementation Plan
+1. Instrument libde265 to log coefficients per TU (or use FFI in hevc-compare)
+2. Add matching logging to our decoder
+3. Diff outputs to find first mismatched TU
+4. Focus debugging on that specific TU's CABAC operations
+
+### What We Know
+- CABAC primitives are verified correct (hevc-compare tests pass)
+- Bug is in **which operations we call and in what order**
+- Need to compare the SEQUENCE of operations, not just individual operations
+
+### hevc-compare Extension Needed
+Extend `crates/hevc-compare/` to call libde265's `decode_residual_block()` via FFI and compare coefficient arrays directly. This gives ground truth without relying on end-to-end metrics.
 
 
 ## Investigation Notes
