@@ -264,6 +264,89 @@ Our implementation used `c1` directly (0-3), but H.265/libde265 requires:
 
 **Results:** Chroma averages improved from 198/210 to 161/173. Still not at target ~128.
 
+### Session 2026-01-23: Operation Sequence Investigation
+
+**Current state:**
+- 225/280 CTUs decoded
+- SSIM2 = -1130
+- 26 large coefficients (>500)
+- First large coeff at call#157, byte 1112, value=841
+
+**Key finding: All 18 hevc-compare tests PASS**
+- Individual CABAC operations match C++ exactly
+- Bug must be in SEQUENCE of operations, not individual ops
+
+**Call#157 analysis (first large coefficient):**
+```
+log2=2 c_idx=0 scan=Vertical byte=1101 cabac=(328,239)
+remaining n=8 base=2 rice=2 byte=1106 cabac=(420,53696,-2) → remaining=839
+```
+- CABAC state (420, 53696, -2) is "hot" - value nearly equals scaled_range
+- scaled_range = 420 << 7 = 53760, value = 53696 (diff = 64)
+- Causes bypass decode to produce many consecutive 1-bits
+
+**Verified CORRECT (matches libde265):**
+- cbf_luma context: `ctx_offset = if trafo_depth == 0 { 1 } else { 0 }`
+- cbf_cbcr context: `ctx_idx = CBF_CBCR + trafo_depth`
+- split_cu_flag context: `ctx_idx = condL + condA`
+- sig_coeff_flag context derivation (all scan types)
+- greater1Ctx state machine
+- Vertical scan coordinate swap
+
+**What causes CABAC state to reach (420, 53696, -2)?**
+The state is CUMULATIVE from all prior operations since slice start.
+If call#156 ends correctly, call#157's starting state should match libde265.
+
+**CBF_LUMA decode verified correct around byte 1100:**
+```
+CBF_LUMA: byte=1094->1094 ctx=31 val=true (350,319)->(343,319)
+CBF_LUMA: byte=1101->1101 ctx=31 val=true (335,239)->(328,239)
+```
+- ctx=31 means CBF_LUMA(31) + 0 (trafo_depth > 0)
+- State transitions look correct for context-coded bin decode
+
+**Call#157 context derivation verified:**
+- ctx_set=0 for sb_idx=0 in 4x4 luma (base=0, prev_gt1=false) ✓
+- greater1Ctx starts at 1, increments/resets correctly ✓
+- Vertical scan coordinate swap: (2,3) → local(3,2) ✓
+- last_pos_in_sb=14 matches position (3,2) in vertical scan ✓
+
+**Key insight:** All individual operations verified correct. Bug is likely in
+NUMBER of operations - we may be doing extra/missing operations somewhere.
+
+**Session 2026-01-23 (Continued):**
+
+Additional verification performed:
+1. **CTX_IDX_MAP_4X4** matches C++ exactly: `[0,1,4,5,2,3,4,5,6,6,8,8,7,7,8,8]`
+2. **Sign decode order** matches libde265: high scan pos → low scan pos
+3. **Remaining decode order** matches libde265: iterating from high to low
+4. **DC handling** verified: `DC DECODE before: cabac=(340,13090,-7) → after: (295,13090,-7)`
+5. **needs_remaining logic** matches libde265's `coeff_has_max_base_level`:
+   - g1=0 positions → don't need remaining
+   - g1=1 positions → need remaining
+   - Positions beyond first 8 → always need remaining
+
+**Detailed operation count for call#157:**
+- 14 sig_coeff decodes (13 down to 1, plus DC)
+- 8 greater1 decodes (first 8 significant coefficients)
+- 1 greater2 decode (for first g1=1)
+- 12 sign bypass bits (13 sig - 1 hidden)
+- 11 remaining decodes
+
+**Hot state occurs at position n=8:**
+Before n=8 remaining: state = (420, 53696, -2)
+- scaled_range = 420 << 7 = 53760
+- value = 53696 → only 64 below threshold
+- Bypass decode produces 839 consecutive 1-bits
+
+**Root cause hypothesis:** State drift accumulated from earlier residual calls.
+All operations within call#157 appear correct, so the initial state (328, 239)
+at byte 1101 may already be wrong. Need to compare starting states across
+all residual calls to find first divergence point.
+
+**Recommended next step:** Add test that compares CABAC state at START of each
+residual call between Rust and C++ (requires deeper libde265 integration).
+
 ### Context Derivation Analysis (2026-01-22)
 
 **Debug infrastructure added:** CabacTracker in debug.rs tracks:

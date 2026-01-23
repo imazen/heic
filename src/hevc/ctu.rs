@@ -192,7 +192,7 @@ impl<'a> SliceContext<'a> {
             debug::track_ctu_start(ctu_count, byte_pos);
 
             // DEBUG: Print CTU state periodically
-            if ctu_count.is_multiple_of(50) {
+            if ctu_count.is_multiple_of(50) || ctu_count <= 3 {
                 let (range, offset) = self.cabac.get_state();
                 eprintln!(
                     "DEBUG: CTU {} byte={} cabac=({},{}) x={} y={}",

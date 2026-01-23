@@ -184,13 +184,27 @@ pub fn decode_residual(
     let residual_call_num =
         DEBUG_RESIDUAL_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
-    // Verbose debug for specific call (disabled by default)
+    // Print state at start of each residual call (for tracing)
+    // Enable to trace CABAC state progression in early CTUs
+    let trace_state = residual_call_num < 200;
+    if trace_state {
+        let (byte_pos, _, _) = cabac.get_position();
+        if byte_pos < 1200 {
+            eprintln!(
+                "TRACE call#{}: byte={} cabac=({},{}) log2={} c_idx={}",
+                residual_call_num, byte_pos, init_range, init_offset, log2_size, c_idx
+            );
+        }
+    }
+
+    // Verbose debug for specific calls
+    // Enable for calls around the first large coefficient
     #[allow(unused_variables)]
     let debug_call = false;
     if debug_call {
         let (byte_pos, _, _) = cabac.get_position();
         eprintln!(
-            "DEBUG call#{}: START log2={} c_idx={} scan={:?} byte={} cabac=({},{})",
+            "\nDEBUG call#{}: START log2={} c_idx={} scan={:?} byte={} cabac=({},{})",
             residual_call_num, log2_size, c_idx, scan_order, byte_pos, init_range, init_offset
         );
     }
@@ -200,6 +214,13 @@ pub fn decode_residual(
 
     // Decode last significant coefficient position
     let (last_x, last_y) = decode_last_sig_coeff_pos(cabac, ctx, log2_size, c_idx)?;
+    if debug_call {
+        let (byte_pos, _, _) = cabac.get_position();
+        eprintln!(
+            "DEBUG call#{}: last_sig=({},{}) byte={}",
+            residual_call_num, last_x, last_y, byte_pos
+        );
+    }
 
     // Swap coordinates for vertical scan
     let (last_x, last_y) = if scan_order == ScanOrder::Vertical {
@@ -234,12 +255,21 @@ pub fn decode_residual(
     let local_y = (last_y % 4) as u8;
     let last_pos_in_sb = find_scan_pos_4x4(scan_pos, local_x, local_y);
 
+    if debug_call {
+        eprintln!(
+            "DEBUG call#{}: last_sb_idx={} last_pos_in_sb={} local=({},{}) sb_width={}",
+            residual_call_num, last_sb_idx, last_pos_in_sb, local_x, local_y, sb_width
+        );
+    }
+
     // Track coded_sub_block_flag for prevCsbf calculation
     // Max sub-block grid is 8x8 for 32x32 TU
     let mut coded_sb_flags = [[false; 8]; 8];
 
-    // Per libde265 HM algorithm: ctxSet = c1, which is reset to 1 each subblock
-    // and becomes 0 if any greater1_flag is 1. Cross-subblock state not needed.
+    // Track whether the previously-processed subblock had any greater1_flag == 1
+    // This is used for ctx_set derivation per H.265 section 9.3.4.2.6
+    // "Previous" means the one already processed (higher scan index since we process high to low)
+    let mut prev_subblock_had_gt1 = false;
 
     // Decode coefficients
     for sb_idx in (0..=last_sb_idx).rev() {
@@ -322,6 +352,14 @@ pub fn decode_residual(
             let sig = decode_sig_coeff_flag(
                 cabac, ctx, c_idx, n, log2_size, scan_idx, sb_x, sb_y, prev_csbf, scan_pos,
             )?;
+            if debug_call {
+                // Print all sig_coeff decodes to trace state
+                let (r, v, bn) = cabac.get_state_extended();
+                eprintln!(
+                    "DEBUG call#{}: sig_coeff n={} -> {} raw_cabac=({},{},{})",
+                    residual_call_num, n, if sig { 1 } else { 0 }, r, v, bn
+                );
+            }
             if sig {
                 coeff_flags[n as usize] = true;
                 coeff_values[n as usize] = 1;
@@ -339,11 +377,31 @@ pub fn decode_residual(
                 coeff_flags[0] = true;
                 coeff_values[0] = 1;
                 num_coeffs += 1;
+                if debug_call {
+                    eprintln!(
+                        "DEBUG call#{}: DC INFERRED (can_infer_dc=true)",
+                        residual_call_num
+                    );
+                }
             } else {
                 // Decode sig_coeff_flag for DC
+                if debug_call {
+                    let (r, v, bn) = cabac.get_state_extended();
+                    eprintln!(
+                        "DEBUG call#{}: DC DECODE before: cabac=({},{},{})",
+                        residual_call_num, r, v, bn
+                    );
+                }
                 let sig = decode_sig_coeff_flag(
                     cabac, ctx, c_idx, 0, log2_size, scan_idx, sb_x, sb_y, prev_csbf, scan_pos,
                 )?;
+                if debug_call {
+                    let (r, v, bn) = cabac.get_state_extended();
+                    eprintln!(
+                        "DEBUG call#{}: DC sig_coeff n=0 -> {} cabac=({},{},{})",
+                        residual_call_num, if sig { 1 } else { 0 }, r, v, bn
+                    );
+                }
                 if sig {
                     coeff_flags[0] = true;
                     coeff_values[0] = 1;
@@ -356,11 +414,23 @@ pub fn decode_residual(
             continue;
         }
 
-        // c1 tracks if any greater1_flag is 1 (for next subblock's ctxSet)
-        // Reset to 1 at start of each subblock
-        // Per libde265: ctxSet = c1, captured at subblock start and used for ALL g1 flags
-        let mut c1 = 1u8;
-        let ctx_set = c1; // Capture initial c1 - this stays constant for entire subblock
+        // Calculate ctx_set per H.265 section 9.3.4.2.6
+        // base = 0 for DC subblock (sb_idx==0) or chroma (c_idx!=0)
+        // base = 2 for luma non-DC subblock
+        // ctx_set = base + (prev_gt1 ? 1 : 0)
+        let base = if sb_idx == 0 || c_idx > 0 { 0 } else { 2 };
+        let ctx_set = base + if prev_subblock_had_gt1 { 1 } else { 0 };
+
+        if debug_call {
+            let (byte_pos, _, _) = cabac.get_position();
+            eprintln!(
+                "DEBUG call#{}: sb_idx={} ({},{}) start_pos={} num_coeffs={} ctx_set={} (base={} prev_gt1={}) byte={}",
+                residual_call_num, sb_idx, sb_x, sb_y, start_pos, num_coeffs, ctx_set, base, prev_subblock_had_gt1, byte_pos
+            );
+        }
+
+        // Track if this subblock has any g1=1 (for next subblock's ctx_set)
+        let mut this_subblock_had_gt1 = false;
 
         // greater1Ctx: context index component, reset to 1 each subblock
         // Updated BEFORE decoding each coefficient (except first) based on PREVIOUS flag
@@ -400,12 +470,18 @@ pub fn decode_residual(
 
             // Use ctx_set (captured at subblock start) for ALL greater1_flags
             let g1 = decode_coeff_greater1_flag(cabac, ctx, c_idx, ctx_set, greater1_ctx)?;
+            if debug_call {
+                eprintln!(
+                    "DEBUG call#{}: g1[n={}] ctx_set={} gt1_ctx={} -> {}",
+                    residual_call_num, n, ctx_set, greater1_ctx, if g1 { 1 } else { 0 }
+                );
+            }
             last_greater1_flag = g1;
 
             if g1 {
                 coeff_values[n as usize] = 2;
                 g1_positions[n as usize] = true;
-                c1 = 0; // Track that a greater1_flag was 1
+                this_subblock_had_gt1 = true; // Track for next subblock's ctx_set
                 if first_g1_idx.is_none() {
                     first_g1_idx = Some(n);
                 } else {
@@ -413,7 +489,6 @@ pub fn decode_residual(
                     needs_remaining[n as usize] = true;
                 }
             }
-            // Note: c1 stays 1 if no g1=1 yet, becomes 0 when any g1=1
             g1_count += 1;
         }
 
@@ -421,6 +496,13 @@ pub fn decode_residual(
         // Uses same ctx_set as greater1_flags (captured at subblock start)
         if let Some(g1_idx) = first_g1_idx {
             let g2 = decode_coeff_greater2_flag(cabac, ctx, c_idx, ctx_set)?;
+            if debug_call {
+                let (byte_pos, _, _) = cabac.get_position();
+                eprintln!(
+                    "DEBUG call#{}: g2 ctx_set={} -> {} byte={}",
+                    residual_call_num, ctx_set, if g2 { 1 } else { 0 }, byte_pos
+                );
+            }
             if g2 {
                 coeff_values[g1_idx as usize] = 3;
                 needs_remaining[g1_idx as usize] = true;
@@ -473,6 +555,13 @@ pub fn decode_residual(
         // This matches the H.265 spec and libde265: the FIRST coefficient in
         // scanning order (lowest scan position) has its sign hidden.
         let mut coeff_signs = [0u8; 16];
+        if debug_call {
+            let (byte_pos, _, _) = cabac.get_position();
+            eprintln!(
+                "DEBUG call#{}: SIGNS n_sig={} sign_hidden={} byte={}",
+                residual_call_num, n_sig, sign_hidden, byte_pos
+            );
+        }
         for (i, sign) in coeff_signs[..n_sig.saturating_sub(1)]
             .iter_mut()
             .enumerate()
@@ -485,6 +574,13 @@ pub fn decode_residual(
             coeff_signs[n_sig - 1] = cabac.decode_bypass()?;
         }
         // If sign_hidden, coeff_signs[n_sig-1] stays 0 (will be inferred later)
+        if debug_call {
+            let (byte_pos, _, _) = cabac.get_position();
+            eprintln!(
+                "DEBUG call#{}: SIGNS done signs={:?} byte={}",
+                residual_call_num, &coeff_signs[..n_sig], byte_pos
+            );
+        }
 
         // Decode remaining levels for all coefficients that need it
         // Rice parameter starts at 0 and is updated adaptively
@@ -495,8 +591,22 @@ pub fn decode_residual(
             if coeff_flags[n as usize] && needs_remaining[n as usize] {
                 let base = coeff_values[n as usize];
 
+                if debug_call {
+                    let (byte_pos, _, _) = cabac.get_position();
+                    let (r, v, bn) = cabac.get_state_extended();
+                    eprint!(
+                        "DEBUG call#{}: remaining n={} base={} rice={} byte={} raw_cabac=({},{},{}) ",
+                        residual_call_num, n, base, rice_param, byte_pos, r, v, bn
+                    );
+                }
+
                 let (remaining, new_rice) =
                     decode_coeff_abs_level_remaining(cabac, rice_param, base)?;
+
+                if debug_call {
+                    let (r_after, v_after) = cabac.get_state();
+                    eprintln!("-> remaining={} new_rice={} final={} cabac_after=({},{})", remaining, new_rice, base + remaining, r_after, v_after);
+                }
 
                 rice_param = new_rice;
                 let final_value = base + remaining;
@@ -541,6 +651,9 @@ pub fn decode_residual(
                 }
             }
         }
+
+        // Update prev_subblock_had_gt1 for the next subblock (lower scan index)
+        prev_subblock_had_gt1 = this_subblock_had_gt1;
     }
 
     let _ = (init_range, init_offset); // Used for future debugging if needed
