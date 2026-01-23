@@ -1,106 +1,106 @@
 # CABAC Coefficient Decode Bug Investigation - Context Handoff
 
-## Current State (2026-01-22)
+## Current State (2026-01-23)
 
-**Status:** All 280 CTUs decode, but with 34 large coefficients (>500) indicating CABAC desync. SSIM2 = -965 (poor quality).
+**Status:** All 225 CTUs decode, but with 26 large coefficients (>500) indicating CABAC desync. First large coefficient at call#157 (byte 1112, value=841).
 
-**Key Finding:** Individual CABAC primitives are CORRECT (hevc-compare tests pass). The bug is in context derivation or state tracking.
+**Key Finding:** All 18 hevc-compare tests PASS - individual CABAC operations match C++. The bug is in accumulated state drift across residual calls.
 
 ## Investigation Summary
 
-### Problem
-Large coefficients (>500) appear starting at byte 1316. These are caused by CABAC desync where bypass decodes produce many consecutive 1-bits, leading to huge Golomb-Rice values.
+### What's Verified CORRECT
 
-### Attempted Fixes (REVERTED - Made things worse)
+1. **Individual CABAC primitives** - All tests pass comparing C++ and Rust:
+   - bypass decode ✓
+   - bypass bits ✓
+   - coeff_abs_level_remaining ✓
+   - context init ✓
+   - context-coded bin decode ✓
+   - sig_coeff_flag context derivation ✓
+   - greater1/greater2 flag contexts ✓
+   - vertical scan handling ✓
 
-1. **ctx_set = base (0 or 2)** instead of always 1:
-   - Moved first large coeff from byte 1316 to byte 1411
-   - Still had 32 large coefficients
+2. **Context derivations match libde265:**
+   - CTX_IDX_MAP_4X4: `[0,1,4,5,2,3,4,5,6,6,8,8,7,7,8,8]` ✓
+   - cbf_luma: `ctx = CBF_LUMA + (trafo_depth == 0 ? 1 : 0)` ✓
+   - cbf_cbcr: `ctx = CBF_CBCR + trafo_depth` ✓
+   - greater1Ctx state machine ✓
+   - ctxSet derivation (base + prev_gt1) ✓
 
-2. **ctx_set = base + (prev_c1==0 ? 1 : 0)** with cross-subblock tracking:
-   - Only decoded 225/280 CTUs (worse!)
-   - First large coeff moved to byte 1112
-   - This is correct per H.265 spec but exposes other bugs
+3. **Operation sequences within a TU match:**
+   - Sign decode order (high scan pos → low) ✓
+   - Remaining decode order (high → low) ✓
+   - DC handling (decode when can_infer_dc=false) ✓
+   - needs_remaining matches coeff_has_max_base_level ✓
 
-### The "Local Optima" Problem
-**CRITICAL:** With multiple interacting bugs, fixing one bug can make metrics worse because it exposes other compensating bugs. The "wrong" ctx_set=1 was masking other issues.
+### The Problem
 
-## Current ctx_set Derivation (WRONG but stable)
-
-```rust
-// residual.rs lines 359-363
-let mut c1 = 1u8;
-let ctx_set = c1; // Always 1!
+**Call#157 at byte 1101:**
+```
+log2=2 c_idx=0 scan=Vertical initial_state=(328,239)
+14 sig_coeff + 8 g1 + 1 g2 + 12 signs + 4 remaining decodes
+→ State becomes (420, 53696, -2) which is "hot" (value ≈ scaled_range=53760)
+→ remaining n=8 produces 839 consecutive 1-bits → coefficient 841
 ```
 
-**Correct per H.265 9.3.4.2.6:**
-- ctx_set = 0 if (sb_idx==0 OR c_idx>0) else 2  // Base
-- ctx_set += 1 if previous subblock had any g1=1  // Increment
+The state (420, 53696, -2) is mathematically correct for the operations performed WITHIN call#157. The problem is the STARTING state (328, 239) at byte 1101 may already be wrong due to drift in earlier calls.
 
-## Where to Focus Next
+### Root Cause Hypothesis
 
-1. **Don't optimize for "CTUs decoded" or "SSIM score"** - these lead to local optima
-2. **Use differential testing at coefficient level:**
-   - hevc-compare crate can compare individual CABAC operations
-   - Need to find FIRST operation where our decoder diverges from libde265
+**Accumulated state drift:** If even ONE earlier residual call decoded a different number of bits than libde265, all subsequent states would shift. Since individual operations are correct, the bug must be in the NUMBER of operations per call.
 
-3. **Trace the EXACT sequence of operations for a specific TU:**
-   - The debug tracing infrastructure is in place
-   - Set `debug_call = residual_call_num == N` in residual.rs line 189
-   - Compare operation sequence with libde265
+Possible causes:
+1. Different coefficient positions being decoded
+2. Extra/missing context-coded bins somewhere
+3. Different decision logic for DC inference vs explicit decode
+
+### Next Steps
+
+1. **Compare CABAC state at START of each residual call:**
+   - Add instrumentation to our decoder to log starting state
+   - Do the same in libde265 via FFI
+   - Find first call where states diverge
+
+2. **Alternatively, compare coefficient arrays:**
+   - Extend hevc-compare to decode full TUs and compare results
+   - Find first TU with mismatched coefficients
+   - Trace that specific TU's operation sequence
+
+3. **Look for conditional differences:**
+   - DC inference conditions
+   - Coded sub-block flag decisions
+   - Any other conditional decoding logic
 
 ## Key Files
 
-- `src/hevc/residual.rs` - Coefficient decode logic (the bug is here)
-- `src/hevc/cabac.rs` - CABAC decoder (primitives are correct)
+- `src/hevc/residual.rs` - Coefficient decode (bug location)
+- `src/hevc/ctu.rs` - CTU/TU decode, cbf flags
 - `crates/hevc-compare/` - C++ comparison infrastructure
-- `/home/lilith/work/heic/spec/sections/` - H.265 spec organized by component
+- `/home/lilith/work/heic/libde265-src/libde265/slice.cc` - Reference impl
 
-## Spec References
-
-- 9.3.4.2.5 - sig_coeff_flag context derivation
-- 9.3.4.2.6 - coeff_abs_level_greater1_flag context (ctxSet derivation)
-- 9.3.4.2.7 - coeff_abs_level_greater2_flag context
-- 10.3.4 - CABAC decoding flow
-
-## Debug Trace Example
-
-For call#256 (before reverting ctx_set fix):
-```
-DEBUG call#256: START log2=2 c_idx=0 scan=Diagonal byte=1305 cabac=(500,252)
-DEBUG call#256: SUBBLOCK sb_idx=0 (0,0) byte=1305 cabac=(256,197)
-  sig_coeff_flags: 14 coeffs at positions [0,1,2,3,4,5,6,7,8,9,10,11,12,13]
-  g1[n=11]: ctx_set=1 gt1_ctx=3 -> true
-  ...
-  remaining[n=2]: base=1 rice=3 byte=1312 cabac=(256,255)
-    -> remaining=2002 new_rice=4 final=2003  ← LARGE VALUE!
-```
-
-The CABAC state (256,255) with offset very close to range causes many consecutive 1-bits in bypass decode.
-
-## Commands
+## Debug Commands
 
 ```bash
-# Run comparison test
+# Run SSIM comparison (shows large coeff count)
 cargo test --test compare_reference test_ssim2 -- --nocapture
 
 # Run hevc-compare tests (verify primitives)
 cd crates/hevc-compare && cargo test -- --nocapture
 
-# Enable debug tracing for specific call
-# Edit src/hevc/residual.rs line 189:
-let debug_call = residual_call_num == 256;  # Set to call number of interest
+# Enable debug tracing for specific residual call
+# Edit src/hevc/residual.rs line 203:
+let debug_call = residual_call_num == 157;
 ```
 
-## Next Steps
+## Spec References
 
-1. Read spec sections for ctxSet derivation (already in CLAUDE.md)
-2. Add test comparing TU decode operation-by-operation with libde265
-3. Find first diverging operation, not just first large coefficient
-4. Once found, trace WHY that operation differs
+- 9.3.4.2.5 - sig_coeff_flag context derivation
+- 9.3.4.2.6 - greater1_flag context (ctxSet derivation)
+- 9.3.4.2.7 - greater2_flag context
+- 9.3.4.2.4 - coded_sub_block_flag context
 
 ## Don't Forget
 
+- Delete this file after loading into new session
 - Check git status before starting work
-- The spec is at `/home/lilith/work/heic/spec/sections/README.md`
-- Individual CABAC primitives match libde265 - the bug is in orchestration
+- Individual CABAC primitives are CORRECT - focus on operation counts
