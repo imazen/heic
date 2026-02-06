@@ -49,22 +49,24 @@ pub fn get_scan_order(log2_size: u8, intra_mode: u8, c_idx: u8) -> ScanOrder {
 
 /// 4x4 diagonal scan order (indexed by position 0-15)
 /// OLD pattern: produces recognizable visuals (not spec-compliant but works)
+/// 4x4 diagonal (up-right) scan order - H.265 Table 6-5
+/// Each tuple is (xS, yS) = (column, row)
 pub static SCAN_ORDER_4X4_DIAG: [(u8, u8); 16] = [
     (0, 0),
-    (1, 0),
     (0, 1),
-    (2, 0),
-    (1, 1),
+    (1, 0),
     (0, 2),
-    (3, 0),
-    (2, 1),
-    (1, 2),
+    (1, 1),
+    (2, 0),
     (0, 3),
-    (3, 1),
-    (2, 2),
+    (1, 2),
+    (2, 1),
+    (3, 0),
     (1, 3),
-    (3, 2),
+    (2, 2),
+    (3, 1),
     (2, 3),
+    (3, 2),
     (3, 3),
 ];
 
@@ -213,7 +215,7 @@ pub fn decode_residual(
     // Verbose debug for specific calls
     // Enable for calls around the first large coefficient
     #[allow(unused_variables)]
-    let debug_call = false;
+    let debug_call = residual_call_num <= 10;
     if debug_call {
         let (byte_pos, _, _) = cabac.get_position();
         eprintln!(
@@ -273,6 +275,15 @@ pub fn decode_residual(
             "DEBUG call#{}: last_sb_idx={} last_pos_in_sb={} local=({},{}) sb_width={}",
             residual_call_num, last_sb_idx, last_pos_in_sb, local_x, local_y, sb_width
         );
+    }
+
+    #[cfg(feature = "trace-coefficients")]
+    {
+        let bc = cabac.bin_counter;
+        if bc >= 255 && bc <= 275 {
+            eprintln!("RESIDUAL_SETUP: bc={} last_x={} last_y={} log2_size={} local=({},{}) last_pos_in_sb={} last_sb_idx={}",
+                bc, last_x, last_y, log2_size, local_x, local_y, last_pos_in_sb, last_sb_idx);
+        }
     }
 
     // Track coded_sub_block_flag for prevCsbf calculation
@@ -680,14 +691,14 @@ fn get_scan_sub_block(log2_size: u8, order: ScanOrder) -> &'static [(u8, u8)] {
     static SCAN_1X1: [(u8, u8); 1] = [(0, 0)];
 
     // --- 2x2 sub-block grid (8x8 TU) ---
-    static SCAN_2X2_DIAG: [(u8, u8); 4] = [(0, 0), (1, 0), (0, 1), (1, 1)];
+    static SCAN_2X2_DIAG: [(u8, u8); 4] = [(0, 0), (0, 1), (1, 0), (1, 1)];
     static SCAN_2X2_HORIZ: [(u8, u8); 4] = [(0, 0), (1, 0), (0, 1), (1, 1)];
     static SCAN_2X2_VERT: [(u8, u8); 4] = [(0, 0), (0, 1), (1, 0), (1, 1)];
 
     // --- 4x4 sub-block grid (16x16 TU) ---
     static SCAN_4X4_DIAG: [(u8, u8); 16] = [
-        (0, 0), (1, 0), (0, 1), (2, 0), (1, 1), (0, 2), (3, 0), (2, 1),
-        (1, 2), (0, 3), (3, 1), (2, 2), (1, 3), (3, 2), (2, 3), (3, 3),
+        (0, 0), (0, 1), (1, 0), (0, 2), (1, 1), (2, 0), (0, 3), (1, 2),
+        (2, 1), (3, 0), (1, 3), (2, 2), (3, 1), (2, 3), (3, 2), (3, 3),
     ];
     static SCAN_4X4_HORIZ: [(u8, u8); 16] = [
         (0, 0), (1, 0), (2, 0), (3, 0), (0, 1), (1, 1), (2, 1), (3, 1),
@@ -700,14 +711,14 @@ fn get_scan_sub_block(log2_size: u8, order: ScanOrder) -> &'static [(u8, u8)] {
 
     // --- 8x8 sub-block grid (32x32 TU) ---
     static SCAN_8X8_DIAG: [(u8, u8); 64] = [
-        (0, 0), (1, 0), (0, 1), (2, 0), (1, 1), (0, 2), (3, 0), (2, 1),
-        (1, 2), (0, 3), (4, 0), (3, 1), (2, 2), (1, 3), (0, 4), (5, 0),
-        (4, 1), (3, 2), (2, 3), (1, 4), (0, 5), (6, 0), (5, 1), (4, 2),
-        (3, 3), (2, 4), (1, 5), (0, 6), (7, 0), (6, 1), (5, 2), (4, 3),
-        (3, 4), (2, 5), (1, 6), (0, 7), (7, 1), (6, 2), (5, 3), (4, 4),
-        (3, 5), (2, 6), (1, 7), (7, 2), (6, 3), (5, 4), (4, 5), (3, 6),
-        (2, 7), (7, 3), (6, 4), (5, 5), (4, 6), (3, 7), (7, 4), (6, 5),
-        (5, 6), (4, 7), (7, 5), (6, 6), (5, 7), (7, 6), (6, 7), (7, 7),
+        (0, 0), (0, 1), (1, 0), (0, 2), (1, 1), (2, 0), (0, 3), (1, 2),
+        (2, 1), (3, 0), (0, 4), (1, 3), (2, 2), (3, 1), (4, 0), (0, 5),
+        (1, 4), (2, 3), (3, 2), (4, 1), (5, 0), (0, 6), (1, 5), (2, 4),
+        (3, 3), (4, 2), (5, 1), (6, 0), (0, 7), (1, 6), (2, 5), (3, 4),
+        (4, 3), (5, 2), (6, 1), (7, 0), (1, 7), (2, 6), (3, 5), (4, 4),
+        (5, 3), (6, 2), (7, 1), (2, 7), (3, 6), (4, 5), (5, 4), (6, 3),
+        (7, 2), (3, 7), (4, 6), (5, 5), (6, 4), (7, 3), (4, 7), (5, 6),
+        (6, 5), (7, 4), (5, 7), (6, 6), (7, 5), (6, 7), (7, 6), (7, 7),
     ];
     static SCAN_8X8_HORIZ: [(u8, u8); 64] = [
         (0,0),(1,0),(2,0),(3,0),(4,0),(5,0),(6,0),(7,0),
@@ -829,6 +840,7 @@ fn decode_last_sig_coeff_prefix(
     let mut prefix = 0u32;
     while prefix < max_prefix as u32 {
         let ctx_idx = ctx_base + ctx_offset + ((prefix as usize) >> ctx_shift as usize);
+        cabac.trace_ctx_idx = ctx_idx as i32;
         let bin = cabac.decode_bin(&mut ctx[ctx_idx])?;
         if bin == 0 {
             break;
@@ -848,6 +860,7 @@ fn decode_coded_sub_block_flag_simple(
 ) -> Result<bool> {
     // Simplified: always use ctx 0 or 2
     let ctx_idx = context::CODED_SUB_BLOCK_FLAG + if c_idx > 0 { 2 } else { 0 };
+    cabac.trace_ctx_idx = ctx_idx as i32;
     Ok(cabac.decode_bin(&mut ctx[ctx_idx])? != 0)
 }
 
@@ -865,6 +878,7 @@ fn decode_coded_sub_block_flag(
     // csbfCtx = 1 if either neighbor is coded, else 0
     let csbf_ctx = if csbf_neighbors != 0 { 1 } else { 0 };
     let ctx_idx = context::CODED_SUB_BLOCK_FLAG + csbf_ctx + if c_idx > 0 { 2 } else { 0 };
+    cabac.trace_ctx_idx = ctx_idx as i32;
     Ok(cabac.decode_bin(&mut ctx[ctx_idx])? != 0)
 }
 
@@ -1002,6 +1016,16 @@ fn decode_sig_coeff_flag(
 
     let ctx_idx = calc_sig_coeff_flag_ctx(x_c, y_c, log2_size, c_idx, scan_idx, prev_csbf);
 
+    #[cfg(feature = "trace-coefficients")]
+    {
+        let bc = cabac.bin_counter;
+        if bc >= 264 && bc <= 275 {
+            eprintln!("SIG_COEFF: bc={} pos={} scan=({},{}) x_c={} y_c={} log2={} c_idx={} scan_idx={} prev_csbf={} ctx_idx={}",
+                bc, pos, x_in_sb, y_in_sb, x_c, y_c, log2_size, c_idx, scan_idx, prev_csbf, ctx_idx);
+        }
+    }
+
+    cabac.trace_ctx_idx = ctx_idx as i32;
     Ok(cabac.decode_bin(&mut ctx[ctx_idx])? != 0)
 }
 
@@ -1019,6 +1043,7 @@ fn decode_coeff_greater1_flag(
         + if c_idx > 0 { 16 } else { 0 }
         + (ctx_set as usize) * 4
         + (greater1_ctx as usize).min(3);
+    cabac.trace_ctx_idx = ctx_idx as i32;
     Ok(cabac.decode_bin(&mut ctx[ctx_idx])? != 0)
 }
 
@@ -1032,6 +1057,7 @@ fn decode_coeff_greater2_flag(
 ) -> Result<bool> {
     let ctx_idx =
         context::COEFF_ABS_LEVEL_GREATER2_FLAG + if c_idx > 0 { 4 } else { 0 } + ctx_set as usize;
+    cabac.trace_ctx_idx = ctx_idx as i32;
     Ok(cabac.decode_bin(&mut ctx[ctx_idx])? != 0)
 }
 

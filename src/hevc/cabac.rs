@@ -272,9 +272,6 @@ impl<'a> CabacDecoder<'a> {
 
     /// Decode a single bin using context model
     pub fn decode_bin(&mut self, ctx: &mut ContextModel) -> Result<u8> {
-        #[cfg(feature = "trace-coefficients")]
-        let _trace_enabled = self.enable_trace;
-
         let q_range_idx = (self.range >> 6) & 3;
         let lps_range = LPS_TABLE[ctx.state as usize][q_range_idx as usize] as u32;
 
@@ -319,6 +316,14 @@ impl<'a> CabacDecoder<'a> {
             self.renormalize()?;
         }
 
+        #[cfg(feature = "trace-coefficients")]
+        {
+            self.bin_counter += 1;
+            eprintln!("BIN#{} ctx r={} v={} bn={} bin={} s={} m={} ci={}",
+                self.bin_counter, self.range, self.value, self.bits_needed,
+                bin_val, ctx.state, ctx.mps, self.trace_ctx_idx);
+        }
+
         Ok(bin_val)
     }
 
@@ -338,12 +343,21 @@ impl<'a> CabacDecoder<'a> {
         }
 
         let scaled_range = self.range << 7;
-        if self.value >= scaled_range {
+        let bin_val = if self.value >= scaled_range {
             self.value -= scaled_range;
-            Ok(1)
+            1u8
         } else {
-            Ok(0)
+            0u8
+        };
+
+        #[cfg(feature = "trace-coefficients")]
+        {
+            self.bin_counter += 1;
+            eprintln!("BYP#{} r={} v={} bn={} bin={}",
+                self.bin_counter, self.range, self.value, self.bits_needed, bin_val);
         }
+
+        Ok(bin_val)
     }
 
     /// Decode multiple bypass bins
@@ -360,12 +374,21 @@ impl<'a> CabacDecoder<'a> {
         self.range -= 2;
 
         let scaled_range = self.range << 7;
-        if self.value >= scaled_range {
-            Ok(1)
+        let bin_val = if self.value >= scaled_range {
+            1u8
         } else {
             self.renormalize()?;
-            Ok(0)
+            0u8
+        };
+
+        #[cfg(feature = "trace-coefficients")]
+        {
+            self.bin_counter += 1;
+            eprintln!("TRM#{} r={} v={} bn={} bin={}",
+                self.bin_counter, self.range, self.value, self.bits_needed, bin_val);
         }
+
+        Ok(bin_val)
     }
 
     /// Renormalize the decoder state
@@ -478,7 +501,7 @@ pub static INIT_VALUES: [u8; context::NUM_CONTEXTS] = [
     197, 185, 201, // PALETTE_MODE_FLAG (1)
     154, // PRED_MODE_FLAG (1)
     149, // PART_MODE (4)
-    154, 139, 154, 154, // PREV_INTRA_LUMA_PRED_FLAG (1)
+    184, 139, 154, 154, // PREV_INTRA_LUMA_PRED_FLAG (1)
     184, // INTRA_CHROMA_PRED_MODE (1)
     63,  // INTER_PRED_IDC (5)
     95, 79, 63, 31, 31,  // MERGE_FLAG (1)
