@@ -3,15 +3,15 @@
 //! This module implements the HEVC (High Efficiency Video Coding) decoder
 //! for decoding HEIC still images.
 
-mod bitstream;
+pub mod bitstream;
 mod cabac;
 mod ctu;
 pub mod debug;
 mod intra;
-mod params;
+pub mod params;
 mod picture;
 mod residual;
-mod slice;
+pub mod slice;
 mod transform;
 
 pub use picture::DecodedFrame;

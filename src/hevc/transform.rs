@@ -272,7 +272,7 @@ pub fn idct16(coeffs: &[i16; 256], output: &mut [i16; 256], bit_depth: u8) {
     }
 }
 
-/// Inverse 32x32 DCT (simplified - uses partial butterfly)
+/// Inverse 32x32 DCT (direct matrix multiply)
 pub fn idct32(coeffs: &[i16; 1024], output: &mut [i16; 1024], bit_depth: u8) {
     let shift1 = 7;
     let shift2 = 20 - bit_depth;
@@ -281,15 +281,12 @@ pub fn idct32(coeffs: &[i16; 1024], output: &mut [i16; 1024], bit_depth: u8) {
 
     let mut tmp = [0i32; 1024];
 
-    // Simplified implementation using partial butterfly
-    // Full implementation would use the complete DCT32 matrix
-
-    // First pass (vertical) - partial butterfly
+    // First pass (vertical)
     for i in 0..32 {
         partial_butterfly_inverse_32(&coeffs[i..], 32, &mut tmp[i..], 32, shift1, add1);
     }
 
-    // Second pass (horizontal) - partial butterfly
+    // Second pass (horizontal)
     for i in 0..32 {
         let row_start = i * 32;
         let mut row_in = [0i16; 32];
@@ -304,7 +301,7 @@ pub fn idct32(coeffs: &[i16; 1024], output: &mut [i16; 1024], bit_depth: u8) {
     }
 }
 
-/// Partial butterfly inverse for 32-point transform (column)
+/// Inverse 32-point transform (column)
 fn partial_butterfly_inverse_32(
     src: &[i16],
     src_stride: usize,
@@ -313,7 +310,6 @@ fn partial_butterfly_inverse_32(
     shift: i32,
     add: i32,
 ) {
-    // Simplified - just compute directly for now
     for j in 0..32 {
         let mut sum = 0i32;
         for k in 0..32 {
@@ -325,7 +321,7 @@ fn partial_butterfly_inverse_32(
     }
 }
 
-/// Partial butterfly inverse for 32-point transform (row)
+/// Inverse 32-point transform (row)
 fn partial_butterfly_inverse_32_row(src: &[i16; 32], dst: &mut [i32; 32], shift: i32, add: i32) {
     for (j, dst_val) in dst.iter_mut().enumerate() {
         let mut sum = 0i32;
@@ -339,23 +335,25 @@ fn partial_butterfly_inverse_32_row(src: &[i16; 32], dst: &mut [i32; 32], shift:
 
 /// Get DCT32 coefficient at position (row, col)
 fn get_dct32_coef(row: usize, col: usize) -> i16 {
-    // Even rows use DCT16 pattern, odd rows use DCT32_ODD
     if row.is_multiple_of(2) {
+        // Even rows: symmetric
         if row == 0 {
+            // Row 0 is all 64s
             DCT32_EVEN[col % 16]
+        } else if col < 16 {
+            DCT16_MATRIX[row / 2][col]
         } else {
-            // Use DCT16 coefficients for even rows
-            DCT16_MATRIX[row / 2][col % 16]
+            // Symmetry: T[2k][col] = T[2k][31-col] for col >= 16
+            DCT16_MATRIX[row / 2][31 - col]
         }
     } else {
+        // Odd rows: anti-symmetric
         let odd_row = row / 2;
-        if odd_row < 16 && col < 16 {
+        if col < 16 {
             DCT32_ODD[odd_row][col]
         } else {
-            // Mirror for second half
-            let mirror_col = if col >= 16 { 31 - col } else { col };
-            let sign = if col >= 16 { -1 } else { 1 };
-            sign * DCT32_ODD[odd_row % 16][mirror_col]
+            // Anti-symmetry: T[2k+1][col] = -T[2k+1][31-col] for col >= 16
+            -DCT32_ODD[odd_row][31 - col]
         }
     }
 }

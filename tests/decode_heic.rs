@@ -2,7 +2,7 @@
 
 use heic_decoder::{HeicDecoder, heif};
 
-const EXAMPLE_HEIC: &str = "/home/lilith/work/heic/libheif/examples/example.heic";
+const EXAMPLE_HEIC: &str = "example.heic";
 
 #[test]
 fn test_get_info() {
@@ -343,4 +343,73 @@ fn test_raw_yuv_values() {
     println!("  x=31: Cb avg={}, Cr avg={}", cb_avg, cr_avg);
     println!("  first 8 Cb: {:?}", &cb_at_31[..8.min(cb_at_31.len())]);
     println!("  first 8 Cr: {:?}", &cr_at_31[..8.min(cr_at_31.len())]);
+}
+
+#[test]
+fn test_decode_120x120() {
+    let data = std::fs::read("test_120x120.heic").expect("Failed to read test_120x120.heic");
+    let decoder = HeicDecoder::new();
+
+    let image = decoder.decode(&data).expect("Failed to decode");
+
+    println!("Decoded: {}x{}", image.width, image.height);
+
+    // Also check YCbCr plane stats via decode_to_frame
+    let frame = decoder.decode_to_frame(&data).expect("Failed to decode frame");
+    let y_avg: u64 = frame.y_plane.iter().map(|&v| v as u64).sum::<u64>() / frame.y_plane.len() as u64;
+    let cb_avg: u64 = frame.cb_plane.iter().map(|&v| v as u64).sum::<u64>() / frame.cb_plane.len() as u64;
+    let cr_avg: u64 = frame.cr_plane.iter().map(|&v| v as u64).sum::<u64>() / frame.cr_plane.len() as u64;
+    println!("YCbCr plane avgs: Y={} Cb={} Cr={}", y_avg, cb_avg, cr_avg);
+    let y_var: u64 = frame.y_plane.iter().map(|&v| { let d = v as i64 - y_avg as i64; (d * d) as u64 }).sum::<u64>() / frame.y_plane.len() as u64;
+    println!("Y variance: {} (stddev ~{})", y_var, (y_var as f64).sqrt() as u32);
+    // Print some Y values in each CTU quadrant
+    for &(qx, qy, label) in &[(16, 16, "CTU0"), (80, 16, "CTU1"), (16, 80, "CTU2"), (80, 80, "CTU3")] {
+        let idx = (qy * frame.width + qx) as usize;
+        let y_val = frame.y_plane[idx];
+        let cidx = ((qy/2) * frame.width.div_ceil(2) + qx/2) as usize;
+        let cb = frame.cb_plane[cidx];
+        let cr = frame.cr_plane[cidx];
+        println!("  {} at ({},{}) Y={} Cb={} Cr={}", label, qx, qy, y_val, cb, cr);
+    }
+
+    // Print pixel statistics
+    let npx = (image.width * image.height) as usize;
+    let (mut r_sum, mut g_sum, mut b_sum) = (0u64, 0u64, 0u64);
+    let (mut r_min, mut g_min, mut b_min) = (255u8, 255u8, 255u8);
+    let (mut r_max, mut g_max, mut b_max) = (0u8, 0u8, 0u8);
+    for i in 0..npx {
+        let r = image.data[i * 3];
+        let g = image.data[i * 3 + 1];
+        let b = image.data[i * 3 + 2];
+        r_sum += r as u64; g_sum += g as u64; b_sum += b as u64;
+        r_min = r_min.min(r); g_min = g_min.min(g); b_min = b_min.min(b);
+        r_max = r_max.max(r); g_max = g_max.max(g); b_max = b_max.max(b);
+    }
+    println!("RGB stats: R avg={} [{}-{}], G avg={} [{}-{}], B avg={} [{}-{}]",
+        r_sum / npx as u64, r_min, r_max,
+        g_sum / npx as u64, g_min, g_max,
+        b_sum / npx as u64, b_min, b_max);
+    // Print a few pixel values from different regions
+    for &(px, py) in &[(0,0), (30,30), (60,60), (90,90), (60,0), (0,60)] {
+        if px < image.width && py < image.height {
+            let idx = ((py * image.width + px) * 3) as usize;
+            println!("  pixel({},{}) = R={} G={} B={}", px, py,
+                image.data[idx], image.data[idx+1], image.data[idx+2]);
+        }
+    }
+
+    // Write timestamped PPM
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    let timestamp = now.as_secs();
+    let ppm_path = format!("output_120x120_{}.ppm", timestamp);
+
+    let mut file = std::fs::File::create(&ppm_path).expect("Failed to create PPM");
+    use std::io::Write;
+    write!(file, "P6\n{} {}\n255\n", image.width, image.height)
+        .expect("Failed to write PPM header");
+    file.write_all(&image.data)
+        .expect("Failed to write PPM data");
+    println!("Wrote decoded image to: {}", ppm_path);
 }

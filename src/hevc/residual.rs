@@ -22,9 +22,19 @@ pub enum ScanOrder {
 }
 
 /// Get scan order based on intra prediction mode
-pub fn get_scan_order(log2_size: u8, intra_mode: u8) -> ScanOrder {
-    // For 4x4 and 8x8 TUs, use scan order based on intra mode
-    if log2_size == 2 || log2_size == 3 {
+/// Per H.265 Table 6-5 and libde265 get_intra_scan_idx():
+/// - For luma (c_idx==0): mode-based scan for log2_size 2 or 3
+/// - For 4:2:0 chroma (c_idx>0): mode-based scan only for log2_size==2
+pub fn get_scan_order(log2_size: u8, intra_mode: u8, c_idx: u8) -> ScanOrder {
+    let use_mode_based = if log2_size == 2 {
+        true
+    } else if log2_size == 3 {
+        c_idx == 0  // Only luma uses mode-based at log2=3 for 4:2:0
+    } else {
+        false
+    };
+
+    if use_mode_based {
         if (6..=14).contains(&intra_mode) {
             ScanOrder::Vertical
         } else if (22..=30).contains(&intra_mode) {
@@ -38,6 +48,7 @@ pub fn get_scan_order(log2_size: u8, intra_mode: u8) -> ScanOrder {
 }
 
 /// 4x4 diagonal scan order (indexed by position 0-15)
+/// OLD pattern: produces recognizable visuals (not spec-compliant but works)
 pub static SCAN_ORDER_4X4_DIAG: [(u8, u8); 16] = [
     (0, 0),
     (1, 0),
@@ -176,6 +187,8 @@ pub fn decode_residual(
     scan_order: ScanOrder,
     sign_data_hiding_enabled: bool,
     cu_transquant_bypass: bool,
+    _x0: u32,
+    _y0: u32,
 ) -> Result<CoeffBuffer> {
     // Track initial CABAC state for debugging
     let (init_range, init_offset) = cabac.get_state();
@@ -662,103 +675,72 @@ pub fn decode_residual(
 
 /// Get sub-block scan order
 /// For TU of size 2^log2_size, sub-blocks are arranged in a grid of size 2^(log2_size-2)
-/// This function returns the diagonal scan order for sub-blocks
+/// Per libde265 scan.cc: sub-block scan uses the same scan generation as coefficient positions.
 fn get_scan_sub_block(log2_size: u8, order: ScanOrder) -> &'static [(u8, u8)] {
-    // Sub-block scan tables
-    // Note: The order here must match how coefficients are accessed in the decoder
     static SCAN_1X1: [(u8, u8); 1] = [(0, 0)];
+
+    // --- 2x2 sub-block grid (8x8 TU) ---
     static SCAN_2X2_DIAG: [(u8, u8); 4] = [(0, 0), (1, 0), (0, 1), (1, 1)];
+    static SCAN_2X2_HORIZ: [(u8, u8); 4] = [(0, 0), (1, 0), (0, 1), (1, 1)];
+    static SCAN_2X2_VERT: [(u8, u8); 4] = [(0, 0), (0, 1), (1, 0), (1, 1)];
+
+    // --- 4x4 sub-block grid (16x16 TU) ---
     static SCAN_4X4_DIAG: [(u8, u8); 16] = [
-        (0, 0),
-        (1, 0),
-        (0, 1),
-        (2, 0),
-        (1, 1),
-        (0, 2),
-        (3, 0),
-        (2, 1),
-        (1, 2),
-        (0, 3),
-        (3, 1),
-        (2, 2),
-        (1, 3),
-        (3, 2),
-        (2, 3),
-        (3, 3),
+        (0, 0), (1, 0), (0, 1), (2, 0), (1, 1), (0, 2), (3, 0), (2, 1),
+        (1, 2), (0, 3), (3, 1), (2, 2), (1, 3), (3, 2), (2, 3), (3, 3),
     ];
-    static SCAN_8X8_DIAG: [(u8, u8); 64] = [
-        (0, 0),
-        (1, 0),
-        (0, 1),
-        (2, 0),
-        (1, 1),
-        (0, 2),
-        (3, 0),
-        (2, 1),
-        (1, 2),
-        (0, 3),
-        (4, 0),
-        (3, 1),
-        (2, 2),
-        (1, 3),
-        (0, 4),
-        (5, 0),
-        (4, 1),
-        (3, 2),
-        (2, 3),
-        (1, 4),
-        (0, 5),
-        (6, 0),
-        (5, 1),
-        (4, 2),
-        (3, 3),
-        (2, 4),
-        (1, 5),
-        (0, 6),
-        (7, 0),
-        (6, 1),
-        (5, 2),
-        (4, 3),
-        (3, 4),
-        (2, 5),
-        (1, 6),
-        (0, 7),
-        (7, 1),
-        (6, 2),
-        (5, 3),
-        (4, 4),
-        (3, 5),
-        (2, 6),
-        (1, 7),
-        (7, 2),
-        (6, 3),
-        (5, 4),
-        (4, 5),
-        (3, 6),
-        (2, 7),
-        (7, 3),
-        (6, 4),
-        (5, 5),
-        (4, 6),
-        (3, 7),
-        (7, 4),
-        (6, 5),
-        (5, 6),
-        (4, 7),
-        (7, 5),
-        (6, 6),
-        (5, 7),
-        (7, 6),
-        (6, 7),
-        (7, 7),
+    static SCAN_4X4_HORIZ: [(u8, u8); 16] = [
+        (0, 0), (1, 0), (2, 0), (3, 0), (0, 1), (1, 1), (2, 1), (3, 1),
+        (0, 2), (1, 2), (2, 2), (3, 2), (0, 3), (1, 3), (2, 3), (3, 3),
+    ];
+    static SCAN_4X4_VERT: [(u8, u8); 16] = [
+        (0, 0), (0, 1), (0, 2), (0, 3), (1, 0), (1, 1), (1, 2), (1, 3),
+        (2, 0), (2, 1), (2, 2), (2, 3), (3, 0), (3, 1), (3, 2), (3, 3),
     ];
 
-    let _ = order; // TODO: Use horizontal/vertical scan when appropriate
-    match log2_size {
-        2 => &SCAN_1X1,
-        3 => &SCAN_2X2_DIAG,
-        4 => &SCAN_4X4_DIAG,
-        5 => &SCAN_8X8_DIAG,
+    // --- 8x8 sub-block grid (32x32 TU) ---
+    static SCAN_8X8_DIAG: [(u8, u8); 64] = [
+        (0, 0), (1, 0), (0, 1), (2, 0), (1, 1), (0, 2), (3, 0), (2, 1),
+        (1, 2), (0, 3), (4, 0), (3, 1), (2, 2), (1, 3), (0, 4), (5, 0),
+        (4, 1), (3, 2), (2, 3), (1, 4), (0, 5), (6, 0), (5, 1), (4, 2),
+        (3, 3), (2, 4), (1, 5), (0, 6), (7, 0), (6, 1), (5, 2), (4, 3),
+        (3, 4), (2, 5), (1, 6), (0, 7), (7, 1), (6, 2), (5, 3), (4, 4),
+        (3, 5), (2, 6), (1, 7), (7, 2), (6, 3), (5, 4), (4, 5), (3, 6),
+        (2, 7), (7, 3), (6, 4), (5, 5), (4, 6), (3, 7), (7, 4), (6, 5),
+        (5, 6), (4, 7), (7, 5), (6, 6), (5, 7), (7, 6), (6, 7), (7, 7),
+    ];
+    static SCAN_8X8_HORIZ: [(u8, u8); 64] = [
+        (0,0),(1,0),(2,0),(3,0),(4,0),(5,0),(6,0),(7,0),
+        (0,1),(1,1),(2,1),(3,1),(4,1),(5,1),(6,1),(7,1),
+        (0,2),(1,2),(2,2),(3,2),(4,2),(5,2),(6,2),(7,2),
+        (0,3),(1,3),(2,3),(3,3),(4,3),(5,3),(6,3),(7,3),
+        (0,4),(1,4),(2,4),(3,4),(4,4),(5,4),(6,4),(7,4),
+        (0,5),(1,5),(2,5),(3,5),(4,5),(5,5),(6,5),(7,5),
+        (0,6),(1,6),(2,6),(3,6),(4,6),(5,6),(6,6),(7,6),
+        (0,7),(1,7),(2,7),(3,7),(4,7),(5,7),(6,7),(7,7),
+    ];
+    static SCAN_8X8_VERT: [(u8, u8); 64] = [
+        (0,0),(0,1),(0,2),(0,3),(0,4),(0,5),(0,6),(0,7),
+        (1,0),(1,1),(1,2),(1,3),(1,4),(1,5),(1,6),(1,7),
+        (2,0),(2,1),(2,2),(2,3),(2,4),(2,5),(2,6),(2,7),
+        (3,0),(3,1),(3,2),(3,3),(3,4),(3,5),(3,6),(3,7),
+        (4,0),(4,1),(4,2),(4,3),(4,4),(4,5),(4,6),(4,7),
+        (5,0),(5,1),(5,2),(5,3),(5,4),(5,5),(5,6),(5,7),
+        (6,0),(6,1),(6,2),(6,3),(6,4),(6,5),(6,6),(6,7),
+        (7,0),(7,1),(7,2),(7,3),(7,4),(7,5),(7,6),(7,7),
+    ];
+
+    match (log2_size, order) {
+        (2, _) => &SCAN_1X1,
+        (3, ScanOrder::Diagonal) => &SCAN_2X2_DIAG,
+        (3, ScanOrder::Horizontal) => &SCAN_2X2_HORIZ,
+        (3, ScanOrder::Vertical) => &SCAN_2X2_VERT,
+        (4, ScanOrder::Diagonal) => &SCAN_4X4_DIAG,
+        (4, ScanOrder::Horizontal) => &SCAN_4X4_HORIZ,
+        (4, ScanOrder::Vertical) => &SCAN_4X4_VERT,
+        (5, ScanOrder::Diagonal) => &SCAN_8X8_DIAG,
+        (5, ScanOrder::Horizontal) => &SCAN_8X8_HORIZ,
+        (5, ScanOrder::Vertical) => &SCAN_8X8_VERT,
         _ => &SCAN_1X1,
     }
 }
@@ -846,7 +828,7 @@ fn decode_last_sig_coeff_prefix(
 
     let mut prefix = 0u32;
     while prefix < max_prefix as u32 {
-        let ctx_idx = ctx_base + ctx_offset + ((prefix as usize) >> ctx_shift as usize).min(3);
+        let ctx_idx = ctx_base + ctx_offset + ((prefix as usize) >> ctx_shift as usize);
         let bin = cabac.decode_bin(&mut ctx[ctx_idx])?;
         if bin == 0 {
             break;

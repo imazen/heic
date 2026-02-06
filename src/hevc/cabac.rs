@@ -106,12 +106,12 @@ pub struct ContextModel {
 impl ContextModel {
     /// Create a new context model with initial values
     pub fn new(init_value: u8) -> Self {
-        // Convert init_value to state and mps
-        let slope = (init_value >> 4) as i32 * 5 - 45;
-        let offset = ((init_value & 15) << 3) as i32 - 16;
+        // Convert init_value to state and mps (H.265 Section 9.3.2.2)
+        let m = (init_value >> 4) as i32 * 5 - 45;
+        let n = ((init_value & 15) << 3) as i32 - 16;
         let qp = 26; // Default QP for initialization
 
-        let init_state = ((slope * (qp - 16)) >> 4) + offset;
+        let init_state = ((m * qp.clamp(0, 51)) >> 4) + n;
         let init_state = init_state.clamp(1, 126);
 
         let (state, mps) = if init_state >= 64 {
@@ -128,12 +128,13 @@ impl ContextModel {
         (self.state, self.mps)
     }
 
-    /// Initialize context for a given slice QP
+    /// Initialize context for a given slice QP (H.265 Section 9.3.2.2)
     pub fn init(&mut self, init_value: u8, slice_qp: i32) {
-        let slope = (init_value >> 4) as i32 * 5 - 45;
-        let offset = ((init_value & 15) << 3) as i32 - 16;
+        let m = (init_value >> 4) as i32 * 5 - 45;
+        let n = ((init_value & 15) << 3) as i32 - 16;
 
-        let init_state = ((slope * (slice_qp - 16)) >> 4) + offset;
+        // H.265 spec: preCtxState = Clip3(1, 126, ((m * Clip3(0, 51, SliceQpY)) >> 4) + n)
+        let init_state = ((m * slice_qp.clamp(0, 51)) >> 4) + n;
         let init_state = init_state.clamp(1, 126);
 
         if init_state >= 64 {
@@ -161,6 +162,15 @@ pub struct CabacDecoder<'a> {
     value: u32,
     /// Bits needed before next byte read (negative means bits available)
     bits_needed: i32,
+    /// Whether tracing is enabled
+    #[cfg(feature = "trace-coefficients")]
+    pub enable_trace: bool,
+    /// Counter for bins decoded
+    #[cfg(feature = "trace-coefficients")]
+    pub bin_counter: u64,
+    /// Last context index used (for tracing)
+    #[cfg(feature = "trace-coefficients")]
+    pub trace_ctx_idx: i32,
 }
 
 impl<'a> CabacDecoder<'a> {
@@ -186,12 +196,30 @@ impl<'a> CabacDecoder<'a> {
             return Err(HevcError::CabacError("data too short"));
         }
 
+        #[cfg(feature = "trace-coefficients")]
+        {
+            eprintln!(
+                "CABAC_INIT: data_len={} first_bytes=[{:#04x}, {:#04x}, {:#04x}, {:#04x}]",
+                data.len(),
+                data.get(0).copied().unwrap_or(0),
+                data.get(1).copied().unwrap_or(0),
+                data.get(2).copied().unwrap_or(0),
+                data.get(3).copied().unwrap_or(0),
+            );
+        }
+
         let mut decoder = Self {
             data,
             byte_pos: 0,
             range: 510,
             value: 0,
             bits_needed: 8,
+            #[cfg(feature = "trace-coefficients")]
+            enable_trace: false,
+            #[cfg(feature = "trace-coefficients")]
+            bin_counter: 0,
+            #[cfg(feature = "trace-coefficients")]
+            trace_ctx_idx: -1,
         };
 
         // Initialize value (matching libde265 exactly)
@@ -206,6 +234,14 @@ impl<'a> CabacDecoder<'a> {
             decoder.value |= decoder.data[decoder.byte_pos] as u32;
             decoder.byte_pos += 1;
             decoder.bits_needed = -8;
+        }
+
+        #[cfg(feature = "trace-coefficients")]
+        {
+            eprintln!(
+                "CABAC_INIT_STATE: range={} value={} bits_needed={} byte_pos={}",
+                decoder.range, decoder.value, decoder.bits_needed, decoder.byte_pos
+            );
         }
 
         Ok(decoder)
@@ -231,6 +267,9 @@ impl<'a> CabacDecoder<'a> {
 
     /// Decode a single bin using context model
     pub fn decode_bin(&mut self, ctx: &mut ContextModel) -> Result<u8> {
+        #[cfg(feature = "trace-coefficients")]
+        let _trace_enabled = self.enable_trace;
+
         let q_range_idx = (self.range >> 6) & 3;
         let lps_range = LPS_TABLE[ctx.state as usize][q_range_idx as usize] as u32;
 
@@ -241,9 +280,25 @@ impl<'a> CabacDecoder<'a> {
 
         let bin_val;
         if self.value < scaled_range {
-            // MPS path
+            // MPS path - libde265-style conditional 1-bit renormalization
             bin_val = ctx.mps;
             ctx.state = STATE_TRANS_MPS[ctx.state as usize];
+
+            // Only renormalize if range < 256 (at most one shift needed for MPS)
+            if scaled_range < (256 << 7) {
+                self.range = scaled_range >> 6; // range <<= 1 via scaled arithmetic
+                self.value <<= 1;
+                self.bits_needed += 1;
+                if self.bits_needed >= 0 {
+                    if self.byte_pos < self.data.len() {
+                        self.bits_needed = -8;
+                        self.value |= self.data[self.byte_pos] as u32;
+                        self.byte_pos += 1;
+                    } else {
+                        self.bits_needed = -8;
+                    }
+                }
+            }
         } else {
             // LPS path
             bin_val = 1 - ctx.mps;
@@ -254,10 +309,10 @@ impl<'a> CabacDecoder<'a> {
                 ctx.mps = 1 - ctx.mps;
             }
             ctx.state = STATE_TRANS_LPS[ctx.state as usize];
-        }
 
-        // Renormalize
-        self.renormalize()?;
+            // LPS always needs renormalization (potentially multiple shifts)
+            self.renormalize()?;
+        }
 
         Ok(bin_val)
     }

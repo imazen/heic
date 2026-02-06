@@ -218,6 +218,9 @@ pub struct SliceHeader {
     /// Number of entry point offsets (for tiles/WPP)
     pub num_entry_point_offsets: u32,
 
+    /// Entry point byte offsets (cumulative) for WPP/tile substream boundaries
+    pub entry_point_offsets: Vec<u32>,
+
     /// Derived: SliceQPY = 26 + pps.init_qp_minus26 + slice_qp_delta
     pub slice_qp_y: i32,
 }
@@ -384,19 +387,24 @@ impl SliceHeader {
         };
 
         // Entry point offsets (tiles/WPP)
-        let num_entry_point_offsets =
+        let (num_entry_point_offsets, entry_point_offsets) =
             if pps.tiles_enabled_flag || pps.entropy_coding_sync_enabled_flag {
                 let n = reader.read_ue()?;
+                let mut offsets = Vec::with_capacity(n as usize);
                 if n > 0 {
-                    // Skip the actual offset values for now
                     let offset_len = reader.read_ue()? as u8 + 1;
-                    for _ in 0..n {
-                        reader.read_bits(offset_len)?;
+                    for i in 0..n {
+                        let mut offset = reader.read_bits(offset_len)? + 1; // +1 per H.265 spec
+                        if i > 0 {
+                            offset += offsets[(i - 1) as usize]; // cumulative like libde265
+                        }
+                        offsets.push(offset);
                     }
                 }
-                n
+                eprintln!("DEBUG: Parsed {} entry point offsets: {:?}", n, offsets);
+                (n, offsets)
             } else {
-                0
+                (0, Vec::new())
             };
 
         // Skip slice segment header extension
@@ -420,9 +428,13 @@ impl SliceHeader {
             alignment_bit, data_offset
         );
         eprintln!(
-            "DEBUG: slice_qp_delta={}, slice_qp_y={}",
+            "DEBUG: slice_qp_delta={}, slice_qp_y={}, sao_luma={}, sao_chroma={}, wpp={}, entry_points={}",
             slice_qp_delta,
-            26 + pps.init_qp_minus26 as i32 + slice_qp_delta as i32
+            26 + pps.init_qp_minus26 as i32 + slice_qp_delta as i32,
+            slice_sao_luma_flag,
+            slice_sao_chroma_flag,
+            pps.entropy_coding_sync_enabled_flag,
+            num_entry_point_offsets,
         );
 
         // Calculate derived values
@@ -451,6 +463,7 @@ impl SliceHeader {
                 slice_tc_offset_div2,
                 slice_loop_filter_across_slices_enabled_flag,
                 num_entry_point_offsets,
+                entry_point_offsets,
                 slice_qp_y,
             },
             data_offset,
