@@ -1,0 +1,5 @@
+# HEIC Decoder Output Scores
+# Score 0-10: 0=garbage, 5=recognizable, 10=pixel-perfect
+# Leave score blank after |, fill in after viewing PPM
+#
+# Timestamp              | Bins  | Description                              | Score
