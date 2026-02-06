@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Select-Object -First 20)",
+      "Bash(ls:*)",
+      "Bash(python compare_traces.py:*)",
+      "Bash(cmake --build:*)",
+      "Bash(cargo build:*)",
+      "Bash(./libde265/build-traced/dec265/Release/dec265.exe:*)",
+      "Bash(cmake:*)",
+      "Bash(./target/release/decode_heic:*)",
+      "Bash(python compare_cq.py:*)",
+      "Bash(./target/release/extract_hevc:*)",
+      "Bash(./dec265.exe:*)",
+      "Bash(cargo run:*)",
+      "Bash(cargo test:*)",
+      "Bash(dir:*)",
+      "Bash(powershell -Command:*)",
+      "Bash(python compare_ci.py:*)",
+      "Bash(python:*)",
+      "Bash(Select-String \"error\")",
+      "Bash(Select-Object -First 10)",
+      "Bash(target\\\\debug\\\\deps\\\\decode_heic-3ed07af2cbb36b0e.exe test_raw_yuv_values:*)",
+      "Bash(\"D:\\\\Rust-projects\\\\heic-decoder-rs\\\\target\\\\debug\\\\deps\\\\decode_heic-3ed07af2cbb36b0e.exe\" test_raw_yuv_values --nocapture)",
+      "Bash(\"D:\\\\Rust-projects\\\\heic-decoder-rs\\\\target\\\\debug\\\\deps\\\\decode_heic-3ed07af2cbb36b0e.exe\" test_raw_yuv_values --nocapture --ignored)",
+      "Bash(xxd:*)",
+      "Bash(git checkout:*)",
+      "Bash(findstr:*)",
+      "Bash(D:/Rust-projects/heic-decoder-rs/libde265/build-traced/dec265/Release/dec265.exe:*)",
+      "Bash(if:*)",
+      "Bash(then python3 -c \"\nimport struct\nwith open\\(''test_120x120_libde265.yuv'', ''rb''\\) as f:\n    y_data = f.read\\(120*120\\)\n    import statistics\n    y_vals = list\\(y_data\\)\n    print\\(f''Reference Y: avg={sum\\(y_vals\\)/len\\(y_vals\\):.1f}, stddev={statistics.stdev\\(y_vals\\):.1f}, min={min\\(y_vals\\)}, max={max\\(y_vals\\)}''\\)\n\")",
+      "Bash(else echo \"Reference file not found\")",
+      "Bash(fi)"
+    ]
+  }
+}

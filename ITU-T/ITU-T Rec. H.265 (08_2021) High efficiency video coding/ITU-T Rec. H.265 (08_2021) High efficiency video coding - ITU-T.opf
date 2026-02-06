@@ -1,0 +1,22 @@
+<?xml version='1.0' encoding='utf-8'?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="uuid_id" version="2.0">
+    <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+        <dc:identifier opf:scheme="calibre" id="calibre_id">4</dc:identifier>
+        <dc:identifier opf:scheme="uuid" id="uuid_id">d0a9b26c-40a7-478d-a914-4e99f81600a0</dc:identifier>
+        <dc:title>ITU-T Rec. H.265 (08/2021) High efficiency video coding</dc:title>
+        <dc:creator opf:file-as="ITU-T" opf:role="aut">ITU-T</dc:creator>
+        <dc:contributor opf:file-as="calibre" opf:role="bkp">calibre (9.0.0) [https://calibre-ebook.com]</dc:contributor>
+        <dc:date>2021-10-08T05:37:22+00:00</dc:date>
+        <dc:description>SERIES H: AUDIOVISUAL AND MULTIMEDIA SYSTEMS - Infrastructure of audiovisual services – Coding of moving video</dc:description>
+        <dc:language>en</dc:language>
+        <dc:subject>SERIES H: AUDIOVISUAL AND MULTIMEDIA SYSTEMS - Infrastructure of audiovisual services – Coding of moving video</dc:subject>
+        <dc:subject>H.265</dc:subject>
+        <dc:subject>H</dc:subject>
+        <dc:subject>265</dc:subject>
+        <meta name="calibre:timestamp" content="2026-02-05T04:52:34.188808+00:00"/>
+        <meta name="calibre:title_sort" content="ITU-T Rec. H.265 (08/2021) High efficiency video coding"/>
+    </metadata>
+    <guide>
+        <reference type="cover" title="Cover" href="ITU-T Rec. H.265 (08_2021) High efficiency video coding - ITU-T.jpg"/>
+    </guide>
+</package>
