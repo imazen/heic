@@ -8,4 +8,4 @@ mod boxes;
 mod parser;
 
 pub use boxes::{HevcDecoderConfig, ItemProperty};
-pub use parser::{HeifContainer, Item, ItemType, parse};
+pub use parser::{HeifContainer, ImageGrid, Item, ItemType, parse, parse_grid_config};

@@ -9,6 +9,7 @@ mod cabac;
 mod ctu;
 pub mod debug;
 mod deblock;
+pub mod grid;
 mod intra;
 pub mod params;
 mod picture;

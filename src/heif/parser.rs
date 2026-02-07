@@ -6,7 +6,7 @@ use core::str;
 
 use super::boxes::{
     Box, BoxIterator, ColorInfo, FourCC, HevcDecoderConfig, ImageSpatialExtents, ItemInfo,
-    ItemLocation, ItemProperty, PropertyAssociation,
+    ItemLocation, ItemProperty, ItemReference, PropertyAssociation,
 };
 use crate::error::{HeicError, Result};
 
@@ -35,10 +35,16 @@ pub struct HeifContainer<'a> {
     pub color_infos: Vec<ColorInfo>,
     /// Property associations
     pub property_associations: Vec<PropertyAssociation>,
+    /// Item references (from iref box)
+    pub item_references: Vec<ItemReference>,
     /// Media data offset
     mdat_offset: Option<usize>,
     /// Media data length
     mdat_length: Option<usize>,
+    /// Item data (idat) offset within meta box content
+    idat_offset: Option<usize>,
+    /// Item data (idat) length
+    idat_length: Option<usize>,
 }
 
 /// Item type enumeration
@@ -142,17 +148,69 @@ impl<'a> HeifContainer<'a> {
             return None;
         }
 
-        // For now, handle single-extent items
-        // TODO: handle multiple extents and construction methods
-        let (offset, length) = loc.extents[0];
-        let offset = (loc.base_offset + offset) as usize;
-        let length = length as usize;
+        // For single-extent items, return a direct slice
+        if loc.extents.len() == 1 {
+            let (offset, length) = loc.extents[0];
+            let length = length as usize;
 
-        if offset + length <= self.data.len() {
-            Some(&self.data[offset..offset + length])
-        } else {
-            None
+            match loc.construction_method {
+                0 => {
+                    // File-based: offset is absolute within file
+                    let abs_offset = (loc.base_offset + offset) as usize;
+                    if abs_offset + length <= self.data.len() {
+                        return Some(&self.data[abs_offset..abs_offset + length]);
+                    }
+                }
+                1 => {
+                    // idat-based: offset is within idat box content
+                    if let Some(idat_off) = self.idat_offset {
+                        let abs_offset = idat_off + (loc.base_offset + offset) as usize;
+                        if abs_offset + length <= self.data.len() {
+                            return Some(&self.data[abs_offset..abs_offset + length]);
+                        }
+                    }
+                }
+                _ => {} // construction_method=2 (item) not supported yet
+            }
+            return None;
         }
+
+        // For multi-extent items, use get_item_data_owned
+        None
+    }
+
+    /// Get raw data for an item, concatenating multiple extents if needed
+    pub fn get_item_data_owned(&self, item_id: u32) -> Option<Vec<u8>> {
+        let loc = self.item_locations.iter().find(|l| l.item_id == item_id)?;
+
+        if loc.extents.is_empty() {
+            return None;
+        }
+
+        let mut result = Vec::new();
+        for &(offset, length) in &loc.extents {
+            let len = length as usize;
+            let abs_offset = match loc.construction_method {
+                0 => (loc.base_offset + offset) as usize,
+                1 => {
+                    self.idat_offset? + (loc.base_offset + offset) as usize
+                }
+                _ => return None,
+            };
+            if abs_offset + len > self.data.len() {
+                return None;
+            }
+            result.extend_from_slice(&self.data[abs_offset..abs_offset + len]);
+        }
+
+        Some(result)
+    }
+
+    /// Get tile item IDs for a grid item (from iref 'dimg' references)
+    pub fn get_tile_item_ids(&self, grid_item_id: u32) -> Option<Vec<u32>> {
+        self.item_references.iter()
+            .find(|r| r.from_item_id == grid_item_id && r.ref_type == FourCC::DIMG)
+            .map(|r| r.to_item_ids.clone())
     }
 }
 
@@ -170,8 +228,11 @@ pub fn parse(data: &[u8]) -> Result<HeifContainer<'_>> {
         hevc_configs: Vec::new(),
         color_infos: Vec::new(),
         property_associations: Vec::new(),
+        item_references: Vec::new(),
         mdat_offset: None,
         mdat_length: None,
+        idat_offset: None,
+        idat_length: None,
     };
 
     // Parse top-level boxes
@@ -242,6 +303,8 @@ fn parse_meta(meta: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
     }
 
     let content = &meta.content[4..];
+    // Base offset for child boxes within this meta content (for idat resolution)
+    let meta_content_base = meta.header.content_offset + 4;
 
     for child in BoxIterator::new(content) {
         match child.box_type() {
@@ -249,7 +312,13 @@ fn parse_meta(meta: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
             FourCC::ILOC => parse_iloc(&child, container)?,
             FourCC::IINF => parse_iinf(&child, container)?,
             FourCC::IPRP => parse_iprp(&child, container)?,
-            _ => {} // hdlr, iref, etc.
+            FourCC::IREF => parse_iref(&child, container)?,
+            FourCC::IDAT => {
+                // Store absolute file offset for idat content
+                container.idat_offset = Some(meta_content_base + child.header.content_offset);
+                container.idat_length = Some(child.content.len());
+            }
+            _ => {} // hdlr, etc.
         }
     }
 
@@ -727,4 +796,134 @@ fn parse_ipma(ipma: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn parse_iref(iref: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
+    let content = iref.content;
+    if content.len() < 4 {
+        return Err(HeicError::InvalidContainer("iref too short"));
+    }
+
+    let version = content[0];
+    let mut pos = 4;
+
+    while pos + 8 <= content.len() {
+        // Each reference is a box-like structure: size(4) + type(4) + data
+        let ref_size = u32::from_be_bytes([
+            content[pos], content[pos + 1], content[pos + 2], content[pos + 3],
+        ]) as usize;
+        
+        if ref_size < 14 || pos + ref_size > content.len() {
+            break;
+        }
+
+        let ref_type = FourCC::from_bytes(&content[pos + 4..pos + 8])
+            .unwrap_or(FourCC(*b"    "));
+
+        let mut rpos = pos + 8;
+
+        // from_item_id
+        let from_item_id = if version == 0 {
+            let id = u16::from_be_bytes([content[rpos], content[rpos + 1]]) as u32;
+            rpos += 2;
+            id
+        } else {
+            let id = u32::from_be_bytes([
+                content[rpos], content[rpos + 1], content[rpos + 2], content[rpos + 3],
+            ]);
+            rpos += 4;
+            id
+        };
+
+        // reference_count
+        if rpos + 2 > pos + ref_size {
+            pos += ref_size;
+            continue;
+        }
+        let ref_count = u16::from_be_bytes([content[rpos], content[rpos + 1]]) as usize;
+        rpos += 2;
+
+        let mut to_item_ids = Vec::with_capacity(ref_count);
+        for _ in 0..ref_count {
+            let to_id = if version == 0 {
+                if rpos + 2 > pos + ref_size {
+                    break;
+                }
+                let id = u16::from_be_bytes([content[rpos], content[rpos + 1]]) as u32;
+                rpos += 2;
+                id
+            } else {
+                if rpos + 4 > pos + ref_size {
+                    break;
+                }
+                let id = u32::from_be_bytes([
+                    content[rpos], content[rpos + 1], content[rpos + 2], content[rpos + 3],
+                ]);
+                rpos += 4;
+                id
+            };
+            to_item_ids.push(to_id);
+        }
+
+        container.item_references.push(ItemReference {
+            ref_type,
+            from_item_id,
+            to_item_ids,
+        });
+
+        pos += ref_size;
+    }
+
+    Ok(())
+}
+
+/// Parsed image grid configuration (ISO/IEC 23008-12, A.2.3.2)
+#[derive(Debug, Clone)]
+pub struct ImageGrid {
+    /// Number of tile columns
+    pub columns: u32,
+    /// Number of tile rows
+    pub rows: u32,
+    /// Output width in pixels
+    pub output_width: u32,
+    /// Output height in pixels
+    pub output_height: u32,
+}
+
+/// Parse grid item data into ImageGrid configuration
+pub fn parse_grid_config(data: &[u8]) -> core::result::Result<ImageGrid, HeicError> {
+    // ImageGrid: version(1) + flags(1) + rows_minus1(1) + cols_minus1(1) + output_width + output_height
+    if data.len() < 8 {
+        return Err(HeicError::InvalidData("grid data too short"));
+    }
+
+    let _version = data[0];
+    let flags = data[1];
+    let rows = data[2] as u32 + 1;
+    let columns = data[3] as u32 + 1;
+
+    // fields_length: 0 = 16-bit, 1 = 32-bit dimensions
+    let large_fields = (flags & 1) != 0;
+
+    let (output_width, output_height) = if large_fields {
+        if data.len() < 12 {
+            return Err(HeicError::InvalidData("grid data too short for 32-bit dims"));
+        }
+        (
+            u32::from_be_bytes([data[4], data[5], data[6], data[7]]),
+            u32::from_be_bytes([data[8], data[9], data[10], data[11]]),
+        )
+    } else {
+        (
+            u16::from_be_bytes([data[4], data[5]]) as u32,
+            u16::from_be_bytes([data[6], data[7]]) as u32,
+        )
+    };
+
+    Ok(ImageGrid {
+        columns,
+        rows,
+        output_width,
+        output_height,
+    })
 }
