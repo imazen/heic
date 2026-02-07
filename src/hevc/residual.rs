@@ -681,6 +681,33 @@ pub fn decode_residual(
     }
 
     let _ = (init_range, init_offset); // Used for future debugging if needed
+
+    // Coefficient trace for first 100 calls to compare against libde265
+    if residual_call_num < 100 {
+        let size = 1usize << log2_size;
+        eprint!("COEFF_TRACE call#{} x={} y={} log2={} c_idx={} scan={:?} last=({},{}):",
+            residual_call_num, _x0, _y0, log2_size, c_idx, scan_order, last_x, last_y);
+
+        // Print non-zero coefficients in scan order (from position 0 to end)
+        for sb_idx in 0..scan_sub.len() {
+            let (sbx, sby) = scan_sub[sb_idx];
+            for n in 0..16 {
+                let (px, py) = scan_pos[n];
+                let x = sbx as usize * 4 + px as usize;
+                let y = sby as usize * 4 + py as usize;
+                if x < size && y < size {
+                    let val = buffer.get(x, y);
+                    if val != 0 {
+                        eprint!(" [{},{}]={}", x, y, val);
+                    }
+                }
+            }
+        }
+        let (byte_pos, _, _) = cabac.get_position();
+        let (r, v, bn) = cabac.get_state_extended();
+        eprintln!(" | end_byte={} cabac=({},{},{})", byte_pos, r, v, bn);
+    }
+
     Ok(buffer)
 }
 

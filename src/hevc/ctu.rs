@@ -1038,6 +1038,9 @@ impl<'a> SliceContext<'a> {
             // For 4:2:0, if we split from 8x8 to 4x4, decode chroma residuals now
             // (because 4x4 children can't have chroma TUs)
             if log2_size == 3 {
+                eprintln!("DEBUG: 8x8→4x4 split complete, decoding chroma at luma({},{}) → chroma({},{})",
+                    x0, y0, x0/2, y0/2);
+
                 // Apply chroma prediction for the deferred chroma TU before adding residuals
                 let chroma_mode = self.get_intra_pred_mode_c(x0, y0);
                 intra::predict_intra(frame, x0 / 2, y0 / 2, 2, chroma_mode, 1);
