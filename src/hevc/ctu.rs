@@ -8,6 +8,7 @@
 
 use alloc::vec::Vec;
 
+use super::availability::ReconstructionMap;
 use super::cabac::{CabacDecoder, ContextModel, INIT_VALUES, context};
 use super::debug;
 use super::intra;
@@ -80,6 +81,8 @@ pub struct SliceContext<'a> {
     slice_data: &'a [u8],
     /// Saved context models per CTB row for WPP (saved after 2nd CTU in each row)
     wpp_saved_ctx: Vec<[ContextModel; context::NUM_CONTEXTS]>,
+    /// Reconstruction map tracking which samples have been decoded (for intra prediction availability)
+    reco_map: ReconstructionMap,
 }
 
 impl<'a> SliceContext<'a> {
@@ -96,12 +99,13 @@ impl<'a> SliceContext<'a> {
             &slice_data[..16.min(slice_data.len())]
         );
         eprintln!(
-            "DEBUG: SPS: {}x{}, ctb_size={}, min_cb_size={}, scaling_list={}",
+            "DEBUG: SPS: {}x{}, ctb_size={}, min_cb_size={}, scaling_list={}, sao={}",
             sps.pic_width_in_luma_samples,
             sps.pic_height_in_luma_samples,
             sps.ctb_size(),
             1 << sps.log2_min_cb_size(),
-            sps.scaling_list_enabled_flag
+            sps.scaling_list_enabled_flag,
+            sps.sample_adaptive_offset_enabled_flag
         );
         eprintln!(
             "DEBUG: SPS: max_transform_hierarchy_depth_intra={}",
@@ -183,6 +187,10 @@ impl<'a> SliceContext<'a> {
             intra_pred_stride,
             slice_data,
             wpp_saved_ctx: Vec::new(),
+            reco_map: ReconstructionMap::new(
+                sps.pic_width_in_luma_samples,
+                sps.pic_height_in_luma_samples,
+            ),
         })
     }
 
@@ -240,6 +248,13 @@ impl<'a> SliceContext<'a> {
     pub fn decode_slice(&mut self, frame: &mut DecodedFrame) -> Result<()> {
         // Initialize CABAC tracker for debugging
         debug::init_tracker();
+
+        eprintln!("DEBUG PPS: cu_qp_delta_enabled={} diff_cu_qp_delta_depth={} init_qp_minus26={}",
+            self.pps.cu_qp_delta_enabled_flag, self.pps.diff_cu_qp_delta_depth,
+            self.pps.init_qp_minus26);
+        eprintln!("DEBUG SPS: log2_ctb_size={} log2_min_tb={} log2_max_tb={} max_trafo_depth_intra={}",
+            self.sps.log2_ctb_size(), self.sps.log2_min_tb_size(),
+            self.sps.log2_max_tb_size(), self.sps.max_transform_hierarchy_depth_intra);
 
         let ctb_size = self.sps.ctb_size();
         let pic_width_in_ctbs = self.sps.pic_width_in_ctbs();
@@ -374,7 +389,16 @@ impl<'a> SliceContext<'a> {
 
         // Decode SAO parameters before coding quadtree
         if self.sps.sample_adaptive_offset_enabled_flag {
+            {
+                let (r, v, bn) = self.cabac.get_state_extended();
+                eprintln!("DEBUG: before SAO: range={} value={} bits_needed={}", r, v, bn);
+            }
             self.decode_sao(x_ctb, y_ctb)?;
+        }
+        {
+            let (r, v, bn) = self.cabac.get_state_extended();
+            let (byte, _, _) = self.cabac.get_position();
+            eprintln!("DEBUG: after SAO, before split: byte={} range={} value={} bits_needed={}", byte, r, v, bn);
         }
 
         // Decode the coding quadtree
@@ -1043,8 +1067,8 @@ impl<'a> SliceContext<'a> {
 
                 // Apply chroma prediction for the deferred chroma TU before adding residuals
                 let chroma_mode = self.get_intra_pred_mode_c(x0, y0);
-                intra::predict_intra(frame, x0 / 2, y0 / 2, 2, chroma_mode, 1);
-                intra::predict_intra(frame, x0 / 2, y0 / 2, 2, chroma_mode, 2);
+                intra::predict_intra(frame, x0 / 2, y0 / 2, 2, chroma_mode, 1, &self.reco_map);
+                intra::predict_intra(frame, x0 / 2, y0 / 2, 2, chroma_mode, 2, &self.reco_map);
 
                 // Use stored chroma intra mode for chroma scan order
                 let scan_order_cb = residual::get_scan_order(2, chroma_mode.as_u8(), 1);
@@ -1056,6 +1080,9 @@ impl<'a> SliceContext<'a> {
                     let scan_order_cr = residual::get_scan_order(2, chroma_mode.as_u8(), 2);
                     self.decode_and_apply_residual(x0 / 2, y0 / 2, 2, 2, scan_order_cr, frame)?;
                 }
+                // Mark deferred chroma blocks as reconstructed
+                self.reco_map.mark_reconstructed(x0 / 2, y0 / 2, 4, 1);
+                self.reco_map.mark_reconstructed(x0 / 2, y0 / 2, 4, 2);
             }
         } else {
             // Decode transform unit (leaf node)
@@ -1092,7 +1119,7 @@ impl<'a> SliceContext<'a> {
         // Apply intra prediction for this TU's luma block BEFORE decoding residuals
         // This ensures prediction uses the latest reconstructed frame state
         let actual_luma_mode = self.get_intra_pred_mode(x0, y0);
-        intra::predict_intra(frame, x0, y0, log2_size, actual_luma_mode, 0);
+        intra::predict_intra(frame, x0, y0, log2_size, actual_luma_mode, 0, &self.reco_map);
 
         // Apply chroma prediction if this TU handles chroma (log2_size >= 3)
         if log2_size >= 3 {
@@ -1100,8 +1127,8 @@ impl<'a> SliceContext<'a> {
             let chroma_x = x0 / 2;
             let chroma_y = y0 / 2;
             let chroma_log2_size = log2_size - 1;
-            intra::predict_intra(frame, chroma_x, chroma_y, chroma_log2_size, chroma_mode, 1);
-            intra::predict_intra(frame, chroma_x, chroma_y, chroma_log2_size, chroma_mode, 2);
+            intra::predict_intra(frame, chroma_x, chroma_y, chroma_log2_size, chroma_mode, 1, &self.reco_map);
+            intra::predict_intra(frame, chroma_x, chroma_y, chroma_log2_size, chroma_mode, 2, &self.reco_map);
         }
 
         // Decode cbf_luma - Per H.265 spec 7.3.8.8:
@@ -1268,6 +1295,69 @@ impl<'a> SliceContext<'a> {
             }
         }
         // Note: if log2_size < 3, chroma was decoded by parent when splitting from 8x8
+
+        // Mark luma block as reconstructed
+        let size = 1u32 << log2_size;
+        self.reco_map.mark_reconstructed(x0, y0, size, 0);
+        // Mark chroma blocks if this TU handles chroma
+        if log2_size >= 3 {
+            let chroma_size = size / 2;
+            self.reco_map.mark_reconstructed(x0 / 2, y0 / 2, chroma_size, 1);
+            self.reco_map.mark_reconstructed(x0 / 2, y0 / 2, chroma_size, 2);
+        }
+
+        // RECONSTRUCTION TRACE: Print reconstructed pixels for differential debugging
+        {
+            use core::sync::atomic::{AtomicU32, Ordering};
+            static TU_RECO_COUNT: AtomicU32 = AtomicU32::new(0);
+            let count = TU_RECO_COUNT.load(Ordering::Relaxed);
+            let size = 1u32 << log2_size;
+
+            // Trace luma
+            if count < 200 {
+                let row0: Vec<u16> = (0..size.min(8)).map(|x| frame.get_y(x0 + x, y0)).collect();
+                let row1: Vec<u16> = if size > 1 { (0..size.min(8)).map(|x| frame.get_y(x0 + x, y0 + 1)).collect() } else { vec![] };
+                eprint!("TU_RECO {}: pos=({},{}) nT={} cIdx=0 qP={} cbf={}",
+                    count, x0, y0, size, self.qp_y, if cbf_luma { 1 } else { 0 });
+                eprint!(" row0=[{}]", row0.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","));
+                if !row1.is_empty() {
+                    eprint!(" row1=[{}]", row1.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","));
+                }
+                eprintln!();
+                TU_RECO_COUNT.store(count + 1, Ordering::Relaxed);
+            }
+
+            // Trace chroma if this TU handles chroma
+            if log2_size >= 3 && count + 1 < 200 {
+                let cx = x0 / 2;
+                let cy = y0 / 2;
+                let cs = size / 2;
+                let count2 = TU_RECO_COUNT.load(Ordering::Relaxed);
+
+                let cb_row0: Vec<u16> = (0..cs.min(8)).map(|x| frame.get_cb(cx + x, cy)).collect();
+                let cb_row1: Vec<u16> = if cs > 1 { (0..cs.min(8)).map(|x| frame.get_cb(cx + x, cy + 1)).collect() } else { vec![] };
+                eprint!("TU_RECO {}: pos=({},{}) nT={} cIdx=1 qP={} cbf={}",
+                    count2, cx, cy, cs, self.qp_cb, if cbf_cb { 1 } else { 0 });
+                eprint!(" row0=[{}]", cb_row0.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","));
+                if !cb_row1.is_empty() {
+                    eprint!(" row1=[{}]", cb_row1.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","));
+                }
+                eprintln!();
+                TU_RECO_COUNT.store(count2 + 1, Ordering::Relaxed);
+
+                let count3 = TU_RECO_COUNT.load(Ordering::Relaxed);
+                let cr_row0: Vec<u16> = (0..cs.min(8)).map(|x| frame.get_cr(cx + x, cy)).collect();
+                let cr_row1: Vec<u16> = if cs > 1 { (0..cs.min(8)).map(|x| frame.get_cr(cx + x, cy + 1)).collect() } else { vec![] };
+                eprint!("TU_RECO {}: pos=({},{}) nT={} cIdx=2 qP={} cbf={}",
+                    count3, cx, cy, cs, self.qp_cr, if cbf_cr { 1 } else { 0 });
+                eprint!(" row0=[{}]", cr_row0.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","));
+                if !cr_row1.is_empty() {
+                    eprint!(" row1=[{}]", cr_row1.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","));
+                }
+                eprintln!();
+                TU_RECO_COUNT.store(count3 + 1, Ordering::Relaxed);
+            }
+        }
 
         Ok(())
     }

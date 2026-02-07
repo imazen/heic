@@ -5,6 +5,7 @@
 //! - Mode 1: DC (average of reference samples)
 //! - Modes 2-34: Angular (directional prediction)
 
+use super::availability::ReconstructionMap;
 use super::picture::DecodedFrame;
 use super::slice::IntraPredMode;
 
@@ -50,6 +51,7 @@ pub fn predict_intra(
     log2_size: u8,
     mode: IntraPredMode,
     c_idx: u8, // 0=Y, 1=Cb, 2=Cr
+    reco_map: &ReconstructionMap,
 ) {
     let size = 1u32 << log2_size;
 
@@ -57,7 +59,21 @@ pub fn predict_intra(
     let mut border = [0i32; 4 * MAX_INTRA_PRED_BLOCK_SIZE + 1];
     let border_center = 2 * MAX_INTRA_PRED_BLOCK_SIZE;
 
-    fill_border_samples(frame, x, y, size, c_idx, &mut border, border_center);
+    fill_border_samples(frame, x, y, size, c_idx, &mut border, border_center, reco_map);
+
+    // Apply prediction based on mode
+    match mode {
+        IntraPredMode::Planar => {
+            predict_planar(frame, x, y, size, c_idx, &border, border_center);
+        }
+        IntraPredMode::Dc => {
+            predict_dc(frame, x, y, size, c_idx, &border, border_center);
+        }
+        _ => {
+            let mode_val = mode.as_u8();
+            predict_angular(frame, x, y, size, c_idx, mode_val, &border, border_center);
+        }
+    }
 
     // DEBUG: Track order and print border samples for chroma blocks near the problem area
     static PRED_SEQ: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -145,7 +161,10 @@ pub fn predict_intra(
     }
 }
 
-/// Fill border samples from neighboring pixels
+/// Fill border samples from neighboring pixels using z-scan availability (H.265 8.4.4.2.1)
+///
+/// Uses the ReconstructionMap to determine which reference samples have actually
+/// been decoded, rather than relying on pixel values as sentinels.
 fn fill_border_samples(
     frame: &DecodedFrame,
     x: u32,
@@ -154,88 +173,90 @@ fn fill_border_samples(
     c_idx: u8,
     border: &mut [i32],
     center: usize,
+    reco_map: &ReconstructionMap,
 ) {
-    // Border layout (indexed from center):
-    //   border[-2*size .. -1] = left samples (bottom to top)
-    //   border[0] = top-left corner
-    //   border[1 .. 2*size] = top samples (left to right)
-
     let (frame_w, frame_h) = if c_idx == 0 {
         (frame.width, frame.height)
     } else {
-        // Chroma is half resolution for 4:2:0
         (frame.width / 2, frame.height / 2)
     };
 
-    // Check availability of neighbors
-    let avail_left = x > 0;
-    let avail_top = y > 0;
-    let avail_top_left = avail_left && avail_top;
-    let avail_top_right = avail_top && (x + size * 2) <= frame_w;
-    let avail_bottom_left = avail_left && (y + size * 2) <= frame_h;
-
-    // Fill with default value if no neighbors available
     let default_val = 1i32 << (frame.bit_depth - 1);
 
+    // Helper: check if a sample at (sx, sy) is available for reference
+    let is_avail = |sx: u32, sy: u32| -> bool {
+        sx < frame_w && sy < frame_h && reco_map.is_reconstructed(sx, sy, c_idx)
+    };
+
+    // Build availability + sample arrays per H.265 8.4.4.2.1
+    // Total 4*size + 1 samples: 2*size left (bottom-left to top), corner, 2*size top (left to top-right)
+    let total = 4 * size as usize + 1;
+    let mut avail = vec![false; total];
+    let mut samples = vec![0i32; total];
+
+    // Index mapping: [0..2*size-1] = bottom-left to left, [2*size] = corner, [2*size+1..4*size] = top to top-right
+    let corner_idx = 2 * size as usize;
+
+    // Bottom-left samples (index 0 = bottom-most, going up)
+    for i in 0..(2 * size) {
+        let sy = y + 2 * size - 1 - i;
+        if x > 0 && is_avail(x - 1, sy) {
+            avail[i as usize] = true;
+            samples[i as usize] = get_sample(frame, x - 1, sy, c_idx) as i32;
+        }
+    }
+
     // Top-left corner
-    if avail_top_left {
-        border[center] = get_sample(frame, x - 1, y - 1, c_idx) as i32;
-    } else if avail_top {
-        border[center] = get_sample(frame, x, y - 1, c_idx) as i32;
-    } else if avail_left {
-        border[center] = get_sample(frame, x - 1, y, c_idx) as i32;
-    } else {
-        border[center] = default_val;
+    if x > 0 && y > 0 && is_avail(x - 1, y - 1) {
+        avail[corner_idx] = true;
+        samples[corner_idx] = get_sample(frame, x - 1, y - 1, c_idx) as i32;
     }
 
-    // Top samples (border[1..size] and border[size+1..2*size] for top-right)
-    for i in 0..size {
-        if avail_top {
-            border[center + 1 + i as usize] = get_sample(frame, x + i, y - 1, c_idx) as i32;
-        } else {
-            border[center + 1 + i as usize] = border[center];
-        }
-    }
-
-    // Top-right samples
-    for i in size..(2 * size) {
-        if avail_top_right && (x + i) < frame_w {
-            border[center + 1 + i as usize] = get_sample(frame, x + i, y - 1, c_idx) as i32;
-        } else if avail_top {
-            // Replicate last available top sample
-            border[center + 1 + i as usize] = border[center + size as usize];
-        } else {
-            border[center + 1 + i as usize] = border[center];
-        }
-    }
-
-    // Left samples (border[-1..-size] and border[-size-1..-2*size] for bottom-left)
-    for i in 0..size {
-        if avail_left {
-            border[center - 1 - i as usize] = get_sample(frame, x - 1, y + i, c_idx) as i32;
-        } else {
-            border[center - 1 - i as usize] = border[center];
-        }
-    }
-
-    // Bottom-left samples
-    for i in size..(2 * size) {
-        if avail_bottom_left && (y + i) < frame_h {
-            border[center - 1 - i as usize] = get_sample(frame, x - 1, y + i, c_idx) as i32;
-        } else if avail_left {
-            // Replicate last available left sample
-            border[center - 1 - i as usize] = border[center - size as usize];
-        } else {
-            border[center - 1 - i as usize] = border[center];
+    // Top and top-right samples
+    for i in 0..(2 * size) {
+        let sx = x + i;
+        if y > 0 && is_avail(sx, y - 1) {
+            avail[corner_idx + 1 + i as usize] = true;
+            samples[corner_idx + 1 + i as usize] = get_sample(frame, sx, y - 1, c_idx) as i32;
         }
     }
 
     // Reference sample substitution (H.265 8.4.4.2.2)
-    // If any sample is unavailable, substitute from available samples
-    // NOTE: This uses 0 as a sentinel for "unavailable" which is technically a bug
-    // since 0 is a valid sample value. However, removing this breaks the decoder
-    // due to interactions with how the border array is initialized.
-    reference_sample_substitution(border, center, size as usize);
+    // Find first available sample scanning from bottom-left to top-right
+    let mut first_avail_val = None;
+    for i in 0..total {
+        if avail[i] {
+            first_avail_val = Some(samples[i]);
+            break;
+        }
+    }
+    let subst_val = first_avail_val.unwrap_or(default_val);
+
+    // Substitute unavailable samples: scan from bottom-left to top-right,
+    // replacing unavailable with the nearest available to their left (in scan order)
+    let mut last_val = subst_val;
+    for i in 0..total {
+        if avail[i] {
+            last_val = samples[i];
+        } else {
+            samples[i] = last_val;
+        }
+    }
+
+    // Copy into border array format:
+    // border[center - 1 - i] = left[i] (i=0 is top-most left, i=2*size-1 is bottom-most)
+    // border[center] = corner
+    // border[center + 1 + i] = top[i]
+    for i in 0..(2 * size as usize) {
+        // samples index for left: bottom-most is index 0, top-most is index 2*size-1
+        // border index: border[center-1] = top-most left (y), border[center-1-i] goes down
+        // So border[center-1-i] = samples[2*size-1-i]
+        border[center - 1 - i] = samples[2 * size as usize - 1 - i];
+    }
+    border[center] = samples[corner_idx];
+    for i in 0..(2 * size as usize) {
+        border[center + 1 + i] = samples[corner_idx + 1 + i];
+    }
 }
 
 /// Substitute unavailable reference samples (H.265 8.4.4.2.2)
@@ -294,12 +315,6 @@ fn get_sample(frame: &DecodedFrame, x: u32, y: u32, c_idx: u8) -> u16 {
 
 /// Set a sample in the frame
 fn set_sample(frame: &mut DecodedFrame, x: u32, y: u32, c_idx: u8, value: u16) {
-    // DEBUG: Track Cr writes at y=0 for x=104-111 to find corruption
-    if c_idx == 2 && y == 0 && (104..=111).contains(&x) {
-        let old_val = frame.get_cr(x, y);
-        eprintln!("DEBUG: set_cr({},{}) = {} (was {})", x, y, value, old_val);
-    }
-
     match c_idx {
         0 => frame.set_y(x, y, value),
         1 => frame.set_cb(x, y, value),
@@ -473,12 +488,13 @@ fn predict_angular(
                     ref_arr[idx]
                 };
 
+                let clamped = pred.clamp(0, max_val) as u16;
                 set_sample(
                     frame,
                     x + px as u32,
                     y + py as u32,
                     c_idx,
-                    pred.clamp(0, max_val) as u16,
+                    clamped,
                 );
             }
         }

@@ -3,6 +3,7 @@
 use heic_decoder::HeicDecoder;
 use std::env;
 use std::fs;
+use std::path::Path;
 use std::process;
 
 fn main() {
@@ -14,6 +15,14 @@ fn main() {
 
     let input_path = &args[1];
     let data = fs::read(input_path).expect("Failed to read input file");
+
+    // Generate timestamp and base filename
+    let timestamp = chrono::Local::now().format("%Y-%m-%d_%H%M%S").to_string();
+    let input_stem = Path::new(input_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+    let base_name = format!("output_{}_{}", input_stem, timestamp);
 
     let decoder = HeicDecoder::new();
     
@@ -28,11 +37,11 @@ fn main() {
 
             // Write RGB PPM
             let rgb = frame.to_rgb();
-            let output_path = "output.ppm";
+            let ppm_path = format!("{}.ppm", base_name);
             let mut ppm = format!("P6\n{} {}\n255\n", cw, ch).into_bytes();
             ppm.extend_from_slice(&rgb);
-            fs::write(output_path, &ppm).expect("Failed to write PPM");
-            println!("Wrote RGB to {}", output_path);
+            fs::write(&ppm_path, &ppm).expect("Failed to write PPM");
+            println!("Wrote RGB to {}", ppm_path);
 
             // Write raw YUV (I420 planar, same format as libde265 output)
             let shift = frame.bit_depth - 8;
@@ -63,8 +72,9 @@ fn main() {
                     yuv.push((frame.cr_plane[idx] >> shift) as u8);
                 }
             }
-            fs::write("output.yuv", &yuv).expect("Failed to write YUV");
-            println!("Wrote raw YUV to output.yuv ({} bytes)", yuv.len());
+            let yuv_path = format!("{}.yuv", base_name);
+            fs::write(&yuv_path, &yuv).expect("Failed to write YUV");
+            println!("Wrote raw YUV to {} ({} bytes)", yuv_path, yuv.len());
         }
         Err(e) => {
             eprintln!("Decode error: {:?}", e);

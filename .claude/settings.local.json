@@ -30,7 +30,15 @@
       "Bash(if:*)",
       "Bash(then python3 -c \"\nimport struct\nwith open\\(''test_120x120_libde265.yuv'', ''rb''\\) as f:\n    y_data = f.read\\(120*120\\)\n    import statistics\n    y_vals = list\\(y_data\\)\n    print\\(f''Reference Y: avg={sum\\(y_vals\\)/len\\(y_vals\\):.1f}, stddev={statistics.stdev\\(y_vals\\):.1f}, min={min\\(y_vals\\)}, max={max\\(y_vals\\)}''\\)\n\")",
       "Bash(else echo \"Reference file not found\")",
-      "Bash(fi)"
+      "Bash(fi)",
+      "Bash(cat:*)",
+      "Bash(magick:*)",
+      "Bash(PATH=\"libde265/build-traced-v2/libde265/Release:$PATH\" libde265/build-traced-v2/dec265/Release/dec265.exe:*)",
+      "Bash(PATH=\"D:/Rust-projects/heic-decoder-rs/libde265/release-traced/x64:$PATH\" D:/Rust-projects/heic-decoder-rs/libde265/release-traced/x64/dec265.exe:*)",
+      "Bash(PATH=\"D:/Rust-projects/heic-decoder-rs/libde265/build-traced-v2/libde265/Release:$PATH\" D:/Rust-projects/heic-decoder-rs/libde265/build-traced-v2/dec265/Release/dec265.exe:*)",
+      "Bash(\"D:/Rust-projects/heic-decoder-rs/libde265/build-traced-v2/dec265/Release/dec265.exe\" -q \"D:/Rust-projects/heic-decoder-rs/test_120x120_from_heic.hevc\" --disable-deblocking --disable-sao -o \"D:/Rust-projects/heic-decoder-rs/libde265_nofilter_fresh.yuv\")",
+      "Bash(\"D:/Rust-projects/heic-decoder-rs/libde265/build-traced-v2/dec265/Release/dec265.exe\" -q --disable-deblocking --disable-sao -o \"D:/Rust-projects/heic-decoder-rs/libde265_nofilter_fresh.yuv\" \"D:/Rust-projects/heic-decoder-rs/test_120x120_from_heic.hevc\")",
+      "Bash(target\\\\release\\\\decode_heic.exe:*)"
     ]
   }
 }

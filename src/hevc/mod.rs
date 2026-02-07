@@ -3,6 +3,7 @@
 //! This module implements the HEVC (High Efficiency Video Coding) decoder
 //! for decoding HEIC still images.
 
+mod availability;
 pub mod bitstream;
 mod cabac;
 mod ctu;
