@@ -76,6 +76,10 @@ pub struct SliceContext<'a> {
     intra_pred_mode_c: Vec<u8>,
     /// Stride for intra_pred_mode arrays in 4x4 block units
     intra_pred_stride: u32,
+    /// Full slice data (needed for WPP row transitions)
+    slice_data: &'a [u8],
+    /// Saved context models per CTB row for WPP (saved after 2nd CTU in each row)
+    wpp_saved_ctx: Vec<[ContextModel; context::NUM_CONTEXTS]>,
 }
 
 impl<'a> SliceContext<'a> {
@@ -177,6 +181,8 @@ impl<'a> SliceContext<'a> {
             intra_pred_mode_y,
             intra_pred_mode_c,
             intra_pred_stride,
+            slice_data,
+            wpp_saved_ctx: Vec::new(),
         })
     }
 
@@ -238,6 +244,7 @@ impl<'a> SliceContext<'a> {
         let ctb_size = self.sps.ctb_size();
         let pic_width_in_ctbs = self.sps.pic_width_in_ctbs();
         let pic_height_in_ctbs = self.sps.pic_height_in_ctbs();
+        let wpp_enabled = self.pps.entropy_coding_sync_enabled_flag;
 
         // Start from slice segment address
         let start_addr = self.header.slice_segment_address;
@@ -246,6 +253,16 @@ impl<'a> SliceContext<'a> {
 
         let mut ctu_count = 0u32;
         let total_ctus = pic_width_in_ctbs * pic_height_in_ctbs;
+
+        // For WPP, track which entry point offset to use next (0-indexed into entry_point_offsets)
+        let mut wpp_entry_idx = 0usize;
+
+        if wpp_enabled {
+            eprintln!(
+                "DEBUG: WPP enabled, {} entry point offsets, {} CTB rows",
+                self.header.num_entry_point_offsets, pic_height_in_ctbs
+            );
+        }
 
         loop {
             // Decode one CTU
@@ -270,21 +287,68 @@ impl<'a> SliceContext<'a> {
             self.decode_ctu(x_ctb, y_ctb, frame)?;
             ctu_count += 1;
 
-            // Check for end of slice segment
-            let end_of_slice = self.cabac.decode_terminate()?;
-            if end_of_slice != 0 {
-                eprintln!(
-                    "DEBUG: end_of_slice after CTU {}, decoded {}/{} CTUs",
-                    ctu_count, ctu_count, total_ctus
-                );
-                break;
+            // WPP: save context models after the 2nd CTU in each row (ctb_x == 1)
+            // These will be restored when starting the next row
+            if wpp_enabled && self.ctb_x == 1 {
+                let row = self.ctb_y as usize;
+                if self.wpp_saved_ctx.len() <= row {
+                    self.wpp_saved_ctx.resize(row + 1, [ContextModel::new(154); context::NUM_CONTEXTS]);
+                }
+                self.wpp_saved_ctx[row] = self.ctx;
             }
+
+            // Check for end of slice segment (end_of_sub_stream_one_bit for WPP)
+            let end_of_slice = self.cabac.decode_terminate()?;
 
             // Move to next CTB
             self.ctb_x += 1;
-            if self.ctb_x >= pic_width_in_ctbs {
+            let row_complete = self.ctb_x >= pic_width_in_ctbs;
+
+            if row_complete {
+                // Row complete
+                if wpp_enabled && wpp_entry_idx < self.header.entry_point_offsets.len() {
+                    // WPP row transition: reinitialize CABAC from the next substream
+                    let offset = self.header.entry_point_offsets[wpp_entry_idx] as usize;
+                    wpp_entry_idx += 1;
+
+                    if offset < self.slice_data.len() {
+                        self.cabac = CabacDecoder::new(&self.slice_data[offset..])?;
+
+                        // Restore context models saved after 2nd CTU of previous row
+                        let prev_row = self.ctb_y as usize;
+                        if let Some(saved) = self.wpp_saved_ctx.get(prev_row) {
+                            self.ctx = *saved;
+                        }
+
+                        eprintln!(
+                            "DEBUG: WPP row transition: row {} -> {}, entry_offset={}, slice_data[{}..] len={}",
+                            self.ctb_y, self.ctb_y + 1, offset, offset,
+                            self.slice_data.len() - offset
+                        );
+                    } else {
+                        eprintln!(
+                            "DEBUG: WPP entry point offset {} beyond slice data len {}",
+                            offset, self.slice_data.len()
+                        );
+                        break;
+                    }
+                } else if end_of_slice != 0 {
+                    eprintln!(
+                        "DEBUG: end_of_slice after CTU {}, decoded {}/{} CTUs",
+                        ctu_count, ctu_count, total_ctus
+                    );
+                    break;
+                }
+
                 self.ctb_x = 0;
                 self.ctb_y += 1;
+            } else if end_of_slice != 0 {
+                // Mid-row termination (shouldn't happen normally, but handle gracefully)
+                eprintln!(
+                    "DEBUG: unexpected end_of_slice mid-row after CTU {}, decoded {}/{} CTUs",
+                    ctu_count, ctu_count, total_ctus
+                );
+                break;
             }
 
             // Check for end of picture
@@ -728,18 +792,9 @@ impl<'a> SliceContext<'a> {
                 // Store chroma mode for all blocks in this CU
                 self.set_intra_pred_mode_c(x0, y0, cb_size, chroma_mode);
 
-                // Apply luma predictions for all 4 PUs
-                intra::predict_intra(frame, x0, y0, log2_pu_size, luma_mode_0, 0);
-                intra::predict_intra(frame, x0 + half, y0, log2_pu_size, luma_mode_1, 0);
-                intra::predict_intra(frame, x0, y0 + half, log2_pu_size, luma_mode_2, 0);
-                intra::predict_intra(frame, x0 + half, y0 + half, log2_pu_size, luma_mode_3, 0);
-
-                // Apply chroma prediction once for the whole 8x8 region
-                let chroma_x = x0 / 2;
-                let chroma_y = y0 / 2;
-                let chroma_log2_size = log2_cb_size.saturating_sub(1).max(2);
-                intra::predict_intra(frame, chroma_x, chroma_y, chroma_log2_size, chroma_mode, 1);
-                intra::predict_intra(frame, chroma_x, chroma_y, chroma_log2_size, chroma_mode, 2);
+                // NOTE: Prediction is now applied per-TU in decode_transform_unit_leaf,
+                // not at the CU level, so that each TU can use reconstructed pixels
+                // from earlier TUs as reference samples.
 
                 luma_mode_0
             }
@@ -983,8 +1038,12 @@ impl<'a> SliceContext<'a> {
             // For 4:2:0, if we split from 8x8 to 4x4, decode chroma residuals now
             // (because 4x4 children can't have chroma TUs)
             if log2_size == 3 {
-                // Use stored chroma intra mode for chroma scan order
+                // Apply chroma prediction for the deferred chroma TU before adding residuals
                 let chroma_mode = self.get_intra_pred_mode_c(x0, y0);
+                intra::predict_intra(frame, x0 / 2, y0 / 2, 2, chroma_mode, 1);
+                intra::predict_intra(frame, x0 / 2, y0 / 2, 2, chroma_mode, 2);
+
+                // Use stored chroma intra mode for chroma scan order
                 let scan_order_cb = residual::get_scan_order(2, chroma_mode.as_u8(), 1);
 
                 if cbf_cb {
@@ -1026,6 +1085,21 @@ impl<'a> SliceContext<'a> {
         frame: &mut DecodedFrame,
     ) -> Result<()> {
         let debug_tt = self.debug_ctu;
+
+        // Apply intra prediction for this TU's luma block BEFORE decoding residuals
+        // This ensures prediction uses the latest reconstructed frame state
+        let actual_luma_mode = self.get_intra_pred_mode(x0, y0);
+        intra::predict_intra(frame, x0, y0, log2_size, actual_luma_mode, 0);
+
+        // Apply chroma prediction if this TU handles chroma (log2_size >= 3)
+        if log2_size >= 3 {
+            let chroma_mode = self.get_intra_pred_mode_c(x0, y0);
+            let chroma_x = x0 / 2;
+            let chroma_y = y0 / 2;
+            let chroma_log2_size = log2_size - 1;
+            intra::predict_intra(frame, chroma_x, chroma_y, chroma_log2_size, chroma_mode, 1);
+            intra::predict_intra(frame, chroma_x, chroma_y, chroma_log2_size, chroma_mode, 2);
+        }
 
         // Decode cbf_luma - Per H.265 spec 7.3.8.8:
         // Condition: CuPredMode == MODE_INTRA || trafoDepth != 0 || cbf_cb || cbf_cr
@@ -1106,8 +1180,25 @@ impl<'a> SliceContext<'a> {
                     self.cu_qp_delta = 0;
                 }
                 self.is_cu_qp_delta_coded = true;
+
+                // Apply QP delta per H.265 section 8.6.1
+                // QP_Y = ((qP_Y_PRED + CuQpDeltaVal + 52 + 2*QpBdOffsetY) % (52 + QpBdOffsetY)) - QpBdOffsetY
+                let qp_bd_offset_y = 6 * (self.sps.bit_depth_y() as i32 - 8);
+                self.qp_y = ((self.qp_y + self.cu_qp_delta + 52 + 2 * qp_bd_offset_y)
+                    % (52 + qp_bd_offset_y))
+                    - qp_bd_offset_y;
+
+                // Update chroma QP values
+                let qp_i_cb = self.qp_y + self.pps.pps_cb_qp_offset as i32
+                    + self.header.slice_cb_qp_offset as i32;
+                let qp_i_cr = self.qp_y + self.pps.pps_cr_qp_offset as i32
+                    + self.header.slice_cr_qp_offset as i32;
+                self.qp_cb = chroma_qp_mapping(qp_i_cb.clamp(0, 57));
+                self.qp_cr = chroma_qp_mapping(qp_i_cr.clamp(0, 57));
+
                 if debug_tt {
-                    eprintln!("    TT: cu_qp_delta_abs={} delta={}", cu_qp_delta_abs, self.cu_qp_delta);
+                    eprintln!("    TT: cu_qp_delta_abs={} delta={} -> qp_y={} qp_cb={} qp_cr={}",
+                        cu_qp_delta_abs, self.cu_qp_delta, self.qp_y, self.qp_cb, self.qp_cr);
                 }
             }
         }
@@ -1488,31 +1579,9 @@ impl<'a> SliceContext<'a> {
         let cb_size = 1u32 << log2_size;
         self.set_intra_pred_mode_c(x0, y0, cb_size, intra_chroma_mode);
 
-        // Apply luma intra prediction
-        intra::predict_intra(frame, x0, y0, log2_size, intra_luma_mode, 0);
-
-        // Apply chroma intra prediction (half resolution for 4:2:0)
-        if apply_chroma && log2_size >= 3 {
-            let chroma_x = x0 / 2;
-            let chroma_y = y0 / 2;
-            let chroma_log2_size = log2_size.saturating_sub(1).max(2);
-            intra::predict_intra(
-                frame,
-                chroma_x,
-                chroma_y,
-                chroma_log2_size,
-                intra_chroma_mode,
-                1,
-            );
-            intra::predict_intra(
-                frame,
-                chroma_x,
-                chroma_y,
-                chroma_log2_size,
-                intra_chroma_mode,
-                2,
-            );
-        }
+        // NOTE: Prediction is now applied per-TU in decode_transform_unit_leaf,
+        // not at the CU level, so that each TU can use reconstructed pixels
+        // from earlier TUs as reference samples.
 
         Ok(intra_luma_mode)
     }
