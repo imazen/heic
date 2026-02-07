@@ -43,6 +43,110 @@ fn get_inv_angle(mode: u8) -> i32 {
     }
 }
 
+/// Reference sample filtering (H.265 8.4.4.2.3)
+/// Applies 3-tap smoothing filter or strong intra smoothing to border samples
+/// BEFORE prediction. This is critical for correct intra prediction.
+///
+/// Per libde265: only applied for luma in 4:2:0 mode (cIdx==0 || ChromaArrayType==444)
+fn filter_reference_samples(
+    border: &mut [i32],
+    center: usize,
+    size: u32,
+    mode: IntraPredMode,
+    c_idx: u8,
+    strong_intra_smoothing_enabled: bool,
+    bit_depth: u8,
+) {
+    let n = size as i32;
+    let mode_val = mode.as_u8() as i32;
+
+    // No filtering for 4:2:0 chroma (only luma)
+    if c_idx != 0 {
+        return;
+    }
+
+    // No filtering for DC mode or 4x4 blocks
+    if mode == IntraPredMode::Dc || size == 4 {
+        return;
+    }
+
+    // Compute minimum distance to horizontal (mode 10) and vertical (mode 26)
+    let min_dist_ver_hor = (mode_val - 26).abs().min((mode_val - 10).abs());
+
+    // Determine filterFlag based on block size (H.265 Table 8-3 intraHorVerDistThres)
+    let filter_flag = match size {
+        8 => min_dist_ver_hor > 7,
+        16 => min_dist_ver_hor > 1,
+        32 => min_dist_ver_hor > 0,
+        _ => false, // 64 and larger: no filtering
+    };
+
+    if !filter_flag {
+        return;
+    }
+
+    // Check for strong intra smoothing (bilinear interpolation)
+    let bi_int_flag = strong_intra_smoothing_enabled
+        && c_idx == 0
+        && size == 32
+        && {
+            // Smoothness check: boundary samples should be approximately linear
+            let threshold = 1i32 << (bit_depth as i32 - 5);
+            let p0 = border[center]; // top-left corner
+            let p_top_end = border[center + 2 * n as usize]; // top-right corner (p[+64])
+            let p_top_mid = border[center + n as usize]; // top midpoint (p[+32])
+            let p_left_end = border[center - 2 * n as usize]; // bottom-left corner (p[-64])
+            let p_left_mid = border[center - n as usize]; // left midpoint (p[-32])
+
+            (p0 + p_top_end - 2 * p_top_mid).abs() < threshold
+                && (p0 + p_left_end - 2 * p_left_mid).abs() < threshold
+        };
+
+    // Allocate temporary filtered array
+    let total = 4 * size as usize + 1;
+    let f_center = 2 * size as usize;
+    let mut filtered = vec![0i32; total];
+
+    if bi_int_flag {
+        // Strong intra smoothing: bilinear interpolation from corners
+        // Only for size==32, so 2*nT = 64, shift = 6, rounding = 32
+        let p0 = border[center];
+        let p_top_end = border[center + 2 * n as usize];
+        let p_left_end = border[center - 2 * n as usize];
+        let two_n = 2 * n; // = 64 for size=32
+
+        filtered[f_center] = p0; // top-left corner preserved
+        filtered[0] = p_left_end; // bottom-left preserved
+        filtered[total - 1] = p_top_end; // top-right preserved
+
+        // libde265: pF[-i] = p[0] + ((i*(p[-64]-p[0])+32)>>6)
+        //           pF[+i] = p[0] + ((i*(p[+64]-p[0])+32)>>6)
+        for i in 1..(two_n as usize) {
+            // Left side: interpolate from p0 to p_left_end
+            filtered[f_center - i] = p0 + ((i as i32 * (p_left_end - p0) + (two_n / 2)) >> 6);
+            // Top side: interpolate from p0 to p_top_end
+            filtered[f_center + i] = p0 + ((i as i32 * (p_top_end - p0) + (two_n / 2)) >> 6);
+        }
+    } else {
+        // Regular 3-tap filter: f[i] = (p[i-1] + 2*p[i] + p[i+1] + 2) >> 2
+        // Preserve endpoints
+        filtered[0] = border[center - 2 * n as usize]; // bottom-left endpoint
+        filtered[total - 1] = border[center + 2 * n as usize]; // top-right endpoint
+
+        // Filter all interior samples
+        for i in 1..=(total - 2) {
+            let border_idx = (center as i32 - 2 * n as i32 + i as i32) as usize;
+            filtered[i] = (border[border_idx - 1] + 2 * border[border_idx] + border[border_idx + 1] + 2) >> 2;
+        }
+    }
+
+    // Copy filtered samples back to border
+    for i in 0..total {
+        let border_idx = center - 2 * n as usize + i;
+        border[border_idx] = filtered[i];
+    }
+}
+
 /// Perform intra prediction for a block
 pub fn predict_intra(
     frame: &mut DecodedFrame,
@@ -52,6 +156,7 @@ pub fn predict_intra(
     mode: IntraPredMode,
     c_idx: u8, // 0=Y, 1=Cb, 2=Cr
     reco_map: &ReconstructionMap,
+    strong_intra_smoothing_enabled: bool,
 ) {
     let size = 1u32 << log2_size;
 
@@ -60,6 +165,17 @@ pub fn predict_intra(
     let border_center = 2 * MAX_INTRA_PRED_BLOCK_SIZE;
 
     fill_border_samples(frame, x, y, size, c_idx, &mut border, border_center, reco_map);
+
+    // Apply reference sample filtering (H.265 8.4.4.2.3) BEFORE prediction
+    filter_reference_samples(
+        &mut border,
+        border_center,
+        size,
+        mode,
+        c_idx,
+        strong_intra_smoothing_enabled,
+        frame.bit_depth as u8,
+    );
 
     // DEBUG: Trace Cb prediction at error position (32,16)
     if c_idx == 1 && x == 32 && y == 16 {
@@ -83,20 +199,6 @@ pub fn predict_intra(
         let top_neighbor = if y > 0 { frame.get_cb(x, y - 1) } else { 0 };
         eprintln!("  frame_before_pred: Cb(32,16)={} left_neighbor={} top_neighbor={}", 
             frame_val, left_neighbor, top_neighbor);
-    }
-
-    // Apply prediction based on mode
-    match mode {
-        IntraPredMode::Planar => {
-            predict_planar(frame, x, y, size, c_idx, &border, border_center);
-        }
-        IntraPredMode::Dc => {
-            predict_dc(frame, x, y, size, c_idx, &border, border_center);
-        }
-        _ => {
-            let mode_val = mode.as_u8();
-            predict_angular(frame, x, y, size, c_idx, mode_val, &border, border_center);
-        }
     }
 
     // DEBUG: Track order and print border samples for chroma blocks near the problem area

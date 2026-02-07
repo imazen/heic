@@ -150,6 +150,18 @@ pub struct SliceContext<'a> {
     sao_params: Vec<SaoParams>,
     /// Number of CTBs per row for SAO indexing
     ctbs_per_row: u32,
+    /// Per-position QP_Y map for QP prediction (indexed by min_tb_size grid)
+    qp_y_map: Vec<i32>,
+    /// Stride for QP map (in min_tb_size units)
+    qp_y_map_stride: u32,
+    /// QP from the previous quantization group (for fallback in QP prediction)
+    last_qpy_in_previous_qg: i32,
+    /// Current quantization group X position (top-left pixel)
+    current_qg_x: i32,
+    /// Current quantization group Y position (top-left pixel)
+    current_qg_y: i32,
+    /// Current CTB address in tile scan (for same-CTB neighbor check)
+    ctb_addr_in_ts: u32,
 }
 
 impl<'a> SliceContext<'a> {
@@ -237,6 +249,12 @@ impl<'a> SliceContext<'a> {
         let ctbs_per_col = sps.pic_height_in_luma_samples.div_ceil(ctb_size);
         let sao_params = vec![SaoParams::default(); (ctbs_per_row * ctbs_per_col) as usize];
 
+        // Initialize QP map (at min_tb_size granularity)
+        let min_tb_size = 1u32 << sps.log2_min_tb_size();
+        let qp_y_map_stride = sps.pic_width_in_luma_samples.div_ceil(min_tb_size);
+        let qp_y_map_height = sps.pic_height_in_luma_samples.div_ceil(min_tb_size);
+        let qp_y_map = vec![slice_qp; (qp_y_map_stride * qp_y_map_height) as usize];
+
         Ok(Self {
             sps,
             pps,
@@ -266,6 +284,12 @@ impl<'a> SliceContext<'a> {
             ),
             sao_params,
             ctbs_per_row,
+            qp_y_map,
+            qp_y_map_stride,
+            last_qpy_in_previous_qg: slice_qp,
+            current_qg_x: -1,
+            current_qg_y: -1,
+            ctb_addr_in_ts: 0,
         })
     }
 
@@ -317,6 +341,105 @@ impl<'a> SliceContext<'a> {
         } else {
             IntraPredMode::Planar
         }
+    }
+
+    /// Store QP_Y for a CU covering size×size pixels (at min_tb_size granularity)
+    fn set_qpy(&mut self, x: u32, y: u32, size: u32, qp_y: i32) {
+        let min_tb_size = 1u32 << self.sps.log2_min_tb_size();
+        let blocks = (size / min_tb_size).max(1);
+        let bx = x / min_tb_size;
+        let by = y / min_tb_size;
+        for dy in 0..blocks {
+            for dx in 0..blocks {
+                let idx = ((by + dy) * self.qp_y_map_stride + bx + dx) as usize;
+                if idx < self.qp_y_map.len() {
+                    self.qp_y_map[idx] = qp_y;
+                }
+            }
+        }
+    }
+
+    /// Get QP_Y at a specific pixel position (from the QP map)
+    fn get_qpy(&self, x: u32, y: u32) -> i32 {
+        let min_tb_size = 1u32 << self.sps.log2_min_tb_size();
+        let idx = ((y / min_tb_size) * self.qp_y_map_stride + x / min_tb_size) as usize;
+        if idx < self.qp_y_map.len() {
+            self.qp_y_map[idx]
+        } else {
+            self.header.slice_qp_y
+        }
+    }
+
+    /// Derive QP_Y prediction per H.265 section 8.6.1
+    /// Uses left and above neighbor QPs, averaged, with fallback to previous QG's QP
+    fn derive_qp_y_pred(&mut self, x_cu_base: u32, y_cu_base: u32) -> i32 {
+        let log2_min_cu_qp_delta_size = self.sps.log2_ctb_size() - self.pps.diff_cu_qp_delta_depth;
+        let qg_size_mask = (1u32 << log2_min_cu_qp_delta_size) - 1;
+
+        // Top-left pixel position of current quantization group
+        let x_qg = x_cu_base & !qg_size_mask;
+        let y_qg = y_cu_base & !qg_size_mask;
+
+        // Track QG transitions: save previous QP when entering a new QG
+        if x_qg as i32 != self.current_qg_x || y_qg as i32 != self.current_qg_y {
+            self.last_qpy_in_previous_qg = self.qp_y;
+            self.current_qg_x = x_qg as i32;
+            self.current_qg_y = y_qg as i32;
+        }
+
+        // Determine if this is the first QG in a CTB row / slice / tile
+        let ctb_size = self.sps.ctb_size();
+        let ctb_lsb_mask = ctb_size - 1;
+        let first_in_ctb_row = x_qg == 0 && (y_qg & ctb_lsb_mask) == 0;
+
+        // For simplicity, check first QG in slice
+        let first_in_slice = x_qg == 0 && y_qg == 0; // Only correct for single-slice; TODO: handle multi-slice
+
+        let qp_y_prev = if first_in_slice || (first_in_ctb_row && self.pps.entropy_coding_sync_enabled_flag) {
+            self.header.slice_qp_y
+        } else {
+            self.last_qpy_in_previous_qg
+        };
+
+        // Derive qPY_A (left neighbor of current QG)
+        // Per libde265: check available_zscan first, then verify same CTB via MinTbAddrZS
+        // If neighbor is in a different CTB, fall back to qP_Y_PREV
+        let qpy_a = if x_qg > 0 {
+            let left_ctb_x = (x_qg - 1) / ctb_size;
+            let cur_ctb_x = x_qg / ctb_size;
+            let left_ctb_y = y_qg / ctb_size;
+            let cur_ctb_y = y_qg / ctb_size;
+            if left_ctb_x == cur_ctb_x && left_ctb_y == cur_ctb_y {
+                self.get_qpy(x_qg - 1, y_qg)
+            } else {
+                qp_y_prev
+            }
+        } else {
+            qp_y_prev
+        };
+
+        // Derive qPY_B (above neighbor of current QG)
+        let qpy_b = if y_qg > 0 {
+            let above_ctb_x = x_qg / ctb_size;
+            let cur_ctb_x = x_qg / ctb_size;
+            let above_ctb_y = (y_qg - 1) / ctb_size;
+            let cur_ctb_y = y_qg / ctb_size;
+            if above_ctb_x == cur_ctb_x && above_ctb_y == cur_ctb_y {
+                self.get_qpy(x_qg, y_qg - 1)
+            } else {
+                qp_y_prev
+            }
+        } else {
+            qp_y_prev
+        };
+
+        // Average left and above
+        let qp_y_pred = (qpy_a + qpy_b + 1) >> 1;
+
+        eprintln!("QP_PRED: QG({},{}) qpy_a={} qpy_b={} prev={} pred={}",
+            x_qg, y_qg, qpy_a, qpy_b, qp_y_prev, qp_y_pred);
+
+        qp_y_pred
     }
 
     /// Decode all CTUs in the slice
@@ -373,6 +496,9 @@ impl<'a> SliceContext<'a> {
             }
             // Enable verbose debug for first CTU to trace cbf_luma etc
             self.debug_ctu = ctu_count == 0;
+
+            // Set CTB address for same-CTB neighbor check in QP prediction
+            self.ctb_addr_in_ts = ctu_count;
 
             self.decode_ctu(x_ctb, y_ctb, frame)?;
             ctu_count += 1;
@@ -1212,6 +1338,30 @@ impl<'a> SliceContext<'a> {
             }
         }
 
+        // Per H.265 8.6.1 / libde265 decode_quantization_parameters:
+        // Always derive and store QPY for every CU, not just those with coded cu_qp_delta.
+        // This ensures the QP map is correct for future neighbor lookups.
+        // For CUs without coded delta, QPY = qPY_PRED + 0 = qPY_PRED.
+        if self.pps.cu_qp_delta_enabled_flag {
+            let qp_y_pred = self.derive_qp_y_pred(x0, y0);
+            let qp_bd_offset_y = 6 * (self.sps.bit_depth_y() as i32 - 8);
+            self.qp_y = ((qp_y_pred + self.cu_qp_delta + 52 + 2 * qp_bd_offset_y)
+                % (52 + qp_bd_offset_y))
+                - qp_bd_offset_y;
+
+            // Update chroma QP
+            let qp_i_cb = self.qp_y + self.pps.pps_cb_qp_offset as i32
+                + self.header.slice_cb_qp_offset as i32;
+            let qp_i_cr = self.qp_y + self.pps.pps_cr_qp_offset as i32
+                + self.header.slice_cr_qp_offset as i32;
+            self.qp_cb = chroma_qp_mapping(qp_i_cb.clamp(0, 57));
+            self.qp_cr = chroma_qp_mapping(qp_i_cr.clamp(0, 57));
+
+            // Store QPY in the map for the CU's area
+            let cb_size_cu = 1u32 << log2_cb_size;
+            self.set_qpy(x0, y0, cb_size_cu, self.qp_y);
+        }
+
         Ok(())
     }
 
@@ -1425,8 +1575,8 @@ impl<'a> SliceContext<'a> {
 
                 // Apply chroma prediction for the deferred chroma TU before adding residuals
                 let chroma_mode = self.get_intra_pred_mode_c(x0, y0);
-                intra::predict_intra(frame, x0 / 2, y0 / 2, 2, chroma_mode, 1, &self.reco_map);
-                intra::predict_intra(frame, x0 / 2, y0 / 2, 2, chroma_mode, 2, &self.reco_map);
+                intra::predict_intra(frame, x0 / 2, y0 / 2, 2, chroma_mode, 1, &self.reco_map, self.sps.strong_intra_smoothing_enabled_flag);
+                intra::predict_intra(frame, x0 / 2, y0 / 2, 2, chroma_mode, 2, &self.reco_map, self.sps.strong_intra_smoothing_enabled_flag);
 
                 // Use stored chroma intra mode for chroma scan order
                 let scan_order_cb = residual::get_scan_order(2, chroma_mode.as_u8(), 1);
@@ -1477,7 +1627,7 @@ impl<'a> SliceContext<'a> {
         // Apply intra prediction for this TU's luma block BEFORE decoding residuals
         // This ensures prediction uses the latest reconstructed frame state
         let actual_luma_mode = self.get_intra_pred_mode(x0, y0);
-        intra::predict_intra(frame, x0, y0, log2_size, actual_luma_mode, 0, &self.reco_map);
+        intra::predict_intra(frame, x0, y0, log2_size, actual_luma_mode, 0, &self.reco_map, self.sps.strong_intra_smoothing_enabled_flag);
 
         // Apply chroma prediction if this TU handles chroma (log2_size >= 3)
         if log2_size >= 3 {
@@ -1485,8 +1635,8 @@ impl<'a> SliceContext<'a> {
             let chroma_x = x0 / 2;
             let chroma_y = y0 / 2;
             let chroma_log2_size = log2_size - 1;
-            intra::predict_intra(frame, chroma_x, chroma_y, chroma_log2_size, chroma_mode, 1, &self.reco_map);
-            intra::predict_intra(frame, chroma_x, chroma_y, chroma_log2_size, chroma_mode, 2, &self.reco_map);
+            intra::predict_intra(frame, chroma_x, chroma_y, chroma_log2_size, chroma_mode, 1, &self.reco_map, self.sps.strong_intra_smoothing_enabled_flag);
+            intra::predict_intra(frame, chroma_x, chroma_y, chroma_log2_size, chroma_mode, 2, &self.reco_map, self.sps.strong_intra_smoothing_enabled_flag);
         }
 
         // Decode cbf_luma - Per H.265 spec 7.3.8.8:
@@ -1572,12 +1722,25 @@ impl<'a> SliceContext<'a> {
                 }
                 self.is_cu_qp_delta_coded = true;
 
+                // Derive QP predictor per H.265 section 8.6.1
+                // This uses left/above neighbor averaging instead of simple carry-forward
+                let qp_y_pred = self.derive_qp_y_pred(x0, y0);
+
                 // Apply QP delta per H.265 section 8.6.1
                 // QP_Y = ((qP_Y_PRED + CuQpDeltaVal + 52 + 2*QpBdOffsetY) % (52 + QpBdOffsetY)) - QpBdOffsetY
                 let qp_bd_offset_y = 6 * (self.sps.bit_depth_y() as i32 - 8);
-                self.qp_y = ((self.qp_y + self.cu_qp_delta + 52 + 2 * qp_bd_offset_y)
+                self.qp_y = ((qp_y_pred + self.cu_qp_delta + 52 + 2 * qp_bd_offset_y)
                     % (52 + qp_bd_offset_y))
                     - qp_bd_offset_y;
+
+                // Store QP in the map for future neighbor lookups
+                // Store over the full quantization group area, not just the TU
+                let log2_min_cu_qp_delta_size = self.sps.log2_ctb_size() - self.pps.diff_cu_qp_delta_depth;
+                let qg_size = 1u32 << log2_min_cu_qp_delta_size;
+                let qg_mask = qg_size - 1;
+                let qg_x = x0 & !qg_mask;
+                let qg_y = y0 & !qg_mask;
+                self.set_qpy(qg_x, qg_y, qg_size, self.qp_y);
 
                 // Update chroma QP values
                 let qp_i_cb = self.qp_y + self.pps.pps_cb_qp_offset as i32
