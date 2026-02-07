@@ -5,14 +5,10 @@
 //! of HEVC tiles (e.g., 8160×6120 split into 192 tiles of 512×512).
 //! This module decodes each tile and stitches them into a full image.
 
-use alloc::vec;
-use alloc::vec::Vec;
-
 use crate::error::HeicError;
 use crate::heif::{HeifContainer, ImageGrid, ItemType};
-
-use super::picture::DecodedFrame;
-use super::{decode_with_config, decode};
+use crate::hevc::DecodedFrame;
+use crate::hevc::{decode_with_config, decode};
 
 /// Decode a grid image from a HEIF container
 ///

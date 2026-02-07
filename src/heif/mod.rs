@@ -5,6 +5,7 @@
 //! describe the file structure and contain image data.
 
 mod boxes;
+pub mod grid;
 mod parser;
 
 pub use boxes::{HevcDecoderConfig, ItemProperty};

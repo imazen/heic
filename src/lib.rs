@@ -87,7 +87,7 @@ impl HeicDecoder {
                 .or_else(|| container.get_item_data_owned(primary_item.id))
                 .ok_or(HeicError::InvalidData("Missing grid item data"))?;
             let grid_config = heif::parse_grid_config(&grid_bytes)?;
-            hevc::grid::decode_grid(&container, primary_item.id, &grid_config)?
+            heif::grid::decode_grid(&container, primary_item.id, &grid_config)?
         } else {
             // Single image
             let image_data = container
@@ -125,7 +125,7 @@ impl HeicDecoder {
                 .or_else(|| container.get_item_data_owned(primary_item.id))
                 .ok_or(HeicError::InvalidData("Missing grid item data"))?;
             let grid_config = heif::parse_grid_config(&grid_bytes)?;
-            Ok(hevc::grid::decode_grid(&container, primary_item.id, &grid_config)?)
+            Ok(heif::grid::decode_grid(&container, primary_item.id, &grid_config)?)
         } else {
             let image_data = container
                 .get_item_data(primary_item.id)
