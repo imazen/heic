@@ -35,6 +35,16 @@ fn main() {
             println!("Bit depth: {}, Chroma format: {}", frame.bit_depth, frame.chroma_format);
             println!("Crop: left={} right={} top={} bottom={}", frame.crop_left, frame.crop_right, frame.crop_top, frame.crop_bottom);
 
+            // Print color space info
+            println!("\nColor Space:");
+            println!("  Primaries: {:?}", frame.colorspace.primaries);
+            println!("  Transfer: {:?}", frame.colorspace.transfer);
+            println!("  Matrix: {:?}", frame.colorspace.matrix);
+            println!("  Full Range: {}", frame.colorspace.full_range);
+            if frame.colorspace.transfer.is_hdr() {
+                println!("  ⚠️  HDR detected! Output will be tone-mapped to SDR.");
+            }
+
             // Write RGB PPM
             let rgb = frame.to_rgb();
             let ppm_path = format!("{}.ppm", base_name);

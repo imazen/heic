@@ -1,19 +1,15 @@
 //! HEIC grid image decoder
-//!
-//! Implements ISO/IEC 23008-12 grid-based image composition.
-//! Smartphone cameras (Android/iPhone) commonly encode photos as grids
-//! of HEVC tiles (e.g., 8160×6120 split into 192 tiles of 512×512).
-//! This module decodes each tile and stitches them into a full image.
+
+
 
 use crate::error::HeicError;
 use crate::heif::{HeifContainer, ImageGrid, ItemType};
 use crate::hevc::DecodedFrame;
 use crate::hevc::{decode_with_config, decode};
 
-/// Decode a grid image from a HEIF container
-///
-/// Parses the grid configuration, decodes each HEVC tile, and stitches
-/// them into a single output frame at the grid's output dimensions.
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 pub fn decode_grid<'a>(
     container: &HeifContainer<'a>,
     grid_item_id: u32,
@@ -31,33 +27,59 @@ pub fn decode_grid<'a>(
         ));
     }
 
-    // Decode the first tile to determine tile dimensions and bit depth
-    let first_tile = decode_tile(container, tile_ids[0])?;
-    let tile_width = first_tile.cropped_width();
-    let tile_height = first_tile.cropped_height();
-    let bit_depth = first_tile.bit_depth;
-    let chroma_format = first_tile.chroma_format;
+    #[cfg(feature = "parallel")]
+    let tiles = decode_tiles_parallel(container, &tile_ids)?;
+
+    #[cfg(not(feature = "parallel"))]
+    let tiles = decode_tiles_sequential(container, &tile_ids)?;
+    let tile_width = tiles[0].cropped_width();
+    let tile_height = tiles[0].cropped_height();
+    let bit_depth = tiles[0].bit_depth;
+    let chroma_format = tiles[0].chroma_format;
 
     // Create output frame at the grid's output dimensions
     let out_width = grid_config.output_width;
     let out_height = grid_config.output_height;
     let mut output = DecodedFrame::with_params(out_width, out_height, bit_depth, chroma_format);
 
-    // Stitch first tile
-    stitch_tile(&first_tile, &mut output, 0, 0, tile_width, tile_height);
-
-    // Decode and stitch remaining tiles
-    for (idx, &tile_id) in tile_ids.iter().enumerate().skip(1) {
+    for (idx, tile) in tiles.iter().enumerate() {
         let row = idx as u32 / grid_config.columns;
         let col = idx as u32 % grid_config.columns;
         let dst_x = col * tile_width;
         let dst_y = row * tile_height;
 
-        let tile = decode_tile(container, tile_id)?;
-        stitch_tile(&tile, &mut output, dst_x, dst_y, tile_width, tile_height);
+        stitch_tile(tile, &mut output, dst_x, dst_y, tile_width, tile_height);
     }
 
     Ok(output)
+}
+
+fn decode_tiles_sequential(
+    container: &HeifContainer<'_>,
+    tile_ids: &[u32],
+) -> Result<Vec<DecodedFrame>, HeicError> {
+    tile_ids
+        .iter()
+        .map(|&tile_id| decode_tile(container, tile_id))
+        .collect()
+}
+
+#[cfg(feature = "parallel")]
+fn decode_tiles_parallel(
+    container: &HeifContainer<'_>,
+    tile_ids: &[u32],
+) -> Result<Vec<DecodedFrame>, HeicError> {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(8.min(rayon::current_num_threads()))
+        .build()
+        .map_err(|_| HeicError::InvalidData("Failed to create thread pool"))?;
+
+    pool.install(|| {
+        tile_ids
+            .par_iter()
+            .map(|&tile_id| decode_tile(container, tile_id))
+            .collect()
+    })
 }
 
 /// Decode a single tile item

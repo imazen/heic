@@ -10,15 +10,15 @@
 
 ### Rust Decoder (This Implementation)
 ```
-Average:    0.388s per decode
-Min:        0.373s
-Max:        0.432s (first iteration cold start)
-Throughput: 2.81 MP/s
+Average:    0.347s per decode
+Min:        0.343s
+Max:        0.348s (first iteration cold start)
+Throughput: 3.15 MP/s
 ```
 
 **Warmed up (iterations 2-10):**
-- Average: ~0.380s
-- Consistent performance: 0.373-0.392s
+- Average: ~0.347s
+- Consistent performance: 0.343-0.348s
 
 ### FFmpeg (with libde265 backend)
 ```
@@ -34,8 +34,8 @@ Max:        2.605s (first iteration cold start)
 ## Analysis
 
 ### Performance Comparison
-- **Rust vs FFmpeg (warm)**: Rust is ~1.75x slower (0.380s vs 0.217s)
-- **Gap**: ~163ms per decode
+- **Rust vs FFmpeg (warm)**: Rust is ~1.60x slower (0.347s vs 0.217s)
+- **Gap**: ~130ms per decode
 
 ### Interpretation
 ✅ **Very competitive!** Being within 2x of FFmpeg (which has 10+ years of optimization) is excellent for a recently completed pure Rust implementation.
@@ -51,6 +51,9 @@ Max:        2.605s (first iteration cold start)
 ### Current Rust Optimizations
 ✅ IDCT 32x32 (AVX2) - **Pixel-perfect**
 ✅ IDCT 16x16 (AVX2) - **Pixel-perfect**
+✅ IDCT 8x8 (AVX2) - **Pixel-perfect** (NEW)
+✅ IDCT 4x4 (SSE2) - **Pixel-perfect** (NEW)
+✅ IDST 4x4 (SSE2) - **Pixel-perfect** (NEW)
 ✅ Inlining for hot-path helpers
 ✅ Efficient memory layout
 ✅ Zero-copy where possible

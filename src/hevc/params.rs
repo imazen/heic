@@ -92,6 +92,8 @@ pub struct Sps {
     pub strong_intra_smoothing_enabled_flag: bool,
     /// VUI parameters present flag
     pub vui_parameters_present_flag: bool,
+    /// VUI parameters (if present)
+    pub vui_parameters: Option<VuiParameters>,
 }
 
 impl Sps {
@@ -163,6 +165,59 @@ pub struct PcmParams {
     pub log2_diff_max_min_pcm_luma_coding_block_size: u8,
     /// PCM loop filter disabled flag
     pub pcm_loop_filter_disabled_flag: bool,
+}
+
+/// VUI (Video Usability Information) parameters
+/// Contains color space and display metadata
+/// ITU-T H.265 Annex E.2
+#[derive(Debug, Clone)]
+pub struct VuiParameters {
+    /// Aspect ratio info present flag
+    pub aspect_ratio_info_present_flag: bool,
+    /// Aspect ratio IDC
+    pub aspect_ratio_idc: u8,
+    /// SAR width (if aspect_ratio_idc == 255 Extended_SAR)
+    pub sar_width: u16,
+    /// SAR height (if aspect_ratio_idc == 255 Extended_SAR)
+    pub sar_height: u16,
+    /// Overscan info present flag
+    pub overscan_info_present_flag: bool,
+    /// Overscan appropriate flag
+    pub overscan_appropriate_flag: bool,
+    /// Video signal type present flag
+    pub video_signal_type_present_flag: bool,
+    /// Video format (0=component, 1=PAL, 2=NTSC, 3=SECAM, 4=MAC, 5=unspecified)
+    pub video_format: u8,
+    /// Video full range flag (true=0-255, false=16-235 for 8-bit)
+    pub video_full_range_flag: bool,
+    /// Colour description present flag
+    pub colour_description_present_flag: bool,
+    /// Colour primaries (ITU-T H.265 Table E.3)
+    pub colour_primaries: u8,
+    /// Transfer characteristics (ITU-T H.265 Table E.4)
+    pub transfer_characteristics: u8,
+    /// Matrix coefficients (ITU-T H.265 Table E.5)
+    pub matrix_coefficients: u8,
+}
+
+impl Default for VuiParameters {
+    fn default() -> Self {
+        Self {
+            aspect_ratio_info_present_flag: false,
+            aspect_ratio_idc: 0,
+            sar_width: 0,
+            sar_height: 0,
+            overscan_info_present_flag: false,
+            overscan_appropriate_flag: false,
+            video_signal_type_present_flag: false,
+            video_format: 5, // Unspecified
+            video_full_range_flag: false,
+            colour_description_present_flag: false,
+            colour_primaries: 2, // Unspecified
+            transfer_characteristics: 2, // Unspecified
+            matrix_coefficients: 2, // Unspecified
+        }
+    }
 }
 
 /// Picture Parameter Set
@@ -417,7 +472,11 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
     let strong_intra_smoothing_enabled_flag = reader.read_bit()? != 0;
 
     let vui_parameters_present_flag = reader.read_bit()? != 0;
-    // Skip VUI parameters (optional)
+    let vui_parameters = if vui_parameters_present_flag {
+        Some(parse_vui_parameters(&mut reader)?)
+    } else {
+        None
+    };
 
     Ok(Sps {
         sps_id,
@@ -451,6 +510,7 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
         sps_temporal_mvp_enabled_flag,
         strong_intra_smoothing_enabled_flag,
         vui_parameters_present_flag,
+        vui_parameters,
     })
 }
 
@@ -697,6 +757,141 @@ fn skip_short_term_ref_pic_set(
             let _used_by_curr_pic_s1_flag = reader.read_bit()?;
         }
     }
+
+    Ok(())
+}
+
+/// Parse VUI (Video Usability Information) parameters
+/// ITU-T H.265 Annex E.2.1
+///
+/// We focus on color space parameters for still images.
+/// Video-specific parameters (timing, HRD) are skipped.
+fn parse_vui_parameters(reader: &mut BitstreamReader<'_>) -> Result<VuiParameters> {
+    let mut vui = VuiParameters::default();
+
+    // Aspect ratio info
+    vui.aspect_ratio_info_present_flag = reader.read_bit()? != 0;
+    if vui.aspect_ratio_info_present_flag {
+        vui.aspect_ratio_idc = reader.read_bits(8)? as u8;
+        const EXTENDED_SAR: u8 = 255;
+        if vui.aspect_ratio_idc == EXTENDED_SAR {
+            vui.sar_width = reader.read_bits(16)? as u16;
+            vui.sar_height = reader.read_bits(16)? as u16;
+        }
+    }
+
+    // Overscan info
+    vui.overscan_info_present_flag = reader.read_bit()? != 0;
+    if vui.overscan_info_present_flag {
+        vui.overscan_appropriate_flag = reader.read_bit()? != 0;
+    }
+
+    // Video signal type (contains color space info)
+    vui.video_signal_type_present_flag = reader.read_bit()? != 0;
+    if vui.video_signal_type_present_flag {
+        vui.video_format = reader.read_bits(3)? as u8;
+        vui.video_full_range_flag = reader.read_bit()? != 0;
+
+        vui.colour_description_present_flag = reader.read_bit()? != 0;
+        if vui.colour_description_present_flag {
+            vui.colour_primaries = reader.read_bits(8)? as u8;
+            vui.transfer_characteristics = reader.read_bits(8)? as u8;
+            vui.matrix_coefficients = reader.read_bits(8)? as u8;
+        }
+    }
+
+    // Chroma loc info (not needed for color space conversion)
+    let chroma_loc_info_present_flag = reader.read_bit()? != 0;
+    if chroma_loc_info_present_flag {
+        let _chroma_sample_loc_type_top_field = reader.read_ue()?;
+        let _chroma_sample_loc_type_bottom_field = reader.read_ue()?;
+    }
+
+    // Neutral chroma indication flag
+    let _neutral_chroma_indication_flag = reader.read_bit()?;
+
+    // Field seq flag
+    let _field_seq_flag = reader.read_bit()?;
+
+    // Frame field info present flag
+    let _frame_field_info_present_flag = reader.read_bit()?;
+
+    // Default display window (not needed for still images)
+    let default_display_window_flag = reader.read_bit()? != 0;
+    if default_display_window_flag {
+        let _def_disp_win_left_offset = reader.read_ue()?;
+        let _def_disp_win_right_offset = reader.read_ue()?;
+        let _def_disp_win_top_offset = reader.read_ue()?;
+        let _def_disp_win_bottom_offset = reader.read_ue()?;
+    }
+
+    // Timing info (skip for still images - we don't need frame rate)
+    let vui_timing_info_present_flag = reader.read_bit()? != 0;
+    if vui_timing_info_present_flag {
+        let _vui_num_units_in_tick = reader.read_bits(32)?;
+        let _vui_time_scale = reader.read_bits(32)?;
+
+        let vui_poc_proportional_to_timing_flag = reader.read_bit()? != 0;
+        if vui_poc_proportional_to_timing_flag {
+            let _vui_num_ticks_poc_diff_one_minus1 = reader.read_ue()?;
+        }
+
+        // HRD parameters (skip - not needed for still images)
+        let vui_hrd_parameters_present_flag = reader.read_bit()? != 0;
+        if vui_hrd_parameters_present_flag {
+            skip_hrd_parameters(reader)?;
+        }
+    }
+
+    // Bitstream restriction (skip - not needed for still images)
+    let bitstream_restriction_flag = reader.read_bit()? != 0;
+    if bitstream_restriction_flag {
+        let _tiles_fixed_structure_flag = reader.read_bit()?;
+        let _motion_vectors_over_pic_boundaries_flag = reader.read_bit()?;
+        let _restricted_ref_pic_lists_flag = reader.read_bit()?;
+        let _min_spatial_segmentation_idc = reader.read_ue()?;
+        let _max_bytes_per_pic_denom = reader.read_ue()?;
+        let _max_bits_per_min_cu_denom = reader.read_ue()?;
+        let _log2_max_mv_length_horizontal = reader.read_ue()?;
+        let _log2_max_mv_length_vertical = reader.read_ue()?;
+    }
+
+    Ok(vui)
+}
+
+/// Skip HRD (Hypothetical Reference Decoder) parameters
+/// Not needed for still images
+fn skip_hrd_parameters(reader: &mut BitstreamReader<'_>) -> Result<()> {
+    let nal_hrd_parameters_present_flag = reader.read_bit()? != 0;
+    let vcl_hrd_parameters_present_flag = reader.read_bit()? != 0;
+
+    let sub_pic_hrd_params_present_flag = if nal_hrd_parameters_present_flag
+        || vcl_hrd_parameters_present_flag
+    {
+        let flag = reader.read_bit()? != 0;
+        if flag {
+            let _tick_divisor_minus2 = reader.read_bits(8)?;
+            let _du_cpb_removal_delay_increment_length_minus1 = reader.read_bits(5)?;
+            let _sub_pic_cpb_params_in_pic_timing_sei_flag = reader.read_bit()?;
+            let _dpb_output_delay_du_length_minus1 = reader.read_bits(5)?;
+        }
+        flag
+    } else {
+        false
+    };
+
+    let _bit_rate_scale = reader.read_bits(4)?;
+    let _cpb_size_scale = reader.read_bits(4)?;
+    if sub_pic_hrd_params_present_flag {
+        let _cpb_size_du_scale = reader.read_bits(4)?;
+    }
+
+    let _initial_cpb_removal_delay_length_minus1 = reader.read_bits(5)?;
+    let _au_cpb_removal_delay_length_minus1 = reader.read_bits(5)?;
+    let _dpb_output_delay_length_minus1 = reader.read_bits(5)?;
+
+    // Skip sublayer HRD parameters (complex, not needed)
+    // This is a simplified skip - full parsing would require tracking sublayers
 
     Ok(())
 }

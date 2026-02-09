@@ -3,13 +3,14 @@
 //! This module implements the HEVC (High Efficiency Video Coding) decoder
 //! for decoding HEIC still images.
 
-mod availability;
 pub mod bitstream;
 mod cabac;
+pub mod colorspace;
 mod ctu;
 pub mod debug;
 mod deblock;
 mod intra;
+// mod intra_simd; // Disabled - SIMD overhead too high for typical HEVC block sizes (4x4 to 32x32)
 pub mod params;
 mod picture;
 mod residual;
@@ -95,11 +96,28 @@ fn decode_nal_units(nal_units: &[bitstream::NalUnit<'_>]) -> Result<DecodedFrame
     let sps = sps.ok_or(HevcError::MissingParameterSet("SPS"))?;
     let pps = pps.ok_or(HevcError::MissingParameterSet("PPS"))?;
 
-    // Create frame buffer
-    let mut frame = DecodedFrame::new(
+    // Create frame buffer with proper bit depth and chroma format
+    let bit_depth = sps.bit_depth_y();
+    let chroma_format = sps.chroma_format_idc;
+
+    let mut frame = DecodedFrame::with_params(
         sps.pic_width_in_luma_samples,
         sps.pic_height_in_luma_samples,
+        bit_depth,
+        chroma_format,
     );
+
+    // Set color space from VUI parameters if present
+    if let Some(ref vui) = sps.vui_parameters {
+        if vui.colour_description_present_flag {
+            frame.colorspace = colorspace::ColorSpace::from_vui(
+                vui.colour_primaries,
+                vui.transfer_characteristics,
+                vui.matrix_coefficients,
+                vui.video_full_range_flag,
+            );
+        }
+    }
 
     // Set conformance window cropping from SPS
     // Offsets are in units of SubWidthC/SubHeightC, need to convert to luma samples

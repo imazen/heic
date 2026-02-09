@@ -1,15 +1,81 @@
 //! Intra prediction for HEVC
-//!
-//! Implements the 35 intra prediction modes:
-//! - Mode 0: Planar (smooth bilinear interpolation)
-//! - Mode 1: DC (average of reference samples)
-//! - Modes 2-34: Angular (directional prediction)
 
-use super::availability::ReconstructionMap;
 use super::picture::DecodedFrame;
 use super::slice::IntraPredMode;
 
-/// Maximum block size for intra prediction
+/// Tracks which samples in the frame have been reconstructed.
+/// Used for intra prediction reference sample availability (H.265 8.4.4.2.1).
+pub(super) struct ReconstructionMap {
+    luma: Vec<u8>,
+    cb: Vec<u8>,
+    cr: Vec<u8>,
+    width: u32,
+    height: u32,
+    chroma_width: u32,
+    chroma_height: u32,
+}
+
+impl ReconstructionMap {
+    pub(super) fn new(width: u32, height: u32) -> Self {
+        let luma_bits = (width * height) as usize;
+        let luma_bytes = luma_bits.div_ceil(8);
+        let cw = width.div_ceil(2);
+        let ch = height.div_ceil(2);
+        let chroma_bits = (cw * ch) as usize;
+        let chroma_bytes = chroma_bits.div_ceil(8);
+
+        Self {
+            luma: vec![0; luma_bytes],
+            cb: vec![0; chroma_bytes],
+            cr: vec![0; chroma_bytes],
+            width,
+            height,
+            chroma_width: cw,
+            chroma_height: ch,
+        }
+    }
+
+    pub(super) fn mark_reconstructed(&mut self, x: u32, y: u32, size: u32, c_idx: u8) {
+        let (map, w, h) = match c_idx {
+            0 => (&mut self.luma, self.width, self.height),
+            1 => (&mut self.cb, self.chroma_width, self.chroma_height),
+            2 => (&mut self.cr, self.chroma_width, self.chroma_height),
+            _ => return,
+        };
+
+        for dy in 0..size {
+            let py = y + dy;
+            if py >= h {
+                break;
+            }
+            for dx in 0..size {
+                let px = x + dx;
+                if px >= w {
+                    break;
+                }
+                let idx = (py * w + px) as usize;
+                map[idx / 8] |= 1 << (idx % 8);
+            }
+        }
+    }
+
+    fn is_reconstructed(&self, x: u32, y: u32, c_idx: u8) -> bool {
+        let (map, w, h) = match c_idx {
+            0 => (&self.luma, self.width, self.height),
+            1 => (&self.cb, self.chroma_width, self.chroma_height),
+            2 => (&self.cr, self.chroma_width, self.chroma_height),
+            _ => return false,
+        };
+
+        if x >= w || y >= h {
+            return false;
+        }
+
+        let idx = (y * w + x) as usize;
+        (map[idx / 8] >> (idx % 8)) & 1 != 0
+    }
+}
+
 pub const MAX_INTRA_PRED_BLOCK_SIZE: usize = 64;
 
 /// Intra prediction angle table (H.265 Table 8-4)
@@ -130,14 +196,16 @@ fn filter_reference_samples(
         }
     } else {
         // Regular 3-tap filter: f[i] = (p[i-1] + 2*p[i] + p[i+1] + 2) >> 2
-        // Preserve endpoints
-        filtered[0] = border[center - 2 * n as usize]; // bottom-left endpoint
-        filtered[total - 1] = border[center + 2 * n as usize]; // top-right endpoint
+        // Copy border to filtered first
+        for i in 0..total {
+            filtered[i] = border[center - 2 * n as usize + i];
+        }
 
-        // Filter all interior samples
+        // Note: SIMD 3-tap filter disabled - overhead too high for small filter sizes
+
+        // Scalar fallback - filter all interior samples
         for i in 1..=(total - 2) {
-            let border_idx = (center as i32 - 2 * n as i32 + i as i32) as usize;
-            filtered[i] = (border[border_idx - 1] + 2 * border[border_idx] + border[border_idx + 1] + 2) >> 2;
+            filtered[i] = (filtered[i - 1] + 2 * filtered[i] + filtered[i + 1] + 2) >> 2;
         }
     }
 
@@ -360,6 +428,12 @@ fn set_sample(frame: &mut DecodedFrame, x: u32, y: u32, c_idx: u8, value: u16) {
     }
 }
 
+/// Public version of set_sample for SIMD code
+#[inline]
+pub(super) fn set_sample_public(frame: &mut DecodedFrame, x: u32, y: u32, c_idx: u8, value: u16) {
+    set_sample(frame, x, y, c_idx, value);
+}
+
 /// Planar prediction (mode 0) - H.265 8.4.4.2.4
 fn predict_planar(
     frame: &mut DecodedFrame,
@@ -369,6 +443,30 @@ fn predict_planar(
     c_idx: u8,
     border: &[i32],
     center: usize,
+) {
+    // Use scalar version (SIMD version had too much overhead for typical HEVC block sizes)
+    predict_planar_scalar(
+        frame,
+        x,
+        y,
+        size,
+        c_idx,
+        border,
+        center,
+        frame.bit_depth as u8,
+    );
+}
+
+/// Scalar fallback for planar prediction (called from SIMD code)
+pub(super) fn predict_planar_scalar(
+    frame: &mut DecodedFrame,
+    x: u32,
+    y: u32,
+    size: u32,
+    c_idx: u8,
+    border: &[i32],
+    center: usize,
+    bit_depth: u8,
 ) {
     let n = size as i32;
     let log2_size = (size as f32).log2() as u32;
@@ -393,7 +491,7 @@ fn predict_planar(
                 + n)
                 >> (log2_size + 1);
 
-            let value = pred.clamp(0, (1 << frame.bit_depth) - 1) as u16;
+            let value = pred.clamp(0, (1 << bit_depth) - 1) as u16;
             set_sample(frame, x + px, y + py, c_idx, value);
         }
     }

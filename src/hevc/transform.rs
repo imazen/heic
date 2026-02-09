@@ -10,7 +10,7 @@
 pub const MAX_COEFF: usize = 32 * 32;
 
 /// DST-VII basis functions for 4x4 (scaled by 64)
-static DST4_MATRIX: [[i16; 4]; 4] = [
+pub(crate) static DST4_MATRIX: [[i16; 4]; 4] = [
     [29, 55, 74, 84],
     [74, 74, 0, -74],
     [84, -29, -74, 55],
@@ -18,7 +18,7 @@ static DST4_MATRIX: [[i16; 4]; 4] = [
 ];
 
 /// DCT-II basis functions for 4x4 (scaled by 64)
-static DCT4_MATRIX: [[i16; 4]; 4] = [
+pub(crate) static DCT4_MATRIX: [[i16; 4]; 4] = [
     [64, 64, 64, 64],
     [83, 36, -36, -83],
     [64, -64, -64, 64],
@@ -26,7 +26,7 @@ static DCT4_MATRIX: [[i16; 4]; 4] = [
 ];
 
 /// DCT-II basis functions for 8x8 (scaled by 64)
-static DCT8_MATRIX: [[i16; 8]; 8] = [
+pub(crate) static DCT8_MATRIX: [[i16; 8]; 8] = [
     [64, 64, 64, 64, 64, 64, 64, 64],
     [89, 75, 50, 18, -18, -50, -75, -89],
     [83, 36, -36, -83, -83, -36, 36, 83],
@@ -370,9 +370,19 @@ pub struct DequantParams {
     pub log2_tr_size: u8,
 }
 
-/// Dequantize coefficients
 pub fn dequantize(coeffs: &mut [i16], params: DequantParams) {
-    // Scaling factors from H.265 Table 8-8
+    #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+    {
+        if is_x86_feature_detected!("avx2") && coeffs.len() >= 16 {
+            unsafe {
+                return dequantize_avx2(coeffs, params);
+            }
+        }
+    }
+    dequantize_scalar(coeffs, params);
+}
+
+fn dequantize_scalar(coeffs: &mut [i16], params: DequantParams) {
     static LEVEL_SCALE: [i32; 6] = [40, 45, 51, 57, 64, 72];
 
     let qp_per = params.qp / 6;
@@ -396,6 +406,70 @@ pub fn dequantize(coeffs: &mut [i16], params: DequantParams) {
     }
 }
 
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn dequantize_avx2(coeffs: &mut [i16], params: DequantParams) {
+    use std::arch::x86_64::*;
+
+    static LEVEL_SCALE: [i32; 6] = [40, 45, 51, 57, 64, 72];
+
+    let qp_per = params.qp / 6;
+    let qp_rem = params.qp % 6;
+    let scale = LEVEL_SCALE[qp_rem as usize];
+    let multiplier = scale * (1 << qp_per);
+
+    let shift = params.bit_depth as i32 - 9 + params.log2_tr_size as i32;
+
+    if shift >= 0 {
+        let add = 1 << (shift - 1);
+        let v_mult = _mm256_set1_epi32(multiplier);
+        let v_add = _mm256_set1_epi32(add);
+        let v_min = _mm256_set1_epi32(-32768);
+        let v_max = _mm256_set1_epi32(32767);
+
+        let chunks = coeffs.len() / 8;
+        for i in 0..chunks {
+            let offset = i * 8;
+
+            let v_coef_i16 = _mm_loadu_si128(coeffs.as_ptr().add(offset) as *const __m128i);
+            let v_coef = _mm256_cvtepi16_epi32(v_coef_i16);
+
+            let v_scaled = _mm256_mullo_epi32(v_coef, v_mult);
+            let v_added = _mm256_add_epi32(v_scaled, v_add);
+
+            let mut results = [0i32; 8];
+            _mm256_storeu_si256(results.as_mut_ptr() as *mut __m256i, v_added);
+
+            for val in results.iter_mut() {
+                *val >>= shift;
+            }
+
+            let v_shifted = _mm256_loadu_si256(results.as_ptr() as *const __m256i);
+            let v_clamped_lo = _mm256_max_epi32(v_shifted, v_min);
+            let v_clamped = _mm256_min_epi32(v_clamped_lo, v_max);
+
+            // Pack 8x i32 to 8x i16
+            // _mm256_packs_epi32 operates on 128-bit lanes independently, creating [0,1,2,3,0,1,2,3|4,5,6,7,4,5,6,7]
+            // We need to permute to get [0,1,2,3,4,5,6,7|...]
+            let v_packed = _mm256_packs_epi32(v_clamped, v_clamped);
+            let v_permuted = _mm256_permute4x64_epi64(v_packed, 0b11_01_10_00); // Reorder lanes: [0,2,1,3]
+            let v_result_128 = _mm256_castsi256_si128(v_permuted);
+            _mm_storeu_si128(coeffs.as_mut_ptr().add(offset) as *mut __m128i, v_result_128);
+        }
+
+        for coef in &mut coeffs[chunks * 8..] {
+            let value = (*coef as i32 * multiplier + add) >> shift;
+            *coef = value.clamp(-32768, 32767) as i16;
+        }
+    } else {
+        let neg_shift = -shift;
+        for coef in coeffs.iter_mut() {
+            let value = (*coef as i32 * multiplier) << neg_shift;
+            *coef = value.clamp(-32768, 32767) as i16;
+        }
+    }
+}
+
 /// Generic inverse transform dispatch
 pub fn inverse_transform(
     coeffs: &[i16],
@@ -411,9 +485,9 @@ pub fn inverse_transform(
             in_arr[..coeffs.len().min(16)].copy_from_slice(&coeffs[..coeffs.len().min(16)]);
 
             if is_intra_4x4_luma {
-                idst4(&in_arr, &mut out_arr, bit_depth);
+                super::transform_simd::idst4_optimized(&in_arr, &mut out_arr, bit_depth);
             } else {
-                idct4(&in_arr, &mut out_arr, bit_depth);
+                super::transform_simd::idct4_optimized(&in_arr, &mut out_arr, bit_depth);
             }
 
             output[..16].copy_from_slice(&out_arr);
@@ -422,7 +496,7 @@ pub fn inverse_transform(
             let mut in_arr = [0i16; 64];
             let mut out_arr = [0i16; 64];
             in_arr[..coeffs.len().min(64)].copy_from_slice(&coeffs[..coeffs.len().min(64)]);
-            idct8(&in_arr, &mut out_arr, bit_depth);
+            super::transform_simd::idct8_optimized(&in_arr, &mut out_arr, bit_depth);
             output[..64].copy_from_slice(&out_arr);
         }
         16 => {

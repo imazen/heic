@@ -8,11 +8,10 @@
 
 use alloc::vec::Vec;
 
-use super::availability::ReconstructionMap;
 use super::cabac::{CabacDecoder, ContextModel, INIT_VALUES, context};
 use super::debug;
 use super::deblock::DeblockMetadata;
-use super::intra;
+use super::intra::{self, ReconstructionMap};
 use super::params::{Pps, Sps};
 use super::picture::DecodedFrame;
 use super::residual::{self, ScanOrder};

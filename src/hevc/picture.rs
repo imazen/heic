@@ -2,6 +2,7 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+use super::colorspace::ColorSpace;
 
 /// Decoded video frame
 #[derive(Debug)]
@@ -20,6 +21,8 @@ pub struct DecodedFrame {
     pub bit_depth: u8,
     /// Chroma format (1=4:2:0, 2=4:2:2, 3=4:4:4)
     pub chroma_format: u8,
+    /// Color space metadata
+    pub colorspace: ColorSpace,
     /// Conformance window left offset (in luma samples)
     pub crop_left: u32,
     /// Conformance window right offset (in luma samples)
@@ -47,6 +50,7 @@ impl DecodedFrame {
             cr_plane: vec![0; chroma_size],
             bit_depth: 8,
             chroma_format: 1, // 4:2:0
+            colorspace: ColorSpace::default(),
             crop_left: 0,
             crop_right: 0,
             crop_top: 0,
@@ -76,6 +80,7 @@ impl DecodedFrame {
             cr_plane: vec![0; chroma_size],
             bit_depth,
             chroma_format,
+            colorspace: ColorSpace::default(),
             crop_left: 0,
             crop_right: 0,
             crop_top: 0,
@@ -118,14 +123,22 @@ impl DecodedFrame {
         }
     }
 
-    /// Convert YCbCr to RGB with conformance window cropping
     pub fn to_rgb(&self) -> Vec<u8> {
+        #[cfg(feature = "parallel")]
+        {
+            let out_height = self.cropped_height();
+            if out_height >= 1000 {
+                return self.to_rgb_parallel();
+            }
+        }
+        self.to_rgb_sequential()
+    }
+
+    fn to_rgb_sequential(&self) -> Vec<u8> {
         let out_width = self.cropped_width();
         let out_height = self.cropped_height();
         let mut rgb = Vec::with_capacity((out_width * out_height * 3) as usize);
-        let shift = self.bit_depth - 8;
 
-        // Iterate over cropped region
         let y_start = self.crop_top;
         let y_end = self.height - self.crop_bottom;
         let x_start = self.crop_left;
@@ -134,27 +147,131 @@ impl DecodedFrame {
         for y in y_start..y_end {
             for x in x_start..x_end {
                 let y_idx = (y * self.width + x) as usize;
-                let y_val = (self.y_plane[y_idx] >> shift) as i32;
+                let y_val = self.y_plane[y_idx];
 
-                // Get chroma values based on format
-                let (cb_val, cr_val) = self.get_chroma(x, y, shift);
+                let (cb_val, cr_val) = self.get_chroma_u16(x, y);
 
-                // BT.601 YCbCr to RGB conversion
-                // R = Y + 1.402 * (Cr - 128)
-                // G = Y - 0.344136 * (Cb - 128) - 0.714136 * (Cr - 128)
-                // B = Y + 1.772 * (Cb - 128)
-
-                let cb = cb_val - 128;
-                let cr = cr_val - 128;
-
-                let r = y_val + ((1436 * cr) >> 10);
-                let g = y_val - ((352 * cb + 731 * cr) >> 10);
-                let b = y_val + ((1815 * cb) >> 10);
-
-                rgb.push(r.clamp(0, 255) as u8);
-                rgb.push(g.clamp(0, 255) as u8);
-                rgb.push(b.clamp(0, 255) as u8);
+                let (r, g, b) = self.colorspace.ycbcr_to_rgb8(y_val, cb_val, cr_val, self.bit_depth);
+                rgb.push(r);
+                rgb.push(g);
+                rgb.push(b);
             }
+        }
+
+        rgb
+    }
+
+    #[cfg(feature = "parallel")]
+    fn to_rgb_parallel(&self) -> Vec<u8> {
+        use rayon::prelude::*;
+
+        let out_width = self.cropped_width();
+        let out_height = self.cropped_height();
+
+        let y_start = self.crop_top;
+        let y_end = self.height - self.crop_bottom;
+        let x_start = self.crop_left;
+        let x_end = self.width - self.crop_right;
+
+        let row_data: Vec<Vec<u8>> = (y_start..y_end)
+            .into_par_iter()
+            .map(|y| {
+                let mut row_rgb = Vec::with_capacity((out_width * 3) as usize);
+                for x in x_start..x_end {
+                    let y_idx = (y * self.width + x) as usize;
+                    let y_val = self.y_plane[y_idx];
+
+                    let (cb_val, cr_val) = self.get_chroma_u16(x, y);
+
+                    let (r, g, b) = self.colorspace.ycbcr_to_rgb8(y_val, cb_val, cr_val, self.bit_depth);
+                    row_rgb.push(r);
+                    row_rgb.push(g);
+                    row_rgb.push(b);
+                }
+                row_rgb
+            })
+            .collect();
+
+        let mut rgb = Vec::with_capacity((out_width * out_height * 3) as usize);
+        for row in row_data {
+            rgb.extend_from_slice(&row);
+        }
+
+        rgb
+    }
+
+    pub fn to_rgb16(&self) -> Vec<u16> {
+        #[cfg(feature = "parallel")]
+        {
+            let out_height = self.cropped_height();
+            if out_height >= 1000 {
+                return self.to_rgb16_parallel();
+            }
+        }
+        self.to_rgb16_sequential()
+    }
+
+    fn to_rgb16_sequential(&self) -> Vec<u16> {
+        let out_width = self.cropped_width();
+        let out_height = self.cropped_height();
+        let mut rgb = Vec::with_capacity((out_width * out_height * 3) as usize);
+
+        let y_start = self.crop_top;
+        let y_end = self.height - self.crop_bottom;
+        let x_start = self.crop_left;
+        let x_end = self.width - self.crop_right;
+
+        for y in y_start..y_end {
+            for x in x_start..x_end {
+                let y_idx = (y * self.width + x) as usize;
+                let y_val = self.y_plane[y_idx];
+
+                let (cb_val, cr_val) = self.get_chroma_u16(x, y);
+
+                let (r, g, b) = self.colorspace.ycbcr_to_rgb16(y_val, cb_val, cr_val, self.bit_depth);
+                rgb.push(r);
+                rgb.push(g);
+                rgb.push(b);
+            }
+        }
+
+        rgb
+    }
+
+    #[cfg(feature = "parallel")]
+    fn to_rgb16_parallel(&self) -> Vec<u16> {
+        use rayon::prelude::*;
+
+        let out_width = self.cropped_width();
+        let out_height = self.cropped_height();
+
+        let y_start = self.crop_top;
+        let y_end = self.height - self.crop_bottom;
+        let x_start = self.crop_left;
+        let x_end = self.width - self.crop_right;
+
+        let row_data: Vec<Vec<u16>> = (y_start..y_end)
+            .into_par_iter()
+            .map(|y| {
+                let mut row_rgb = Vec::with_capacity((out_width * 3) as usize);
+                for x in x_start..x_end {
+                    let y_idx = (y * self.width + x) as usize;
+                    let y_val = self.y_plane[y_idx];
+
+                    let (cb_val, cr_val) = self.get_chroma_u16(x, y);
+
+                    let (r, g, b) = self.colorspace.ycbcr_to_rgb16(y_val, cb_val, cr_val, self.bit_depth);
+                    row_rgb.push(r);
+                    row_rgb.push(g);
+                    row_rgb.push(b);
+                }
+                row_rgb
+            })
+            .collect();
+
+        let mut rgb = Vec::with_capacity((out_width * out_height * 3) as usize);
+        for row in row_data {
+            rgb.extend_from_slice(&row);
         }
 
         rgb
@@ -252,6 +369,67 @@ impl DecodedFrame {
                 (cb, cr)
             }
             _ => (128, 128),
+        }
+    }
+
+    /// Get chroma values at full bit depth (u16)
+    fn get_chroma_u16(&self, x: u32, y: u32) -> (u16, u16) {
+        // Neutral chroma value at current bit depth
+        let neutral = 1 << (self.bit_depth - 1);
+
+        match self.chroma_format {
+            0 => (neutral, neutral), // Monochrome - neutral chroma
+            1 => {
+                // 4:2:0 - both dimensions halved
+                let cx = x / 2;
+                let cy = y / 2;
+                let c_stride = self.c_stride();
+                let c_idx = (cy as usize) * c_stride + (cx as usize);
+                let cb = if c_idx < self.cb_plane.len() {
+                    self.cb_plane[c_idx]
+                } else {
+                    neutral
+                };
+                let cr = if c_idx < self.cr_plane.len() {
+                    self.cr_plane[c_idx]
+                } else {
+                    neutral
+                };
+                (cb, cr)
+            }
+            2 => {
+                // 4:2:2 - horizontal halved
+                let cx = x / 2;
+                let c_stride = self.c_stride();
+                let c_idx = (y as usize) * c_stride + (cx as usize);
+                let cb = if c_idx < self.cb_plane.len() {
+                    self.cb_plane[c_idx]
+                } else {
+                    neutral
+                };
+                let cr = if c_idx < self.cr_plane.len() {
+                    self.cr_plane[c_idx]
+                } else {
+                    neutral
+                };
+                (cb, cr)
+            }
+            3 => {
+                // 4:4:4 - full resolution
+                let c_idx = (y * self.width + x) as usize;
+                let cb = if c_idx < self.cb_plane.len() {
+                    self.cb_plane[c_idx]
+                } else {
+                    neutral
+                };
+                let cr = if c_idx < self.cr_plane.len() {
+                    self.cr_plane[c_idx]
+                } else {
+                    neutral
+                };
+                (cb, cr)
+            }
+            _ => (neutral, neutral),
         }
     }
 
