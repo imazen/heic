@@ -429,7 +429,7 @@ pub fn inverse_transform(
             let mut in_arr = [0i16; 256];
             let mut out_arr = [0i16; 256];
             in_arr[..coeffs.len().min(256)].copy_from_slice(&coeffs[..coeffs.len().min(256)]);
-            idct16(&in_arr, &mut out_arr, bit_depth);
+            super::transform_simd::idct16_optimized(&in_arr, &mut out_arr, bit_depth);
             output[..256].copy_from_slice(&out_arr);
         }
         32 => {
