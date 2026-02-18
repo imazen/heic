@@ -199,7 +199,8 @@ impl<'a> SliceContext<'a> {
                     ctu_count, byte_pos, range, offset, self.ctb_x, self.ctb_y
                 );
             }
-            self.debug_ctu = false;
+            // Enable debug for CTU 1 (where first large coefficient occurs)
+            self.debug_ctu = ctu_count == 1;
 
             self.decode_ctu(x_ctb, y_ctb, frame)?;
             ctu_count += 1;
@@ -526,12 +527,14 @@ impl<'a> SliceContext<'a> {
         // unless transquant_bypass is enabled
         if !self.cu_transquant_bypass_flag {
             // Decode transform tree
+            let intra_split_flag = part_mode == PartMode::PartNxN;
             self.decode_transform_tree(
                 x0,
                 y0,
                 log2_cb_size,
                 0, // trafo_depth
                 intra_mode,
+                intra_split_flag,
                 frame,
             )?;
 
@@ -555,6 +558,7 @@ impl<'a> SliceContext<'a> {
         log2_size: u8,
         trafo_depth: u8,
         intra_mode: IntraPredMode,
+        intra_split_flag: bool,
         frame: &mut DecodedFrame,
     ) -> Result<()> {
         // For 4:2:0, start with root having chroma responsibility
@@ -564,6 +568,7 @@ impl<'a> SliceContext<'a> {
             log2_size,
             trafo_depth,
             intra_mode,
+            intra_split_flag,
             true,
             true,
             frame,
@@ -580,11 +585,14 @@ impl<'a> SliceContext<'a> {
         log2_size: u8,
         trafo_depth: u8,
         intra_mode: IntraPredMode,
+        intra_split_flag: bool,
         cbf_cb_parent: bool,
         cbf_cr_parent: bool,
         frame: &mut DecodedFrame,
     ) -> Result<()> {
-        let max_trafo_depth = self.sps.max_transform_hierarchy_depth_intra;
+        // Per H.265: MaxTrafoDepth = max_transform_hierarchy_depth_intra + IntraSplitFlag
+        let max_trafo_depth = self.sps.max_transform_hierarchy_depth_intra
+            + if intra_split_flag { 1 } else { 0 };
         let log2_min_trafo_size = self.sps.log2_min_tb_size();
         let log2_max_trafo_size = self.sps.log2_max_tb_size();
 
@@ -597,9 +605,12 @@ impl<'a> SliceContext<'a> {
         let debug_tt = self.debug_ctu;
 
         // Step 1: Determine if we should split
+        // Per H.265: decode split_transform_flag only when all conditions met AND
+        // NOT (IntraSplitFlag && trafoDepth == 0)
         let split_transform = if log2_size <= log2_max_trafo_size
             && log2_size > log2_min_trafo_size
             && trafo_depth < max_trafo_depth
+            && !(intra_split_flag && trafo_depth == 0)
         {
             // Decode split_transform_flag
             let ctx_idx = context::SPLIT_TRANSFORM_FLAG + (5 - log2_size as usize).min(2);
@@ -613,8 +624,10 @@ impl<'a> SliceContext<'a> {
                 );
             }
             flag
-        } else if log2_size > log2_max_trafo_size {
-            true // Must split if larger than max
+        } else if log2_size > log2_max_trafo_size
+            || (intra_split_flag && trafo_depth == 0)
+        {
+            true // Must split: larger than max OR IntraSplitFlag at depth 0
         } else {
             if debug_tt {
                 eprintln!(
@@ -687,6 +700,7 @@ impl<'a> SliceContext<'a> {
                 new_log2_size,
                 new_depth,
                 intra_mode,
+                intra_split_flag,
                 cbf_cb,
                 cbf_cr,
                 frame,
@@ -697,6 +711,7 @@ impl<'a> SliceContext<'a> {
                 new_log2_size,
                 new_depth,
                 intra_mode,
+                intra_split_flag,
                 cbf_cb,
                 cbf_cr,
                 frame,
@@ -707,6 +722,7 @@ impl<'a> SliceContext<'a> {
                 new_log2_size,
                 new_depth,
                 intra_mode,
+                intra_split_flag,
                 cbf_cb,
                 cbf_cr,
                 frame,
@@ -717,6 +733,7 @@ impl<'a> SliceContext<'a> {
                 new_log2_size,
                 new_depth,
                 intra_mode,
+                intra_split_flag,
                 cbf_cb,
                 cbf_cr,
                 frame,
@@ -766,30 +783,20 @@ impl<'a> SliceContext<'a> {
     ) -> Result<()> {
         let debug_tt = self.debug_ctu;
 
-        // Decode cbf_luma - coded if trafo_depth == 0 OR there's chroma residual
-        // If not coded (trafo_depth > 0 AND no chroma cbf), it's implicitly 1
-        let cbf_luma = if trafo_depth == 0 || cbf_cb || cbf_cr {
-            // Context: offset 0 if trafo_depth > 0, offset 1 if trafo_depth == 0
-            let ctx_offset = if trafo_depth == 0 { 1 } else { 0 };
-            let ctx_idx = context::CBF_LUMA + ctx_offset;
-            let val = self.cabac.decode_bin(&mut self.ctx[ctx_idx])? != 0;
-            if debug_tt {
-                let (r, o) = self.cabac.get_state();
-                eprintln!(
-                    "    TT: cbf_luma={} depth={} log2={} ctx_offset={} (r={},o={})",
-                    val, trafo_depth, log2_size, ctx_offset, r, o
-                );
-            }
-            val
-        } else {
-            if debug_tt {
-                eprintln!(
-                    "    TT: cbf_luma=1 (implicit) log2={} depth={}",
-                    log2_size, trafo_depth
-                );
-            }
-            true // Implicitly 1 when trafo_depth > 0 and no chroma cbf
-        };
+        // Decode cbf_luma - per H.265 spec 7.3.8.6:
+        // cbf_luma is coded if: CuPredMode == MODE_INTRA || trafoDepth != 0 || cbf_cb || cbf_cr
+        // For INTRA mode (all HEIC images), cbf_luma is ALWAYS coded
+        // Context: offset 0 if trafo_depth > 0, offset 1 if trafo_depth == 0
+        let ctx_offset = if trafo_depth == 0 { 1 } else { 0 };
+        let ctx_idx = context::CBF_LUMA + ctx_offset;
+        let cbf_luma = self.cabac.decode_bin(&mut self.ctx[ctx_idx])? != 0;
+        if debug_tt {
+            let (r, o) = self.cabac.get_state();
+            eprintln!(
+                "    TT: cbf_luma={} depth={} log2={} ctx_offset={} (r={},o={})",
+                cbf_luma, trafo_depth, log2_size, ctx_offset, r, o
+            );
+        }
 
         // Determine scan order based on intra prediction mode
         let scan_order = residual::get_scan_order(log2_size, intra_mode.as_u8());

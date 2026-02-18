@@ -200,7 +200,7 @@ pub fn decode_residual(
     // Verbose debug for specific calls
     // Enable for calls around the first large coefficient
     #[allow(unused_variables)]
-    let debug_call = false;
+    let debug_call = (505..=515).contains(&residual_call_num);
     if debug_call {
         let (byte_pos, _, _) = cabac.get_position();
         eprintln!(
@@ -667,96 +667,53 @@ fn get_scan_sub_block(log2_size: u8, order: ScanOrder) -> &'static [(u8, u8)] {
     // Sub-block scan tables
     // Note: The order here must match how coefficients are accessed in the decoder
     static SCAN_1X1: [(u8, u8); 1] = [(0, 0)];
-    static SCAN_2X2_DIAG: [(u8, u8); 4] = [(0, 0), (1, 0), (0, 1), (1, 1)];
+    static SCAN_2X2_DIAG: [(u8, u8); 4] = [(0, 0), (0, 1), (1, 0), (1, 1)];
+    // Per libde265 init_scan_h: (0,0),(1,0),(0,1),(1,1) — row by row
+    static SCAN_2X2_HORIZ: [(u8, u8); 4] = [(0, 0), (1, 0), (0, 1), (1, 1)];
+    // Per libde265 init_scan_v: (0,0),(0,1),(1,0),(1,1) — column by column
+    // Note: 2x2 diagonal and vertical are identical
+    static SCAN_2X2_VERT: [(u8, u8); 4] = [(0, 0), (0, 1), (1, 0), (1, 1)];
+    // Per libde265 init_scan_d(blkSize=4): verified against C++ trace
     static SCAN_4X4_DIAG: [(u8, u8); 16] = [
         (0, 0),
-        (1, 0),
         (0, 1),
-        (2, 0),
-        (1, 1),
+        (1, 0),
         (0, 2),
-        (3, 0),
-        (2, 1),
-        (1, 2),
+        (1, 1),
+        (2, 0),
         (0, 3),
-        (3, 1),
-        (2, 2),
+        (1, 2),
+        (2, 1),
+        (3, 0),
         (1, 3),
-        (3, 2),
+        (2, 2),
+        (3, 1),
         (2, 3),
+        (3, 2),
         (3, 3),
     ];
+    // Per libde265 init_scan_d(blkSize=8): verified against C++ trace
     static SCAN_8X8_DIAG: [(u8, u8); 64] = [
-        (0, 0),
-        (1, 0),
-        (0, 1),
-        (2, 0),
-        (1, 1),
-        (0, 2),
-        (3, 0),
-        (2, 1),
-        (1, 2),
-        (0, 3),
-        (4, 0),
-        (3, 1),
-        (2, 2),
-        (1, 3),
-        (0, 4),
-        (5, 0),
-        (4, 1),
-        (3, 2),
-        (2, 3),
-        (1, 4),
-        (0, 5),
-        (6, 0),
-        (5, 1),
-        (4, 2),
-        (3, 3),
-        (2, 4),
-        (1, 5),
-        (0, 6),
-        (7, 0),
-        (6, 1),
-        (5, 2),
-        (4, 3),
-        (3, 4),
-        (2, 5),
-        (1, 6),
-        (0, 7),
-        (7, 1),
-        (6, 2),
-        (5, 3),
-        (4, 4),
-        (3, 5),
-        (2, 6),
-        (1, 7),
-        (7, 2),
-        (6, 3),
-        (5, 4),
-        (4, 5),
-        (3, 6),
-        (2, 7),
-        (7, 3),
-        (6, 4),
-        (5, 5),
-        (4, 6),
-        (3, 7),
-        (7, 4),
-        (6, 5),
-        (5, 6),
-        (4, 7),
-        (7, 5),
-        (6, 6),
-        (5, 7),
-        (7, 6),
-        (6, 7),
-        (7, 7),
+        (0, 0), (0, 1), (1, 0), (0, 2), (1, 1), (2, 0),
+        (0, 3), (1, 2), (2, 1), (3, 0), (0, 4), (1, 3),
+        (2, 2), (3, 1), (4, 0), (0, 5), (1, 4), (2, 3),
+        (3, 2), (4, 1), (5, 0), (0, 6), (1, 5), (2, 4),
+        (3, 3), (4, 2), (5, 1), (6, 0), (0, 7), (1, 6),
+        (2, 5), (3, 4), (4, 3), (5, 2), (6, 1), (7, 0),
+        (1, 7), (2, 6), (3, 5), (4, 4), (5, 3), (6, 2),
+        (7, 1), (2, 7), (3, 6), (4, 5), (5, 4), (6, 3),
+        (7, 2), (3, 7), (4, 6), (5, 5), (6, 4), (7, 3),
+        (4, 7), (5, 6), (6, 5), (7, 4), (5, 7), (6, 6),
+        (7, 5), (6, 7), (7, 6), (7, 7),
     ];
 
-    let _ = order; // TODO: Use horizontal/vertical scan when appropriate
     match log2_size {
         2 => &SCAN_1X1,
-        3 => &SCAN_2X2_DIAG,
+        3 => match order {
+            ScanOrder::Horizontal => &SCAN_2X2_HORIZ,
+            _ => &SCAN_2X2_DIAG, // Diagonal and Vertical are identical for 2x2
+        },
+        // For 16x16 and larger, scan is always diagonal per H.265
         4 => &SCAN_4X4_DIAG,
         5 => &SCAN_8X8_DIAG,
         _ => &SCAN_1X1,
@@ -846,7 +803,7 @@ fn decode_last_sig_coeff_prefix(
 
     let mut prefix = 0u32;
     while prefix < max_prefix as u32 {
-        let ctx_idx = ctx_base + ctx_offset + ((prefix as usize) >> ctx_shift as usize).min(3);
+        let ctx_idx = ctx_base + ctx_offset + (prefix as usize >> ctx_shift as usize);
         let bin = cabac.decode_bin(&mut ctx[ctx_idx])?;
         if bin == 0 {
             break;
@@ -904,7 +861,7 @@ static CTX_IDX_MAP_4X4: [u8; 16] = [0, 1, 4, 5, 2, 3, 4, 5, 6, 6, 8, 8, 7, 7, 8,
 /// - log2_size: TU size (2=4x4, 3=8x8, 4=16x16, 5=32x32)
 /// - c_idx: component (0=Y, 1=Cb, 2=Cr)
 /// - scan_idx: scan order (0=diagonal, 1=horizontal, 2=vertical)
-/// - prev_csbf: coded_sub_block_flag of neighbors (bit0=below, bit1=right - our convention)
+/// - prev_csbf: coded_sub_block_flag of neighbors (bit0=right, bit1=below per H.265/libde265)
 fn calc_sig_coeff_flag_ctx(
     x_c: u8,
     y_c: u8,
