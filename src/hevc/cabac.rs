@@ -129,11 +129,12 @@ impl ContextModel {
     }
 
     /// Initialize context for a given slice QP
+    /// Per H.265 Table 9-5: preCtxState = Clip3(1,126, ((m * Clip3(0,51,SliceQPY))>>4) + n)
     pub fn init(&mut self, init_value: u8, slice_qp: i32) {
-        let slope = (init_value >> 4) as i32 * 5 - 45;
-        let offset = ((init_value & 15) << 3) as i32 - 16;
+        let m = (init_value >> 4) as i32 * 5 - 45;
+        let n = ((init_value & 15) << 3) as i32 - 16;
 
-        let init_state = ((slope * (slice_qp - 16)) >> 4) + offset;
+        let init_state = ((m * slice_qp.clamp(0, 51)) >> 4) + n;
         let init_state = init_state.clamp(1, 126);
 
         if init_state >= 64 {
@@ -161,6 +162,8 @@ pub struct CabacDecoder<'a> {
     value: u32,
     /// Bits needed before next byte read (negative means bits available)
     bits_needed: i32,
+    /// Bin counter for debug tracing
+    bin_counter: u32,
 }
 
 impl<'a> CabacDecoder<'a> {
@@ -192,6 +195,7 @@ impl<'a> CabacDecoder<'a> {
             range: 510,
             value: 0,
             bits_needed: 8,
+            bin_counter: 0,
         };
 
         // Initialize value (matching libde265 exactly)
@@ -209,6 +213,27 @@ impl<'a> CabacDecoder<'a> {
         }
 
         Ok(decoder)
+    }
+
+    /// Reinitialize CABAC decoder at current bitstream position (byte alignment).
+    /// Used for WPP substream boundaries and tile boundaries.
+    /// Equivalent to libde265's init_CABAC_decoder_2().
+    pub fn reinit(&mut self) {
+        self.range = 510;
+        self.bits_needed = 8;
+        self.value = 0;
+
+        let remaining = self.data.len() - self.byte_pos;
+        if remaining > 0 {
+            self.value = (self.data[self.byte_pos] as u32) << 8;
+            self.byte_pos += 1;
+            self.bits_needed -= 8;
+        }
+        if remaining > 1 {
+            self.value |= self.data[self.byte_pos] as u32;
+            self.byte_pos += 1;
+            self.bits_needed -= 8;
+        }
     }
 
     /// Read a single bit from the bitstream (for regular context decoding)
@@ -231,6 +256,7 @@ impl<'a> CabacDecoder<'a> {
 
     /// Decode a single bin using context model
     pub fn decode_bin(&mut self, ctx: &mut ContextModel) -> Result<u8> {
+        self.bin_counter += 1;
         let q_range_idx = (self.range >> 6) & 3;
         let lps_range = LPS_TABLE[ctx.state as usize][q_range_idx as usize] as u32;
 
@@ -264,6 +290,7 @@ impl<'a> CabacDecoder<'a> {
 
     /// Decode a bypass bin (equal probability) - libde265 compatible
     pub fn decode_bypass(&mut self) -> Result<u8> {
+        self.bin_counter += 1;
         self.value <<= 1;
         self.bits_needed += 1;
 
@@ -293,6 +320,25 @@ impl<'a> CabacDecoder<'a> {
             result = (result << 1) | self.decode_bypass()? as u32;
         }
         Ok(result)
+    }
+
+    /// Decode Exp-Golomb coded value (EGk) using bypass bins
+    pub fn decode_egk_bypass(&mut self, k: u8) -> Result<u32> {
+        let mut base = 0u32;
+        let mut n = k;
+        loop {
+            let bit = self.decode_bypass()?;
+            if bit == 0 {
+                break;
+            }
+            base += 1 << n;
+            n += 1;
+            if n >= k + 32 {
+                return Err(HevcError::InvalidBitstream("EGk prefix too long"));
+            }
+        }
+        let suffix = self.decode_bypass_bits(n)?;
+        Ok(base + suffix)
     }
 
     /// Decode a terminate bin (end of slice check)
@@ -418,7 +464,7 @@ pub static INIT_VALUES: [u8; context::NUM_CONTEXTS] = [
     197, 185, 201, // PALETTE_MODE_FLAG (1)
     154, // PRED_MODE_FLAG (1)
     149, // PART_MODE (4)
-    154, 139, 154, 154, // PREV_INTRA_LUMA_PRED_FLAG (1)
+    184, 154, 139, 154, // PREV_INTRA_LUMA_PRED_FLAG (1)
     184, // INTRA_CHROMA_PRED_MODE (1)
     63,  // INTER_PRED_IDC (5)
     95, 79, 63, 31, 31,  // MERGE_FLAG (1)
