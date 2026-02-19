@@ -117,12 +117,12 @@ pub fn decode_rgba_into(
 - **sample1.heic** (1440x960, transform_skip): Y 68.26 dB (max ±3), Cb/Cr pixel-exact
 - Without filters: 100% pixel-exact vs libde265 --disable-deblocking --disable-sao
 - All CABAC SEs match libde265 perfectly
-- Batch tested 11 images: 9 pass, 2 have minor dimension issues
+- Clean aperture (clap box) crop applied after conformance window
+- Image rotation (irot box) — 90°/180°/270° CW rotation of decoded frames
+- Batch tested 11 images: 11/11 pass
 
 ### Pending
 - SIMD optimization
-- medium_q50.heic: height off by 1 (conformance window vs ISPE discrepancy)
-- classic-car-iphone12pro: EXIF rotation not applied to decoded dimensions
 
 ## Known Limitations
 
