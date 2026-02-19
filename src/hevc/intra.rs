@@ -407,25 +407,43 @@ fn predict_planar(
     let right = border[center + 1 + n]; // border[nT+1]
     let bottom = border[center - 1 - n]; // border[-1-nT]
 
+    // Check if entire block fits in plane for unchecked inner loop
+    let last_row_end = (y as usize + n - 1) * stride + x as usize + n;
+    let block_fits = last_row_end <= plane.len();
+
     for py in 0..n {
         let py_i = py as i32;
         let left = border[center - 1 - py];
         let row_start = (y as usize + py) * stride + x as usize;
-        // Slice the row to eliminate per-pixel bounds checks
-        let row = &mut plane[row_start..row_start + n];
 
-        for px in 0..n {
-            let px_i = px as i32;
-            let top = border[center + 1 + px];
-
-            let pred = ((n_i - 1 - px_i) * left
-                + (px_i + 1) * right
-                + (n_i - 1 - py_i) * top
-                + (py_i + 1) * bottom
-                + n_i)
-                >> (log2_size + 1);
-
-            row[px] = pred.clamp(0, max_val) as u16;
+        if block_fits {
+            let row = &mut plane[row_start..row_start + n];
+            for px in 0..n {
+                let px_i = px as i32;
+                let top = border[center + 1 + px];
+                let pred = ((n_i - 1 - px_i) * left
+                    + (px_i + 1) * right
+                    + (n_i - 1 - py_i) * top
+                    + (py_i + 1) * bottom
+                    + n_i)
+                    >> (log2_size + 1);
+                row[px] = pred.clamp(0, max_val) as u16;
+            }
+        } else {
+            for px in 0..n {
+                let idx = row_start + px;
+                if idx < plane.len() {
+                    let px_i = px as i32;
+                    let top = border[center + 1 + px];
+                    let pred = ((n_i - 1 - px_i) * left
+                        + (px_i + 1) * right
+                        + (n_i - 1 - py_i) * top
+                        + (py_i + 1) * bottom
+                        + n_i)
+                        >> (log2_size + 1);
+                    plane[idx] = pred.clamp(0, max_val) as u16;
+                }
+            }
         }
     }
 }
@@ -511,7 +529,12 @@ fn predict_angular(
     center: usize,
 ) {
     let n = size as i32;
+    let n_u = n as usize;
     let intra_pred_angle = INTRA_PRED_ANGLE[mode as usize] as i32;
+
+    // Check if entire block fits in plane for unchecked inner loop
+    let last_row_end = (y as usize + n_u - 1) * stride + x as usize + n_u;
+    let block_fits = last_row_end <= plane.len();
 
     // Build reference array
     let mut ref_arr = [0i32; 4 * MAX_INTRA_PRED_BLOCK_SIZE + 1];
@@ -549,24 +572,38 @@ fn predict_angular(
         }
 
         // Generate prediction
-        let n_u = n as usize;
         for py in 0..n {
             let i_idx = ((py + 1) * intra_pred_angle) >> 5;
             let i_fact = ((py + 1) * intra_pred_angle) & 31;
             let row_start = (y as i32 + py) as usize * stride + x as usize;
-            let row = &mut plane[row_start..row_start + n_u];
 
-            if i_fact != 0 {
-                for (px, out) in row.iter_mut().enumerate() {
-                    let idx = (ref_center as i32 + px as i32 + i_idx + 1) as usize;
-                    let pred =
-                        ((32 - i_fact) * ref_arr[idx] + i_fact * ref_arr[idx + 1] + 16) >> 5;
-                    *out = pred.clamp(0, max_val) as u16;
+            if block_fits {
+                let row = &mut plane[row_start..row_start + n_u];
+                if i_fact != 0 {
+                    for (px, out) in row.iter_mut().enumerate() {
+                        let idx = (ref_center as i32 + px as i32 + i_idx + 1) as usize;
+                        let pred =
+                            ((32 - i_fact) * ref_arr[idx] + i_fact * ref_arr[idx + 1] + 16) >> 5;
+                        *out = pred.clamp(0, max_val) as u16;
+                    }
+                } else {
+                    for (px, out) in row.iter_mut().enumerate() {
+                        let idx = (ref_center as i32 + px as i32 + i_idx + 1) as usize;
+                        *out = ref_arr[idx].clamp(0, max_val) as u16;
+                    }
                 }
             } else {
-                for (px, out) in row.iter_mut().enumerate() {
-                    let idx = (ref_center as i32 + px as i32 + i_idx + 1) as usize;
-                    *out = ref_arr[idx].clamp(0, max_val) as u16;
+                for px in 0..n_u {
+                    let out_idx = row_start + px;
+                    if out_idx < plane.len() {
+                        let idx = (ref_center as i32 + px as i32 + i_idx + 1) as usize;
+                        let pred = if i_fact != 0 {
+                            ((32 - i_fact) * ref_arr[idx] + i_fact * ref_arr[idx + 1] + 16) >> 5
+                        } else {
+                            ref_arr[idx]
+                        };
+                        plane[out_idx] = pred.clamp(0, max_val) as u16;
+                    }
                 }
             }
         }
@@ -610,24 +647,39 @@ fn predict_angular(
         }
 
         // Generate prediction (transposed compared to mode >= 18)
-        let n_u = n as usize;
         for py in 0..n {
             let row_start = (y as i32 + py) as usize * stride + x as usize;
-            let row = &mut plane[row_start..row_start + n_u];
 
-            for (px, out) in row.iter_mut().enumerate() {
-                let i_idx = ((px as i32 + 1) * intra_pred_angle) >> 5;
-                let i_fact = ((px as i32 + 1) * intra_pred_angle) & 31;
-
-                let pred = if i_fact != 0 {
-                    let idx = (ref_center as i32 + py + i_idx + 1) as usize;
-                    ((32 - i_fact) * ref_arr[idx] + i_fact * ref_arr[idx + 1] + 16) >> 5
-                } else {
-                    let idx = (ref_center as i32 + py + i_idx + 1) as usize;
-                    ref_arr[idx]
-                };
-
-                *out = pred.clamp(0, max_val) as u16;
+            if block_fits {
+                let row = &mut plane[row_start..row_start + n_u];
+                for (px, out) in row.iter_mut().enumerate() {
+                    let i_idx = ((px as i32 + 1) * intra_pred_angle) >> 5;
+                    let i_fact = ((px as i32 + 1) * intra_pred_angle) & 31;
+                    let pred = if i_fact != 0 {
+                        let idx = (ref_center as i32 + py + i_idx + 1) as usize;
+                        ((32 - i_fact) * ref_arr[idx] + i_fact * ref_arr[idx + 1] + 16) >> 5
+                    } else {
+                        let idx = (ref_center as i32 + py + i_idx + 1) as usize;
+                        ref_arr[idx]
+                    };
+                    *out = pred.clamp(0, max_val) as u16;
+                }
+            } else {
+                for px in 0..n_u {
+                    let out_idx = row_start + px;
+                    if out_idx < plane.len() {
+                        let i_idx = ((px as i32 + 1) * intra_pred_angle) >> 5;
+                        let i_fact = ((px as i32 + 1) * intra_pred_angle) & 31;
+                        let pred = if i_fact != 0 {
+                            let idx = (ref_center as i32 + py + i_idx + 1) as usize;
+                            ((32 - i_fact) * ref_arr[idx] + i_fact * ref_arr[idx + 1] + 16) >> 5
+                        } else {
+                            let idx = (ref_center as i32 + py + i_idx + 1) as usize;
+                            ref_arr[idx]
+                        };
+                        plane[out_idx] = pred.clamp(0, max_val) as u16;
+                    }
+                }
             }
         }
 
