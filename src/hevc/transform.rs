@@ -372,38 +372,30 @@ pub fn inverse_transform(
 ) {
     match size {
         4 => {
-            let mut in_arr = [0i16; 16];
-            let mut out_arr = [0i16; 16];
-            in_arr[..coeffs.len().min(16)].copy_from_slice(&coeffs[..coeffs.len().min(16)]);
+            // Use try_into to get sized array references without copies
+            let in_arr: &[i16; 16] = coeffs[..16].try_into().unwrap();
+            let out_arr: &mut [i16; 16] = (&mut output[..16]).try_into().unwrap();
 
             if is_intra_4x4_luma {
-                idst4(&in_arr, &mut out_arr, bit_depth);
+                idst4(in_arr, out_arr, bit_depth);
             } else {
-                idct4(&in_arr, &mut out_arr, bit_depth);
+                idct4(in_arr, out_arr, bit_depth);
             }
-
-            output[..16].copy_from_slice(&out_arr);
         }
         8 => {
-            let mut in_arr = [0i16; 64];
-            let mut out_arr = [0i16; 64];
-            in_arr[..coeffs.len().min(64)].copy_from_slice(&coeffs[..coeffs.len().min(64)]);
-            idct8(&in_arr, &mut out_arr, bit_depth);
-            output[..64].copy_from_slice(&out_arr);
+            let in_arr: &[i16; 64] = coeffs[..64].try_into().unwrap();
+            let out_arr: &mut [i16; 64] = (&mut output[..64]).try_into().unwrap();
+            idct8(in_arr, out_arr, bit_depth);
         }
         16 => {
-            let mut in_arr = [0i16; 256];
-            let mut out_arr = [0i16; 256];
-            in_arr[..coeffs.len().min(256)].copy_from_slice(&coeffs[..coeffs.len().min(256)]);
-            idct16(&in_arr, &mut out_arr, bit_depth);
-            output[..256].copy_from_slice(&out_arr);
+            let in_arr: &[i16; 256] = coeffs[..256].try_into().unwrap();
+            let out_arr: &mut [i16; 256] = (&mut output[..256]).try_into().unwrap();
+            idct16(in_arr, out_arr, bit_depth);
         }
         32 => {
-            let mut in_arr = [0i16; 1024];
-            let mut out_arr = [0i16; 1024];
-            in_arr[..coeffs.len().min(1024)].copy_from_slice(&coeffs[..coeffs.len().min(1024)]);
-            idct32(&in_arr, &mut out_arr, bit_depth);
-            output[..1024].copy_from_slice(&out_arr);
+            let in_arr: &[i16; 1024] = coeffs[..1024].try_into().unwrap();
+            let out_arr: &mut [i16; 1024] = (&mut output[..1024]).try_into().unwrap();
+            idct32(in_arr, out_arr, bit_depth);
         }
         _ => {}
     }

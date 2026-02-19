@@ -53,6 +53,8 @@ pub fn predict_intra(
     strong_intra_smoothing_enabled: bool,
 ) {
     let size = 1u32 << log2_size;
+    let bit_depth = frame.bit_depth;
+    let chroma_format = frame.chroma_format;
 
     // Get reference samples (border pixels)
     let mut border = [0i32; 4 * MAX_INTRA_PRED_BLOCK_SIZE + 1];
@@ -62,7 +64,7 @@ pub fn predict_intra(
 
     // Reference sample filtering (H.265 8.4.4.2.3)
     // Only applied for luma, or for chroma in 4:4:4 format
-    if c_idx == 0 || frame.chroma_format == 3 {
+    if c_idx == 0 || chroma_format == 3 {
         intra_prediction_sample_filtering(
             &mut border,
             border_center,
@@ -70,21 +72,31 @@ pub fn predict_intra(
             c_idx,
             mode.as_u8(),
             strong_intra_smoothing_enabled,
-            frame.bit_depth as usize,
+            bit_depth as usize,
         );
     }
+
+    // Resolve plane once to avoid per-pixel match on c_idx
+    let (plane, stride) = frame.plane_mut(c_idx);
+    let max_val = (1i32 << bit_depth) - 1;
 
     // Apply prediction based on mode
     match mode {
         IntraPredMode::Planar => {
-            predict_planar(frame, x, y, size, log2_size, c_idx, &border, border_center);
+            predict_planar(
+                plane, stride, x, y, size, log2_size, max_val, &border, border_center,
+            );
         }
         IntraPredMode::Dc => {
-            predict_dc(frame, x, y, size, log2_size, c_idx, &border, border_center);
+            predict_dc(
+                plane, stride, x, y, size, log2_size, c_idx, max_val, &border, border_center,
+            );
         }
         _ => {
             let mode_val = mode.as_u8();
-            predict_angular(frame, x, y, size, c_idx, mode_val, &border, border_center);
+            predict_angular(
+                plane, stride, x, y, size, c_idx, mode_val, max_val, &border, border_center,
+            );
         }
     }
 }
@@ -168,6 +180,15 @@ fn intra_prediction_sample_filtering(
     // Copy filtered values back
     for i in 0..=(4 * n_t) {
         border[center - 2 * n_t + i] = pf[pf_center - 2 * n_t + i];
+    }
+}
+
+/// Write a sample directly to a plane slice
+#[inline(always)]
+fn write_sample(plane: &mut [u16], stride: usize, x: u32, y: u32, value: u16) {
+    let idx = y as usize * stride + x as usize;
+    if idx < plane.len() {
+        plane[idx] = value;
     }
 }
 
@@ -398,29 +419,28 @@ fn set_sample(frame: &mut DecodedFrame, x: u32, y: u32, c_idx: u8, value: u16) {
 /// Planar prediction (mode 0) - H.265 8.4.4.2.4
 #[allow(clippy::too_many_arguments)]
 fn predict_planar(
-    frame: &mut DecodedFrame,
+    plane: &mut [u16],
+    stride: usize,
     x: u32,
     y: u32,
     size: u32,
     log2_size: u8,
-    c_idx: u8,
+    max_val: i32,
     border: &[i32],
     center: usize,
 ) {
     let n = size as i32;
+    let right = border[center + 1 + size as usize]; // border[nT+1]
+    let bottom = border[center - 1 - size as usize]; // border[-1-nT]
 
     for py in 0..size {
+        let py_i = py as i32;
+        let left = border[center - 1 - py as usize];
+        let row_start = (y + py) as usize * stride + x as usize;
+
         for px in 0..size {
             let px_i = px as i32;
-            let py_i = py as i32;
-
-            // Planar formula:
-            // pred = ((nT-1-x)*border[-1-y] + (x+1)*border[nT+1] +
-            //         (nT-1-y)*border[1+x] + (y+1)*border[-1-nT] + nT) >> (log2(nT)+1)
-            let left = border[center - 1 - py as usize];
-            let right = border[center + 1 + size as usize]; // border[nT+1]
             let top = border[center + 1 + px as usize];
-            let bottom = border[center - 1 - size as usize]; // border[-1-nT]
 
             let pred = ((n - 1 - px_i) * left
                 + (px_i + 1) * right
@@ -429,8 +449,10 @@ fn predict_planar(
                 + n)
                 >> (log2_size + 1);
 
-            let value = pred.clamp(0, (1 << frame.bit_depth) - 1) as u16;
-            set_sample(frame, x + px, y + py, c_idx, value);
+            let idx = row_start + px as usize;
+            if idx < plane.len() {
+                plane[idx] = pred.clamp(0, max_val) as u16;
+            }
         }
     }
 }
@@ -438,12 +460,14 @@ fn predict_planar(
 /// DC prediction (mode 1) - H.265 8.4.4.2.5
 #[allow(clippy::too_many_arguments)]
 fn predict_dc(
-    frame: &mut DecodedFrame,
+    plane: &mut [u16],
+    stride: usize,
     x: u32,
     y: u32,
     size: u32,
     log2_size: u8,
     c_idx: u8,
+    max_val: i32,
     border: &[i32],
     center: usize,
 ) {
@@ -457,39 +481,45 @@ fn predict_dc(
     }
     dc_val = (dc_val + n) >> (log2_size + 1);
 
-    let max_val = (1 << frame.bit_depth) - 1;
-
     // Apply DC filtering for luma and small blocks
     if c_idx == 0 && size < 32 {
         // Corner pixel: average of corner neighbors and 2*DC
         let corner = (border[center - 1] + 2 * dc_val + border[center + 1] + 2) >> 2;
-        set_sample(frame, x, y, c_idx, corner.clamp(0, max_val) as u16);
+        write_sample(plane, stride, x, y, corner.clamp(0, max_val) as u16);
 
         // Top edge: blend top border with DC
+        let row_start = y as usize * stride + x as usize;
         for px in 1..size {
             let pred = (border[center + 1 + px as usize] + 3 * dc_val + 2) >> 2;
-            set_sample(frame, x + px, y, c_idx, pred.clamp(0, max_val) as u16);
+            let idx = row_start + px as usize;
+            if idx < plane.len() {
+                plane[idx] = pred.clamp(0, max_val) as u16;
+            }
         }
 
         // Left edge: blend left border with DC
         for py in 1..size {
             let pred = (border[center - 1 - py as usize] + 3 * dc_val + 2) >> 2;
-            set_sample(frame, x, y + py, c_idx, pred.clamp(0, max_val) as u16);
+            write_sample(plane, stride, x, y + py, pred.clamp(0, max_val) as u16);
         }
 
-        // Interior: pure DC
+        // Interior: pure DC — fill rows directly
         let dc_u16 = dc_val.clamp(0, max_val) as u16;
         for py in 1..size {
-            for px in 1..size {
-                set_sample(frame, x + px, y + py, c_idx, dc_u16);
+            let row_start = (y + py) as usize * stride + (x as usize + 1);
+            let row_end = row_start + (size as usize - 1);
+            if row_end <= plane.len() {
+                plane[row_start..row_end].fill(dc_u16);
             }
         }
     } else {
-        // No filtering: fill entire block with DC value
+        // No filtering: fill entire block with DC value using row fills
         let dc_u16 = dc_val.clamp(0, max_val) as u16;
         for py in 0..size {
-            for px in 0..size {
-                set_sample(frame, x + px, y + py, c_idx, dc_u16);
+            let row_start = (y + py) as usize * stride + x as usize;
+            let row_end = row_start + size as usize;
+            if row_end <= plane.len() {
+                plane[row_start..row_end].fill(dc_u16);
             }
         }
     }
@@ -498,12 +528,14 @@ fn predict_dc(
 /// Angular prediction (modes 2-34) - H.265 8.4.4.2.6
 #[allow(clippy::too_many_arguments)]
 fn predict_angular(
-    frame: &mut DecodedFrame,
+    plane: &mut [u16],
+    stride: usize,
     x: u32,
     y: u32,
     size: u32,
     c_idx: u8,
     mode: u8,
+    max_val: i32,
     border: &[i32],
     center: usize,
 ) {
@@ -514,16 +546,13 @@ fn predict_angular(
     let mut ref_arr = [0i32; 4 * MAX_INTRA_PRED_BLOCK_SIZE + 1];
     let ref_center = 2 * MAX_INTRA_PRED_BLOCK_SIZE;
 
-    let max_val = (1 << frame.bit_depth) - 1;
-
     if mode >= 18 {
         // Horizontal-ish modes (18-34)
         // Reference is top samples
 
         // Copy top samples to ref[0..nT]
-        for i in 0..=n {
-            ref_arr[ref_center + i as usize] = border[center + i as usize];
-        }
+        ref_arr[ref_center..ref_center + n as usize + 1]
+            .copy_from_slice(&border[center..center + n as usize + 1]);
 
         if intra_pred_angle < 0 {
             // Negative angle: need to extend reference to the left
@@ -532,8 +561,6 @@ fn predict_angular(
 
             if ext < -1 {
                 for xx in ext..=-1 {
-                    // Note: xx is negative, inv_angle is negative for modes 19-25
-                    // So xx * inv_angle is positive, giving a positive idx
                     let idx = (xx * inv_angle + 128) >> 8;
                     if idx >= 0 && idx <= (2 * n) {
                         ref_arr[(ref_center as i32 + xx) as usize] =
@@ -543,32 +570,37 @@ fn predict_angular(
             }
         } else {
             // Positive angle: extend reference to the right
-            for xx in (n + 1)..=(2 * n) {
-                ref_arr[ref_center + xx as usize] = border[center + xx as usize];
-            }
+            let src_start = center + n as usize + 1;
+            let dst_start = ref_center + n as usize + 1;
+            let count = n as usize;
+            ref_arr[dst_start..dst_start + count]
+                .copy_from_slice(&border[src_start..src_start + count]);
         }
 
         // Generate prediction
         for py in 0..n {
-            for px in 0..n {
-                let i_idx = ((py + 1) * intra_pred_angle) >> 5;
-                let i_fact = ((py + 1) * intra_pred_angle) & 31;
+            let i_idx = ((py + 1) * intra_pred_angle) >> 5;
+            let i_fact = ((py + 1) * intra_pred_angle) & 31;
+            let row_start = (y as i32 + py) as usize * stride + x as usize;
 
-                let pred = if i_fact != 0 {
+            if i_fact != 0 {
+                for px in 0..n {
                     let idx = (ref_center as i32 + px + i_idx + 1) as usize;
-                    ((32 - i_fact) * ref_arr[idx] + i_fact * ref_arr[idx + 1] + 16) >> 5
-                } else {
+                    let pred =
+                        ((32 - i_fact) * ref_arr[idx] + i_fact * ref_arr[idx + 1] + 16) >> 5;
+                    let out_idx = row_start + px as usize;
+                    if out_idx < plane.len() {
+                        plane[out_idx] = pred.clamp(0, max_val) as u16;
+                    }
+                }
+            } else {
+                for px in 0..n {
                     let idx = (ref_center as i32 + px + i_idx + 1) as usize;
-                    ref_arr[idx]
-                };
-
-                set_sample(
-                    frame,
-                    x + px as u32,
-                    y + py as u32,
-                    c_idx,
-                    pred.clamp(0, max_val) as u16,
-                );
+                    let out_idx = row_start + px as usize;
+                    if out_idx < plane.len() {
+                        plane[out_idx] = ref_arr[idx].clamp(0, max_val) as u16;
+                    }
+                }
             }
         }
 
@@ -577,13 +609,7 @@ fn predict_angular(
             for py in 0..n {
                 let pred =
                     border[center + 1] + ((border[center - 1 - py as usize] - border[center]) >> 1);
-                set_sample(
-                    frame,
-                    x,
-                    y + py as u32,
-                    c_idx,
-                    pred.clamp(0, max_val) as u16,
-                );
+                write_sample(plane, stride, x, y + py as u32, pred.clamp(0, max_val) as u16);
             }
         }
     } else {
@@ -618,6 +644,8 @@ fn predict_angular(
 
         // Generate prediction (transposed compared to mode >= 18)
         for py in 0..n {
+            let row_start = (y as i32 + py) as usize * stride + x as usize;
+
             for px in 0..n {
                 let i_idx = ((px + 1) * intra_pred_angle) >> 5;
                 let i_fact = ((px + 1) * intra_pred_angle) & 31;
@@ -630,13 +658,10 @@ fn predict_angular(
                     ref_arr[idx]
                 };
 
-                set_sample(
-                    frame,
-                    x + px as u32,
-                    y + py as u32,
-                    c_idx,
-                    pred.clamp(0, max_val) as u16,
-                );
+                let out_idx = row_start + px as usize;
+                if out_idx < plane.len() {
+                    plane[out_idx] = pred.clamp(0, max_val) as u16;
+                }
             }
         }
 
@@ -645,13 +670,7 @@ fn predict_angular(
             for px in 0..n {
                 let pred =
                     border[center - 1] + ((border[center + 1 + px as usize] - border[center]) >> 1);
-                set_sample(
-                    frame,
-                    x + px as u32,
-                    y,
-                    c_idx,
-                    pred.clamp(0, max_val) as u16,
-                );
+                write_sample(plane, stride, x + px as u32, y, pred.clamp(0, max_val) as u16);
             }
         }
     }

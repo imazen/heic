@@ -24,6 +24,10 @@ imgref = "1.11"
 heic-wasm-rs = { path = "../heic-wasm-rs" }
 png = "0.17"
 
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
 # [[bench]]
 # name = "decode"
 # harness = false

@@ -1287,7 +1287,7 @@ impl<'a> SliceContext<'a> {
         frame: &mut DecodedFrame,
     ) -> Result<()> {
         // Decode coefficients via CABAC
-        let (coeff_buf, transform_skip) = residual::decode_residual(
+        let (mut coeff_buf, transform_skip) = residual::decode_residual(
             &mut self.cabac,
             &mut self.ctx,
             log2_size,
@@ -1307,9 +1307,8 @@ impl<'a> SliceContext<'a> {
         let size = 1usize << log2_size;
         let num_coeffs = size * size;
 
-        // Dequantize coefficients
-        let mut coeffs = [0i16; 1024];
-        coeffs[..num_coeffs].copy_from_slice(&coeff_buf.coeffs[..num_coeffs]);
+        // Dequantize coefficients in-place
+        let coeffs = &mut coeff_buf.coeffs;
 
         let (qp, bit_depth) = match c_idx {
             0 => (self.qp_y, self.sps.bit_depth_y()),
@@ -1375,7 +1374,7 @@ impl<'a> SliceContext<'a> {
         } else {
             let is_intra_4x4_luma = log2_size == 2 && c_idx == 0;
             transform::inverse_transform(
-                &coeffs,
+                coeffs,
                 &mut residual,
                 size,
                 bit_depth,
@@ -1383,27 +1382,17 @@ impl<'a> SliceContext<'a> {
             );
         }
 
-        // Add residual to prediction
+        // Add residual to prediction — resolve plane once to avoid per-pixel dispatch
         let max_val = (1i32 << bit_depth) - 1;
+        let (plane, stride) = frame.plane_mut(c_idx);
         for py in 0..size {
+            let row_start = (y0 as usize + py) * stride + x0 as usize;
             for px in 0..size {
-                let r = residual[py * size + px] as i32;
-                let x = x0 + px as u32;
-                let y = y0 + py as u32;
-
-                let pred = match c_idx {
-                    0 => frame.get_y(x, y) as i32,
-                    1 => frame.get_cb(x, y) as i32,
-                    2 => frame.get_cr(x, y) as i32,
-                    _ => 0,
-                };
-
-                let recon = (pred + r).clamp(0, max_val) as u16;
-                match c_idx {
-                    0 => frame.set_y(x, y, recon),
-                    1 => frame.set_cb(x, y, recon),
-                    2 => frame.set_cr(x, y, recon),
-                    _ => {}
+                let idx = row_start + px;
+                if idx < plane.len() {
+                    let pred = plane[idx] as i32;
+                    let r = residual[py * size + px] as i32;
+                    plane[idx] = (pred + r).clamp(0, max_val) as u16;
                 }
             }
         }

@@ -678,6 +678,43 @@ impl DecodedFrame {
         }
     }
 
+    /// Get a mutable plane slice and stride for a given component.
+    ///
+    /// Returns `(plane, stride)` where `plane` is the raw pixel data
+    /// and `stride` is the number of pixels per row.
+    #[inline]
+    pub fn plane_mut(&mut self, c_idx: u8) -> (&mut [u16], usize) {
+        match c_idx {
+            0 => (&mut self.y_plane, self.width as usize),
+            1 => {
+                let stride = self.c_stride();
+                (&mut self.cb_plane, stride)
+            }
+            2 => {
+                let stride = self.c_stride();
+                (&mut self.cr_plane, stride)
+            }
+            _ => (&mut self.y_plane, self.width as usize),
+        }
+    }
+
+    /// Get an immutable plane slice and stride for a given component.
+    #[inline]
+    pub fn plane(&self, c_idx: u8) -> (&[u16], usize) {
+        match c_idx {
+            0 => (&self.y_plane, self.width as usize),
+            1 => {
+                let stride = self.c_stride();
+                (&self.cb_plane, stride)
+            }
+            2 => {
+                let stride = self.c_stride();
+                (&self.cr_plane, stride)
+            }
+            _ => (&self.y_plane, self.width as usize),
+        }
+    }
+
     /// Get chroma plane dimensions (width, height)
     fn chroma_dims(&self) -> (u32, u32) {
         match self.chroma_format {

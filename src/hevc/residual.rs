@@ -152,6 +152,7 @@ impl Default for CoeffBuffer {
 
 impl CoeffBuffer {
     /// Create a new coefficient buffer
+    #[inline]
     pub fn new(log2_size: u8) -> Self {
         Self {
             coeffs: [0; MAX_COEFF],
@@ -161,17 +162,20 @@ impl CoeffBuffer {
     }
 
     /// Get the transform size
+    #[inline]
     pub fn size(&self) -> usize {
         1 << self.log2_size
     }
 
     /// Get coefficient at position
+    #[inline]
     pub fn get(&self, x: usize, y: usize) -> i16 {
         let stride = self.size();
         self.coeffs[y * stride + x]
     }
 
     /// Set coefficient at position
+    #[inline]
     pub fn set(&mut self, x: usize, y: usize, value: i16) {
         let stride = self.size();
         self.coeffs[y * stride + x] = value;
