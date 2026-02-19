@@ -125,19 +125,7 @@ impl HeicDecoder {
         let container = heif::parse(data)?;
         let primary_item = container.primary_item().ok_or(HeicError::NoPrimaryImage)?;
 
-        let mut frame = if primary_item.item_type == ItemType::Grid {
-            self.decode_grid(&container, &primary_item)?
-        } else {
-            let image_data = container
-                .get_item_data(primary_item.id)
-                .ok_or(HeicError::InvalidData("Missing image data"))?;
-
-            if let Some(ref config) = primary_item.hevc_config {
-                hevc::decode_with_config(config, image_data)?
-            } else {
-                hevc::decode(image_data)?
-            }
-        };
+        let mut frame = self.decode_item(&container, &primary_item, 0)?;
 
         // Try to decode alpha plane from auxiliary image.
         // Two known alpha URIs:
@@ -162,15 +150,45 @@ impl HeicDecoder {
             }
         }
 
+        Ok(frame)
+    }
+
+    /// Decode an item, handling derived image types (iden, grid, iovl).
+    /// Applies the item's own transforms (clap, irot) after decoding.
+    fn decode_item(
+        &self,
+        container: &heif::HeifContainer<'_>,
+        item: &heif::Item,
+        depth: u32,
+    ) -> Result<hevc::DecodedFrame> {
+        if depth > 8 {
+            return Err(HeicError::InvalidData("Derived image reference chain too deep"));
+        }
+
+        let mut frame = match item.item_type {
+            ItemType::Grid => self.decode_grid(container, item)?,
+            ItemType::Iden => self.decode_iden(container, item, depth)?,
+            ItemType::Iovl => self.decode_iovl(container, item, depth)?,
+            _ => {
+                let image_data = container
+                    .get_item_data(item.id)
+                    .ok_or(HeicError::InvalidData("Missing image data"))?;
+
+                if let Some(ref config) = item.hevc_config {
+                    hevc::decode_with_config(config, image_data)?
+                } else {
+                    hevc::decode(image_data)?
+                }
+            }
+        };
+
         // Apply clean aperture crop (clap box) if present
-        // The clap box specifies the true image dimensions within the
-        // conformance-window-cropped frame
-        if let Some(clap) = primary_item.clean_aperture {
+        if let Some(clap) = item.clean_aperture {
             apply_clean_aperture(&mut frame, &clap);
         }
 
         // Apply image rotation (irot box) if present
-        if let Some(rotation) = primary_item.rotation {
+        if let Some(rotation) = item.rotation {
             frame = match rotation.angle {
                 90 => frame.rotate_90_cw(),
                 180 => frame.rotate_180(),
@@ -180,6 +198,228 @@ impl HeicDecoder {
         }
 
         Ok(frame)
+    }
+
+    /// Decode an identity-derived image by following dimg references.
+    fn decode_iden(
+        &self,
+        container: &heif::HeifContainer<'_>,
+        iden_item: &heif::Item,
+        depth: u32,
+    ) -> Result<hevc::DecodedFrame> {
+        let source_ids = container.get_item_references(iden_item.id, FourCC::DIMG);
+        let source_id = source_ids
+            .first()
+            .ok_or(HeicError::InvalidData("iden item has no dimg reference"))?;
+
+        let source_item = container
+            .get_item(*source_id)
+            .ok_or(HeicError::InvalidData("iden dimg target item not found"))?;
+
+        // Recursively decode the source item (may be another iden, grid, hvc1, etc.)
+        // The source item's own transforms are applied by decode_item.
+        self.decode_item(container, &source_item, depth + 1)
+    }
+
+    /// Decode an image overlay (iovl) by compositing referenced tiles onto a canvas.
+    fn decode_iovl(
+        &self,
+        container: &heif::HeifContainer<'_>,
+        iovl_item: &heif::Item,
+        depth: u32,
+    ) -> Result<hevc::DecodedFrame> {
+        let iovl_data = container
+            .get_item_data(iovl_item.id)
+            .ok_or(HeicError::InvalidData("Missing overlay descriptor"))?;
+
+        // Parse iovl descriptor:
+        // - version (1 byte) + flags (3 bytes)
+        // - canvas_fill_value: 2 bytes * num_channels (flags & 0x01 determines 32-bit offsets)
+        if iovl_data.len() < 6 {
+            return Err(HeicError::InvalidData("Overlay descriptor too short"));
+        }
+
+        let flags = iovl_data[1];
+        let large = (flags & 1) != 0;
+
+        // Skip version/flags (4 bytes), skip fill value (we'll use 0 fill)
+        // Fill value is 2 bytes per channel, but number of channels varies
+        // Simpler: look at total data size vs number of tile references to find offset
+        let tile_ids = container.get_item_references(iovl_item.id, FourCC::DIMG);
+        if tile_ids.is_empty() {
+            return Err(HeicError::InvalidData("Overlay has no tile references"));
+        }
+
+        // Calculate expected layout:
+        // 4 bytes (version/flags) + fill_bytes + width/height + N*(x_off + y_off)
+        // For HEVC images: fill = 2 bytes * 3 channels = 6 bytes typically (but RGBA = 8)
+        // Width/height = 4 bytes each (large) or 2 bytes each
+        // Offsets = 4 bytes each (large) or 2 bytes each, N offsets of 2 values
+        let off_size = if large { 4usize } else { 2 };
+        // Work backwards from the expected total:
+        // total = 4 + fill_bytes + 2*off_size + N*2*off_size
+        // fill_bytes = total - 4 - 2*off_size - N*2*off_size
+        let per_tile = 2 * off_size;
+        let fixed_end = 4 + 2 * off_size; // version/flags + width/height
+        let tile_data_size = tile_ids.len() * per_tile;
+        let fill_bytes = iovl_data
+            .len()
+            .checked_sub(fixed_end + tile_data_size)
+            .ok_or(HeicError::InvalidData("Overlay descriptor too short for tiles"))?;
+
+        let mut pos = 4 + fill_bytes;
+
+        // Read canvas dimensions
+        let (canvas_width, canvas_height) = if large {
+            if pos + 8 > iovl_data.len() {
+                return Err(HeicError::InvalidData("Overlay descriptor truncated"));
+            }
+            let w = u32::from_be_bytes([
+                iovl_data[pos],
+                iovl_data[pos + 1],
+                iovl_data[pos + 2],
+                iovl_data[pos + 3],
+            ]);
+            let h = u32::from_be_bytes([
+                iovl_data[pos + 4],
+                iovl_data[pos + 5],
+                iovl_data[pos + 6],
+                iovl_data[pos + 7],
+            ]);
+            pos += 8;
+            (w, h)
+        } else {
+            if pos + 4 > iovl_data.len() {
+                return Err(HeicError::InvalidData("Overlay descriptor truncated"));
+            }
+            let w = u16::from_be_bytes([iovl_data[pos], iovl_data[pos + 1]]) as u32;
+            let h = u16::from_be_bytes([iovl_data[pos + 2], iovl_data[pos + 3]]) as u32;
+            pos += 4;
+            (w, h)
+        };
+
+        // Read per-tile offsets
+        let mut offsets = Vec::with_capacity(tile_ids.len());
+        for _ in 0..tile_ids.len() {
+            let (x, y) = if large {
+                if pos + 8 > iovl_data.len() {
+                    return Err(HeicError::InvalidData("Overlay offset data truncated"));
+                }
+                let x = i32::from_be_bytes([
+                    iovl_data[pos],
+                    iovl_data[pos + 1],
+                    iovl_data[pos + 2],
+                    iovl_data[pos + 3],
+                ]);
+                let y = i32::from_be_bytes([
+                    iovl_data[pos + 4],
+                    iovl_data[pos + 5],
+                    iovl_data[pos + 6],
+                    iovl_data[pos + 7],
+                ]);
+                pos += 8;
+                (x, y)
+            } else {
+                if pos + 4 > iovl_data.len() {
+                    return Err(HeicError::InvalidData("Overlay offset data truncated"));
+                }
+                let x = i16::from_be_bytes([iovl_data[pos], iovl_data[pos + 1]]) as i32;
+                let y = i16::from_be_bytes([iovl_data[pos + 2], iovl_data[pos + 3]]) as i32;
+                pos += 4;
+                (x, y)
+            };
+            offsets.push((x, y));
+        }
+
+        // Decode first tile to get format info
+        let first_tile_item = container
+            .get_item(tile_ids[0])
+            .ok_or(HeicError::InvalidData("Missing overlay tile item"))?;
+        let first_tile_config = first_tile_item
+            .hevc_config
+            .as_ref()
+            .ok_or(HeicError::InvalidData("Missing overlay tile hvcC"))?;
+
+        let bit_depth = first_tile_config.bit_depth_luma_minus8 + 8;
+        let chroma_format = first_tile_config.chroma_format;
+
+        let mut output = hevc::DecodedFrame::with_params(
+            canvas_width,
+            canvas_height,
+            bit_depth,
+            chroma_format,
+        );
+
+        // Decode each tile and composite onto the canvas
+        for (idx, &tile_id) in tile_ids.iter().enumerate() {
+            let tile_item = container
+                .get_item(tile_id)
+                .ok_or(HeicError::InvalidData("Missing overlay tile"))?;
+
+            let tile_frame = self.decode_item(container, &tile_item, depth + 1)?;
+
+            let (off_x, off_y) = offsets[idx];
+            let dst_x = off_x.max(0) as u32;
+            let dst_y = off_y.max(0) as u32;
+            let tile_w = tile_frame.cropped_width();
+            let tile_h = tile_frame.cropped_height();
+
+            // Copy luma
+            let copy_w = tile_w.min(canvas_width.saturating_sub(dst_x));
+            let copy_h = tile_h.min(canvas_height.saturating_sub(dst_y));
+
+            for row in 0..copy_h {
+                let src_row = (tile_frame.crop_top + row) as usize;
+                let dst_row = (dst_y + row) as usize;
+                for col in 0..copy_w {
+                    let src_col = (tile_frame.crop_left + col) as usize;
+                    let dst_col = (dst_x + col) as usize;
+                    let src_idx = src_row * tile_frame.y_stride() + src_col;
+                    let dst_idx = dst_row * output.y_stride() + dst_col;
+                    if src_idx < tile_frame.y_plane.len() && dst_idx < output.y_plane.len() {
+                        output.y_plane[dst_idx] = tile_frame.y_plane[src_idx];
+                    }
+                }
+            }
+
+            // Copy chroma
+            if chroma_format > 0 {
+                let (sub_x, sub_y) = match chroma_format {
+                    1 => (2u32, 2u32),
+                    2 => (2, 1),
+                    3 => (1, 1),
+                    _ => (2, 2),
+                };
+                let c_copy_w = copy_w.div_ceil(sub_x);
+                let c_copy_h = copy_h.div_ceil(sub_y);
+                let c_dst_x = dst_x / sub_x;
+                let c_dst_y = dst_y / sub_y;
+                let c_src_x = tile_frame.crop_left / sub_x;
+                let c_src_y = tile_frame.crop_top / sub_y;
+
+                let src_c_stride = tile_frame.c_stride();
+                let dst_c_stride = output.c_stride();
+
+                for row in 0..c_copy_h {
+                    let src_row = (c_src_y + row) as usize;
+                    let dst_row = (c_dst_y + row) as usize;
+                    for col in 0..c_copy_w {
+                        let src_col = (c_src_x + col) as usize;
+                        let dst_col = (c_dst_x + col) as usize;
+                        let src_idx = src_row * src_c_stride + src_col;
+                        let dst_idx = dst_row * dst_c_stride + dst_col;
+                        if src_idx < tile_frame.cb_plane.len()
+                            && dst_idx < output.cb_plane.len()
+                        {
+                            output.cb_plane[dst_idx] = tile_frame.cb_plane[src_idx];
+                            output.cr_plane[dst_idx] = tile_frame.cr_plane[src_idx];
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(output)
     }
 
     /// Decode a grid-based HEIC image
