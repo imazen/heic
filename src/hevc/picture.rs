@@ -8,6 +8,11 @@ use alloc::vec::Vec;
 /// for reference sample availability (H.265 8.4.4.2.2).
 pub const UNINIT_SAMPLE: u16 = u16::MAX;
 
+/// Deblocking edge flags per 4x4 block
+pub const DEBLOCK_FLAG_VERT: u8 = 1;
+/// Horizontal edge flag
+pub const DEBLOCK_FLAG_HORIZ: u8 = 2;
+
 /// Decoded video frame
 #[derive(Debug)]
 pub struct DecodedFrame {
@@ -33,6 +38,13 @@ pub struct DecodedFrame {
     pub crop_top: u32,
     /// Conformance window bottom offset (in luma samples)
     pub crop_bottom: u32,
+    /// Deblocking edge flags at 4x4 block granularity
+    /// Bit 0 = vertical edge, Bit 1 = horizontal edge
+    pub deblock_flags: Vec<u8>,
+    /// Stride for deblock_flags (width / 4)
+    pub deblock_stride: u32,
+    /// QP map at 4x4 block granularity (for deblocking)
+    pub qp_map: Vec<i8>,
 }
 
 impl DecodedFrame {
@@ -43,6 +55,9 @@ impl DecodedFrame {
         let chroma_width = width.div_ceil(2);
         let chroma_height = height.div_ceil(2);
         let chroma_size = (chroma_width * chroma_height) as usize;
+        let deblock_stride = width.div_ceil(4);
+        let deblock_height = height.div_ceil(4);
+        let deblock_size = (deblock_stride * deblock_height) as usize;
 
         Self {
             width,
@@ -56,6 +71,9 @@ impl DecodedFrame {
             crop_right: 0,
             crop_top: 0,
             crop_bottom: 0,
+            deblock_flags: vec![0; deblock_size],
+            deblock_stride,
+            qp_map: vec![0; deblock_size],
         }
     }
 
@@ -73,6 +91,10 @@ impl DecodedFrame {
 
         let chroma_size = (chroma_width * chroma_height) as usize;
 
+        let deblock_stride = width.div_ceil(4);
+        let deblock_height = height.div_ceil(4);
+        let deblock_size = (deblock_stride * deblock_height) as usize;
+
         Self {
             width,
             height,
@@ -85,6 +107,51 @@ impl DecodedFrame {
             crop_right: 0,
             crop_top: 0,
             crop_bottom: 0,
+            deblock_flags: vec![0; deblock_size],
+            deblock_stride,
+            qp_map: vec![0; deblock_size],
+        }
+    }
+
+    /// Mark a vertical TU/CU boundary at luma position (x, y) with given size
+    pub fn mark_tu_boundary(&mut self, x: u32, y: u32, size: u32) {
+        let bx = x / 4;
+        let by = y / 4;
+        let bs = size / 4;
+
+        // Mark vertical edge at x (left edge of TU)
+        if x > 0 {
+            for j in 0..bs {
+                let idx = ((by + j) * self.deblock_stride + bx) as usize;
+                if idx < self.deblock_flags.len() {
+                    self.deblock_flags[idx] |= DEBLOCK_FLAG_VERT;
+                }
+            }
+        }
+
+        // Mark horizontal edge at y (top edge of TU)
+        if y > 0 {
+            for i in 0..bs {
+                let idx = (by * self.deblock_stride + bx + i) as usize;
+                if idx < self.deblock_flags.len() {
+                    self.deblock_flags[idx] |= DEBLOCK_FLAG_HORIZ;
+                }
+            }
+        }
+    }
+
+    /// Store QP for a block region at 4x4 granularity
+    pub fn store_block_qp(&mut self, x: u32, y: u32, size: u32, qp: i8) {
+        let bx = x / 4;
+        let by = y / 4;
+        let bs = size / 4;
+        for j in 0..bs {
+            for i in 0..bs {
+                let idx = ((by + j) * self.deblock_stride + bx + i) as usize;
+                if idx < self.qp_map.len() {
+                    self.qp_map[idx] = qp;
+                }
+            }
         }
     }
 

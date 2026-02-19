@@ -6,6 +6,7 @@
 mod bitstream;
 mod cabac;
 mod ctu;
+mod deblock;
 pub mod debug;
 mod intra;
 mod params;
@@ -202,7 +203,16 @@ fn decode_slice(
     // 4. Decode all CTUs in the slice
     ctx.decode_slice(frame)?;
 
-    // 5. TODO: Apply in-loop filters (deblocking, SAO)
+    // 5. Apply deblocking filter
+    if !slice_header.slice_deblocking_filter_disabled_flag {
+        let beta_offset = slice_header.slice_beta_offset_div2 as i32 * 2;
+        let tc_offset = slice_header.slice_tc_offset_div2 as i32 * 2;
+        let cb_qp_offset = pps.pps_cb_qp_offset as i32;
+        let cr_qp_offset = pps.pps_cr_qp_offset as i32;
+        deblock::apply_deblocking_filter(frame, beta_offset, tc_offset, cb_qp_offset, cr_qp_offset);
+    }
+
+    // 6. TODO: SAO (Sample Adaptive Offset)
 
     Ok(())
 }

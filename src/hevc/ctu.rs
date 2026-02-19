@@ -1081,6 +1081,11 @@ impl<'a> SliceContext<'a> {
             self.store_qpy(cu_x, cu_y, cu_log2, self.current_qpy);
         }
 
+        // Mark TU boundary and store QP for deblocking
+        let tu_size = 1u32 << log2_size;
+        frame.mark_tu_boundary(x0, y0, tu_size);
+        frame.store_block_qp(x0, y0, tu_size, self.current_qpy as i8);
+
         // Look up intra mode at actual TU position (correct for NxN where sub-TUs differ)
         let actual_luma_mode = self.get_intra_mode_at(x0, y0);
         let sis = self.sps.strong_intra_smoothing_enabled_flag;
