@@ -5,7 +5,9 @@
 
 extern crate alloc;
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use alloc::format;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// Enable verbose coefficient logging
 pub static VERBOSE_COEFFS: AtomicBool = AtomicBool::new(false);
@@ -20,7 +22,9 @@ pub static INVARIANT_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
 #[cold]
 pub fn invariant_violation(msg: &str, should_panic: bool) {
     let count = INVARIANT_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
+    #[cfg(feature = "std")]
     eprintln!("INVARIANT VIOLATION #{}: {}", count + 1, msg);
+    let _ = count;
     if should_panic {
         panic!("invariant violation: {}", msg);
     }
@@ -109,6 +113,7 @@ impl TuDecodeLog {
     }
 
     /// Print summary of decoded coefficients
+    #[cfg(feature = "std")]
     pub fn print_summary(&self) {
         eprintln!(
             "TU ({},{}) c_idx={} size={}x{} last=({},{}) coeffs={}",
@@ -157,6 +162,7 @@ pub fn compare_coeffs(
         }
     }
 
+    #[cfg(feature = "std")]
     if !diffs.is_empty() {
         eprintln!("{}: {} differences found:", context, diffs.len());
         for (x, y, ours_val, ref_val) in &diffs[..diffs.len().min(10)] {
@@ -217,6 +223,7 @@ impl CabacTracker {
     }
 
     /// Print summary of tracking data
+    #[cfg(feature = "std")]
     pub fn print_summary(&self) {
         if !self.ctu_positions.is_empty() {
             eprintln!("CABAC Tracker Summary:");
@@ -245,14 +252,17 @@ impl CabacTracker {
 }
 
 /// Global tracker instance
+#[cfg(feature = "std")]
 static TRACKER: std::sync::Mutex<Option<CabacTracker>> = std::sync::Mutex::new(None);
 
 /// Initialize global tracker
+#[cfg(feature = "std")]
 pub fn init_tracker() {
     *TRACKER.lock().unwrap() = Some(CabacTracker::new());
 }
 
 /// Record CTU start in global tracker
+#[cfg(feature = "std")]
 pub fn track_ctu_start(ctu_idx: u32, byte_pos: usize) {
     if let Some(tracker) = TRACKER.lock().unwrap().as_mut() {
         tracker.record_ctu_start(ctu_idx, byte_pos);
@@ -260,6 +270,7 @@ pub fn track_ctu_start(ctu_idx: u32, byte_pos: usize) {
 }
 
 /// Record large coefficient in global tracker
+#[cfg(feature = "std")]
 pub fn track_large_coeff(byte_pos: usize) {
     if let Some(tracker) = TRACKER.lock().unwrap().as_mut() {
         tracker.record_large_coeff(byte_pos);
@@ -267,11 +278,25 @@ pub fn track_large_coeff(byte_pos: usize) {
 }
 
 /// Print tracker summary
+#[cfg(feature = "std")]
 pub fn print_tracker_summary() {
     if let Some(tracker) = TRACKER.lock().unwrap().as_ref() {
         tracker.print_summary();
     }
 }
+
+/// No-op stubs for no_std
+#[cfg(not(feature = "std"))]
+pub fn init_tracker() {}
+/// No-op stub for no_std
+#[cfg(not(feature = "std"))]
+pub fn track_ctu_start(_ctu_idx: u32, _byte_pos: usize) {}
+/// No-op stub for no_std
+#[cfg(not(feature = "std"))]
+pub fn track_large_coeff(_byte_pos: usize) {}
+/// No-op stub for no_std
+#[cfg(not(feature = "std"))]
+pub fn print_tracker_summary() {}
 
 #[cfg(test)]
 mod tests {

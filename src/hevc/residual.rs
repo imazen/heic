@@ -8,6 +8,14 @@ use super::debug;
 use super::transform::MAX_COEFF;
 use crate::error::HevcError;
 
+/// Residual trace output, only available with std feature
+macro_rules! rc_eprintln {
+    ($($arg:tt)*) => {
+        #[cfg(feature = "std")]
+        eprintln!($($arg)*);
+    };
+}
+
 type Result<T> = core::result::Result<T, HevcError>;
 
 /// Scan order types for coefficient scanning
@@ -198,6 +206,7 @@ pub fn decode_residual(
     DEBUG_RESIDUAL_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
     // SE trace for differential testing against libde265
+    #[cfg(feature = "std")]
     {
         let se_num = crate::hevc::ctu::SE_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         if se_num < crate::hevc::ctu::SE_TRACE_LIMIT {
@@ -211,6 +220,9 @@ pub fn decode_residual(
     }
 
     // Surgical trace for diverging residual (set to u32::MAX to disable)
+    #[cfg(feature = "std")]
+    let rc_trace = false;
+    #[cfg(not(feature = "std"))]
     let rc_trace = false;
     let rcp = "RCX";
 
@@ -227,7 +239,7 @@ pub fn decode_residual(
         if rc_trace {
             let (range, _, _) = cabac.get_state_extended();
             let (byte_pos, _, _) = cabac.get_position();
-            eprintln!("{rcp}_TSKIP c_idx={} val={} range={} byte={}", c_idx, flag as u8, range, byte_pos);
+            rc_eprintln!("{rcp}_TSKIP c_idx={} val={} range={} byte={}", c_idx, flag as u8, range, byte_pos);
         }
         flag
     } else {
@@ -239,7 +251,7 @@ pub fn decode_residual(
     if rc_trace {
         let (range, _, _) = cabac.get_state_extended();
         let (byte_pos, _, _) = cabac.get_position();
-        eprintln!("{rcp}_LAST lastX={} lastY={} range={} byte={}", last_x, last_y, range, byte_pos);
+        rc_eprintln!("{rcp}_LAST lastX={} lastY={} range={} byte={}", last_x, last_y, range, byte_pos);
     }
 
     // Swap coordinates for vertical scan
@@ -276,7 +288,7 @@ pub fn decode_residual(
     let last_pos_in_sb = find_scan_pos_4x4(scan_pos, local_x, local_y);
 
     if rc_trace {
-        eprintln!("{rcp}_SCAN scanIdx={} lastSB={} lastPos={} sb=({},{}) local=({},{})",
+        rc_eprintln!("{rcp}_SCAN scanIdx={} lastSB={} lastPos={} sb=({},{}) local=({},{})",
             scan_idx, last_sb_idx, last_pos_in_sb, last_sb_x, last_sb_y, local_x, local_y);
     }
 
@@ -377,7 +389,7 @@ pub fn decode_residual(
                 let xc = sb_x * 4 + x_in_sb;
                 let yc = sb_y * 4 + y_in_sb;
                 let ctx_idx = calc_sig_coeff_flag_ctx(xc, yc, log2_size, c_idx, scan_idx, prev_csbf);
-                eprintln!("{rcp}_SIG n={} pos=({},{}) ctx={} val={} range={} byte={}",
+                rc_eprintln!("{rcp}_SIG n={} pos=({},{}) ctx={} val={} range={} byte={}",
                     n, xc, yc, ctx_idx, if sig {1} else {0}, range, byte_pos);
             }
             if sig {
@@ -396,7 +408,7 @@ pub fn decode_residual(
                 coeff_flags[0] = true;
                 coeff_values[0] = 1;
                 num_coeffs += 1;
-                if rc_trace { eprintln!("{rcp}_SIG n=0 DC_INFERRED"); }
+                if rc_trace { rc_eprintln!("{rcp}_SIG n=0 DC_INFERRED"); }
             } else {
                 let sig = decode_sig_coeff_flag(
                     cabac, ctx, c_idx, 0, log2_size, scan_idx, sb_x, sb_y, prev_csbf, scan_pos,
@@ -405,7 +417,7 @@ pub fn decode_residual(
                     let (range, _, _) = cabac.get_state_extended();
                     let (byte_pos, _, _) = cabac.get_position();
                     let ctx_idx = calc_sig_coeff_flag_ctx(sb_x * 4, sb_y * 4, log2_size, c_idx, scan_idx, prev_csbf);
-                    eprintln!("{rcp}_SIG n=0 pos=({},{}) ctx={} val={} range={} byte={}",
+                    rc_eprintln!("{rcp}_SIG n=0 pos=({},{}) ctx={} val={} range={} byte={}",
                         sb_x * 4, sb_y * 4, ctx_idx, if sig {1} else {0}, range, byte_pos);
                 }
                 if sig {
@@ -428,7 +440,7 @@ pub fn decode_residual(
         let ctx_set = base + if prev_subblock_had_gt1 { 1 } else { 0 };
 
         if rc_trace {
-            eprintln!("{rcp}_COEFF sb_idx={} num_coeffs={} ctx_set={}", sb_idx, num_coeffs, ctx_set);
+            rc_eprintln!("{rcp}_COEFF sb_idx={} num_coeffs={} ctx_set={}", sb_idx, num_coeffs, ctx_set);
         }
 
         // Track if this subblock has any g1=1 (for next subblock's ctx_set)
@@ -479,7 +491,7 @@ pub fn decode_residual(
                     + if c_idx > 0 { 16 } else { 0 }
                     + (ctx_set as usize) * 4
                     + (greater1_ctx as usize).min(3);
-                eprintln!("{rcp}_G1 c={} ctxSet={} g1ctx={} fullCtx={} val={} range={} byte={}",
+                rc_eprintln!("{rcp}_G1 c={} ctxSet={} g1ctx={} fullCtx={} val={} range={} byte={}",
                     g1_count, ctx_set, greater1_ctx, full_ctx, if g1 {1} else {0}, range, byte_pos);
             }
             last_greater1_flag = g1;
@@ -505,7 +517,7 @@ pub fn decode_residual(
             if rc_trace {
                 let (range, _, _) = cabac.get_state_extended();
                 let (byte_pos, _, _) = cabac.get_position();
-                eprintln!("{rcp}_G2 ctxSet={} val={} range={} byte={}", ctx_set, if g2 {1} else {0}, range, byte_pos);
+                rc_eprintln!("{rcp}_G2 ctxSet={} val={} range={} byte={}", ctx_set, if g2 {1} else {0}, range, byte_pos);
             }
             if g2 {
                 coeff_values[g1_idx as usize] = 3;
@@ -572,7 +584,7 @@ pub fn decode_residual(
         if rc_trace {
             let (range, _, _) = cabac.get_state_extended();
             let (byte_pos, _, _) = cabac.get_position();
-            eprintln!("{rcp}_SIGNS n_sig={} hidden={} signs={:?} range={} byte={}",
+            rc_eprintln!("{rcp}_SIGNS n_sig={} hidden={} signs={:?} range={} byte={}",
                 n_sig, sign_hidden, &coeff_signs[..n_sig], range, byte_pos);
         }
 
@@ -589,7 +601,7 @@ pub fn decode_residual(
                 if rc_trace {
                     let (range, _, _) = cabac.get_state_extended();
                     let (byte_pos, _, _) = cabac.get_position();
-                    eprintln!("{rcp}_REM n={} base={} rice={} rem={} final={} range={} byte={}",
+                    rc_eprintln!("{rcp}_REM n={} base={} rice={} rem={} final={} range={} byte={}",
                         n, base, rice_param, remaining, base + remaining, range, byte_pos);
                 }
                 rice_param = new_rice;
@@ -638,7 +650,7 @@ pub fn decode_residual(
     if rc_trace {
         let (range, _, _) = cabac.get_state_extended();
         let (byte_pos, _, _) = cabac.get_position();
-        eprintln!("{rcp}_END range={} byte={}", range, byte_pos);
+        rc_eprintln!("{rcp}_END range={} byte={}", range, byte_pos);
     }
     Ok((buffer, transform_skip))
 }

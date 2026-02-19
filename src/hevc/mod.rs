@@ -209,9 +209,22 @@ fn decode_slice(
     ctx.decode_slice(frame)?;
 
     // 5. Apply deblocking filter (skip if HEIC_NOFILTER or HEIC_NODEBLOCK env set)
+    #[cfg(feature = "std")]
     let skip_all = std::env::var("HEIC_NOFILTER").is_ok();
-    let skip_deblock = skip_all || std::env::var("HEIC_NODEBLOCK").is_ok();
-    let skip_sao = skip_all || std::env::var("HEIC_NOSAO").is_ok();
+    #[cfg(not(feature = "std"))]
+    let skip_all = false;
+    let skip_deblock = skip_all || {
+        #[cfg(feature = "std")]
+        { std::env::var("HEIC_NODEBLOCK").is_ok() }
+        #[cfg(not(feature = "std"))]
+        { false }
+    };
+    let skip_sao = skip_all || {
+        #[cfg(feature = "std")]
+        { std::env::var("HEIC_NOSAO").is_ok() }
+        #[cfg(not(feature = "std"))]
+        { false }
+    };
     if !skip_deblock && !slice_header.slice_deblocking_filter_disabled_flag {
         let beta_offset = slice_header.slice_beta_offset_div2 as i32 * 2;
         let tc_offset = slice_header.slice_tc_offset_div2 as i32 * 2;

@@ -515,6 +515,28 @@ impl<'a> DecodeRequest<'a> {
 }
 
 // ---------------------------------------------------------------------------
+// no_std float helpers (f64::floor/round require std)
+// ---------------------------------------------------------------------------
+
+/// Floor for f64 (truncate toward negative infinity)
+#[inline]
+fn floor_f64(x: f64) -> f64 {
+    let i = x as i64;
+    let f = i as f64;
+    if f > x { f - 1.0 } else { f }
+}
+
+/// Round-half-away-from-zero for f64
+#[inline]
+fn round_f64(x: f64) -> f64 {
+    if x >= 0.0 {
+        floor_f64(x + 0.5)
+    } else {
+        -floor_f64(-x + 0.5)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Internal decode pipeline
 // ---------------------------------------------------------------------------
 
@@ -1087,8 +1109,8 @@ fn decode_alpha_plane(
                 let sy = (dy as f64) * (alpha_h as f64 - 1.0)
                     / (primary_h as f64 - 1.0).max(1.0);
 
-                let x0 = sx.floor() as u32;
-                let y0 = sy.floor() as u32;
+                let x0 = floor_f64(sx) as u32;
+                let y0 = floor_f64(sy) as u32;
                 let x1 = (x0 + 1).min(alpha_w - 1);
                 let y1 = (y0 + 1).min(alpha_h - 1);
                 let fx = sx - x0 as f64;
@@ -1113,7 +1135,7 @@ fn decode_alpha_plane(
                     + v01 * (1.0 - fx) * fy
                     + v11 * fx * fy;
 
-                alpha_plane.push(val.round() as u16);
+                alpha_plane.push(round_f64(val) as u16);
             }
         }
     }
@@ -1203,9 +1225,9 @@ fn apply_clean_aperture(frame: &mut hevc::DecodedFrame, clap: &heif::CleanApertu
     };
 
     let extra_left =
-        ((conf_width as f64 - clean_width as f64) / 2.0 + horiz_off_pixels).round() as u32;
+        round_f64((conf_width as f64 - clean_width as f64) / 2.0 + horiz_off_pixels) as u32;
     let extra_top =
-        ((conf_height as f64 - clean_height as f64) / 2.0 + vert_off_pixels).round() as u32;
+        round_f64((conf_height as f64 - clean_height as f64) / 2.0 + vert_off_pixels) as u32;
     let extra_right = conf_width
         .saturating_sub(clean_width)
         .saturating_sub(extra_left);

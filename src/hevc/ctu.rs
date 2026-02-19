@@ -6,6 +6,7 @@
 //! - PU: Prediction Unit (for motion/intra prediction)
 //! - TU: Transform Unit (for residual coding)
 
+use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -15,6 +16,7 @@ const DEBUG_TRACE: bool = false;
 /// Debug print macro gated behind DEBUG_TRACE const
 macro_rules! debug_trace {
     ($($arg:tt)*) => {
+        #[cfg(feature = "std")]
         if DEBUG_TRACE {
             eprintln!($($arg)*);
         }
@@ -42,10 +44,14 @@ pub const SE_TRACE_LIMIT: u32 = 0;
 fn se_trace(name: &str, val: i64, cabac: &CabacDecoder) {
     let num = SE_COUNTER.fetch_add(1, Ordering::Relaxed);
     if num < SE_TRACE_LIMIT {
-        let (range, _, _) = cabac.get_state_extended();
-        let (byte_pos, _, _) = cabac.get_position();
-        eprintln!("SE#{} {} val={} range={} byte={}", num, name, val, range, byte_pos);
+        #[cfg(feature = "std")]
+        {
+            let (range, _, _) = cabac.get_state_extended();
+            let (byte_pos, _, _) = cabac.get_position();
+            eprintln!("SE#{} {} val={} range={} byte={}", num, name, val, range, byte_pos);
+        }
     }
+    let _ = (name, val, cabac);
 }
 
 /// Chroma QP mapping table (H.265 Table 8-10)
