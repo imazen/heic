@@ -34,50 +34,51 @@ cargo test --test compare_reference write_comparison_images -- --nocapture --ign
 
 Do NOT use web searches for HEVC spec details - read the spec sections or reference implementations directly.
 
-## API Design Guidelines
+## API Design
 
-Follow `/home/lilith/work/codec-design/README.md` for codec API design patterns:
+Follows the zen codec three-layer pattern from `/home/lilith/work/codec-design/README.md`:
 
-### Decoder Design Principles
-- **Layered API**: Simple one-shot functions + builder for advanced use
-- **Info before decode**: Allow inspection without full decode
-- **Zero-copy decode_into**: For performance-critical paths
-- **Multiple output formats**: RGBA, RGB, YUV, etc.
-
-### Example API Shape (future)
 ```rust
 // Simple one-shot
-pub fn decode_rgba(data: &[u8]) -> Result<(Vec<u8>, u32, u32)>;
+let output = DecoderConfig::new().decode(&data, PixelLayout::Rgba8)?;
 
-// Typed pixel output
-pub fn decode<P: DecodePixel>(data: &[u8]) -> Result<(Vec<P>, u32, u32)>;
-
-// Builder for advanced options
-pub struct Decoder<'a> { ... }
-impl<'a> Decoder<'a> {
-    pub fn new(data: &'a [u8]) -> Result<Self>;
-    pub fn info(&self) -> &ImageInfo;
-    pub fn decode_rgba(self) -> Result<ImgVec<RGBA8>>;
-}
+// Full control with limits and cancellation
+let output = DecoderConfig::new()
+    .decode_request(&data)
+    .with_output_layout(PixelLayout::Rgba8)
+    .with_limits(&limits)
+    .with_stop(&cancel)
+    .decode()?;
 
 // Zero-copy into pre-allocated buffer
-pub fn decode_rgba_into(
-    data: &[u8],
-    output: &mut [u8],
-    stride_bytes: u32
-) -> Result<(u32, u32)>;
+let info = ImageInfo::from_bytes(&data)?;
+let mut buf = vec![0u8; info.output_buffer_size(PixelLayout::Rgba8)];
+let info = DecoderConfig::new()
+    .decode_request(&data)
+    .with_output_layout(PixelLayout::Rgba8)
+    .decode_into(&mut buf)?;
+
+// Probe without decoding
+let info = ImageInfo::from_bytes(&data)?;
+
+// Raw YCbCr access
+let frame = DecoderConfig::new().decode_to_frame(&data)?;
+
+// HDR gain map
+let gainmap = DecoderConfig::new().decode_gain_map(&data)?;
 ```
 
-### Essential Crates
-- `rgb` - Typed pixel structs (RGB8, RGBA8, etc.)
-- `imgref` - Strided 2D image views
-- `bytemuck` - Safe transmute for SIMD
+### Key Types
+- `DecoderConfig` — HOW to decode (reusable, Clone)
+- `DecodeRequest<'a>` — WHAT to decode (data + layout + limits + stop)
+- `DecodeOutput` — decoded pixels (data + width + height + layout)
+- `PixelLayout` — Rgb8, Rgba8, Bgr8, Bgra8
+- `Limits` — max_width, max_height, max_pixels, max_memory_bytes
+- `ImageInfo` — probe result (width, height, has_alpha, bit_depth, chroma_format)
+- `enough::Stop` — cooperative cancellation (re-exported)
 
-### SIMD Strategy
-- Use `wide` crate (1.1.1) for portable SIMD types
-- Use `multiversed` for runtime dispatch
-- Place dispatch at high level, `#[inline(always)]` for inner loops
-- See codec-design README for archmage usage in complex operations
+### Dependencies
+- `enough` — cooperative cancellation (Stop trait)
 
 ## Code Style
 
@@ -89,6 +90,9 @@ pub fn decode_rgba_into(
 ## Current Implementation Status
 
 ### Completed
+- Zen codec API (DecoderConfig → DecodeRequest → decode)
+- PixelLayout (Rgb8, Rgba8, Bgr8, Bgra8), Limits, Stop cancellation
+- decode_into zero-copy, ImageInfo::from_bytes probing
 - HEIF container parsing (boxes.rs, parser.rs)
 - NAL unit parsing (bitstream.rs)
 - VPS/SPS/PPS parsing (params.rs)
@@ -121,7 +125,7 @@ pub fn decode_rgba_into(
 - HEVC scaling list support (custom dequantization matrices from SPS/PPS)
 
 ### Current Quality (RGB comparison vs libheif)
-- 100/162 test files decode successfully (0 that libheif handles but we don't)
+- 103/162 test files decode successfully
 - Best: example_q95 65.7dB (98% pixel-exact), classic-car 58.5dB (95% exact)
 - Nokia C001-C052: 50.5dB (77% pixel-exact)
 - Grid images: image1 50.4dB, classic-car 58.5dB
@@ -138,6 +142,8 @@ pub fn decode_rgba_into(
 ### Pending
 - SIMD optimization
 - BT.709 / BT.2020 matrix coefficients (currently only BT.601)
+- Fuzzing targets (decode, limits)
+- whereat error location tracking
 
 ## Known Limitations
 

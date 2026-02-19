@@ -8,3 +8,6 @@ User reported "PPS ID mismatch" error on L-HEVC files. Investigated the NAL stru
 
 ## 2026-02-19: Investigation request - iphone_rotated_and_mirrored.heic 32.8dB PSNR
 User asked to investigate why this file has low PSNR (32.8dB, max diff 33) vs libheif.
+
+## 2026-02-19: Update test files to new API
+User requested updating all test files in tests/ to use new DecoderConfig API (replacing HeicDecoder).
