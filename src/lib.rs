@@ -50,7 +50,11 @@ pub use error::{HeicError, HevcError, ProbeError, Result};
 // Re-export Stop and Unstoppable for ergonomics
 pub use enough::{Stop, StopReason, Unstoppable};
 
+// Re-export At for error location tracking
+pub use whereat::At;
+
 use alloc::vec::Vec;
+use error::check_stop;
 use heif::{ColorInfo, FourCC, ItemType, Transform};
 
 /// Pixel layout for decoded output.
@@ -121,17 +125,17 @@ impl Limits {
     fn check_dimensions(&self, width: u32, height: u32) -> Result<()> {
         if let Some(max_w) = self.max_width {
             if u64::from(width) > max_w {
-                return Err(HeicError::LimitExceeded("image width exceeds limit"));
+                return Err(HeicError::LimitExceeded("image width exceeds limit").into());
             }
         }
         if let Some(max_h) = self.max_height {
             if u64::from(height) > max_h {
-                return Err(HeicError::LimitExceeded("image height exceeds limit"));
+                return Err(HeicError::LimitExceeded("image height exceeds limit").into());
             }
         }
         if let Some(max_px) = self.max_pixels {
             if u64::from(width) * u64::from(height) > max_px {
-                return Err(HeicError::LimitExceeded("pixel count exceeds limit"));
+                return Err(HeicError::LimitExceeded("pixel count exceeds limit").into());
             }
         }
         Ok(())
@@ -141,7 +145,7 @@ impl Limits {
     fn check_memory(&self, estimated_bytes: u64) -> Result<()> {
         if let Some(max_mem) = self.max_memory_bytes {
             if estimated_bytes > max_mem {
-                return Err(HeicError::LimitExceeded("estimated memory exceeds limit"));
+                return Err(HeicError::LimitExceeded("estimated memory exceeds limit").into());
             }
         }
         Ok(())
@@ -205,7 +209,7 @@ impl ImageInfo {
             return Err(ProbeError::InvalidFormat);
         }
 
-        let container = heif::parse(data).map_err(ProbeError::Corrupt)?;
+        let container = heif::parse(data).map_err(|e| ProbeError::Corrupt(e.into_inner()))?;
 
         let primary_item = container
             .primary_item()
@@ -243,7 +247,8 @@ impl ImageInfo {
             .get_item_data(primary_item.id)
             .ok_or(ProbeError::NeedMoreData)?;
 
-        let hevc_info = hevc::get_info(image_data).map_err(|e| ProbeError::Corrupt(e.into()))?;
+        let hevc_info =
+            hevc::get_info(image_data).map_err(|e| ProbeError::Corrupt(HeicError::from(e)))?;
 
         Ok(ImageInfo {
             width: hevc_info.width,
@@ -511,7 +516,8 @@ impl<'a> DecodeRequest<'a> {
             return Err(HeicError::BufferTooSmall {
                 required,
                 actual: output.len(),
-            });
+            }
+            .into());
         }
 
         match self.layout {
@@ -595,7 +601,7 @@ fn decode_to_frame_inner(
 ) -> Result<hevc::DecodedFrame> {
     let limits = limits.unwrap_or(&NO_LIMITS);
 
-    stop.check()?;
+    check_stop(stop)?;
 
     let container = heif::parse(data)?;
     let primary_item = container.primary_item().ok_or(HeicError::NoPrimaryImage)?;
@@ -608,11 +614,11 @@ fn decode_to_frame_inner(
         limits.check_memory(estimated)?;
     }
 
-    stop.check()?;
+    check_stop(stop)?;
 
     let mut frame = decode_item(&container, &primary_item, 0, limits, stop)?;
 
-    stop.check()?;
+    check_stop(stop)?;
 
     // Try to decode alpha plane from auxiliary image.
     let alpha_id = container
@@ -649,10 +655,11 @@ fn decode_item(
     if depth > 8 {
         return Err(HeicError::InvalidData(
             "Derived image reference chain too deep",
-        ));
+        )
+        .into());
     }
 
-    stop.check()?;
+    check_stop(stop)?;
 
     let mut frame = match item.item_type {
         ItemType::Grid => decode_grid(container, item, limits, stop)?,
@@ -745,7 +752,7 @@ fn decode_iovl(
     // - version (1 byte) + flags (3 bytes)
     // - canvas_fill_value: 2 bytes * num_channels (flags & 0x01 determines 32-bit offsets)
     if iovl_data.len() < 6 {
-        return Err(HeicError::InvalidData("Overlay descriptor too short"));
+        return Err(HeicError::InvalidData("Overlay descriptor too short").into());
     }
 
     let flags = iovl_data[1];
@@ -753,7 +760,7 @@ fn decode_iovl(
 
     let tile_ids = container.get_item_references(iovl_item.id, FourCC::DIMG);
     if tile_ids.is_empty() {
-        return Err(HeicError::InvalidData("Overlay has no tile references"));
+        return Err(HeicError::InvalidData("Overlay has no tile references").into());
     }
 
     // Calculate expected layout
@@ -780,7 +787,7 @@ fn decode_iovl(
     // Read canvas dimensions
     let (canvas_width, canvas_height) = if large {
         if pos + 8 > iovl_data.len() {
-            return Err(HeicError::InvalidData("Overlay descriptor truncated"));
+            return Err(HeicError::InvalidData("Overlay descriptor truncated").into());
         }
         let w = u32::from_be_bytes([
             iovl_data[pos],
@@ -798,7 +805,7 @@ fn decode_iovl(
         (w, h)
     } else {
         if pos + 4 > iovl_data.len() {
-            return Err(HeicError::InvalidData("Overlay descriptor truncated"));
+            return Err(HeicError::InvalidData("Overlay descriptor truncated").into());
         }
         let w = u16::from_be_bytes([iovl_data[pos], iovl_data[pos + 1]]) as u32;
         let h = u16::from_be_bytes([iovl_data[pos + 2], iovl_data[pos + 3]]) as u32;
@@ -814,7 +821,7 @@ fn decode_iovl(
     for _ in 0..tile_ids.len() {
         let (x, y) = if large {
             if pos + 8 > iovl_data.len() {
-                return Err(HeicError::InvalidData("Overlay offset data truncated"));
+                return Err(HeicError::InvalidData("Overlay offset data truncated").into());
             }
             let x = i32::from_be_bytes([
                 iovl_data[pos],
@@ -832,7 +839,7 @@ fn decode_iovl(
             (x, y)
         } else {
             if pos + 4 > iovl_data.len() {
-                return Err(HeicError::InvalidData("Overlay offset data truncated"));
+                return Err(HeicError::InvalidData("Overlay offset data truncated").into());
             }
             let x = i16::from_be_bytes([iovl_data[pos], iovl_data[pos + 1]]) as i32;
             let y = i16::from_be_bytes([iovl_data[pos + 2], iovl_data[pos + 3]]) as i32;
@@ -876,7 +883,7 @@ fn decode_iovl(
 
     // Decode each tile and composite onto the canvas
     for (idx, &tile_id) in tile_ids.iter().enumerate() {
-        stop.check()?;
+        check_stop(stop)?;
 
         let tile_item = container
             .get_item(tile_id)
@@ -965,7 +972,7 @@ fn decode_grid(
         .ok_or(HeicError::InvalidData("Missing grid descriptor"))?;
 
     if grid_data.len() < 8 {
-        return Err(HeicError::InvalidData("Grid descriptor too short"));
+        return Err(HeicError::InvalidData("Grid descriptor too short").into());
     }
 
     let flags = grid_data[1];
@@ -975,7 +982,8 @@ fn decode_grid(
         if grid_data.len() < 12 {
             return Err(HeicError::InvalidData(
                 "Grid descriptor too short for 32-bit dims",
-            ));
+            )
+            .into());
         }
         (
             u32::from_be_bytes([grid_data[4], grid_data[5], grid_data[6], grid_data[7]]),
@@ -995,7 +1003,7 @@ fn decode_grid(
     let tile_ids = container.get_item_references(grid_item.id, FourCC::DIMG);
     let expected_tiles = (rows * cols) as usize;
     if tile_ids.len() != expected_tiles {
-        return Err(HeicError::InvalidData("Grid tile count mismatch"));
+        return Err(HeicError::InvalidData("Grid tile count mismatch").into());
     }
 
     // Get hvcC config from the first tile item
@@ -1024,7 +1032,7 @@ fn decode_grid(
 
     // Decode each tile and copy into the output frame
     for (tile_idx, &tile_id) in tile_ids.iter().enumerate() {
-        stop.check()?;
+        check_stop(stop)?;
 
         let tile_row = tile_idx as u32 / cols;
         let tile_col = tile_idx as u32 % cols;

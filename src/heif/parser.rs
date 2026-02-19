@@ -289,7 +289,7 @@ pub fn parse(data: &[u8]) -> Result<HeifContainer<'_>> {
 
     // Verify we have required boxes
     if container.brand.0 == *b"    " {
-        return Err(HeicError::InvalidContainer("missing ftyp box"));
+        return Err(HeicError::InvalidContainer("missing ftyp box").into());
     }
 
     Ok(container)
@@ -298,7 +298,7 @@ pub fn parse(data: &[u8]) -> Result<HeifContainer<'_>> {
 fn parse_ftyp(ftyp: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
     let content = ftyp.content;
     if content.len() < 8 {
-        return Err(HeicError::InvalidContainer("ftyp too short"));
+        return Err(HeicError::InvalidContainer("ftyp too short").into());
     }
 
     container.brand = FourCC::from_bytes(&content[0..4]).unwrap();
@@ -329,7 +329,7 @@ fn parse_ftyp(ftyp: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
             .any(|b| valid_brands.contains(b));
 
     if !is_heif {
-        return Err(HeicError::InvalidContainer("not a HEIF file"));
+        return Err(HeicError::InvalidContainer("not a HEIF file").into());
     }
 
     Ok(())
@@ -338,7 +338,7 @@ fn parse_ftyp(ftyp: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
 fn parse_meta<'a>(meta: &Box<'a>, container: &mut HeifContainer<'a>) -> Result<()> {
     // Meta is a full box - skip version/flags
     if meta.content.len() < 4 {
-        return Err(HeicError::InvalidContainer("meta box too short"));
+        return Err(HeicError::InvalidContainer("meta box too short").into());
     }
 
     let content = &meta.content[4..];
@@ -363,18 +363,18 @@ fn parse_meta<'a>(meta: &Box<'a>, container: &mut HeifContainer<'a>) -> Result<(
 fn parse_pitm(pitm: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
     let content = pitm.content;
     if content.len() < 4 {
-        return Err(HeicError::InvalidContainer("pitm too short"));
+        return Err(HeicError::InvalidContainer("pitm too short").into());
     }
 
     let version = content[0];
     if version == 0 {
         if content.len() < 6 {
-            return Err(HeicError::InvalidContainer("pitm v0 too short"));
+            return Err(HeicError::InvalidContainer("pitm v0 too short").into());
         }
         container.primary_item_id = u16::from_be_bytes([content[4], content[5]]) as u32;
     } else {
         if content.len() < 8 {
-            return Err(HeicError::InvalidContainer("pitm v1 too short"));
+            return Err(HeicError::InvalidContainer("pitm v1 too short").into());
         }
         container.primary_item_id =
             u32::from_be_bytes([content[4], content[5], content[6], content[7]]);
@@ -386,7 +386,7 @@ fn parse_pitm(pitm: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
 fn parse_iloc(iloc: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
     let content = iloc.content;
     if content.len() < 8 {
-        return Err(HeicError::InvalidContainer("iloc too short"));
+        return Err(HeicError::InvalidContainer("iloc too short").into());
     }
 
     let version = content[0];
@@ -499,7 +499,7 @@ fn read_sized_int(data: &[u8], pos: &mut usize, size: usize) -> u64 {
 fn parse_iinf(iinf: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
     let content = iinf.content;
     if content.len() < 6 {
-        return Err(HeicError::InvalidContainer("iinf too short"));
+        return Err(HeicError::InvalidContainer("iinf too short").into());
     }
 
     let version = content[0];
@@ -549,7 +549,7 @@ fn parse_infe(infe: &Box<'_>) -> Result<ItemInfo> {
         _ => 4 + 4 + 2 + 4,    // 14 (version >= 3 uses 4-byte item_id)
     };
     if content.len() < min_len {
-        return Err(HeicError::InvalidContainer("infe too short"));
+        return Err(HeicError::InvalidContainer("infe too short").into());
     }
 
     let flags = u32::from_be_bytes([0, content[1], content[2], content[3]]);
@@ -697,7 +697,7 @@ fn parse_clap(clap: &Box<'_>) -> Result<CleanAperture> {
     let content = clap.content;
     // clap box: 8 fields of 4 bytes each = 32 bytes (no version/flags)
     if content.len() < 32 {
-        return Err(HeicError::InvalidContainer("clap too short"));
+        return Err(HeicError::InvalidContainer("clap too short").into());
     }
 
     let width_n = u32::from_be_bytes([content[0], content[1], content[2], content[3]]);
@@ -729,7 +729,7 @@ fn parse_irot(irot: &Box<'_>) -> Result<ImageRotation> {
     let content = irot.content;
     // irot box: 1 byte angle (0=0°, 1=90°CCW, 2=180°, 3=270°CCW)
     if content.is_empty() {
-        return Err(HeicError::InvalidContainer("irot too short"));
+        return Err(HeicError::InvalidContainer("irot too short").into());
     }
     let angle = match content[0] & 0x03 {
         0 => 0,
@@ -745,7 +745,7 @@ fn parse_imir(imir: &Box<'_>) -> Result<ImageMirror> {
     let content = imir.content;
     // imir box: 1 byte (7 bits reserved, 1 bit axis)
     if content.is_empty() {
-        return Err(HeicError::InvalidContainer("imir too short"));
+        return Err(HeicError::InvalidContainer("imir too short").into());
     }
     Ok(ImageMirror {
         axis: content[0] & 0x01,
@@ -756,7 +756,7 @@ fn parse_auxc(auxc: &Box<'_>) -> Result<String> {
     let content = auxc.content;
     // auxC is a full box: version/flags (4 bytes) + null-terminated UTF-8 aux_type string
     if content.len() < 5 {
-        return Err(HeicError::InvalidContainer("auxC too short"));
+        return Err(HeicError::InvalidContainer("auxC too short").into());
     }
 
     // Skip version/flags (4 bytes)
@@ -772,7 +772,7 @@ fn parse_auxc(auxc: &Box<'_>) -> Result<String> {
 fn parse_ispe(ispe: &Box<'_>) -> Result<ImageSpatialExtents> {
     let content = ispe.content;
     if content.len() < 12 {
-        return Err(HeicError::InvalidContainer("ispe too short"));
+        return Err(HeicError::InvalidContainer("ispe too short").into());
     }
 
     // Skip version/flags (4 bytes)
@@ -785,7 +785,7 @@ fn parse_ispe(ispe: &Box<'_>) -> Result<ImageSpatialExtents> {
 fn parse_hvcc(hvcc: &Box<'_>) -> Result<HevcDecoderConfig> {
     let content = hvcc.content;
     if content.len() < 23 {
-        return Err(HeicError::InvalidContainer("hvcC too short"));
+        return Err(HeicError::InvalidContainer("hvcC too short").into());
     }
 
     let config_version = content[0];
@@ -865,7 +865,7 @@ fn parse_hvcc(hvcc: &Box<'_>) -> Result<HevcDecoderConfig> {
 fn parse_colr(colr: &Box<'_>) -> Result<ColorInfo> {
     let content = colr.content;
     if content.len() < 4 {
-        return Err(HeicError::InvalidContainer("colr too short"));
+        return Err(HeicError::InvalidContainer("colr too short").into());
     }
 
     let color_type = FourCC::from_bytes(&content[0..4]).unwrap();
@@ -873,7 +873,7 @@ fn parse_colr(colr: &Box<'_>) -> Result<ColorInfo> {
     match &color_type.0 {
         b"nclx" => {
             if content.len() < 11 {
-                return Err(HeicError::InvalidContainer("nclx colr too short"));
+                return Err(HeicError::InvalidContainer("nclx colr too short").into());
             }
             Ok(ColorInfo::Nclx {
                 color_primaries: u16::from_be_bytes([content[4], content[5]]),
@@ -886,14 +886,14 @@ fn parse_colr(colr: &Box<'_>) -> Result<ColorInfo> {
             // ICC profile
             Ok(ColorInfo::IccProfile(content[4..].to_vec()))
         }
-        _ => Err(HeicError::InvalidContainer("unknown color type")),
+        _ => Err(HeicError::InvalidContainer("unknown color type").into()),
     }
 }
 
 fn parse_iref(iref: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
     let content = iref.content;
     if content.len() < 4 {
-        return Err(HeicError::InvalidContainer("iref too short"));
+        return Err(HeicError::InvalidContainer("iref too short").into());
     }
 
     let version = content[0];
@@ -959,7 +959,7 @@ fn parse_iref(iref: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
 fn parse_ipma(ipma: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
     let content = ipma.content;
     if content.len() < 8 {
-        return Err(HeicError::InvalidContainer("ipma too short"));
+        return Err(HeicError::InvalidContainer("ipma too short").into());
     }
 
     let version = content[0];

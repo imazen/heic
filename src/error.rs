@@ -3,9 +3,13 @@
 use alloc::string::String;
 use core::fmt;
 use enough::StopReason;
+use whereat::At;
 
-/// Result type for HEIC operations
-pub type Result<T> = core::result::Result<T, HeicError>;
+/// Result type for HEIC operations, with error location tracking.
+///
+/// Errors carry a trace of where they were created and propagated,
+/// accessible via [`At::full_trace()`] or [`At::last_error_trace()`].
+pub type Result<T> = core::result::Result<T, At<HeicError>>;
 
 /// Errors that can occur during HEIC decoding
 #[derive(Debug)]
@@ -70,6 +74,20 @@ impl From<StopReason> for HeicError {
     fn from(r: StopReason) -> Self {
         Self::Cancelled(r)
     }
+}
+
+// Two-hop conversion for ? operator: HevcError → At<HeicError>
+impl From<HevcError> for At<HeicError> {
+    #[track_caller]
+    fn from(e: HevcError) -> Self {
+        At::from(HeicError::from(e))
+    }
+}
+
+/// Check a `Stop` token and convert to `At<HeicError>` on cancellation.
+#[track_caller]
+pub(crate) fn check_stop(stop: &dyn enough::Stop) -> Result<()> {
+    stop.check().map_err(|r| At::from(HeicError::Cancelled(r)))
 }
 
 /// Errors specific to HEVC decoding
