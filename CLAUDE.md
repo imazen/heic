@@ -143,9 +143,10 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 - ImageInfo::from_bytes grid/iden/iovl probing (reads ispe + first tile hvcC)
 - Thumbnail decode support (thmb references, decode_thumbnail API)
 - Zero compiler warnings (clippy clean, all doc comments present)
-- Criterion benchmarks (63ms RGB, 1.3µs probe, 4.4µs EXIF, 4.2ms thumbnail)
+- Criterion benchmarks (57ms RGB, 1.3µs probe, 4.4µs EXIF, 4.2ms thumbnail)
 - 10-bit HEVC support (u16 planes, transparent downconvert to 8-bit output)
 - SIMD-accelerated color conversion via archmage (AVX2 with scalar fallback)
+- SIMD-accelerated IDCT 8x8/16x16 via archmage AVX2 (madd_epi16 butterfly)
 
 ### Current Quality (RGB comparison vs libheif)
 - 104/162 test files decode successfully
@@ -165,7 +166,7 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 
 ### Performance
 - Release profile: thin LTO + codegen-units=1
-- Callgrind: 645M instructions for 1280x854 decode (progression: 731M → 653M → 717M → 645M)
+- Callgrind: 632M instructions for 1280x854 decode (progression: 731M → 653M → 717M → 645M → 632M)
 - Key optimizations applied:
   - Plane-direct writes, in-place dequant, border fill inlining (731M→653M)
   - Partial butterfly IDCT for 8/16/32 (decode_and_apply_residual -14%)
@@ -173,7 +174,8 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
   - Color conversion: 4:2:0 specialization, ×8192 fixed-point (to_rgb -38%)
   - Row-slice bounds-check elimination in intra prediction and residual add
   - SIMD color conversion via archmage AVX2 (81M → 9.2M, -88%)
-- Remaining hotspots: decode_and_apply_residual (35%), predict_intra (16%), CABAC (9%), memcpy/memset (11%)
+  - SIMD IDCT 8x8/16x16 via archmage AVX2 (decode_and_apply_residual 227M → 211M)
+- Remaining hotspots: decode_and_apply_residual (33%), predict_intra (16%), CABAC (9%), memcpy/memset (11%)
 
 ## Known Limitations
 
@@ -204,7 +206,8 @@ src/
     ├── intra.rs     # Intra prediction (35 modes)
     ├── cabac.rs     # CABAC decoder, context tables
     ├── residual.rs  # Transform coefficient parsing
-    ├── transform.rs # Inverse DCT/DST
+    ├── transform.rs # Inverse DCT/DST (scalar + incant! dispatch)
+    ├── transform_simd.rs # AVX2 SIMD IDCT 8x8/16x16
     ├── deblock.rs   # Deblocking filter (H.265 8.7.2)
     ├── sao.rs       # Sample Adaptive Offset (H.265 8.7.3)
     ├── debug.rs     # CABAC tracker, invariant checks
