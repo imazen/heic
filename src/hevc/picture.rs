@@ -13,6 +13,14 @@ pub const DEBLOCK_FLAG_VERT: u8 = 1;
 /// Horizontal edge flag
 pub const DEBLOCK_FLAG_HORIZ: u8 = 2;
 
+/// Round float to u8 with +0.5 bias, clamped to [0,255].
+/// Matches libheif's `clip_f_u16(fx, 255)` = `(int32_t)(fx + 0.5f)` clamped.
+#[inline(always)]
+fn clip_f32(fx: f32) -> u8 {
+    let x = (fx + 0.5f32) as i32;
+    x.clamp(0, 255) as u8
+}
+
 /// Decoded video frame
 #[derive(Debug)]
 pub struct DecodedFrame {
@@ -213,17 +221,17 @@ impl DecodedFrame {
     /// Convert a single YCbCr pixel to RGB.
     /// y_val, cb_val, cr_val are 8-bit values (0-255).
     /// Selects coefficient matrix based on `matrix_coeffs` field.
+    ///
+    /// Full-range uses ×256 fixed-point matching libheif's fast integer path.
+    /// Limited-range uses f32 matching libheif's generic float path exactly.
     #[inline(always)]
     fn ycbcr_to_rgb(&self, y_val: i32, cb_val: i32, cr_val: i32) -> (u8, u8, u8) {
-        // Fixed-point coefficients (scaled by 1024) for full-range conversion:
-        //   R = Y + Cr * (2 - 2*Kr)
-        //   G = Y - Cb * (2 - 2*Kb) * Kb/Kg - Cr * (2 - 2*Kr) * Kr/Kg
-        //   B = Y + Cb * (2 - 2*Kb)
+        // Conversion formulas (ITU-T H.265 E.3.1):
+        //   R = Y + (2 - 2*Kr) * Cr
+        //   G = Y - (2 - 2*Kb)*Kb/Kg * Cb - (2 - 2*Kr)*Kr/Kg * Cr
+        //   B = Y + (2 - 2*Kb) * Cb
         //
-        // For limited-range, Y is scaled by 255/219 ≈ 1.1644, Cb/Cr by 255/224 ≈ 1.1384.
-        // Combined into single multiply.
-        //
-        // Coefficients per standard:
+        // Standard coefficients:
         //   BT.601  (5,6): Kr=0.299,  Kb=0.114,  Kg=0.587
         //   BT.709  (1):   Kr=0.2126, Kb=0.0722, Kg=0.7152
         //   BT.2020 (9):   Kr=0.2627, Kb=0.0593, Kg=0.6780
@@ -232,37 +240,38 @@ impl DecodedFrame {
         let cr = cr_val - 128;
 
         if self.full_range {
-            // Full range coefficients (×1024)
+            // Full-range: ×256 fixed-point, matches libheif Op_YCbCr420_to_RGB24.
+            // Coefficients = lround(256 * float_coeff), signs baked into values.
             let (cr_r, cb_g, cr_g, cb_b) = match self.matrix_coeffs {
-                1 => (1613, 192, 479, 1900), // BT.709
-                9 => (1510, 169, 585, 1927), // BT.2020
-                _ => (1436, 352, 731, 1815), // BT.601 (default/unspecified)
+                1 => (403, -48, -120, 475),  // BT.709
+                9 => (377, -42, -146, 482),   // BT.2020
+                _ => (359, -88, -183, 454),   // BT.601 (default/unspecified)
             };
-            let r = (y_val * 1024 + cr_r * cr + 512) >> 10;
-            let g = (y_val * 1024 - cb_g * cb - cr_g * cr + 512) >> 10;
-            let b = (y_val * 1024 + cb_b * cb + 512) >> 10;
+            let r = y_val + ((cr_r * cr + 128) >> 8);
+            let g = y_val + ((cb_g * cb + cr_g * cr + 128) >> 8);
+            let b = y_val + ((cb_b * cb + 128) >> 8);
             (
                 r.clamp(0, 255) as u8,
                 g.clamp(0, 255) as u8,
                 b.clamp(0, 255) as u8,
             )
         } else {
-            // Limited range: Y [16,235], Cb/Cr [16,240]
-            // Y scale = 1197/1024 = 256/219. Chroma scale = 256/224.
-            let y16 = y_val - 16;
-            let (cr_r, cb_g, cr_g, cb_b) = match self.matrix_coeffs {
-                1 => (1843, 219, 547, 2171), // BT.709
-                9 => (1726, 193, 669, 2202), // BT.2020
-                _ => (1641, 403, 836, 2074), // BT.601 (default/unspecified)
+            // Limited range: f32 matching libheif's generic template exactly.
+            // libheif applies: yv = (Y-16)*1.1689, cb'=Cb*1.1429, cr'=Cr*1.1429
+            // then R = clip(yv + r_cr*cr'), G = clip(yv + g_cb*cb' + g_cr*cr'), B = clip(yv + b_cb*cb')
+            // clip = (int32_t)(val + 0.5f), clamped to [0,255]
+            let yv = (y_val - 16) as f32 * 1.1689f32;
+            let cb_f = cb as f32 * 1.1429f32;
+            let cr_f = cr as f32 * 1.1429f32;
+            let (r_cr, g_cb, g_cr, b_cb) = match self.matrix_coeffs {
+                1 => (1.5748f32, -0.187324f32, -0.468124f32, 1.8556f32), // BT.709
+                9 => (1.4746f32, -0.164553f32, -0.571353f32, 1.8814f32), // BT.2020
+                _ => (1.402f32, -0.344136f32, -0.714136f32, 1.772f32),   // BT.601
             };
-            let r = (1197 * y16 + cr_r * cr + 512) >> 10;
-            let g = (1197 * y16 - cb_g * cb - cr_g * cr + 512) >> 10;
-            let b = (1197 * y16 + cb_b * cb + 512) >> 10;
-            (
-                r.clamp(0, 255) as u8,
-                g.clamp(0, 255) as u8,
-                b.clamp(0, 255) as u8,
-            )
+            let r = clip_f32(yv + r_cr * cr_f);
+            let g = clip_f32(yv + g_cb * cb_f + g_cr * cr_f);
+            let b = clip_f32(yv + b_cb * cb_f);
+            (r, g, b)
         }
     }
 
