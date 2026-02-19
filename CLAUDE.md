@@ -52,7 +52,7 @@ let output = DecoderConfig::new()
 
 // Zero-copy into pre-allocated buffer
 let info = ImageInfo::from_bytes(&data)?;
-let mut buf = vec![0u8; info.output_buffer_size(PixelLayout::Rgba8)];
+let mut buf = vec![0u8; info.output_buffer_size(PixelLayout::Rgba8).unwrap()];
 let info = DecoderConfig::new()
     .decode_request(&data)
     .with_output_layout(PixelLayout::Rgba8)

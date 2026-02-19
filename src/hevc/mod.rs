@@ -20,6 +20,7 @@ pub use picture::DecodedFrame;
 
 use crate::error::HevcError;
 use crate::heif::HevcDecoderConfig;
+use alloc::format;
 use alloc::vec::Vec;
 
 type Result<T> = core::result::Result<T, HevcError>;
@@ -91,6 +92,22 @@ fn decode_nal_units(nal_units: &[bitstream::NalUnit<'_>]) -> Result<DecodedFrame
 
     let sps = sps.ok_or(HevcError::MissingParameterSet("SPS"))?;
     let pps = pps.ok_or(HevcError::MissingParameterSet("PPS"))?;
+
+    // Sanity-check dimensions before allocating (prevent OOM from malicious SPS)
+    let w = sps.pic_width_in_luma_samples;
+    let h = sps.pic_height_in_luma_samples;
+    if w == 0 || h == 0 || w > 16384 || h > 16384 {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!("invalid dimensions {}x{}", w, h),
+        });
+    }
+    if w.checked_mul(h).is_none() {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!("dimensions {}x{} overflow u32", w, h),
+        });
+    }
 
     // Create frame buffer with actual bit depth and chroma format from SPS
     let mut frame = DecodedFrame::with_params(

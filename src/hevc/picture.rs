@@ -55,8 +55,11 @@ pub struct DecodedFrame {
 
 impl DecodedFrame {
     /// Create a new frame buffer
+    ///
+    /// # Panics
+    /// Panics if width * height overflows u32.
     pub fn new(width: u32, height: u32) -> Self {
-        let luma_size = (width * height) as usize;
+        let luma_size = width.checked_mul(height).expect("frame dimensions overflow") as usize;
         // Assume 4:2:0 chroma subsampling
         let chroma_width = width.div_ceil(2);
         let chroma_height = height.div_ceil(2);
@@ -87,8 +90,11 @@ impl DecodedFrame {
     }
 
     /// Create a frame with specific parameters
+    ///
+    /// # Panics
+    /// Panics if width * height overflows u32.
     pub fn with_params(width: u32, height: u32, bit_depth: u8, chroma_format: u8) -> Self {
-        let luma_size = (width * height) as usize;
+        let luma_size = width.checked_mul(height).expect("frame dimensions overflow") as usize;
 
         let (chroma_width, chroma_height) = match chroma_format {
             0 => (0, 0),                                  // Monochrome

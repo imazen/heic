@@ -255,9 +255,13 @@ impl ImageInfo {
     }
 
     /// Calculate the required output buffer size for a given pixel layout.
+    ///
+    /// Returns `None` if the dimensions would overflow `usize`.
     #[must_use]
-    pub fn output_buffer_size(self, layout: PixelLayout) -> usize {
-        self.width as usize * self.height as usize * layout.bytes_per_pixel()
+    pub fn output_buffer_size(self, layout: PixelLayout) -> Option<usize> {
+        (self.width as usize)
+            .checked_mul(self.height as usize)?
+            .checked_mul(layout.bytes_per_pixel())
     }
 }
 
@@ -466,7 +470,10 @@ impl<'a> DecodeRequest<'a> {
 
         let width = frame.cropped_width();
         let height = frame.cropped_height();
-        let required = width as usize * height as usize * self.layout.bytes_per_pixel();
+        let required = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|n| n.checked_mul(self.layout.bytes_per_pixel()))
+            .ok_or(HeicError::LimitExceeded("output buffer size overflows usize"))?;
 
         if output.len() < required {
             return Err(HeicError::BufferTooSmall {
