@@ -155,7 +155,7 @@ fn main() {
 
     // Dump auxiliary images
     if let Some(ref item) = container.primary_item() {
-        let mut alpha_ids = container.find_auxiliary_items(item.id, "urn:mpeg:hevc:2015:auxid");
+        let mut alpha_ids = container.find_auxiliary_items(item.id, "urn:mpeg:hevc:2015:auxid:1");
         alpha_ids.extend(container.find_auxiliary_items(item.id, "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha"));
         if !alpha_ids.is_empty() {
             eprintln!();

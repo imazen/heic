@@ -144,7 +144,7 @@ impl HeicDecoder {
         //   "urn:mpeg:hevc:2015:auxid:1" — HEVC alpha (older)
         //   "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha" — MPEG CICP alpha (newer)
         let alpha_id = container
-            .find_auxiliary_items(primary_item.id, "urn:mpeg:hevc:2015:auxid")
+            .find_auxiliary_items(primary_item.id, "urn:mpeg:hevc:2015:auxid:1")
             .first()
             .copied()
             .or_else(|| {
@@ -411,7 +411,7 @@ impl HeicDecoder {
 
         // Check for alpha auxiliary image (two known URIs)
         let has_alpha = !container
-            .find_auxiliary_items(primary_item.id, "urn:mpeg:hevc:2015:auxid")
+            .find_auxiliary_items(primary_item.id, "urn:mpeg:hevc:2015:auxid:1")
             .is_empty()
             || !container
                 .find_auxiliary_items(
