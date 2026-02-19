@@ -300,7 +300,7 @@ pub struct DequantParams {
     pub log2_tr_size: u8,
 }
 
-/// Dequantize coefficients
+/// Dequantize coefficients (flat scaling — when scaling lists disabled)
 pub fn dequantize(coeffs: &mut [i16], params: DequantParams) {
     // Scaling factors from H.265 Table 8-8
     static LEVEL_SCALE: [i32; 6] = [40, 45, 51, 57, 64, 72];
@@ -309,6 +309,7 @@ pub fn dequantize(coeffs: &mut [i16], params: DequantParams) {
     let qp_rem = params.qp % 6;
     let scale = LEVEL_SCALE[qp_rem as usize];
 
+    // When m[x][y]=16 (flat), absorb the factor into shift: bdShift - 4
     let shift = params.bit_depth as i32 - 9 + params.log2_tr_size as i32;
     let add = if shift > 0 { 1 << (shift - 1) } else { 0 };
 
@@ -321,6 +322,36 @@ pub fn dequantize(coeffs: &mut [i16], params: DequantParams) {
         let neg_shift = -shift;
         for coef in coeffs.iter_mut() {
             let value = (*coef as i32 * scale * (1 << qp_per)) << neg_shift;
+            *coef = value.clamp(-32768, 32767) as i16;
+        }
+    }
+}
+
+/// Dequantize coefficients with per-position scaling factors (H.265 8.6.3 Eq 8-309)
+///
+/// `scaling_matrix`: pre-computed m[x][y] values in raster order (size*size entries)
+pub fn dequantize_scaled(coeffs: &mut [i16], params: DequantParams, scaling_matrix: &[u8]) {
+    static LEVEL_SCALE: [i32; 6] = [40, 45, 51, 57, 64, 72];
+
+    let qp_per = params.qp / 6;
+    let qp_rem = params.qp % 6;
+    let level_scale = LEVEL_SCALE[qp_rem as usize];
+
+    // Full bdShift = BitDepth + Log2(nTbS) - 5 (H.265 Eq 8-309)
+    let bd_shift = params.bit_depth as i32 + params.log2_tr_size as i32 - 5;
+    let add = if bd_shift > 0 { 1 << (bd_shift - 1) } else { 0 };
+
+    if bd_shift >= 0 {
+        for (i, coef) in coeffs.iter_mut().enumerate() {
+            let m = scaling_matrix.get(i).copied().unwrap_or(16) as i32;
+            let value = (*coef as i32 * m * level_scale * (1 << qp_per) + add) >> bd_shift;
+            *coef = value.clamp(-32768, 32767) as i16;
+        }
+    } else {
+        let neg_shift = -bd_shift;
+        for (i, coef) in coeffs.iter_mut().enumerate() {
+            let m = scaling_matrix.get(i).copied().unwrap_or(16) as i32;
+            let value = (*coef as i32 * m * level_scale * (1 << qp_per)) << neg_shift;
             *coef = value.clamp(-32768, 32767) as i16;
         }
     }

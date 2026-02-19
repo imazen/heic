@@ -74,6 +74,8 @@ pub struct Sps {
     pub max_transform_hierarchy_depth_intra: u8,
     /// Scaling list enabled flag
     pub scaling_list_enabled_flag: bool,
+    /// Scaling list data (if enabled)
+    pub scaling_list: Option<ScalingListData>,
     /// AMP enabled flag
     pub amp_enabled_flag: bool,
     /// SAO enabled flag
@@ -169,6 +171,144 @@ pub struct PcmParams {
     pub pcm_loop_filter_disabled_flag: bool,
 }
 
+/// HEVC scaling list data (H.265 7.3.4)
+///
+/// Stores per-coefficient scaling factors for dequantization.
+/// sizeId: 0=4x4, 1=8x8, 2=16x16, 3=32x32
+/// matrixId: 0-2=intra(Y,Cb,Cr), 3-5=inter(Y,Cb,Cr)
+#[derive(Debug, Clone)]
+pub struct ScalingListData {
+    /// ScalingList coefficients in diagonal scan order.
+    /// [sizeId][matrixId][coef_index]
+    /// sizeId 0: 16 coefficients, sizeId 1-3: 64 coefficients
+    pub lists: [[[u8; 64]; 6]; 4],
+    /// DC coefficients for 16x16 (sizeId=2) and 32x32 (sizeId=3)
+    /// Index 0 = sizeId 2, index 1 = sizeId 3
+    pub dc_coef: [[u8; 6]; 2],
+}
+
+impl Default for ScalingListData {
+    fn default() -> Self {
+        Self::new_default()
+    }
+}
+
+impl ScalingListData {
+    /// Create scaling list with H.265 default values (Tables 7-5, 7-6)
+    pub fn new_default() -> Self {
+        let mut data = Self {
+            lists: [[[16; 64]; 6]; 4],
+            dc_coef: [[16; 6]; 2],
+        };
+
+        // Table 7-5: 4x4 default is all 16s (already set)
+
+        // Table 7-6: 8x8/16x16/32x32 defaults
+        // Intra (matrixId 0,1,2)
+        #[rustfmt::skip]
+        const DEFAULT_INTRA_8X8: [u8; 64] = [
+            16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 17, 16, 17, 16, 17, 18,
+            17, 18, 18, 17, 18, 21, 19, 20, 21, 20, 19, 21, 24, 22, 22, 24,
+            24, 22, 22, 24, 25, 25, 27, 30, 27, 25, 25, 29, 31, 35, 35, 31,
+            29, 36, 41, 44, 41, 36, 47, 54, 54, 47, 65, 70, 65, 88, 88, 115,
+        ];
+        // Inter (matrixId 3,4,5)
+        #[rustfmt::skip]
+        const DEFAULT_INTER_8X8: [u8; 64] = [
+            16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 17, 17, 17, 17, 17, 18,
+            18, 18, 18, 18, 18, 20, 20, 20, 20, 20, 20, 20, 24, 24, 24, 24,
+            24, 24, 24, 24, 25, 25, 25, 25, 25, 25, 25, 28, 28, 28, 28, 28,
+            28, 33, 33, 33, 33, 33, 41, 41, 41, 41, 54, 54, 54, 71, 71, 91,
+        ];
+
+        for size_id in 1..4 {
+            for matrix_id in 0..3 {
+                data.lists[size_id][matrix_id] = DEFAULT_INTRA_8X8;
+            }
+            for matrix_id in 3..6 {
+                data.lists[size_id][matrix_id] = DEFAULT_INTER_8X8;
+            }
+        }
+
+        data
+    }
+
+    /// Create flat scaling list (all 16s) — equivalent to scaling_list_enabled_flag=0
+    pub fn new_flat() -> Self {
+        Self {
+            lists: [[[16; 64]; 6]; 4],
+            dc_coef: [[16; 6]; 2],
+        }
+    }
+
+    /// Get the scaling factor m[x][y] for a given transform block.
+    ///
+    /// `log2_size`: log2 of transform block size (2=4x4, 3=8x8, 4=16x16, 5=32x32)
+    /// `matrix_id`: from Table 7-4 (intra Y=0, intra Cb=1, intra Cr=2, inter Y=3, etc.)
+    /// `x`, `y`: position within the transform block
+    #[inline]
+    pub fn get_scaling_factor(&self, log2_size: u8, matrix_id: u8, x: u32, y: u32) -> u8 {
+        let size_id = (log2_size - 2) as usize;
+        let mid = matrix_id as usize;
+
+        match size_id {
+            0 => {
+                // 4x4: direct lookup via diagonal scan
+                let idx = DIAG_SCAN_4X4_INV[y as usize][x as usize];
+                self.lists[0][mid][idx]
+            }
+            1 => {
+                // 8x8: direct lookup via diagonal scan
+                let idx = DIAG_SCAN_8X8_INV[y as usize][x as usize];
+                self.lists[1][mid][idx]
+            }
+            2 => {
+                // 16x16: upscale from 8x8, DC override at (0,0)
+                if x == 0 && y == 0 {
+                    return self.dc_coef[0][mid];
+                }
+                let rx = (x / 2) as usize;
+                let ry = (y / 2) as usize;
+                let idx = DIAG_SCAN_8X8_INV[ry][rx];
+                self.lists[2][mid][idx]
+            }
+            3 => {
+                // 32x32: upscale from 8x8, DC override at (0,0)
+                if x == 0 && y == 0 {
+                    return self.dc_coef[1][mid];
+                }
+                let rx = (x / 4) as usize;
+                let ry = (y / 4) as usize;
+                let idx = DIAG_SCAN_8X8_INV[ry][rx];
+                self.lists[3][mid][idx]
+            }
+            _ => 16,
+        }
+    }
+}
+
+/// Inverse diagonal scan for 4x4: DIAG_SCAN_4X4_INV[y][x] = scan_index
+#[rustfmt::skip]
+static DIAG_SCAN_4X4_INV: [[usize; 4]; 4] = [
+    [ 0,  1,  3,  6],
+    [ 2,  4,  7, 10],
+    [ 5,  8, 11, 13],
+    [ 9, 12, 14, 15],
+];
+
+/// Inverse diagonal scan for 8x8: DIAG_SCAN_8X8_INV[y][x] = scan_index
+#[rustfmt::skip]
+static DIAG_SCAN_8X8_INV: [[usize; 8]; 8] = [
+    [ 0,  1,  3,  6, 10, 15, 21, 28],
+    [ 2,  4,  7, 11, 16, 22, 29, 36],
+    [ 5,  8, 12, 17, 23, 30, 37, 43],
+    [ 9, 13, 18, 24, 31, 38, 44, 49],
+    [14, 19, 25, 32, 39, 45, 50, 54],
+    [20, 26, 33, 40, 46, 51, 55, 58],
+    [27, 34, 41, 47, 52, 56, 59, 61],
+    [35, 42, 48, 53, 57, 60, 62, 63],
+];
+
 /// Picture Parameter Set
 #[derive(Debug, Clone)]
 pub struct Pps {
@@ -232,6 +372,8 @@ pub struct Pps {
     pub pps_tc_offset_div2: i8,
     /// Scaling list data present flag
     pub pps_scaling_list_data_present_flag: bool,
+    /// PPS scaling list data (if present, overrides SPS scaling list)
+    pub pps_scaling_list: Option<ScalingListData>,
     /// Lists modification present flag
     pub lists_modification_present_flag: bool,
     /// Log2 parallel merge level minus 2
@@ -372,13 +514,17 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
     let max_transform_hierarchy_depth_intra = reader.read_ue()? as u8;
 
     let scaling_list_enabled_flag = reader.read_bit()? != 0;
-    if scaling_list_enabled_flag {
+    let scaling_list = if scaling_list_enabled_flag {
         let scaling_list_data_present = reader.read_bit()? != 0;
         if scaling_list_data_present {
-            // Skip scaling list data (complex, rarely used for photos)
-            skip_scaling_list_data(&mut reader)?;
+            Some(parse_scaling_list_data(&mut reader)?)
+        } else {
+            // Use H.265 default scaling matrices
+            Some(ScalingListData::new_default())
         }
-    }
+    } else {
+        None
+    };
 
     let amp_enabled_flag = reader.read_bit()? != 0;
     let sample_adaptive_offset_enabled_flag = reader.read_bit()? != 0;
@@ -476,6 +622,7 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
         max_transform_hierarchy_depth_inter,
         max_transform_hierarchy_depth_intra,
         scaling_list_enabled_flag,
+        scaling_list,
         amp_enabled_flag,
         sample_adaptive_offset_enabled_flag,
         pcm_enabled_flag,
@@ -578,9 +725,11 @@ pub fn parse_pps(data: &[u8]) -> Result<Pps> {
     };
 
     let pps_scaling_list_data_present_flag = reader.read_bit()? != 0;
-    if pps_scaling_list_data_present_flag {
-        skip_scaling_list_data(&mut reader)?;
-    }
+    let pps_scaling_list = if pps_scaling_list_data_present_flag {
+        Some(parse_scaling_list_data(&mut reader)?)
+    } else {
+        None
+    };
 
     let lists_modification_present_flag = reader.read_bit()? != 0;
     let log2_parallel_merge_level_minus2 = reader.read_ue()? as u8;
@@ -617,6 +766,7 @@ pub fn parse_pps(data: &[u8]) -> Result<Pps> {
         pps_beta_offset_div2,
         pps_tc_offset_div2,
         pps_scaling_list_data_present_flag,
+        pps_scaling_list,
         lists_modification_present_flag,
         log2_parallel_merge_level_minus2,
         slice_segment_header_extension_present_flag,
@@ -681,25 +831,50 @@ fn parse_profile_tier_level(
     Ok(ptl)
 }
 
-fn skip_scaling_list_data(reader: &mut BitstreamReader<'_>) -> Result<()> {
-    for size_id in 0..4 {
-        let num_matrix = if size_id == 3 { 2 } else { 6 };
-        for _ in 0..num_matrix {
+fn parse_scaling_list_data(reader: &mut BitstreamReader<'_>) -> Result<ScalingListData> {
+    let mut data = ScalingListData::new_default();
+
+    for size_id in 0..4usize {
+        let matrix_step = if size_id == 3 { 3 } else { 1 };
+        let mut matrix_id = 0usize;
+        while matrix_id < 6 {
             let pred_mode_flag = reader.read_bit()? != 0;
             if !pred_mode_flag {
-                let _pred_matrix_id_delta = reader.read_ue()?;
-            } else {
-                let coef_num = core::cmp::min(64, 1 << (4 + (size_id << 1)));
-                if size_id > 1 {
-                    let _scaling_list_dc_coef = reader.read_se()?;
+                // Copy from a reference matrix
+                let pred_matrix_id_delta = reader.read_ue()? as usize;
+                if pred_matrix_id_delta == 0 {
+                    // Use default scaling list (already initialized)
+                } else if let Some(ref_id) =
+                    matrix_id.checked_sub(pred_matrix_id_delta * matrix_step)
+                {
+                    if ref_id < 6 {
+                        data.lists[size_id][matrix_id] = data.lists[size_id][ref_id];
+                        if size_id >= 2 {
+                            data.dc_coef[size_id - 2][matrix_id] =
+                                data.dc_coef[size_id - 2][ref_id];
+                        }
+                    }
                 }
-                for _ in 0..coef_num {
-                    let _scaling_list_delta_coef = reader.read_se()?;
+            } else {
+                // Parse explicit scaling list
+                let coef_num = core::cmp::min(64, 1usize << (4 + (size_id << 1)));
+                let mut next_coef: i32 = 8;
+                if size_id > 1 {
+                    let dc_coef_minus8 = reader.read_se()?;
+                    next_coef = dc_coef_minus8 + 8;
+                    data.dc_coef[size_id - 2][matrix_id] =
+                        ((next_coef + 256) % 256) as u8;
+                }
+                for i in 0..coef_num {
+                    let delta = reader.read_se()?;
+                    next_coef = (next_coef + delta + 256) % 256;
+                    data.lists[size_id][matrix_id][i] = next_coef as u8;
                 }
             }
+            matrix_id += matrix_step;
         }
     }
-    Ok(())
+    Ok(data)
 }
 
 fn skip_short_term_ref_pic_set(

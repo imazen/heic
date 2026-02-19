@@ -1248,7 +1248,37 @@ impl<'a> SliceContext<'a> {
             bit_depth,
             log2_tr_size: log2_size,
         };
-        transform::dequantize(&mut coeffs[..num_coeffs], dequant_params);
+
+        // Use scaling list if enabled (H.265 8.6.3)
+        // Per spec: use PPS scaling list if present, else SPS scaling list
+        let scaling_list = if self.sps.scaling_list_enabled_flag && !transform_skip {
+            self.pps
+                .pps_scaling_list
+                .as_ref()
+                .or(self.sps.scaling_list.as_ref())
+        } else {
+            None
+        };
+
+        if let Some(sl) = scaling_list {
+            // matrixId: intra Y=0, Cb=1, Cr=2 (all HEIC is intra)
+            let matrix_id = c_idx;
+            // Build scaling matrix in raster order for this TU
+            let mut scaling_matrix = [16u8; 1024];
+            for py in 0..size {
+                for px in 0..size {
+                    scaling_matrix[py * size + px] =
+                        sl.get_scaling_factor(log2_size, matrix_id, px as u32, py as u32);
+                }
+            }
+            transform::dequantize_scaled(
+                &mut coeffs[..num_coeffs],
+                dequant_params,
+                &scaling_matrix[..num_coeffs],
+            );
+        } else {
+            transform::dequantize(&mut coeffs[..num_coeffs], dequant_params);
+        }
 
         // Apply inverse transform (or skip for transform_skip mode)
         let mut residual = [0i16; 1024];
