@@ -79,6 +79,7 @@ let gainmap = DecoderConfig::new().decode_gain_map(&data)?;
 
 ### Dependencies
 - `enough` — cooperative cancellation (Stop trait)
+- `whereat` — error location tracking (At<E> wrapper)
 
 ## Code Style
 
@@ -129,6 +130,7 @@ let gainmap = DecoderConfig::new().decode_gain_map(&data)?;
 - Memory estimation before decode (DecoderConfig::estimate_memory)
 - Hardened parser: checked arithmetic throughout, 16M fuzz runs clean
 - cargo-fuzz targets: decode, decode_limits, probe
+- whereat error location tracking (At<HeicError> Result type)
 
 ### Current Quality (RGB comparison vs libheif)
 - 103/162 test files decode successfully
@@ -146,8 +148,7 @@ let gainmap = DecoderConfig::new().decode_gain_map(&data)?;
 - example_q10: 36.1dB RGB — low-QP amplifies color conversion rounding
 
 ### Pending
-- SIMD optimization
-- whereat error location tracking
+- SIMD optimization (archmage-based)
 
 ## Known Limitations
 
