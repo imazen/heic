@@ -1,8 +1,24 @@
 fn main() {
-    let data = std::fs::read("/home/lilith/work/heic/libheif/examples/example.heic")
-        .expect("Failed to read test file");
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "/home/lilith/work/heic/libheif/examples/example.heic".to_string());
+    let output_path = std::env::args().nth(2);
+    let data = std::fs::read(&path).expect("Failed to read test file");
     let decoder = heic_decoder::HeicDecoder::new();
     let frame = decoder.decode_to_frame(&data).expect("decode failed");
+
+    // Write PPM if output path provided
+    if let Some(ppm_path) = &output_path {
+        let w = frame.cropped_width();
+        let h = frame.cropped_height();
+        let rgb = frame.to_rgb();
+        let header = format!("P6\n{} {}\n255\n", w, h);
+        let mut ppm = Vec::with_capacity(header.len() + rgb.len());
+        ppm.extend_from_slice(header.as_bytes());
+        ppm.extend_from_slice(&rgb);
+        std::fs::write(ppm_path, &ppm).expect("write PPM");
+        eprintln!("Wrote PPM: {}x{} to {}", w, h, ppm_path);
+    }
 
     // Write raw YUV (cropped) for comparison with libde265 --disable-deblocking --disable-sao
     let w = frame.cropped_width() as usize;

@@ -7,5 +7,5 @@
 mod boxes;
 mod parser;
 
-pub use boxes::{HevcDecoderConfig, ItemProperty};
-pub use parser::{HeifContainer, Item, ItemType, parse};
+pub use boxes::{FourCC, HevcDecoderConfig, ImageSpatialExtents, ItemProperty};
+pub use parser::{parse, HeifContainer, Item, ItemType};

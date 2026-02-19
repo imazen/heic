@@ -26,6 +26,8 @@ impl FourCC {
     pub const PIXI: Self = Self(*b"pixi");
     pub const IREF: Self = Self(*b"iref");
     pub const AUXC: Self = Self(*b"auxC");
+    pub const IDAT: Self = Self(*b"idat");
+    pub const DIMG: Self = Self(*b"dimg");
 
     /// Create from bytes
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
@@ -254,4 +256,15 @@ pub struct PropertyAssociation {
     pub item_id: u32,
     /// Property indices (1-based, essential flag)
     pub properties: Vec<(u16, bool)>,
+}
+
+/// Item reference (from iref box)
+#[derive(Debug, Clone)]
+pub struct ItemReference {
+    /// Reference type (e.g., "dimg" for derived image)
+    pub reference_type: FourCC,
+    /// Source item ID
+    pub from_item_id: u32,
+    /// Referenced item IDs
+    pub to_item_ids: Vec<u32>,
 }

@@ -6,7 +6,7 @@ use core::str;
 
 use super::boxes::{
     Box, BoxIterator, ColorInfo, FourCC, HevcDecoderConfig, ImageSpatialExtents, ItemInfo,
-    ItemLocation, ItemProperty, PropertyAssociation,
+    ItemLocation, ItemProperty, ItemReference, PropertyAssociation,
 };
 use crate::error::{HeicError, Result};
 
@@ -35,6 +35,10 @@ pub struct HeifContainer<'a> {
     pub color_infos: Vec<ColorInfo>,
     /// Property associations
     pub property_associations: Vec<PropertyAssociation>,
+    /// Item references (from iref box)
+    pub item_references: Vec<ItemReference>,
+    /// Item data (from idat box inside meta)
+    idat_data: Option<&'a [u8]>,
     /// Media data offset
     mdat_offset: Option<usize>,
     /// Media data length
@@ -142,17 +146,41 @@ impl<'a> HeifContainer<'a> {
             return None;
         }
 
-        // For now, handle single-extent items
-        // TODO: handle multiple extents and construction methods
+        let source = match loc.construction_method {
+            0 => self.data,         // File offset (typically into mdat)
+            1 => self.idat_data?,   // idat box inside meta
+            _ => return None,       // method=2 (item construction) not supported
+        };
+
+        // Single extent: return slice directly (avoids allocation)
+        if loc.extents.len() == 1 {
+            let (offset, length) = loc.extents[0];
+            let offset = (loc.base_offset + offset) as usize;
+            let length = length as usize;
+            if offset + length <= source.len() {
+                return Some(&source[offset..offset + length]);
+            }
+            return None;
+        }
+
+        // Multiple extents: not common for items we handle, return first for now
         let (offset, length) = loc.extents[0];
         let offset = (loc.base_offset + offset) as usize;
         let length = length as usize;
-
-        if offset + length <= self.data.len() {
-            Some(&self.data[offset..offset + length])
+        if offset + length <= source.len() {
+            Some(&source[offset..offset + length])
         } else {
             None
         }
+    }
+
+    /// Get item references of a given type from a source item
+    pub fn get_item_references(&self, from_item_id: u32, ref_type: FourCC) -> Vec<u32> {
+        self.item_references
+            .iter()
+            .filter(|r| r.from_item_id == from_item_id && r.reference_type == ref_type)
+            .flat_map(|r| r.to_item_ids.iter().copied())
+            .collect()
     }
 }
 
@@ -170,6 +198,8 @@ pub fn parse(data: &[u8]) -> Result<HeifContainer<'_>> {
         hevc_configs: Vec::new(),
         color_infos: Vec::new(),
         property_associations: Vec::new(),
+        item_references: Vec::new(),
+        idat_data: None,
         mdat_offset: None,
         mdat_length: None,
     };
@@ -235,7 +265,7 @@ fn parse_ftyp(ftyp: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
     Ok(())
 }
 
-fn parse_meta(meta: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
+fn parse_meta<'a>(meta: &Box<'a>, container: &mut HeifContainer<'a>) -> Result<()> {
     // Meta is a full box - skip version/flags
     if meta.content.len() < 4 {
         return Err(HeicError::InvalidContainer("meta box too short"));
@@ -249,7 +279,11 @@ fn parse_meta(meta: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
             FourCC::ILOC => parse_iloc(&child, container)?,
             FourCC::IINF => parse_iinf(&child, container)?,
             FourCC::IPRP => parse_iprp(&child, container)?,
-            _ => {} // hdlr, iref, etc.
+            FourCC::IREF => parse_iref(&child, container)?,
+            FourCC::IDAT => {
+                container.idat_data = Some(child.content);
+            }
+            _ => {} // hdlr, etc.
         }
     }
 
@@ -648,6 +682,72 @@ fn parse_colr(colr: &Box<'_>) -> Result<ColorInfo> {
         }
         _ => Err(HeicError::InvalidContainer("unknown color type")),
     }
+}
+
+fn parse_iref(iref: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
+    let content = iref.content;
+    if content.len() < 4 {
+        return Err(HeicError::InvalidContainer("iref too short"));
+    }
+
+    let version = content[0];
+    let remaining = &content[4..];
+
+    // iref contains child boxes, each is a reference type
+    for child in BoxIterator::new(remaining) {
+        let ref_type = child.box_type();
+        let data = child.content;
+        let mut pos = 0;
+
+        while pos < data.len() {
+            let (from_id, id_size) = if version == 0 {
+                if pos + 2 > data.len() {
+                    break;
+                }
+                (
+                    u16::from_be_bytes([data[pos], data[pos + 1]]) as u32,
+                    2usize,
+                )
+            } else {
+                if pos + 4 > data.len() {
+                    break;
+                }
+                (
+                    u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]),
+                    4usize,
+                )
+            };
+            pos += id_size;
+
+            if pos + 2 > data.len() {
+                break;
+            }
+            let ref_count = u16::from_be_bytes([data[pos], data[pos + 1]]);
+            pos += 2;
+
+            let mut to_ids = Vec::with_capacity(ref_count as usize);
+            for _ in 0..ref_count {
+                if pos + id_size > data.len() {
+                    break;
+                }
+                let to_id = if version == 0 {
+                    u16::from_be_bytes([data[pos], data[pos + 1]]) as u32
+                } else {
+                    u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                };
+                pos += id_size;
+                to_ids.push(to_id);
+            }
+
+            container.item_references.push(ItemReference {
+                reference_type: ref_type,
+                from_item_id: from_id,
+                to_item_ids: to_ids,
+            });
+        }
+    }
+
+    Ok(())
 }
 
 fn parse_ipma(ipma: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
