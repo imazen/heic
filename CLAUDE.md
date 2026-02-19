@@ -108,13 +108,14 @@ pub fn decode_rgba_into(
 - sig_coeff_flag proper H.265 context derivation
 - Conformance window cropping (to_rgb/to_rgba apply SPS conf_win_offset)
 
-### Current Quality (vs libde265 --disable-deblocking --disable-sao)
-- **100% pixel-exact** — all 1,639,680 bytes match (Y + Cb + Cr)
+### Current Quality
+- **Deblocking filter**: Luma 100.74 dB PSNR (6 pixels ±1), chroma pixel-exact vs libde265
+- **Without filters**: 100% pixel-exact vs libde265 --disable-deblocking --disable-sao
 - All 247,215 CABAC SEs match perfectly
 - Test image: example.heic (1280x854, 4:2:0, 8-bit)
+- Grid image: classic-car-iphone12pro.heic (3024x4032, 48 tiles) decodes correctly
 
 ### Pending
-- Deblocking filter
 - SAO (Sample Adaptive Offset)
 - SIMD optimization
 - Test with more images (different QPs, block sizes, modes)
@@ -148,8 +149,9 @@ src/
     ├── cabac.rs     # CABAC decoder, context tables
     ├── residual.rs  # Transform coefficient parsing
     ├── transform.rs # Inverse DCT/DST
+    ├── deblock.rs   # Deblocking filter (H.265 8.7.2)
     ├── debug.rs     # CABAC tracker, invariant checks
-    └── picture.rs   # Frame buffer
+    └── picture.rs   # Frame buffer (+ deblock metadata)
 ```
 
 ## FEEDBACK.md
