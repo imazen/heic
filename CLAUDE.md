@@ -98,6 +98,7 @@ pub fn decode_rgba_into(
 - Reference sample filtering (H.265 8.4.4.2.3)
 - Reference sample substitution with forward propagation (H.265 8.4.4.2.2)
 - Transform matrices and inverse DCT/DST (transform.rs)
+- Transform skip mode (H.265 8.6.4.1) — proper bypass of inverse transform
 - CABAC tables and decoder framework (cabac.rs) — bit-exact with libde265
 - Frame buffer with YCbCr→RGB conversion (picture.rs)
 - Transform coefficient parsing via CABAC (residual.rs)
@@ -112,15 +113,16 @@ pub fn decode_rgba_into(
 - Grid-based HEIC decoding (idat, iref/dimg, tile assembly)
 
 ### Current Quality (full pipeline: deblocking + SAO)
-- **vs libde265 full output**: Y 102.50 dB (4 pixels ±1), Cb/Cr pixel-exact
-- **Without filters**: 100% pixel-exact vs libde265 --disable-deblocking --disable-sao
-- All 247,215 CABAC SEs match perfectly
-- Test image: example.heic (1280x854, 4:2:0, 8-bit)
-- Grid image: classic-car-iphone12pro.heic (3024x4032, 48 tiles) decodes correctly
+- **example.heic** (1280x854): Y 102.50 dB (4 pixels ±1), Cb/Cr pixel-exact
+- **sample1.heic** (1440x960, transform_skip): Y 68.26 dB (max ±3), Cb/Cr pixel-exact
+- Without filters: 100% pixel-exact vs libde265 --disable-deblocking --disable-sao
+- All CABAC SEs match libde265 perfectly
+- Batch tested 11 images: 9 pass, 2 have minor dimension issues
 
 ### Pending
 - SIMD optimization
-- Test with more images (different QPs, block sizes, modes)
+- medium_q50.heic: height off by 1 (conformance window vs ISPE discrepancy)
+- classic-car-iphone12pro: EXIF rotation not applied to decoded dimensions
 
 ## Known Limitations
 
