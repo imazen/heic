@@ -122,18 +122,18 @@ pub fn decode_rgba_into(
 
 ### Current Quality (RGB comparison vs libheif)
 - 100/162 test files decode successfully (0 that libheif handles but we don't)
-- Best: example_q95 51.3dB (max diff 2), iPhone files 50-52dB (max diff 6-11)
-- Nokia C001-C052: 45.1dB (limited-range color conversion rounding)
-- Grid images: image1 48.2dB, classic-car 50.6dB
-- 10-bit HEVC (MIAF002): 43.7dB
-- Scaling list files: iphone_rotated 50.4dB, iphone_telephoto 50.9dB
+- Best: example_q95 65.7dB (98% pixel-exact), classic-car 58.5dB (95% exact)
+- Nokia C001-C052: 50.5dB (77% pixel-exact)
+- Grid images: image1 50.4dB, classic-car 58.5dB
+- Scaling list files: iphone_rotated 55.3dB (91% exact), iphone_telephoto 50.9dB
 - All CABAC SEs match libde265 perfectly
-- Remaining PSNR gap is from color conversion coefficient precision
+- YUV-level: pixel-perfect for q50+ (76.1dB for q10, 128 Y-plane diffs vs dec265)
+- Remaining RGB PSNR gap from fixed-point vs float color conversion rounding
 
 ### Known Edge Cases
 - MIAF003 (4:4:4 chroma, RExt profile): 5.7dB — chroma format not fully supported
-- overlay_1000x680: 13.2dB — remaining diff from color conversion on fill regions
-- example_q10: 36.0dB RGB — remaining gap from color conversion rounding (YUV: 76.1dB, 128 Y-plane diffs vs dec265)
+- overlay_1000x680: 13.1dB — remaining diff from color conversion on fill regions
+- example_q10: 36.1dB RGB — low-QP amplifies color conversion rounding
 
 ### Pending
 - SIMD optimization
