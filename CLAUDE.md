@@ -108,18 +108,16 @@ pub fn decode_rgba_into(
 - sig_coeff_flag proper H.265 context derivation
 - Conformance window cropping (to_rgb/to_rgba apply SPS conf_win_offset)
 
-### Current Quality (vs libde265, no deblocking/SAO)
-- Y: avg_diff=1.14, PSNR=41.0 dB, 49% exact pixels
-- Cb: avg_diff=0.13, PSNR=56.3 dB, 88% exact
-- Cr: avg_diff=0.16, PSNR=55.5 dB, 84% exact
+### Current Quality (vs libde265 --disable-deblocking --disable-sao)
+- **100% pixel-exact** — all 1,639,680 bytes match (Y + Cb + Cr)
 - All 247,215 CABAC SEs match perfectly
-- Remaining ±1 errors from minor rounding differences in prediction
+- Test image: example.heic (1280x854, 4:2:0, 8-bit)
 
 ### Pending
 - Deblocking filter
 - SAO (Sample Adaptive Offset)
 - SIMD optimization
-- Fix remaining ±1 rounding errors in prediction
+- Test with more images (different QPs, block sizes, modes)
 
 ## Known Limitations
 
@@ -128,13 +126,7 @@ pub fn decode_rgba_into(
 
 ## Known Bugs
 
-### ±1 Rounding Errors in Prediction
-- First error at pixel (277,0): ref=180, ours=179
-- All early errors are exactly ±1
-- Errors propagate and accumulate across the image (max=2 in first CTU row, max=124 by row 704)
-- All prediction formulas (Planar, DC, Angular, boundary filters) verified correct against spec
-- Likely from minor rounding differences in filter application or clipping order
-- Deblocking filter and SAO not yet implemented (will affect final comparison)
+(none)
 
 ## Module Structure
 
