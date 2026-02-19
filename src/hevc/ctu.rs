@@ -15,6 +15,7 @@ use super::intra;
 use super::params::{Pps, Sps};
 use super::picture::DecodedFrame;
 use super::residual::{self, ScanOrder};
+use super::sao::SaoMap;
 use super::slice::{IntraPredMode, PartMode, PredMode, SliceHeader};
 use super::transform;
 use crate::error::HevcError;
@@ -108,6 +109,8 @@ pub struct SliceContext<'a> {
     /// Current quantization group position
     current_qg_x: i32,
     current_qg_y: i32,
+    /// SAO parameters per CTB
+    pub sao_map: SaoMap,
 }
 
 impl<'a> SliceContext<'a> {
@@ -232,6 +235,7 @@ impl<'a> SliceContext<'a> {
             last_qpy_in_prev_qg: slice_qp,
             current_qg_x: -1,
             current_qg_y: -1,
+            sao_map: SaoMap::new(sps.pic_width_in_ctbs(), sps.pic_height_in_ctbs()),
         })
     }
 
@@ -350,9 +354,8 @@ impl<'a> SliceContext<'a> {
         self.decode_coding_quadtree(x_ctb, y_ctb, log2_ctb_size, 0, frame)
     }
 
-    /// Decode SAO (Sample Adaptive Offset) syntax elements from CABAC stream.
-    /// We don't apply SAO filtering, but must consume these elements to keep
-    /// the CABAC stream synchronized.
+    /// Decode SAO (Sample Adaptive Offset) syntax elements from CABAC stream
+    /// and store them in the SAO map for later filtering.
     fn decode_sao(&mut self, x_ctb_pixels: u32, y_ctb_pixels: u32) -> Result<()> {
         let ctb_size = self.sps.ctb_size();
         let x_ctb = x_ctb_pixels / ctb_size;
@@ -363,12 +366,10 @@ impl<'a> SliceContext<'a> {
 
         // sao_merge_left_flag
         if x_ctb > 0 {
-            // Check if left CTB is in the same slice segment
             let pic_width_ctbs = self.sps.pic_width_in_ctbs();
             let ctb_addr_rs = y_ctb * pic_width_ctbs + x_ctb;
-            let slice_addr_rs = 0u32; // First slice starts at 0
+            let slice_addr_rs = 0u32;
             let left_in_slice = ctb_addr_rs > slice_addr_rs;
-            // No tiles in our images, so left is always in same tile
             if left_in_slice {
                 let ctx_idx = context::SAO_MERGE_FLAG;
                 sao_merge_left_flag = self.cabac.decode_bin(&mut self.ctx[ctx_idx])? != 0;
@@ -389,12 +390,18 @@ impl<'a> SliceContext<'a> {
             }
         }
 
-        if !sao_merge_left_flag && !sao_merge_up_flag {
+        let sao_info = if sao_merge_left_flag {
+            *self.sao_map.get(x_ctb - 1, y_ctb)
+        } else if sao_merge_up_flag {
+            *self.sao_map.get(x_ctb, y_ctb - 1)
+        } else {
+            let mut info = super::sao::SaoInfo::default();
             let is_mono = self.sps.chroma_format_idc == 0;
             let n_chroma = if is_mono { 1 } else { 3 };
 
             let mut sao_type_idx_luma = 0u8;
             let mut sao_type_idx_chroma = 0u8;
+            let mut eo_class_chroma = 0u8;
 
             for c_idx in 0..n_chroma {
                 let should_decode = (self.header.slice_sao_luma_flag && c_idx == 0)
@@ -413,9 +420,10 @@ impl<'a> SliceContext<'a> {
                     se_trace("sao_type_idx_chroma", sao_type_idx_chroma as i64, &self.cabac);
                     sao_type_idx_chroma
                 } else {
-                    // cIdx==2 uses same type as cIdx==1
                     sao_type_idx_chroma
                 };
+
+                info.sao_type_idx[c_idx] = sao_type_idx;
 
                 if sao_type_idx != 0 {
                     let bit_depth = if c_idx == 0 {
@@ -424,37 +432,56 @@ impl<'a> SliceContext<'a> {
                         self.sps.bit_depth_c() as u32
                     };
                     let c_max = (1u32 << (bit_depth.min(10) - 5)) - 1;
+                    let offset_scale = 1i32 << (bit_depth.saturating_sub(bit_depth.min(10)));
 
-                    // Decode 4 offset absolute values (TU bypass)
-                    let mut offsets = [0u32; 4];
+                    let mut offsets_abs = [0u32; 4];
                     for i in 0..4 {
-                        offsets[i] = self.decode_cabac_tu_bypass(c_max)?;
-                        se_trace("sao_offset_abs", offsets[i] as i64, &self.cabac);
+                        offsets_abs[i] = self.decode_cabac_tu_bypass(c_max)?;
+                        se_trace("sao_offset_abs", offsets_abs[i] as i64, &self.cabac);
                     }
 
                     if sao_type_idx == 1 {
                         // Band offset: decode signs + band position
+                        let mut signed_offsets = [0i8; 4];
                         for i in 0..4 {
-                            if offsets[i] != 0 {
+                            if offsets_abs[i] != 0 {
                                 let sign = self.cabac.decode_bypass()?;
                                 se_trace("sao_offset_sign", sign as i64, &self.cabac);
+                                let val = (offsets_abs[i] as i32 * offset_scale) as i8;
+                                signed_offsets[i] = if sign != 0 { -val } else { val };
                             }
                         }
-                        // sao_band_position: 5 bypass bits
+                        info.sao_offset_val[c_idx] = signed_offsets;
+
                         let band_pos = self.cabac.decode_bypass_bits(5)?;
                         se_trace("sao_band_position", band_pos as i64, &self.cabac);
+                        info.sao_band_position[c_idx] = band_pos as u8;
                     } else {
-                        // Edge offset: decode sao_eo_class (2 bypass bits)
-                        // Only for cIdx==0 and cIdx==1 (cIdx==2 shares with 1)
+                        // Edge offset: store absolute values (sign applied during filtering)
+                        for i in 0..4 {
+                            info.sao_offset_val[c_idx][i] =
+                                (offsets_abs[i] as i32 * offset_scale) as i8;
+                        }
+
                         if c_idx <= 1 {
                             let eo_class = self.cabac.decode_bypass_bits(2)?;
                             se_trace("sao_eo_class", eo_class as i64, &self.cabac);
+                            if c_idx == 0 {
+                                info.sao_eo_class[0] = eo_class as u8;
+                            } else {
+                                eo_class_chroma = eo_class as u8;
+                                info.sao_eo_class[1] = eo_class_chroma;
+                            }
+                        } else {
+                            info.sao_eo_class[2] = eo_class_chroma;
                         }
                     }
                 }
             }
-        }
+            info
+        };
 
+        *self.sao_map.get_mut(x_ctb, y_ctb) = sao_info;
         Ok(())
     }
 

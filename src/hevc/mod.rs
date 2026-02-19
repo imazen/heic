@@ -12,6 +12,7 @@ mod intra;
 mod params;
 mod picture;
 mod residual;
+mod sao;
 mod slice;
 mod transform;
 
@@ -212,7 +213,10 @@ fn decode_slice(
         deblock::apply_deblocking_filter(frame, beta_offset, tc_offset, cb_qp_offset, cr_qp_offset);
     }
 
-    // 6. TODO: SAO (Sample Adaptive Offset)
+    // 6. Apply SAO (Sample Adaptive Offset)
+    if slice_header.slice_sao_luma_flag || slice_header.slice_sao_chroma_flag {
+        sao::apply_sao(frame, &ctx.sao_map, sps.ctb_size());
+    }
 
     Ok(())
 }
