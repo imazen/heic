@@ -1387,13 +1387,11 @@ impl<'a> SliceContext<'a> {
         let (plane, stride) = frame.plane_mut(c_idx);
         for py in 0..size {
             let row_start = (y0 as usize + py) * stride + x0 as usize;
-            for px in 0..size {
-                let idx = row_start + px;
-                if idx < plane.len() {
-                    let pred = plane[idx] as i32;
-                    let r = residual[py * size + px] as i32;
-                    plane[idx] = (pred + r).clamp(0, max_val) as u16;
-                }
+            let row = &mut plane[row_start..row_start + size];
+            let res_row = &residual[py * size..(py + 1) * size];
+            for (out, &r) in row.iter_mut().zip(res_row.iter()) {
+                let pred = *out as i32;
+                *out = (pred + r as i32).clamp(0, max_val) as u16;
             }
         }
 

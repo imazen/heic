@@ -396,19 +396,42 @@ impl DecodedFrame {
         let y_end = self.height - self.crop_bottom;
         let x_start = self.crop_left;
         let x_end = self.width - self.crop_right;
+        let w = self.width as usize;
 
         let mut offset = 0;
-        for y in y_start..y_end {
-            for x in x_start..x_end {
-                let y_idx = (y * self.width + x) as usize;
-                let y_val = (self.y_plane[y_idx] >> shift) as i32;
-                let (cb_val, cr_val) = self.get_chroma(x, y, shift);
-                let (r, g, b) = self.ycbcr_to_rgb(y_val, cb_val, cr_val);
-                if offset + 3 <= output.len() {
-                    output[offset] = r;
-                    output[offset + 1] = g;
-                    output[offset + 2] = b;
-                    offset += 3;
+        if self.chroma_format == 1 {
+            let c_stride = self.c_stride();
+            for y in y_start..y_end {
+                let y_row = y as usize * w;
+                let c_row = (y as usize / 2) * c_stride;
+                for x in x_start..x_end {
+                    let y_val = (self.y_plane[y_row + x as usize] >> shift) as i32;
+                    let cx = x as usize / 2;
+                    let c_idx = c_row + cx;
+                    let cb_val = (self.cb_plane[c_idx] >> shift) as i32;
+                    let cr_val = (self.cr_plane[c_idx] >> shift) as i32;
+                    let (r, g, b) = self.ycbcr_to_rgb(y_val, cb_val, cr_val);
+                    if offset + 3 <= output.len() {
+                        output[offset] = r;
+                        output[offset + 1] = g;
+                        output[offset + 2] = b;
+                        offset += 3;
+                    }
+                }
+            }
+        } else {
+            for y in y_start..y_end {
+                for x in x_start..x_end {
+                    let y_idx = y as usize * w + x as usize;
+                    let y_val = (self.y_plane[y_idx] >> shift) as i32;
+                    let (cb_val, cr_val) = self.get_chroma(x, y, shift);
+                    let (r, g, b) = self.ycbcr_to_rgb(y_val, cb_val, cr_val);
+                    if offset + 3 <= output.len() {
+                        output[offset] = r;
+                        output[offset + 1] = g;
+                        output[offset + 2] = b;
+                        offset += 3;
+                    }
                 }
             }
         }
