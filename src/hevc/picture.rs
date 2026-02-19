@@ -13,14 +13,6 @@ pub const DEBLOCK_FLAG_VERT: u8 = 1;
 /// Horizontal edge flag
 pub const DEBLOCK_FLAG_HORIZ: u8 = 2;
 
-/// Round float to u8 with +0.5 bias, clamped to [0,255].
-/// Matches libheif's `clip_f_u16(fx, 255)` = `(int32_t)(fx + 0.5f)` clamped.
-#[inline(always)]
-fn clip_f32(fx: f32) -> u8 {
-    let x = (fx + 0.5f32) as i32;
-    x.clamp(0, 255) as u8
-}
-
 /// Decoded video frame
 #[derive(Debug)]
 pub struct DecodedFrame {
@@ -222,26 +214,15 @@ impl DecodedFrame {
     /// y_val, cb_val, cr_val are 8-bit values (0-255).
     /// Selects coefficient matrix based on `matrix_coeffs` field.
     ///
-    /// Full-range uses ×256 fixed-point matching libheif's fast integer path.
-    /// Limited-range uses f32 matching libheif's generic float path exactly.
+    /// Both full-range and limited-range use integer fixed-point arithmetic.
+    /// Full-range: ×256, limited-range: ×2048 with combined Y/C scale factors.
     #[inline(always)]
     fn ycbcr_to_rgb(&self, y_val: i32, cb_val: i32, cr_val: i32) -> (u8, u8, u8) {
-        // Conversion formulas (ITU-T H.265 E.3.1):
-        //   R = Y + (2 - 2*Kr) * Cr
-        //   G = Y - (2 - 2*Kb)*Kb/Kg * Cb - (2 - 2*Kr)*Kr/Kg * Cr
-        //   B = Y + (2 - 2*Kb) * Cb
-        //
-        // Standard coefficients:
-        //   BT.601  (5,6): Kr=0.299,  Kb=0.114,  Kg=0.587
-        //   BT.709  (1):   Kr=0.2126, Kb=0.0722, Kg=0.7152
-        //   BT.2020 (9):   Kr=0.2627, Kb=0.0593, Kg=0.6780
-
         let cb = cb_val - 128;
         let cr = cr_val - 128;
 
         if self.full_range {
             // Full-range: ×256 fixed-point, matches libheif Op_YCbCr420_to_RGB24.
-            // Coefficients = lround(256 * float_coeff), signs baked into values.
             let (cr_r, cb_g, cr_g, cb_b) = match self.matrix_coeffs {
                 1 => (403, -48, -120, 475),  // BT.709
                 9 => (377, -42, -146, 482),   // BT.2020
@@ -256,22 +237,24 @@ impl DecodedFrame {
                 b.clamp(0, 255) as u8,
             )
         } else {
-            // Limited range: f32 matching libheif's generic template exactly.
-            // libheif applies: yv = (Y-16)*1.1689, cb'=Cb*1.1429, cr'=Cr*1.1429
-            // then R = clip(yv + r_cr*cr'), G = clip(yv + g_cb*cb' + g_cr*cr'), B = clip(yv + b_cb*cb')
-            // clip = (int32_t)(val + 0.5f), clamped to [0,255]
-            let yv = (y_val - 16) as f32 * 1.1689f32;
-            let cb_f = cb as f32 * 1.1429f32;
-            let cr_f = cr as f32 * 1.1429f32;
-            let (r_cr, g_cb, g_cr, b_cb) = match self.matrix_coeffs {
-                1 => (1.5748f32, -0.187324f32, -0.468124f32, 1.8556f32), // BT.709
-                9 => (1.4746f32, -0.164553f32, -0.571353f32, 1.8814f32), // BT.2020
-                _ => (1.402f32, -0.344136f32, -0.714136f32, 1.772f32),   // BT.601
+            // Limited-range: ×8192 fixed-point with pre-combined scale factors.
+            // Y_scale = 256/219 ≈ 1.1689, C_scale = 256/224 ≈ 1.1429
+            // Combined coefficients = round(matrix_coeff * C_scale * 8192)
+            let (cr_r, cb_g, cr_g, cb_b) = match self.matrix_coeffs {
+                1 => (14744, -1754, -4383, 17373),  // BT.709
+                9 => (13806, -1541, -5349, 17615),   // BT.2020
+                _ => (13126, -3222, -6686, 16591),   // BT.601 (default/unspecified)
             };
-            let r = clip_f32(yv + r_cr * cr_f);
-            let g = clip_f32(yv + g_cb * cb_f + g_cr * cr_f);
-            let b = clip_f32(yv + b_cb * cb_f);
-            (r, g, b)
+            // Y_coeff = round(1.1689 * 8192) = 9576
+            let yv = (y_val - 16) * 9576;
+            let r = (yv + cr_r * cr + 4096) >> 13;
+            let g = (yv + cb_g * cb + cr_g * cr + 4096) >> 13;
+            let b = (yv + cb_b * cb + 4096) >> 13;
+            (
+                r.clamp(0, 255) as u8,
+                g.clamp(0, 255) as u8,
+                b.clamp(0, 255) as u8,
+            )
         }
     }
 
@@ -279,24 +262,50 @@ impl DecodedFrame {
     pub fn to_rgb(&self) -> Vec<u8> {
         let out_width = self.cropped_width();
         let out_height = self.cropped_height();
-        let mut rgb = Vec::with_capacity((out_width * out_height * 3) as usize);
+        let total = (out_width * out_height) as usize;
+        let mut rgb = vec![0u8; total * 3];
         let shift = self.bit_depth - 8;
 
         let y_start = self.crop_top;
         let y_end = self.height - self.crop_bottom;
         let x_start = self.crop_left;
         let x_end = self.width - self.crop_right;
+        let w = self.width as usize;
 
-        for y in y_start..y_end {
-            for x in x_start..x_end {
-                let y_idx = (y * self.width + x) as usize;
-                let y_val = (self.y_plane[y_idx] >> shift) as i32;
-                let (cb_val, cr_val) = self.get_chroma(x, y, shift);
+        let mut out_idx = 0;
 
-                let (r, g, b) = self.ycbcr_to_rgb(y_val, cb_val, cr_val);
-                rgb.push(r);
-                rgb.push(g);
-                rgb.push(b);
+        if self.chroma_format == 1 {
+            // Specialized 4:2:0 path — avoids per-pixel match dispatch and
+            // hoists c_stride computation out of the loop.
+            let c_stride = self.c_stride();
+            for y in y_start..y_end {
+                let y_row = y as usize * w;
+                let c_row = (y as usize / 2) * c_stride;
+                for x in x_start..x_end {
+                    let y_val = (self.y_plane[y_row + x as usize] >> shift) as i32;
+                    let cx = x as usize / 2;
+                    let c_idx = c_row + cx;
+                    let cb_val = (self.cb_plane[c_idx] >> shift) as i32;
+                    let cr_val = (self.cr_plane[c_idx] >> shift) as i32;
+                    let (r, g, b) = self.ycbcr_to_rgb(y_val, cb_val, cr_val);
+                    rgb[out_idx] = r;
+                    rgb[out_idx + 1] = g;
+                    rgb[out_idx + 2] = b;
+                    out_idx += 3;
+                }
+            }
+        } else {
+            for y in y_start..y_end {
+                for x in x_start..x_end {
+                    let y_idx = y as usize * w + x as usize;
+                    let y_val = (self.y_plane[y_idx] >> shift) as i32;
+                    let (cb_val, cr_val) = self.get_chroma(x, y, shift);
+                    let (r, g, b) = self.ycbcr_to_rgb(y_val, cb_val, cr_val);
+                    rgb[out_idx] = r;
+                    rgb[out_idx + 1] = g;
+                    rgb[out_idx + 2] = b;
+                    out_idx += 3;
+                }
             }
         }
 
