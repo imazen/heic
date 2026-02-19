@@ -61,15 +61,18 @@ pub fn predict_intra(
     fill_border_samples(frame, x, y, size, c_idx, &mut border, border_center);
 
     // Reference sample filtering (H.265 8.4.4.2.3)
-    intra_prediction_sample_filtering(
-        &mut border,
-        border_center,
-        size as usize,
-        c_idx,
-        mode.as_u8(),
-        strong_intra_smoothing_enabled,
-        frame.bit_depth as usize,
-    );
+    // Only applied for luma, or for chroma in 4:4:4 format
+    if c_idx == 0 || frame.chroma_format == 3 {
+        intra_prediction_sample_filtering(
+            &mut border,
+            border_center,
+            size as usize,
+            c_idx,
+            mode.as_u8(),
+            strong_intra_smoothing_enabled,
+            frame.bit_depth as usize,
+        );
+    }
 
     // Apply prediction based on mode
     match mode {
@@ -84,6 +87,7 @@ pub fn predict_intra(
             predict_angular(frame, x, y, size, c_idx, mode_val, &border, border_center);
         }
     }
+
 }
 
 /// Intra prediction reference sample filtering (H.265 8.4.4.2.3)
