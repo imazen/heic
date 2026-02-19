@@ -28,6 +28,6 @@ png = "0.17"
 lto = "thin"
 codegen-units = 1
 
-# [[bench]]
-# name = "decode"
-# harness = false
+[[bench]]
+name = "decode"
+harness = false
