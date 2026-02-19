@@ -668,4 +668,124 @@ impl DecodedFrame {
             }
         }
     }
+
+    /// Mirror the frame about the vertical axis (left-right flip)
+    pub fn mirror_horizontal(&self) -> Self {
+        let w = self.width;
+        let h = self.height;
+
+        let mut y_plane = vec![0u16; (w * h) as usize];
+        for dy in 0..h {
+            for dx in 0..w {
+                y_plane[(dy * w + dx) as usize] =
+                    self.y_plane[(dy * w + (w - 1 - dx)) as usize];
+            }
+        }
+
+        let alpha_plane = self.alpha_plane.as_ref().map(|alpha| {
+            let mut mirrored = vec![0u16; (w * h) as usize];
+            for dy in 0..h {
+                for dx in 0..w {
+                    mirrored[(dy * w + dx) as usize] =
+                        alpha[(dy * w + (w - 1 - dx)) as usize];
+                }
+            }
+            mirrored
+        });
+
+        let (cw, ch) = self.chroma_dims();
+        if cw > 0 && ch > 0 {
+            let csz = (cw * ch) as usize;
+            let mut cb_plane = vec![0u16; csz];
+            let mut cr_plane = vec![0u16; csz];
+            for dy in 0..ch {
+                for dx in 0..cw {
+                    let si = dy as usize * cw as usize + (cw - 1 - dx) as usize;
+                    let di = dy as usize * cw as usize + dx as usize;
+                    if si < self.cb_plane.len() {
+                        cb_plane[di] = self.cb_plane[si];
+                        cr_plane[di] = self.cr_plane[si];
+                    }
+                }
+            }
+            Self {
+                width: w, height: h, y_plane, cb_plane, cr_plane,
+                bit_depth: self.bit_depth, chroma_format: self.chroma_format,
+                crop_left: self.crop_right, crop_right: self.crop_left,
+                crop_top: self.crop_top, crop_bottom: self.crop_bottom,
+                deblock_flags: Vec::new(), deblock_stride: 0, qp_map: Vec::new(),
+                alpha_plane,
+            }
+        } else {
+            Self {
+                width: w, height: h, y_plane,
+                cb_plane: Vec::new(), cr_plane: Vec::new(),
+                bit_depth: self.bit_depth, chroma_format: self.chroma_format,
+                crop_left: self.crop_right, crop_right: self.crop_left,
+                crop_top: self.crop_top, crop_bottom: self.crop_bottom,
+                deblock_flags: Vec::new(), deblock_stride: 0, qp_map: Vec::new(),
+                alpha_plane,
+            }
+        }
+    }
+
+    /// Mirror the frame about the horizontal axis (top-bottom flip)
+    pub fn mirror_vertical(&self) -> Self {
+        let w = self.width;
+        let h = self.height;
+
+        let mut y_plane = vec![0u16; (w * h) as usize];
+        for dy in 0..h {
+            for dx in 0..w {
+                y_plane[(dy * w + dx) as usize] =
+                    self.y_plane[((h - 1 - dy) * w + dx) as usize];
+            }
+        }
+
+        let alpha_plane = self.alpha_plane.as_ref().map(|alpha| {
+            let mut mirrored = vec![0u16; (w * h) as usize];
+            for dy in 0..h {
+                for dx in 0..w {
+                    mirrored[(dy * w + dx) as usize] =
+                        alpha[((h - 1 - dy) * w + dx) as usize];
+                }
+            }
+            mirrored
+        });
+
+        let (cw, ch) = self.chroma_dims();
+        if cw > 0 && ch > 0 {
+            let csz = (cw * ch) as usize;
+            let mut cb_plane = vec![0u16; csz];
+            let mut cr_plane = vec![0u16; csz];
+            for dy in 0..ch {
+                for dx in 0..cw {
+                    let si = (ch - 1 - dy) as usize * cw as usize + dx as usize;
+                    let di = dy as usize * cw as usize + dx as usize;
+                    if si < self.cb_plane.len() {
+                        cb_plane[di] = self.cb_plane[si];
+                        cr_plane[di] = self.cr_plane[si];
+                    }
+                }
+            }
+            Self {
+                width: w, height: h, y_plane, cb_plane, cr_plane,
+                bit_depth: self.bit_depth, chroma_format: self.chroma_format,
+                crop_left: self.crop_left, crop_right: self.crop_right,
+                crop_top: self.crop_bottom, crop_bottom: self.crop_top,
+                deblock_flags: Vec::new(), deblock_stride: 0, qp_map: Vec::new(),
+                alpha_plane,
+            }
+        } else {
+            Self {
+                width: w, height: h, y_plane,
+                cb_plane: Vec::new(), cr_plane: Vec::new(),
+                bit_depth: self.bit_depth, chroma_format: self.chroma_format,
+                crop_left: self.crop_left, crop_right: self.crop_right,
+                crop_top: self.crop_bottom, crop_bottom: self.crop_top,
+                deblock_flags: Vec::new(), deblock_stride: 0, qp_map: Vec::new(),
+                alpha_plane,
+            }
+        }
+    }
 }

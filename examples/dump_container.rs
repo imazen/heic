@@ -66,6 +66,10 @@ fn main() {
             ItemProperty::Rotation(rot) => {
                 eprintln!("  [{}]: irot angle={}°", i, rot.angle);
             }
+            ItemProperty::Mirror(m) => {
+                let desc = if m.axis == 0 { "horizontal (left-right)" } else { "vertical (top-bottom)" };
+                eprintln!("  [{}]: imir axis={} ({})", i, m.axis, desc);
+            }
             ItemProperty::AuxiliaryType(aux_type) => {
                 eprintln!("  [{}]: auxC type={:?}", i, aux_type);
             }
@@ -95,6 +99,7 @@ fn main() {
         eprintln!("  dimensions: {:?}", item.dimensions);
         eprintln!("  has hevc_config: {}", item.hevc_config.is_some());
         eprintln!("  rotation: {:?}", item.rotation);
+        eprintln!("  mirror: {:?}", item.mirror);
         eprintln!("  clean_aperture: {:?}", item.clean_aperture);
 
         if item.item_type == ItemType::Grid {

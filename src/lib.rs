@@ -29,7 +29,7 @@ pub mod hevc;
 pub use error::{HeicError, Result};
 
 use alloc::vec::Vec;
-use heif::{FourCC, ItemType};
+use heif::{FourCC, ItemType, Transform};
 
 /// Decoded image data
 #[derive(Debug, Clone)]
@@ -182,19 +182,28 @@ impl HeicDecoder {
             }
         };
 
-        // Apply clean aperture crop (clap box) if present
-        if let Some(clap) = item.clean_aperture {
-            apply_clean_aperture(&mut frame, &clap);
-        }
-
-        // Apply image rotation (irot box) if present
-        if let Some(rotation) = item.rotation {
-            frame = match rotation.angle {
-                90 => frame.rotate_90_cw(),
-                180 => frame.rotate_180(),
-                270 => frame.rotate_270_cw(),
-                _ => frame,
-            };
+        // Apply transformative properties in ipma listing order (HEIF spec requirement)
+        for transform in &item.transforms {
+            match transform {
+                Transform::CleanAperture(clap) => {
+                    apply_clean_aperture(&mut frame, clap);
+                }
+                Transform::Mirror(mirror) => {
+                    frame = match mirror.axis {
+                        0 => frame.mirror_vertical(),
+                        1 => frame.mirror_horizontal(),
+                        _ => frame,
+                    };
+                }
+                Transform::Rotation(rotation) => {
+                    frame = match rotation.angle {
+                        90 => frame.rotate_90_cw(),
+                        180 => frame.rotate_180(),
+                        270 => frame.rotate_270_cw(),
+                        _ => frame,
+                    };
+                }
+            }
         }
 
         Ok(frame)

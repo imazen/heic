@@ -31,6 +31,7 @@ impl FourCC {
     pub const CLAP: Self = Self(*b"clap");
     pub const IROT: Self = Self(*b"irot");
     pub const AUXL: Self = Self(*b"auxl");
+    pub const IMIR: Self = Self(*b"imir");
 
     /// Create from bytes
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
@@ -207,6 +208,13 @@ pub struct ImageRotation {
     pub angle: u16,
 }
 
+/// Image mirror from imir box
+#[derive(Debug, Clone, Copy)]
+pub struct ImageMirror {
+    /// Mirror axis: 0 = vertical axis (left-right flip), 1 = horizontal axis (top-bottom flip)
+    pub axis: u8,
+}
+
 /// Image spatial extents from ispe box
 #[derive(Debug, Clone, Copy)]
 pub struct ImageSpatialExtents {
@@ -263,6 +271,18 @@ pub enum ColorInfo {
     },
 }
 
+/// Ordered transformative property for an item.
+/// HEIF spec requires these be applied in the order listed in ipma.
+#[derive(Debug, Clone, Copy)]
+pub enum Transform {
+    /// Clean aperture crop (clap)
+    CleanAperture(CleanAperture),
+    /// Image mirror (imir)
+    Mirror(ImageMirror),
+    /// Image rotation (irot)
+    Rotation(ImageRotation),
+}
+
 /// Item property (indexed in ipco)
 #[derive(Debug, Clone)]
 pub enum ItemProperty {
@@ -276,6 +296,8 @@ pub enum ItemProperty {
     CleanAperture(CleanAperture),
     /// Image rotation (irot)
     Rotation(ImageRotation),
+    /// Image mirror (imir)
+    Mirror(ImageMirror),
     /// Auxiliary type (auxC)
     AuxiliaryType(String),
     /// Unknown property

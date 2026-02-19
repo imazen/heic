@@ -5,8 +5,9 @@ use alloc::vec::Vec;
 use core::str;
 
 use super::boxes::{
-    Box, BoxIterator, CleanAperture, ColorInfo, FourCC, HevcDecoderConfig, ImageRotation,
-    ImageSpatialExtents, ItemInfo, ItemLocation, ItemProperty, ItemReference, PropertyAssociation,
+    Box, BoxIterator, CleanAperture, ColorInfo, FourCC, HevcDecoderConfig, ImageMirror,
+    ImageRotation, ImageSpatialExtents, ItemInfo, ItemLocation, ItemProperty, ItemReference,
+    PropertyAssociation, Transform,
 };
 use crate::error::{HeicError, Result};
 
@@ -95,6 +96,11 @@ pub struct Item {
     pub clean_aperture: Option<CleanAperture>,
     /// Image rotation (if available)
     pub rotation: Option<ImageRotation>,
+    /// Image mirror (if available)
+    pub mirror: Option<ImageMirror>,
+    /// Ordered transformative properties (clap, imir, irot) in ipma order.
+    /// HEIF spec requires these be applied in listing order.
+    pub transforms: Vec<Transform>,
     /// Auxiliary type URI (from auxC property, e.g. "urn:mpeg:hevc:2015:auxid:1" for alpha)
     pub auxiliary_type: Option<String>,
 }
@@ -119,6 +125,8 @@ impl<'a> HeifContainer<'a> {
         let mut hevc_config = None;
         let mut clean_aperture = None;
         let mut rotation = None;
+        let mut mirror = None;
+        let mut transforms = Vec::new();
         let mut auxiliary_type = None;
 
         if let Some(assoc) = assoc {
@@ -134,9 +142,15 @@ impl<'a> HeifContainer<'a> {
                         }
                         ItemProperty::CleanAperture(clap) => {
                             clean_aperture = Some(*clap);
+                            transforms.push(Transform::CleanAperture(*clap));
                         }
                         ItemProperty::Rotation(rot) => {
                             rotation = Some(*rot);
+                            transforms.push(Transform::Rotation(*rot));
+                        }
+                        ItemProperty::Mirror(m) => {
+                            mirror = Some(*m);
+                            transforms.push(Transform::Mirror(*m));
                         }
                         ItemProperty::AuxiliaryType(s) => {
                             auxiliary_type = Some(s.clone());
@@ -155,6 +169,8 @@ impl<'a> HeifContainer<'a> {
             hevc_config,
             clean_aperture,
             rotation,
+            mirror,
+            transforms,
             auxiliary_type,
         })
     }
@@ -627,6 +643,13 @@ fn parse_ipco(ipco: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
                     ItemProperty::Unknown
                 }
             }
+            FourCC::IMIR => {
+                if let Ok(mirror) = parse_imir(&child) {
+                    ItemProperty::Mirror(mirror)
+                } else {
+                    ItemProperty::Unknown
+                }
+            }
             FourCC::AUXC => {
                 if let Ok(aux_type) = parse_auxc(&child) {
                     ItemProperty::AuxiliaryType(aux_type)
@@ -688,6 +711,17 @@ fn parse_irot(irot: &Box<'_>) -> Result<ImageRotation> {
         _ => 0,
     };
     Ok(ImageRotation { angle })
+}
+
+fn parse_imir(imir: &Box<'_>) -> Result<ImageMirror> {
+    let content = imir.content;
+    // imir box: 1 byte (7 bits reserved, 1 bit axis)
+    if content.is_empty() {
+        return Err(HeicError::InvalidContainer("imir too short"));
+    }
+    Ok(ImageMirror {
+        axis: content[0] & 0x01,
+    })
 }
 
 fn parse_auxc(auxc: &Box<'_>) -> Result<String> {
