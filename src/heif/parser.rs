@@ -194,9 +194,9 @@ impl<'a> HeifContainer<'a> {
         }
 
         let source = match loc.construction_method {
-            0 => self.data,         // File offset (typically into mdat)
-            1 => self.idat_data?,   // idat box inside meta
-            _ => return None,       // method=2 (item construction) not supported
+            0 => self.data,       // File offset (typically into mdat)
+            1 => self.idat_data?, // idat box inside meta
+            _ => return None,     // method=2 (item construction) not supported
         };
 
         // Single extent: return slice directly (avoids allocation)
@@ -234,10 +234,10 @@ impl<'a> HeifContainer<'a> {
             .filter(|r| r.reference_type == FourCC::AUXL && r.to_item_ids.contains(&target_item_id))
             .filter_map(|r| {
                 let item = self.get_item(r.from_item_id)?;
-                if let Some(ref aux_type) = item.auxiliary_type {
-                    if aux_type.starts_with(aux_type_prefix) {
-                        return Some(r.from_item_id);
-                    }
+                if let Some(ref aux_type) = item.auxiliary_type
+                    && aux_type.starts_with(aux_type_prefix)
+                {
+                    return Some(r.from_item_id);
                 }
                 None
             })
@@ -541,12 +541,14 @@ fn parse_iinf(iinf: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
 fn parse_infe(infe: &Box<'_>) -> Result<ItemInfo> {
     let content = infe.content;
 
-    let version = *content.first().ok_or(HeicError::InvalidContainer("infe too short"))?;
+    let version = *content
+        .first()
+        .ok_or(HeicError::InvalidContainer("infe too short"))?;
     // Minimum: 4 (ver+flags) + id (2 or 4) + 2 (protection) + type (4 if v>=2)
     let min_len = match version {
-        0..=1 => 4 + 2 + 2,    // 8
-        2 => 4 + 2 + 2 + 4,    // 12
-        _ => 4 + 4 + 2 + 4,    // 14 (version >= 3 uses 4-byte item_id)
+        0..=1 => 4 + 2 + 2, // 8
+        2 => 4 + 2 + 2 + 4, // 12
+        _ => 4 + 4 + 2 + 4, // 14 (version >= 3 uses 4-byte item_id)
     };
     if content.len() < min_len {
         return Err(HeicError::InvalidContainer("infe too short").into());
@@ -704,14 +706,10 @@ fn parse_clap(clap: &Box<'_>) -> Result<CleanAperture> {
     let width_d = u32::from_be_bytes([content[4], content[5], content[6], content[7]]);
     let height_n = u32::from_be_bytes([content[8], content[9], content[10], content[11]]);
     let height_d = u32::from_be_bytes([content[12], content[13], content[14], content[15]]);
-    let horiz_off_n =
-        i32::from_be_bytes([content[16], content[17], content[18], content[19]]);
-    let horiz_off_d =
-        u32::from_be_bytes([content[20], content[21], content[22], content[23]]);
-    let vert_off_n =
-        i32::from_be_bytes([content[24], content[25], content[26], content[27]]);
-    let vert_off_d =
-        u32::from_be_bytes([content[28], content[29], content[30], content[31]]);
+    let horiz_off_n = i32::from_be_bytes([content[16], content[17], content[18], content[19]]);
+    let horiz_off_d = u32::from_be_bytes([content[20], content[21], content[22], content[23]]);
+    let vert_off_n = i32::from_be_bytes([content[24], content[25], content[26], content[27]]);
+    let vert_off_d = u32::from_be_bytes([content[28], content[29], content[30], content[31]]);
 
     Ok(CleanAperture {
         width_n,
@@ -763,9 +761,7 @@ fn parse_auxc(auxc: &Box<'_>) -> Result<String> {
     let data = &content[4..];
     // Find null terminator
     let end = data.iter().position(|&b| b == 0).unwrap_or(data.len());
-    let aux_type = str::from_utf8(&data[..end])
-        .unwrap_or("")
-        .to_string();
+    let aux_type = str::from_utf8(&data[..end]).unwrap_or("").to_string();
     Ok(aux_type)
 }
 

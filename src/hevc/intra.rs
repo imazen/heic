@@ -87,7 +87,6 @@ pub fn predict_intra(
             predict_angular(frame, x, y, size, c_idx, mode_val, &border, border_center);
         }
     }
-
 }
 
 /// Intra prediction reference sample filtering (H.265 8.4.4.2.3)
@@ -97,8 +96,8 @@ pub fn predict_intra(
 fn intra_prediction_sample_filtering(
     border: &mut [i32],
     center: usize,
-    n_t: usize,       // block size (4, 8, 16, 32)
-    c_idx: u8,         // 0=luma, 1/2=chroma
+    n_t: usize, // block size (4, 8, 16, 32)
+    c_idx: u8,  // 0=luma, 1/2=chroma
     intra_pred_mode: u8,
     strong_intra_smoothing_enabled: bool,
     bit_depth: usize,
@@ -129,10 +128,10 @@ fn intra_prediction_sample_filtering(
         && c_idx == 0
         && n_t == 32
         && (border[center] + border[center + 64] - 2 * border[center + 32]).abs()
-            < (1 << (bit_depth - 5)) as i32
+            < (1 << (bit_depth - 5))
         && (border[center] + border[center.wrapping_sub(64)] - 2 * border[center.wrapping_sub(32)])
             .abs()
-            < (1 << (bit_depth - 5)) as i32;
+            < (1 << (bit_depth - 5));
 
     // Temporary filtered array
     let mut pf = [0i32; 4 * MAX_INTRA_PRED_BLOCK_SIZE + 1];
@@ -397,6 +396,7 @@ fn set_sample(frame: &mut DecodedFrame, x: u32, y: u32, c_idx: u8, value: u16) {
 }
 
 /// Planar prediction (mode 0) - H.265 8.4.4.2.4
+#[allow(clippy::too_many_arguments)]
 fn predict_planar(
     frame: &mut DecodedFrame,
     x: u32,
@@ -436,6 +436,7 @@ fn predict_planar(
 }
 
 /// DC prediction (mode 1) - H.265 8.4.4.2.5
+#[allow(clippy::too_many_arguments)]
 fn predict_dc(
     frame: &mut DecodedFrame,
     x: u32,

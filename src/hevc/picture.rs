@@ -59,7 +59,9 @@ impl DecodedFrame {
     /// # Panics
     /// Panics if width * height overflows u32.
     pub fn new(width: u32, height: u32) -> Self {
-        let luma_size = width.checked_mul(height).expect("frame dimensions overflow") as usize;
+        let luma_size = width
+            .checked_mul(height)
+            .expect("frame dimensions overflow") as usize;
         // Assume 4:2:0 chroma subsampling
         let chroma_width = width.div_ceil(2);
         let chroma_height = height.div_ceil(2);
@@ -94,7 +96,9 @@ impl DecodedFrame {
     /// # Panics
     /// Panics if width * height overflows u32.
     pub fn with_params(width: u32, height: u32, bit_depth: u8, chroma_format: u8) -> Self {
-        let luma_size = width.checked_mul(height).expect("frame dimensions overflow") as usize;
+        let luma_size = width
+            .checked_mul(height)
+            .expect("frame dimensions overflow") as usize;
 
         let (chroma_width, chroma_height) = match chroma_format {
             0 => (0, 0),                                  // Monochrome
@@ -230,9 +234,9 @@ impl DecodedFrame {
         if self.full_range {
             // Full range coefficients (×1024)
             let (cr_r, cb_g, cr_g, cb_b) = match self.matrix_coeffs {
-                1 => (1613, 192, 479, 1900),   // BT.709
-                9 => (1510, 169, 585, 1927),   // BT.2020
-                _ => (1436, 352, 731, 1815),   // BT.601 (default/unspecified)
+                1 => (1613, 192, 479, 1900), // BT.709
+                9 => (1510, 169, 585, 1927), // BT.2020
+                _ => (1436, 352, 731, 1815), // BT.601 (default/unspecified)
             };
             let r = (y_val * 1024 + cr_r * cr + 512) >> 10;
             let g = (y_val * 1024 - cb_g * cb - cr_g * cr + 512) >> 10;
@@ -247,9 +251,9 @@ impl DecodedFrame {
             // Y scale = 1197/1024 = 256/219. Chroma scale = 256/224.
             let y16 = y_val - 16;
             let (cr_r, cb_g, cr_g, cb_b) = match self.matrix_coeffs {
-                1 => (1843, 219, 547, 2171),   // BT.709
-                9 => (1726, 193, 669, 2202),   // BT.2020
-                _ => (1641, 403, 836, 2074),   // BT.601 (default/unspecified)
+                1 => (1843, 219, 547, 2171), // BT.709
+                9 => (1726, 193, 669, 2202), // BT.2020
+                _ => (1641, 403, 836, 2074), // BT.601 (default/unspecified)
             };
             let r = (1197 * y16 + cr_r * cr + 512) >> 10;
             let g = (1197 * y16 - cb_g * cb - cr_g * cr + 512) >> 10;
@@ -696,8 +700,7 @@ impl DecodedFrame {
         let mut y_plane = vec![0u16; (nw * nh) as usize];
         for dy in 0..nh {
             for dx in 0..nw {
-                y_plane[(dy * nw + dx) as usize] =
-                    self.y_plane[((oh - 1 - dx) * ow + dy) as usize];
+                y_plane[(dy * nw + dx) as usize] = self.y_plane[((oh - 1 - dx) * ow + dy) as usize];
             }
         }
 
@@ -706,8 +709,7 @@ impl DecodedFrame {
             let mut rotated = vec![0u16; (nw * nh) as usize];
             for dy in 0..nh {
                 for dx in 0..nw {
-                    rotated[(dy * nw + dx) as usize] =
-                        alpha[((oh - 1 - dx) * ow + dy) as usize];
+                    rotated[(dy * nw + dx) as usize] = alpha[((oh - 1 - dx) * ow + dy) as usize];
                 }
             }
             rotated
@@ -870,8 +872,7 @@ impl DecodedFrame {
         let mut y_plane = vec![0u16; (nw * nh) as usize];
         for dy in 0..nh {
             for dx in 0..nw {
-                y_plane[(dy * nw + dx) as usize] =
-                    self.y_plane[(dx * ow + (ow - 1 - dy)) as usize];
+                y_plane[(dy * nw + dx) as usize] = self.y_plane[(dx * ow + (ow - 1 - dy)) as usize];
             }
         }
 
@@ -880,8 +881,7 @@ impl DecodedFrame {
             let mut rotated = vec![0u16; (nw * nh) as usize];
             for dy in 0..nh {
                 for dx in 0..nw {
-                    rotated[(dy * nw + dx) as usize] =
-                        alpha[(dx * ow + (ow - 1 - dy)) as usize];
+                    rotated[(dy * nw + dx) as usize] = alpha[(dx * ow + (ow - 1 - dy)) as usize];
                 }
             }
             rotated
@@ -956,8 +956,7 @@ impl DecodedFrame {
         let mut y_plane = vec![0u16; (w * h) as usize];
         for dy in 0..h {
             for dx in 0..w {
-                y_plane[(dy * w + dx) as usize] =
-                    self.y_plane[(dy * w + (w - 1 - dx)) as usize];
+                y_plane[(dy * w + dx) as usize] = self.y_plane[(dy * w + (w - 1 - dx)) as usize];
             }
         }
 
@@ -965,8 +964,7 @@ impl DecodedFrame {
             let mut mirrored = vec![0u16; (w * h) as usize];
             for dy in 0..h {
                 for dx in 0..w {
-                    mirrored[(dy * w + dx) as usize] =
-                        alpha[(dy * w + (w - 1 - dx)) as usize];
+                    mirrored[(dy * w + dx) as usize] = alpha[(dy * w + (w - 1 - dx)) as usize];
                 }
             }
             mirrored
@@ -988,24 +986,43 @@ impl DecodedFrame {
                 }
             }
             Self {
-                width: w, height: h, y_plane, cb_plane, cr_plane,
-                bit_depth: self.bit_depth, chroma_format: self.chroma_format,
-                crop_left: self.crop_right, crop_right: self.crop_left,
-                crop_top: self.crop_top, crop_bottom: self.crop_bottom,
-                deblock_flags: Vec::new(), deblock_stride: 0, qp_map: Vec::new(),
+                width: w,
+                height: h,
+                y_plane,
+                cb_plane,
+                cr_plane,
+                bit_depth: self.bit_depth,
+                chroma_format: self.chroma_format,
+                crop_left: self.crop_right,
+                crop_right: self.crop_left,
+                crop_top: self.crop_top,
+                crop_bottom: self.crop_bottom,
+                deblock_flags: Vec::new(),
+                deblock_stride: 0,
+                qp_map: Vec::new(),
                 alpha_plane,
-                full_range: self.full_range, matrix_coeffs: self.matrix_coeffs,
+                full_range: self.full_range,
+                matrix_coeffs: self.matrix_coeffs,
             }
         } else {
             Self {
-                width: w, height: h, y_plane,
-                cb_plane: Vec::new(), cr_plane: Vec::new(),
-                bit_depth: self.bit_depth, chroma_format: self.chroma_format,
-                crop_left: self.crop_right, crop_right: self.crop_left,
-                crop_top: self.crop_top, crop_bottom: self.crop_bottom,
-                deblock_flags: Vec::new(), deblock_stride: 0, qp_map: Vec::new(),
+                width: w,
+                height: h,
+                y_plane,
+                cb_plane: Vec::new(),
+                cr_plane: Vec::new(),
+                bit_depth: self.bit_depth,
+                chroma_format: self.chroma_format,
+                crop_left: self.crop_right,
+                crop_right: self.crop_left,
+                crop_top: self.crop_top,
+                crop_bottom: self.crop_bottom,
+                deblock_flags: Vec::new(),
+                deblock_stride: 0,
+                qp_map: Vec::new(),
                 alpha_plane,
-                full_range: self.full_range, matrix_coeffs: self.matrix_coeffs,
+                full_range: self.full_range,
+                matrix_coeffs: self.matrix_coeffs,
             }
         }
     }
@@ -1018,8 +1035,7 @@ impl DecodedFrame {
         let mut y_plane = vec![0u16; (w * h) as usize];
         for dy in 0..h {
             for dx in 0..w {
-                y_plane[(dy * w + dx) as usize] =
-                    self.y_plane[((h - 1 - dy) * w + dx) as usize];
+                y_plane[(dy * w + dx) as usize] = self.y_plane[((h - 1 - dy) * w + dx) as usize];
             }
         }
 
@@ -1027,8 +1043,7 @@ impl DecodedFrame {
             let mut mirrored = vec![0u16; (w * h) as usize];
             for dy in 0..h {
                 for dx in 0..w {
-                    mirrored[(dy * w + dx) as usize] =
-                        alpha[((h - 1 - dy) * w + dx) as usize];
+                    mirrored[(dy * w + dx) as usize] = alpha[((h - 1 - dy) * w + dx) as usize];
                 }
             }
             mirrored
@@ -1050,24 +1065,43 @@ impl DecodedFrame {
                 }
             }
             Self {
-                width: w, height: h, y_plane, cb_plane, cr_plane,
-                bit_depth: self.bit_depth, chroma_format: self.chroma_format,
-                crop_left: self.crop_left, crop_right: self.crop_right,
-                crop_top: self.crop_bottom, crop_bottom: self.crop_top,
-                deblock_flags: Vec::new(), deblock_stride: 0, qp_map: Vec::new(),
+                width: w,
+                height: h,
+                y_plane,
+                cb_plane,
+                cr_plane,
+                bit_depth: self.bit_depth,
+                chroma_format: self.chroma_format,
+                crop_left: self.crop_left,
+                crop_right: self.crop_right,
+                crop_top: self.crop_bottom,
+                crop_bottom: self.crop_top,
+                deblock_flags: Vec::new(),
+                deblock_stride: 0,
+                qp_map: Vec::new(),
                 alpha_plane,
-                full_range: self.full_range, matrix_coeffs: self.matrix_coeffs,
+                full_range: self.full_range,
+                matrix_coeffs: self.matrix_coeffs,
             }
         } else {
             Self {
-                width: w, height: h, y_plane,
-                cb_plane: Vec::new(), cr_plane: Vec::new(),
-                bit_depth: self.bit_depth, chroma_format: self.chroma_format,
-                crop_left: self.crop_left, crop_right: self.crop_right,
-                crop_top: self.crop_bottom, crop_bottom: self.crop_top,
-                deblock_flags: Vec::new(), deblock_stride: 0, qp_map: Vec::new(),
+                width: w,
+                height: h,
+                y_plane,
+                cb_plane: Vec::new(),
+                cr_plane: Vec::new(),
+                bit_depth: self.bit_depth,
+                chroma_format: self.chroma_format,
+                crop_left: self.crop_left,
+                crop_right: self.crop_right,
+                crop_top: self.crop_bottom,
+                crop_bottom: self.crop_top,
+                deblock_flags: Vec::new(),
+                deblock_stride: 0,
+                qp_map: Vec::new(),
                 alpha_plane,
-                full_range: self.full_range, matrix_coeffs: self.matrix_coeffs,
+                full_range: self.full_range,
+                matrix_coeffs: self.matrix_coeffs,
             }
         }
     }

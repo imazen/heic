@@ -1,6 +1,6 @@
-/// Batch test: decode multiple HEIC files and compare against reference PNGs
-///
-/// Usage: cargo run --release --example batch_test [test-images-dir] [ref-images-dir]
+// Batch test: decode multiple HEIC files and compare against reference PNGs
+//
+// Usage: cargo run --release --example batch_test [test-images-dir] [ref-images-dir]
 
 fn main() {
     let test_dir = std::env::args()
@@ -26,7 +26,12 @@ fn main() {
     let mut fail = 0u32;
 
     for entry in &entries {
-        let name = entry.path().file_stem().unwrap().to_string_lossy().to_string();
+        let name = entry
+            .path()
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let heic_path = entry.path();
         let ref_path = format!("{}/{}_ref.png", ref_dir, name);
 
@@ -54,10 +59,7 @@ fn main() {
             match load_png_rgb(&ref_path) {
                 Ok((ref_rgb, ref_w, ref_h)) => {
                     if ref_w != w || ref_h != h {
-                        eprintln!(
-                            "SIZE MISMATCH: ours {}x{} vs ref {}x{}",
-                            w, h, ref_w, ref_h
-                        );
+                        eprintln!("SIZE MISMATCH: ours {}x{} vs ref {}x{}", w, h, ref_w, ref_h);
                         fail += 1;
                         continue;
                     }
@@ -90,7 +92,12 @@ fn main() {
         }
     }
 
-    eprintln!("\n=== Results: {} pass, {} fail out of {} ===", pass, fail, pass + fail);
+    eprintln!(
+        "\n=== Results: {} pass, {} fail out of {} ===",
+        pass,
+        fail,
+        pass + fail
+    );
     if fail > 0 {
         std::process::exit(1);
     }

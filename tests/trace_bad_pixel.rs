@@ -117,7 +117,9 @@ fn find_first_bad_pixel() {
     let data = std::fs::read(TEST_IMAGE).expect("Failed to read test file");
 
     let ref_image = ref_decoder.decode(&data).expect("Reference decode failed");
-    let our_image = our_decoder.decode(&data, heic_decoder::PixelLayout::Rgb8).expect("Our decode failed");
+    let our_image = our_decoder
+        .decode(&data, heic_decoder::PixelLayout::Rgb8)
+        .expect("Our decode failed");
 
     assert_eq!(ref_image.width, our_image.width);
     assert_eq!(ref_image.height, our_image.height);
@@ -132,7 +134,10 @@ fn find_first_bad_pixel() {
 
     println!("\n=== Bad Pixel Analysis ===");
     println!("Image: {}x{}", width, height);
-    println!("CTU grid: {}x{} ({}x{} CTUs)", pic_width_ctb, pic_height_ctb, ctb_size, ctb_size);
+    println!(
+        "CTU grid: {}x{} ({}x{} CTUs)",
+        pic_width_ctb, pic_height_ctb, ctb_size, ctb_size
+    );
     println!("Threshold: {} (RGB component diff)", BAD_PIXEL_THRESHOLD);
     println!();
 
@@ -151,20 +156,32 @@ fn find_first_bad_pixel() {
         let prov = pixel_to_provenance(bp.x, bp.y, ctb_size, pic_width_ctb);
         println!(
             "  {:2}. ({:4},{:4}) diff={:3} ref=RGB({:3},{:3},{:3}) ours=RGB({:3},{:3},{:3})",
-            i + 1, bp.x, bp.y, bp.max_diff,
-            bp.ref_rgb[0], bp.ref_rgb[1], bp.ref_rgb[2],
-            bp.our_rgb[0], bp.our_rgb[1], bp.our_rgb[2],
+            i + 1,
+            bp.x,
+            bp.y,
+            bp.max_diff,
+            bp.ref_rgb[0],
+            bp.ref_rgb[1],
+            bp.ref_rgb[2],
+            bp.our_rgb[0],
+            bp.our_rgb[1],
+            bp.our_rgb[2],
         );
         println!(
             "      CTU[{:3}] at ({:2},{:2}), local=({:2},{:2}), chroma=({:3},{:3})",
-            prov.ctu_idx, prov.ctu_x, prov.ctu_y,
-            prov.local_x, prov.local_y,
-            prov.chroma_x, prov.chroma_y,
+            prov.ctu_idx,
+            prov.ctu_x,
+            prov.ctu_y,
+            prov.local_x,
+            prov.local_y,
+            prov.chroma_x,
+            prov.chroma_y,
         );
     }
 
     // Group by CTU
-    let mut ctu_errors: std::collections::HashMap<u32, Vec<&BadPixel>> = std::collections::HashMap::new();
+    let mut ctu_errors: std::collections::HashMap<u32, Vec<&BadPixel>> =
+        std::collections::HashMap::new();
     for bp in &bad_pixels {
         let prov = pixel_to_provenance(bp.x, bp.y, ctb_size, pic_width_ctb);
         ctu_errors.entry(prov.ctu_idx).or_default().push(bp);
@@ -175,12 +192,22 @@ fn find_first_bad_pixel() {
     // Find first CTU with errors
     let first_bad_ctu = ctu_errors.keys().copied().min().unwrap();
     let first_ctu_errors = &ctu_errors[&first_bad_ctu];
-    let first_prov = pixel_to_provenance(first_ctu_errors[0].x, first_ctu_errors[0].y, ctb_size, pic_width_ctb);
+    let first_prov = pixel_to_provenance(
+        first_ctu_errors[0].x,
+        first_ctu_errors[0].y,
+        ctb_size,
+        pic_width_ctb,
+    );
 
-    println!("\nFirst CTU with errors: CTU[{}] at ({},{})",
-        first_bad_ctu, first_prov.ctu_x, first_prov.ctu_y);
+    println!(
+        "\nFirst CTU with errors: CTU[{}] at ({},{})",
+        first_bad_ctu, first_prov.ctu_x, first_prov.ctu_y
+    );
     println!("  {} bad pixels in this CTU", first_ctu_errors.len());
-    println!("  Worst error: {}", first_ctu_errors.iter().map(|p| p.max_diff).max().unwrap());
+    println!(
+        "  Worst error: {}",
+        first_ctu_errors.iter().map(|p| p.max_diff).max().unwrap()
+    );
 
     // Show error distribution by CTU column
     println!("\nBad pixels by CTU column:");
@@ -204,21 +231,30 @@ fn examine_ycbcr_at_bad_pixel() {
     let data = std::fs::read(TEST_IMAGE).expect("Failed to read test file");
 
     // Get the raw YCbCr frame
-    let frame = our_decoder.decode_to_frame(&data).expect("Decode to frame failed");
+    let frame = our_decoder
+        .decode_to_frame(&data)
+        .expect("Decode to frame failed");
 
     println!("\n=== YCbCr Analysis at Key Positions ===");
-    println!("Frame: {}x{} (cropped: {}x{})",
-        frame.width, frame.height,
-        frame.cropped_width(), frame.cropped_height());
-    println!("Bit depth: {}, Chroma format: {}", frame.bit_depth, frame.chroma_format);
+    println!(
+        "Frame: {}x{} (cropped: {}x{})",
+        frame.width,
+        frame.height,
+        frame.cropped_width(),
+        frame.cropped_height()
+    );
+    println!(
+        "Bit depth: {}, Chroma format: {}",
+        frame.bit_depth, frame.chroma_format
+    );
 
     // Analyze a few positions
     let positions = [
         (0, 0),
-        (64, 0),      // Start of CTU column 1
-        (128, 0),     // Start of CTU column 2
-        (104, 0),     // Where we know there's a bad coefficient
-        (200, 200),   // Middle of image
+        (64, 0),    // Start of CTU column 1
+        (128, 0),   // Start of CTU column 2
+        (104, 0),   // Where we know there's a bad coefficient
+        (200, 200), // Middle of image
     ];
 
     println!("\nYCbCr values at key positions:");
@@ -230,15 +266,17 @@ fn examine_ycbcr_at_bad_pixel() {
             let cb_val = frame.get_cb(cx, cy);
             let cr_val = frame.get_cr(cx, cy);
 
-            println!("  ({:4},{:4}): Y={:3} Cb={:3} Cr={:3}",
-                x, y, y_val, cb_val, cr_val);
+            println!(
+                "  ({:4},{:4}): Y={:3} Cb={:3} Cr={:3}",
+                x, y, y_val, cb_val, cr_val
+            );
         }
     }
 
     // Analyze chroma plane averages by CTU row
     println!("\nChroma averages by CTU row (first 5 rows):");
     let ctb_size = 64u32;
-    let chroma_ctb = ctb_size / 2;  // For 4:2:0
+    let chroma_ctb = ctb_size / 2; // For 4:2:0
 
     for ctu_row in 0..5 {
         let cy_start = ctu_row * chroma_ctb;
@@ -257,8 +295,12 @@ fn examine_ycbcr_at_bad_pixel() {
         }
 
         if count > 0 {
-            println!("  Row {}: Cb_avg={:3} Cr_avg={:3}",
-                ctu_row, cb_sum / count, cr_sum / count);
+            println!(
+                "  Row {}: Cb_avg={:3} Cr_avg={:3}",
+                ctu_row,
+                cb_sum / count,
+                cr_sum / count
+            );
         }
     }
 }
@@ -273,7 +315,9 @@ fn compare_y_plane_approximation() {
     let data = std::fs::read(TEST_IMAGE).expect("Failed to read test file");
 
     let ref_image = ref_decoder.decode(&data).expect("Reference decode failed");
-    let frame = our_decoder.decode_to_frame(&data).expect("Decode to frame failed");
+    let frame = our_decoder
+        .decode_to_frame(&data)
+        .expect("Decode to frame failed");
 
     // Approximate Y from reference RGB using BT.601:
     // Y = 0.299*R + 0.587*G + 0.114*B

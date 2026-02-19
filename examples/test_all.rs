@@ -1,7 +1,7 @@
-/// Test all HEIC files: recursively find .heic files and attempt to decode each.
-///
-/// Categorizes results as: DECODE OK, CONTAINER PARSE, HEVC DECODE, or UNSUPPORTED.
-/// Usage: cargo run --release --example test_all [dir]
+// Test all HEIC files: recursively find .heic files and attempt to decode each.
+//
+// Categorizes results as: DECODE OK, CONTAINER PARSE, HEVC DECODE, or UNSUPPORTED.
+// Usage: cargo run --release --example test_all [dir]
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -79,7 +79,11 @@ fn main() {
                 total_time_ms += elapsed;
                 let w = frame.cropped_width();
                 let h = frame.cropped_height();
-                let alpha_tag = if frame.alpha_plane.is_some() { " [ALPHA]" } else { "" };
+                let alpha_tag = if frame.alpha_plane.is_some() {
+                    " [ALPHA]"
+                } else {
+                    ""
+                };
                 eprintln!("OK  {}x{}  ({}ms){}", w, h, elapsed, alpha_tag);
                 ok += 1;
             }
@@ -121,7 +125,9 @@ fn main() {
 
     eprintln!();
     eprintln!("====================================================");
-    eprintln!("=== Results: {ok} OK, {container_err} container, {hevc_err} HEVC, {other_err} other out of {total} ===");
+    eprintln!(
+        "=== Results: {ok} OK, {container_err} container, {hevc_err} HEVC, {other_err} other out of {total} ==="
+    );
     eprintln!("====================================================");
     eprintln!("Total decode time: {}ms", total_time_ms);
     eprintln!();

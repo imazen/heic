@@ -123,30 +123,30 @@ pub struct Limits {
 impl Limits {
     /// Check that dimensions are within limits.
     fn check_dimensions(&self, width: u32, height: u32) -> Result<()> {
-        if let Some(max_w) = self.max_width {
-            if u64::from(width) > max_w {
-                return Err(HeicError::LimitExceeded("image width exceeds limit").into());
-            }
+        if let Some(max_w) = self.max_width
+            && u64::from(width) > max_w
+        {
+            return Err(HeicError::LimitExceeded("image width exceeds limit").into());
         }
-        if let Some(max_h) = self.max_height {
-            if u64::from(height) > max_h {
-                return Err(HeicError::LimitExceeded("image height exceeds limit").into());
-            }
+        if let Some(max_h) = self.max_height
+            && u64::from(height) > max_h
+        {
+            return Err(HeicError::LimitExceeded("image height exceeds limit").into());
         }
-        if let Some(max_px) = self.max_pixels {
-            if u64::from(width) * u64::from(height) > max_px {
-                return Err(HeicError::LimitExceeded("pixel count exceeds limit").into());
-            }
+        if let Some(max_px) = self.max_pixels
+            && u64::from(width) * u64::from(height) > max_px
+        {
+            return Err(HeicError::LimitExceeded("pixel count exceeds limit").into());
         }
         Ok(())
     }
 
     /// Check that estimated memory usage is within limits.
     fn check_memory(&self, estimated_bytes: u64) -> Result<()> {
-        if let Some(max_mem) = self.max_memory_bytes {
-            if estimated_bytes > max_mem {
-                return Err(HeicError::LimitExceeded("estimated memory exceeds limit").into());
-            }
+        if let Some(max_mem) = self.max_memory_bytes
+            && estimated_bytes > max_mem
+        {
+            return Err(HeicError::LimitExceeded("estimated memory exceeds limit").into());
         }
         Ok(())
     }
@@ -227,19 +227,19 @@ impl ImageInfo {
                 .is_empty();
 
         // Try to get info from HEVC config (fast path, no mdat access needed)
-        if let Some(ref config) = primary_item.hevc_config {
-            if let Ok(hevc_info) = hevc::get_info_from_config(config) {
-                // Get bit depth and chroma from config
-                let bit_depth = config.bit_depth_luma_minus8 + 8;
-                let chroma_format = config.chroma_format;
-                return Ok(ImageInfo {
-                    width: hevc_info.width,
-                    height: hevc_info.height,
-                    has_alpha,
-                    bit_depth,
-                    chroma_format,
-                });
-            }
+        if let Some(ref config) = primary_item.hevc_config
+            && let Ok(hevc_info) = hevc::get_info_from_config(config)
+        {
+            // Get bit depth and chroma from config
+            let bit_depth = config.bit_depth_luma_minus8 + 8;
+            let chroma_format = config.chroma_format;
+            return Ok(ImageInfo {
+                width: hevc_info.width,
+                height: hevc_info.height,
+                has_alpha,
+                bit_depth,
+                chroma_format,
+            });
         }
 
         // Fallback to reading image data
@@ -335,7 +335,9 @@ impl DecoderConfig {
     /// Returns an error if the data is not valid HEIC/HEIF format
     /// or if decoding fails.
     pub fn decode(&self, data: &[u8], layout: PixelLayout) -> Result<DecodeOutput> {
-        self.decode_request(data).with_output_layout(layout).decode()
+        self.decode_request(data)
+            .with_output_layout(layout)
+            .decode()
     }
 
     /// Create a decode request for full control over the decode operation.
@@ -383,16 +385,16 @@ impl DecoderConfig {
 
         // YCbCr planes (u16 per sample)
         let luma_bytes = pixels * 2;
-        let chroma_w = (w + 1) / 2;
-        let chroma_h = (h + 1) / 2;
+        let chroma_w = w.div_ceil(2);
+        let chroma_h = h.div_ceil(2);
         let chroma_bytes = chroma_w * chroma_h * 2 * 2; // Cb + Cr
 
         // Output pixel buffer
         let output_bytes = pixels * layout.bytes_per_pixel() as u64;
 
         // Deblocking metadata (flags + QP map at 4x4 granularity)
-        let blocks_w = (w + 3) / 4;
-        let blocks_h = (h + 3) / 4;
+        let blocks_w = w.div_ceil(4);
+        let blocks_h = h.div_ceil(4);
         let deblock_bytes = blocks_w * blocks_h * 2; // flags(u8) + qp(i8)
 
         luma_bytes + chroma_bytes + output_bytes + deblock_bytes
@@ -510,7 +512,9 @@ impl<'a> DecodeRequest<'a> {
         let required = (width as usize)
             .checked_mul(height as usize)
             .and_then(|n| n.checked_mul(self.layout.bytes_per_pixel()))
-            .ok_or(HeicError::LimitExceeded("output buffer size overflows usize"))?;
+            .ok_or(HeicError::LimitExceeded(
+                "output buffer size overflows usize",
+            ))?;
 
         if output.len() < required {
             return Err(HeicError::BufferTooSmall {
@@ -634,10 +638,10 @@ fn decode_to_frame_inner(
                 .first()
                 .copied()
         });
-    if let Some(alpha_id) = alpha_id {
-        if let Some(alpha_plane) = decode_alpha_plane(&container, alpha_id, &frame) {
-            frame.alpha_plane = Some(alpha_plane);
-        }
+    if let Some(alpha_id) = alpha_id
+        && let Some(alpha_plane) = decode_alpha_plane(&container, alpha_id, &frame)
+    {
+        frame.alpha_plane = Some(alpha_plane);
     }
 
     Ok(frame)
@@ -653,10 +657,7 @@ fn decode_item(
     stop: &dyn Stop,
 ) -> Result<hevc::DecodedFrame> {
     if depth > 8 {
-        return Err(HeicError::InvalidData(
-            "Derived image reference chain too deep",
-        )
-        .into());
+        return Err(HeicError::InvalidData("Derived image reference chain too deep").into());
     }
 
     check_stop(stop)?;
@@ -866,14 +867,14 @@ fn decode_iovl(
 
     // Apply canvas fill values (16-bit values scaled to bit depth)
     let fill_shift = 16u32.saturating_sub(bit_depth as u32);
-    let y_fill = (fill_values[0] >> fill_shift) as u16;
+    let y_fill = fill_values[0] >> fill_shift;
     let cb_fill = if num_fill_channels > 1 {
-        (fill_values[1] >> fill_shift) as u16
+        fill_values[1] >> fill_shift
     } else {
         1u16 << (bit_depth - 1) // neutral chroma
     };
     let cr_fill = if num_fill_channels > 2 {
-        (fill_values[2] >> fill_shift) as u16
+        fill_values[2] >> fill_shift
     } else {
         1u16 << (bit_depth - 1) // neutral chroma
     };
@@ -980,10 +981,7 @@ fn decode_grid(
     let cols = grid_data[3] as u32 + 1;
     let (output_width, output_height) = if (flags & 1) != 0 {
         if grid_data.len() < 12 {
-            return Err(HeicError::InvalidData(
-                "Grid descriptor too short for 32-bit dims",
-            )
-            .into());
+            return Err(HeicError::InvalidData("Grid descriptor too short for 32-bit dims").into());
         }
         (
             u32::from_be_bytes([grid_data[4], grid_data[5], grid_data[6], grid_data[7]]),
@@ -1023,12 +1021,8 @@ fn decode_grid(
     // Create output frame at the grid's output dimensions
     let bit_depth = tile_config.bit_depth_luma_minus8 + 8;
     let chroma_format = tile_config.chroma_format;
-    let mut output = hevc::DecodedFrame::with_params(
-        output_width,
-        output_height,
-        bit_depth,
-        chroma_format,
-    );
+    let mut output =
+        hevc::DecodedFrame::with_params(output_width, output_height, bit_depth, chroma_format);
 
     // Decode each tile and copy into the output frame
     for (tile_idx, &tile_id) in tile_ids.iter().enumerate() {
@@ -1154,10 +1148,8 @@ fn decode_alpha_plane(
         // Different dimensions — bilinear resize
         for dy in 0..primary_h {
             for dx in 0..primary_w {
-                let sx = (dx as f64) * (alpha_w as f64 - 1.0)
-                    / (primary_w as f64 - 1.0).max(1.0);
-                let sy = (dy as f64) * (alpha_h as f64 - 1.0)
-                    / (primary_h as f64 - 1.0).max(1.0);
+                let sx = (dx as f64) * (alpha_w as f64 - 1.0) / (primary_w as f64 - 1.0).max(1.0);
+                let sy = (dy as f64) * (alpha_h as f64 - 1.0) / (primary_h as f64 - 1.0).max(1.0);
 
                 let x0 = floor_f64(sx) as u32;
                 let y0 = floor_f64(sy) as u32;
@@ -1198,10 +1190,8 @@ fn decode_gain_map_inner(data: &[u8]) -> Result<HdrGainMap> {
     let container = heif::parse(data)?;
     let primary_item = container.primary_item().ok_or(HeicError::NoPrimaryImage)?;
 
-    let gainmap_ids = container.find_auxiliary_items(
-        primary_item.id,
-        "urn:com:apple:photo:2020:aux:hdrgainmap",
-    );
+    let gainmap_ids =
+        container.find_auxiliary_items(primary_item.id, "urn:com:apple:photo:2020:aux:hdrgainmap");
 
     let &gainmap_id = gainmap_ids
         .first()

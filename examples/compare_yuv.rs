@@ -1,8 +1,8 @@
-/// Compare our decoded YUV against dec265's raw YUV output
-/// Usage: cargo run --release --example compare_yuv <input.heic> <ref.yuv>
-///
-/// dec265 outputs the conformance-window-cropped frame, so we extract
-/// the cropped region from our full-size planes for comparison.
+// Compare our decoded YUV against dec265's raw YUV output
+// Usage: cargo run --release --example compare_yuv <input.heic> <ref.yuv>
+//
+// dec265 outputs the conformance-window-cropped frame, so we extract
+// the cropped region from our full-size planes for comparison.
 
 fn main() {
     let input = std::env::args().nth(1).expect("input HEIC file path");
@@ -76,7 +76,10 @@ fn main() {
     );
 
     if let Some((x, y, ours, ref_val)) = y_first_diff {
-        eprintln!("First Y diff at ({}, {}): ours={} ref={}", x, y, ours, ref_val);
+        eprintln!(
+            "First Y diff at ({}, {}): ours={} ref={}",
+            x, y, ours, ref_val
+        );
     }
     if let Some((x, y, ours, ref_val)) = cb_first_diff {
         eprintln!(

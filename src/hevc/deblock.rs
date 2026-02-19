@@ -3,7 +3,7 @@
 //! Applies strong/weak filtering at CU and TU boundaries to reduce blocking artifacts.
 //! For I-slices (HEIC still images), all boundaries have bS=2 since both sides are intra-coded.
 
-use super::picture::{DecodedFrame, DEBLOCK_FLAG_HORIZ, DEBLOCK_FLAG_VERT};
+use super::picture::{DEBLOCK_FLAG_HORIZ, DEBLOCK_FLAG_VERT, DecodedFrame};
 
 /// Beta prime values for deblocking filter (Table 8-12)
 /// Index 0-51 maps QP to beta prime threshold
@@ -120,6 +120,7 @@ pub fn apply_deblocking_filter(
 ///
 /// For vertical edges: x is the boundary position, filtering samples at x-1..x-4 and x..x+3
 /// For horizontal edges: y is the boundary position, filtering samples at y-1..y-4 and y..y+3
+#[allow(clippy::too_many_arguments)]
 fn filter_edge_luma(
     frame: &mut DecodedFrame,
     x: u32,
@@ -171,10 +172,8 @@ fn filter_edge_luma(
                 && qy >= 0
                 && qy < frame.height as i32
             {
-                p[i as usize][k as usize] =
-                    frame.y_plane[(py * stride + px) as usize] as i32;
-                q[i as usize][k as usize] =
-                    frame.y_plane[(qy * stride + qx) as usize] as i32;
+                p[i as usize][k as usize] = frame.y_plane[(py * stride + px) as usize] as i32;
+                q[i as usize][k as usize] = frame.y_plane[(qy * stride + qx) as usize] as i32;
             }
         }
     }
@@ -229,12 +228,66 @@ fn filter_edge_luma(
             let q1_f = (p[0][k] + q[0][k] + q[1][k] + q[2][k] + 2) >> 2;
             let q2_f = (p[0][k] + q[0][k] + q[1][k] + 3 * q[2][k] + 2 * q[3][k] + 4) >> 3;
 
-            write_sample(frame, x, y, k, vertical, -1, p0_f.clamp(p[0][k] - tc2, p[0][k] + tc2), max_val);
-            write_sample(frame, x, y, k, vertical, -2, p1_f.clamp(p[1][k] - tc2, p[1][k] + tc2), max_val);
-            write_sample(frame, x, y, k, vertical, -3, p2_f.clamp(p[2][k] - tc2, p[2][k] + tc2), max_val);
-            write_sample(frame, x, y, k, vertical, 0, q0_f.clamp(q[0][k] - tc2, q[0][k] + tc2), max_val);
-            write_sample(frame, x, y, k, vertical, 1, q1_f.clamp(q[1][k] - tc2, q[1][k] + tc2), max_val);
-            write_sample(frame, x, y, k, vertical, 2, q2_f.clamp(q[2][k] - tc2, q[2][k] + tc2), max_val);
+            write_sample(
+                frame,
+                x,
+                y,
+                k,
+                vertical,
+                -1,
+                p0_f.clamp(p[0][k] - tc2, p[0][k] + tc2),
+                max_val,
+            );
+            write_sample(
+                frame,
+                x,
+                y,
+                k,
+                vertical,
+                -2,
+                p1_f.clamp(p[1][k] - tc2, p[1][k] + tc2),
+                max_val,
+            );
+            write_sample(
+                frame,
+                x,
+                y,
+                k,
+                vertical,
+                -3,
+                p2_f.clamp(p[2][k] - tc2, p[2][k] + tc2),
+                max_val,
+            );
+            write_sample(
+                frame,
+                x,
+                y,
+                k,
+                vertical,
+                0,
+                q0_f.clamp(q[0][k] - tc2, q[0][k] + tc2),
+                max_val,
+            );
+            write_sample(
+                frame,
+                x,
+                y,
+                k,
+                vertical,
+                1,
+                q1_f.clamp(q[1][k] - tc2, q[1][k] + tc2),
+                max_val,
+            );
+            write_sample(
+                frame,
+                x,
+                y,
+                k,
+                vertical,
+                2,
+                q2_f.clamp(q[2][k] - tc2, q[2][k] + tc2),
+                max_val,
+            );
         } else {
             // Weak filter - modify 1-2 samples on each side
             let delta = (9 * (q[0][k] - p[0][k]) - 3 * (q[1][k] - p[1][k]) + 8) >> 4;
@@ -242,18 +295,54 @@ fn filter_edge_luma(
             if delta.abs() < 10 * tc {
                 let delta = delta.clamp(-tc, tc);
 
-                write_sample(frame, x, y, k, vertical, -1, (p[0][k] + delta).clamp(0, max_val), max_val);
-                write_sample(frame, x, y, k, vertical, 0, (q[0][k] - delta).clamp(0, max_val), max_val);
+                write_sample(
+                    frame,
+                    x,
+                    y,
+                    k,
+                    vertical,
+                    -1,
+                    (p[0][k] + delta).clamp(0, max_val),
+                    max_val,
+                );
+                write_sample(
+                    frame,
+                    x,
+                    y,
+                    k,
+                    vertical,
+                    0,
+                    (q[0][k] - delta).clamp(0, max_val),
+                    max_val,
+                );
 
                 if d_ep == 1 {
                     let delta_p = ((((p[2][k] + p[0][k] + 1) >> 1) - p[1][k] + delta) >> 1)
                         .clamp(-(tc >> 1), tc >> 1);
-                    write_sample(frame, x, y, k, vertical, -2, (p[1][k] + delta_p).clamp(0, max_val), max_val);
+                    write_sample(
+                        frame,
+                        x,
+                        y,
+                        k,
+                        vertical,
+                        -2,
+                        (p[1][k] + delta_p).clamp(0, max_val),
+                        max_val,
+                    );
                 }
                 if d_eq == 1 {
                     let delta_q = ((((q[2][k] + q[0][k] + 1) >> 1) - q[1][k] - delta) >> 1)
                         .clamp(-(tc >> 1), tc >> 1);
-                    write_sample(frame, x, y, k, vertical, 1, (q[1][k] + delta_q).clamp(0, max_val), max_val);
+                    write_sample(
+                        frame,
+                        x,
+                        y,
+                        k,
+                        vertical,
+                        1,
+                        (q[1][k] + delta_q).clamp(0, max_val),
+                        max_val,
+                    );
                 }
             }
         }
@@ -262,6 +351,7 @@ fn filter_edge_luma(
 
 /// Write a filtered sample back to the frame
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn write_sample(
     frame: &mut DecodedFrame,
     edge_x: u32,
@@ -348,7 +438,11 @@ fn apply_chroma_deblocking(
                 let cy = y / sub_y;
 
                 for c_idx in 0..2 {
-                    let qp_offset = if c_idx == 0 { cb_qp_offset } else { cr_qp_offset };
+                    let qp_offset = if c_idx == 0 {
+                        cb_qp_offset
+                    } else {
+                        cr_qp_offset
+                    };
                     let qp_i = ((qp_q + qp_p + 1) >> 1) + qp_offset;
                     let qp_c = chroma_qp_mapping(qp_i);
                     let q_tc = (qp_c + 2 + tc_offset).clamp(0, 53);
@@ -381,8 +475,7 @@ fn apply_chroma_deblocking(
                         let q0 = plane[base + ci] as i32;
                         let q1 = plane[base + ci + 1] as i32;
 
-                        let delta =
-                            (((q0 - p0) * 4 + p1 - q1 + 4) >> 3).clamp(-tc, tc);
+                        let delta = (((q0 - p0) * 4 + p1 - q1 + 4) >> 3).clamp(-tc, tc);
                         plane[base + ci - 1] = (p0 + delta).clamp(0, max_val) as u16;
                         plane[base + ci] = (q0 - delta).clamp(0, max_val) as u16;
                     }
@@ -415,7 +508,11 @@ fn apply_chroma_deblocking(
                 let cy = y / sub_y;
 
                 for c_idx in 0..2 {
-                    let qp_offset = if c_idx == 0 { cb_qp_offset } else { cr_qp_offset };
+                    let qp_offset = if c_idx == 0 {
+                        cb_qp_offset
+                    } else {
+                        cr_qp_offset
+                    };
                     let qp_i = ((qp_q + qp_p + 1) >> 1) + qp_offset;
                     let qp_c = chroma_qp_mapping(qp_i);
                     let q_tc = (qp_c + 2 + tc_offset).clamp(0, 53);
@@ -449,8 +546,7 @@ fn apply_chroma_deblocking(
                         let q0 = plane[row_q * c_stride + col] as i32;
                         let q1 = plane[(row_q + 1) * c_stride + col] as i32;
 
-                        let delta =
-                            (((q0 - p0) * 4 + p1 - q1 + 4) >> 3).clamp(-tc, tc);
+                        let delta = (((q0 - p0) * 4 + p1 - q1 + 4) >> 3).clamp(-tc, tc);
                         plane[row_p * c_stride + col] = (p0 + delta).clamp(0, max_val) as u16;
                         plane[row_q * c_stride + col] = (q0 - delta).clamp(0, max_val) as u16;
                     }

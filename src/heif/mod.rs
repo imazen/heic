@@ -11,4 +11,4 @@ pub use boxes::{
     CleanAperture, ColorInfo, FourCC, HevcDecoderConfig, ImageMirror, ImageRotation,
     ImageSpatialExtents, ItemProperty, Transform,
 };
-pub use parser::{parse, HeifContainer, Item, ItemType};
+pub use parser::{HeifContainer, Item, ItemType, parse};

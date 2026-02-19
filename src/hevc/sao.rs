@@ -65,11 +65,7 @@ const EO_OFFSETS: [(i32, i32, i32, i32); 4] = [
 ];
 
 /// Apply SAO filter to the entire frame
-pub fn apply_sao(
-    frame: &mut DecodedFrame,
-    sao_map: &SaoMap,
-    ctb_size: u32,
-) {
+pub fn apply_sao(frame: &mut DecodedFrame, sao_map: &SaoMap, ctb_size: u32) {
     let width = frame.width;
     let height = frame.height;
     let bit_depth = frame.bit_depth;
@@ -173,6 +169,7 @@ pub fn apply_sao(
 }
 
 /// Apply SAO to one component in a rectangular CTB region
+#[allow(clippy::too_many_arguments)]
 fn apply_sao_component(
     src: &[u16],
     dst: &mut [u16],

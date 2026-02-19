@@ -40,7 +40,9 @@ type Result<T> = core::result::Result<T, HevcError>;
 pub static SE_COUNTER: AtomicU32 = AtomicU32::new(0);
 pub const SE_TRACE_LIMIT: u32 = 0;
 
-/// Log a syntax element decode for differential testing
+/// Log a syntax element decode for differential testing.
+/// Set SE_TRACE_LIMIT > 0 to enable tracing.
+#[allow(clippy::absurd_extreme_comparisons)]
 fn se_trace(name: &str, val: i64, cabac: &CabacDecoder) {
     let num = SE_COUNTER.fetch_add(1, Ordering::Relaxed);
     if num < SE_TRACE_LIMIT {
@@ -48,7 +50,10 @@ fn se_trace(name: &str, val: i64, cabac: &CabacDecoder) {
         {
             let (range, _, _) = cabac.get_state_extended();
             let (byte_pos, _, _) = cabac.get_position();
-            eprintln!("SE#{} {} val={} range={} byte={}", num, name, val, range, byte_pos);
+            eprintln!(
+                "SE#{} {} val={} range={} byte={}",
+                num, name, val, range, byte_pos
+            );
         }
     }
     let _ = (name, val, cabac);
@@ -166,7 +171,8 @@ impl<'a> SliceContext<'a> {
         let (range, offset) = cabac.get_state();
         debug_trace!(
             "DEBUG: CABAC init state: range={}, offset={}",
-            range, offset
+            range,
+            offset
         );
 
         // Initialize context models
@@ -189,7 +195,9 @@ impl<'a> SliceContext<'a> {
 
         debug_trace!(
             "DEBUG: Chroma QP: qp_y={}, qp_cb={}, qp_cr={}",
-            slice_qp, qp_cb, qp_cr
+            slice_qp,
+            qp_cb,
+            qp_cr
         );
         debug_trace!(
             "DEBUG: sign_data_hiding_enabled_flag={}",
@@ -197,7 +205,8 @@ impl<'a> SliceContext<'a> {
         );
         debug_trace!(
             "DEBUG: tiles_enabled={} entropy_coding_sync={}",
-            pps.tiles_enabled_flag, pps.entropy_coding_sync_enabled_flag
+            pps.tiles_enabled_flag,
+            pps.entropy_coding_sync_enabled_flag
         );
         // Initialize ct_depth_map for split_cu_flag context derivation
         // Map is in units of min_cb_size (typically 8x8)
@@ -279,12 +288,13 @@ impl<'a> SliceContext<'a> {
 
         loop {
             // WPP: at start of each new row (ctb_x==0, ctb_y>0), restore saved context
-            if wpp && self.ctb_x == 0 && self.ctb_y > 0 {
-                if let Some(saved) = wpp_saved_ctx {
-                    if pic_width_in_ctbs > 1 {
-                        self.ctx = saved;
-                    }
-                }
+            if wpp
+                && self.ctb_x == 0
+                && self.ctb_y > 0
+                && pic_width_in_ctbs > 1
+                && let Some(saved) = wpp_saved_ctx
+            {
+                self.ctx = saved;
             }
 
             // Decode one CTU
@@ -300,7 +310,12 @@ impl<'a> SliceContext<'a> {
                 let (range, offset) = self.cabac.get_state();
                 debug_trace!(
                     "DEBUG: CTU {} byte={} cabac=({},{}) x={} y={}",
-                    ctu_count, byte_pos, range, offset, self.ctb_x, self.ctb_y
+                    ctu_count,
+                    byte_pos,
+                    range,
+                    offset,
+                    self.ctb_x,
+                    self.ctb_y
                 );
             }
             // Enable debug for CTU 1 (where first large coefficient occurs)
@@ -311,7 +326,7 @@ impl<'a> SliceContext<'a> {
 
             // WPP: save context models after CTB column 1
             if wpp && self.ctb_x == 1 && self.ctb_y < pic_height_in_ctbs - 1 {
-                wpp_saved_ctx = Some(self.ctx.clone());
+                wpp_saved_ctx = Some(self.ctx);
             }
 
             // Check for end of slice segment
@@ -320,7 +335,9 @@ impl<'a> SliceContext<'a> {
             if end_of_slice != 0 {
                 debug_trace!(
                     "DEBUG: end_of_slice after CTU {}, decoded {}/{} CTUs",
-                    ctu_count, ctu_count, total_ctus
+                    ctu_count,
+                    ctu_count,
+                    total_ctus
                 );
                 break;
             }
@@ -417,6 +434,7 @@ impl<'a> SliceContext<'a> {
             let is_mono = self.sps.chroma_format_idc == 0;
             let n_chroma = if is_mono { 1 } else { 3 };
 
+            #[allow(unused_assignments)]
             let mut sao_type_idx_luma = 0u8;
             let mut sao_type_idx_chroma = 0u8;
             let mut eo_class_chroma = 0u8;
@@ -435,7 +453,11 @@ impl<'a> SliceContext<'a> {
                     sao_type_idx_luma
                 } else if c_idx == 1 {
                     sao_type_idx_chroma = self.decode_sao_type_idx()?;
-                    se_trace("sao_type_idx_chroma", sao_type_idx_chroma as i64, &self.cabac);
+                    se_trace(
+                        "sao_type_idx_chroma",
+                        sao_type_idx_chroma as i64,
+                        &self.cabac,
+                    );
                     sao_type_idx_chroma
                 } else {
                     sao_type_idx_chroma
@@ -453,9 +475,9 @@ impl<'a> SliceContext<'a> {
                     let offset_scale = 1i32 << (bit_depth.saturating_sub(bit_depth.min(10)));
 
                     let mut offsets_abs = [0u32; 4];
-                    for i in 0..4 {
-                        offsets_abs[i] = self.decode_cabac_tu_bypass(c_max)?;
-                        se_trace("sao_offset_abs", offsets_abs[i] as i64, &self.cabac);
+                    for elem in &mut offsets_abs {
+                        *elem = self.decode_cabac_tu_bypass(c_max)?;
+                        se_trace("sao_offset_abs", *elem as i64, &self.cabac);
                     }
 
                     if sao_type_idx == 1 {
@@ -476,9 +498,8 @@ impl<'a> SliceContext<'a> {
                         info.sao_band_position[c_idx] = band_pos as u8;
                     } else {
                         // Edge offset: store absolute values (sign applied during filtering)
-                        for i in 0..4 {
-                            info.sao_offset_val[c_idx][i] =
-                                (offsets_abs[i] as i32 * offset_scale) as i8;
+                        for (i, &offset) in offsets_abs.iter().enumerate() {
+                            info.sao_offset_val[c_idx][i] = (offset as i32 * offset_scale) as i8;
                         }
 
                         if c_idx <= 1 {
@@ -511,11 +532,7 @@ impl<'a> SliceContext<'a> {
             Ok(0)
         } else {
             let bit1 = self.cabac.decode_bypass()?;
-            if bit1 == 0 {
-                Ok(1)
-            } else {
-                Ok(2)
-            }
+            if bit1 == 0 { Ok(1) } else { Ok(2) }
         }
     }
 
@@ -555,7 +572,13 @@ impl<'a> SliceContext<'a> {
                 let (r, o) = self.cabac.get_state();
                 debug_trace!(
                     "  CTU37: split_cu_flag at ({},{}) depth={} log2={} → {} (r={},o={})",
-                    x0, y0, ct_depth, log2_cb_size, flag, r, o
+                    x0,
+                    y0,
+                    ct_depth,
+                    log2_cb_size,
+                    flag,
+                    r,
+                    o
                 );
             }
             flag
@@ -564,7 +587,9 @@ impl<'a> SliceContext<'a> {
             if self.debug_ctu {
                 debug_trace!(
                     "  CTU37: forced split at ({},{}) depth={} - outside picture",
-                    x0, y0, ct_depth
+                    x0,
+                    y0,
+                    ct_depth
                 );
             }
             true
@@ -573,7 +598,9 @@ impl<'a> SliceContext<'a> {
             if self.debug_ctu {
                 debug_trace!(
                     "  CTU37: no split at ({},{}) depth={} - min size",
-                    x0, y0, ct_depth
+                    x0,
+                    y0,
+                    ct_depth
                 );
             }
             false
@@ -737,13 +764,19 @@ impl<'a> SliceContext<'a> {
             let pm = self.decode_part_mode(pred_mode, log2_cb_size)?;
             // Debug: log part_mode for first CTU (and count NxN)
             if pm == PartMode::PartNxN {
-                static NXN_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                static NXN_COUNT: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
                 let count = NXN_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 if count == 0 || x0 < 64 && y0 < 64 {
                     let (r, o) = self.cabac.get_state();
                     debug_trace!(
                         "DEBUG: part_mode at ({},{}) log2={}: {:?} cabac=({},{})",
-                        x0, y0, log2_cb_size, pm, r, o
+                        x0,
+                        y0,
+                        log2_cb_size,
+                        pm,
+                        r,
+                        o
                     );
                 }
             }
@@ -751,7 +784,12 @@ impl<'a> SliceContext<'a> {
                 let (r, o) = self.cabac.get_state();
                 debug_trace!(
                     "  CTU37: CU at ({},{}) log2={} part_mode={:?} (r={},o={})",
-                    x0, y0, log2_cb_size, pm, r, o
+                    x0,
+                    y0,
+                    log2_cb_size,
+                    pm,
+                    r,
+                    o
                 );
             }
             pm
@@ -760,7 +798,9 @@ impl<'a> SliceContext<'a> {
             if self.debug_ctu {
                 debug_trace!(
                     "  CTU37: CU at ({},{}) log2={} part_mode=2Nx2N (implicit)",
-                    x0, y0, log2_cb_size
+                    x0,
+                    y0,
+                    log2_cb_size
                 );
             }
             PartMode::Part2Nx2N
@@ -800,16 +840,13 @@ impl<'a> SliceContext<'a> {
 
                 // SECOND pass: decode mpm_idx/rem (bypass bins) and store IMMEDIATELY
                 // per libde265: each PU mode stored before next PU's neighbor lookup
-                let luma_mode_0 =
-                    self.derive_intra_luma_mode(x0, y0, prev_flags[0])?;
+                let luma_mode_0 = self.derive_intra_luma_mode(x0, y0, prev_flags[0])?;
                 self.store_intra_mode(x0, y0, log2_pu_size, luma_mode_0);
 
-                let luma_mode_1 =
-                    self.derive_intra_luma_mode(x0 + half, y0, prev_flags[1])?;
+                let luma_mode_1 = self.derive_intra_luma_mode(x0 + half, y0, prev_flags[1])?;
                 self.store_intra_mode(x0 + half, y0, log2_pu_size, luma_mode_1);
 
-                let luma_mode_2 =
-                    self.derive_intra_luma_mode(x0, y0 + half, prev_flags[2])?;
+                let luma_mode_2 = self.derive_intra_luma_mode(x0, y0 + half, prev_flags[2])?;
                 self.store_intra_mode(x0, y0 + half, log2_pu_size, luma_mode_2);
 
                 let luma_mode_3 =
@@ -855,7 +892,11 @@ impl<'a> SliceContext<'a> {
                 let (r, o) = self.cabac.get_state();
                 debug_trace!(
                     "  CTU37: After transform_tree at ({},{}) log2={} (r={},o={})",
-                    x0, y0, log2_cb_size, r, o
+                    x0,
+                    y0,
+                    log2_cb_size,
+                    r,
+                    o
                 );
             }
         }
@@ -908,8 +949,8 @@ impl<'a> SliceContext<'a> {
         frame: &mut DecodedFrame,
     ) -> Result<()> {
         // Per H.265: MaxTrafoDepth = max_transform_hierarchy_depth_intra + IntraSplitFlag
-        let max_trafo_depth = self.sps.max_transform_hierarchy_depth_intra
-            + if intra_split_flag { 1 } else { 0 };
+        let max_trafo_depth =
+            self.sps.max_transform_hierarchy_depth_intra + if intra_split_flag { 1 } else { 0 };
         let log2_min_trafo_size = self.sps.log2_min_tb_size();
         let log2_max_trafo_size = self.sps.log2_max_tb_size();
 
@@ -934,9 +975,7 @@ impl<'a> SliceContext<'a> {
             let flag = self.cabac.decode_bin(&mut self.ctx[ctx_idx])? != 0;
             se_trace("split_transform", flag as i64, &self.cabac);
             flag
-        } else if log2_size > log2_max_trafo_size
-            || (intra_split_flag && trafo_depth == 0)
-        {
+        } else if log2_size > log2_max_trafo_size || (intra_split_flag && trafo_depth == 0) {
             true // Must split: larger than max OR IntraSplitFlag at depth 0
         } else {
             if debug_tt {
@@ -1038,8 +1077,7 @@ impl<'a> SliceContext<'a> {
             // (because 4x4 children can't have chroma TUs)
             if log2_size == 3 {
                 let sis = self.sps.strong_intra_smoothing_enabled_flag;
-                let scan_order =
-                    residual::get_scan_order(2, intra_chroma_mode.as_u8(), 1);
+                let scan_order = residual::get_scan_order(2, intra_chroma_mode.as_u8(), 1);
 
                 // Predict and apply Cb
                 intra::predict_intra(frame, x0 / 2, y0 / 2, 2, intra_chroma_mode, 1, sis);
@@ -1145,7 +1183,14 @@ impl<'a> SliceContext<'a> {
         if cbf_luma {
             if debug_tt {
                 let (r, o) = self.cabac.get_state();
-                debug_trace!("    TT: decoding luma residual at ({},{}) log2={} (r={},o={})", x0, y0, log2_size, r, o);
+                debug_trace!(
+                    "    TT: decoding luma residual at ({},{}) log2={} (r={},o={})",
+                    x0,
+                    y0,
+                    log2_size,
+                    r,
+                    o
+                );
             }
             self.decode_and_apply_residual(x0, y0, log2_size, 0, scan_order, frame)?;
         }
@@ -1153,29 +1198,48 @@ impl<'a> SliceContext<'a> {
         // Decode chroma: predict + residual per component if not handled by parent
         if log2_size >= 3 {
             let chroma_log2_size = log2_size - 1;
-            let chroma_scan_order = residual::get_scan_order(
-                chroma_log2_size,
-                intra_chroma_mode.as_u8(),
-                1,
-            );
+            let chroma_scan_order =
+                residual::get_scan_order(chroma_log2_size, intra_chroma_mode.as_u8(), 1);
 
             // Predict and apply Cb
             intra::predict_intra(
-                frame, x0 / 2, y0 / 2, chroma_log2_size, intra_chroma_mode, 1, sis,
+                frame,
+                x0 / 2,
+                y0 / 2,
+                chroma_log2_size,
+                intra_chroma_mode,
+                1,
+                sis,
             );
             if cbf_cb {
                 self.decode_and_apply_residual(
-                    x0 / 2, y0 / 2, chroma_log2_size, 1, chroma_scan_order, frame,
+                    x0 / 2,
+                    y0 / 2,
+                    chroma_log2_size,
+                    1,
+                    chroma_scan_order,
+                    frame,
                 )?;
             }
 
             // Predict and apply Cr
             intra::predict_intra(
-                frame, x0 / 2, y0 / 2, chroma_log2_size, intra_chroma_mode, 2, sis,
+                frame,
+                x0 / 2,
+                y0 / 2,
+                chroma_log2_size,
+                intra_chroma_mode,
+                2,
+                sis,
             );
             if cbf_cr {
                 self.decode_and_apply_residual(
-                    x0 / 2, y0 / 2, chroma_log2_size, 2, chroma_scan_order, frame,
+                    x0 / 2,
+                    y0 / 2,
+                    chroma_log2_size,
+                    2,
+                    chroma_scan_order,
+                    frame,
                 )?;
             }
         }
@@ -1187,13 +1251,17 @@ impl<'a> SliceContext<'a> {
     /// Decode cu_qp_delta_abs per H.265 section 7.3.8.11
     /// TU prefix (up to 5 context-coded bins) + EGk bypass suffix
     fn decode_cu_qp_delta_abs(&mut self) -> Result<u32> {
-        let first_bin = self.cabac.decode_bin(&mut self.ctx[context::CU_QP_DELTA_ABS])?;
+        let first_bin = self
+            .cabac
+            .decode_bin(&mut self.ctx[context::CU_QP_DELTA_ABS])?;
         if first_bin == 0 {
             return Ok(0);
         }
         let mut prefix = 1u32;
         for _ in 0..4 {
-            let bin = self.cabac.decode_bin(&mut self.ctx[context::CU_QP_DELTA_ABS + 1])?;
+            let bin = self
+                .cabac
+                .decode_bin(&mut self.ctx[context::CU_QP_DELTA_ABS + 1])?;
             if bin == 0 {
                 break;
             }
@@ -1295,14 +1363,24 @@ impl<'a> SliceContext<'a> {
             // residual = (coeff << tsShift + rnd) >> bdShift
             let ts_shift = 5 + log2_size as i32;
             let bd_shift = (20 - bit_depth as i32).max(0);
-            let rnd = if bd_shift > 0 { 1i32 << (bd_shift - 1) } else { 0 };
+            let rnd = if bd_shift > 0 {
+                1i32 << (bd_shift - 1)
+            } else {
+                0
+            };
             for i in 0..num_coeffs {
                 let c = (coeffs[i] as i32) << ts_shift;
                 residual[i] = ((c + rnd) >> bd_shift) as i16;
             }
         } else {
             let is_intra_4x4_luma = log2_size == 2 && c_idx == 0;
-            transform::inverse_transform(&coeffs, &mut residual, size, bit_depth, is_intra_4x4_luma);
+            transform::inverse_transform(
+                &coeffs,
+                &mut residual,
+                size,
+                bit_depth,
+                is_intra_4x4_luma,
+            );
         }
 
         // Add residual to prediction
@@ -1653,7 +1731,13 @@ impl<'a> SliceContext<'a> {
 
     /// Decode quantization parameters (H.265 section 8.6.1)
     /// Matching libde265's decode_quantization_parameters()
-    fn decode_quantization_parameters(&mut self, x0: u32, y0: u32, x_cu_base: u32, y_cu_base: u32) {
+    fn decode_quantization_parameters(
+        &mut self,
+        x0: u32,
+        _y0: u32,
+        x_cu_base: u32,
+        y_cu_base: u32,
+    ) {
         let log2_min_cu_qp_delta_size = self.sps.log2_ctb_size() - self.pps.diff_cu_qp_delta_depth;
         let qg_mask = (1u32 << log2_min_cu_qp_delta_size) - 1;
 
@@ -1674,9 +1758,9 @@ impl<'a> SliceContext<'a> {
 
         let first_ctb_in_slice = self.header.slice_segment_address;
         let slice_start_x = (first_ctb_in_slice % self.sps.pic_width_in_ctbs()) as i32
-            * (1 << self.sps.log2_ctb_size()) as i32;
+            * (1 << self.sps.log2_ctb_size());
         let slice_start_y = (first_ctb_in_slice / self.sps.pic_width_in_ctbs()) as i32
-            * (1 << self.sps.log2_ctb_size()) as i32;
+            * (1 << self.sps.log2_ctb_size());
         let first_qg_in_slice = slice_start_x == x_qg && slice_start_y == y_qg;
 
         let qp_y_pred = if first_qg_in_slice
@@ -1714,7 +1798,6 @@ impl<'a> SliceContext<'a> {
             let above_x = x_qg as u32;
             let above_y = (y_qg - 1) as u32;
             let ctb_size = self.sps.ctb_size();
-            let our_ctb_y = y0 / ctb_size;
             let above_ctb_y = above_y / ctb_size;
             if above_ctb_y == self.ctb_y {
                 self.get_qpy_at(above_x, above_y)
@@ -1740,10 +1823,12 @@ impl<'a> SliceContext<'a> {
 
         // Compute chroma QP (4:2:0)
         let qp_bd_offset_c = 6 * (self.sps.bit_depth_c() as i32 - 8);
-        let qpi_cb = (qpy + self.pps.pps_cb_qp_offset as i32 + self.header.slice_cb_qp_offset as i32)
-            .clamp(-qp_bd_offset_c, 57);
-        let qpi_cr = (qpy + self.pps.pps_cr_qp_offset as i32 + self.header.slice_cr_qp_offset as i32)
-            .clamp(-qp_bd_offset_c, 57);
+        let qpi_cb =
+            (qpy + self.pps.pps_cb_qp_offset as i32 + self.header.slice_cb_qp_offset as i32)
+                .clamp(-qp_bd_offset_c, 57);
+        let qpi_cr =
+            (qpy + self.pps.pps_cr_qp_offset as i32 + self.header.slice_cr_qp_offset as i32)
+                .clamp(-qp_bd_offset_c, 57);
 
         self.qp_cb = Self::chroma_qp_from_luma(qpi_cb) + qp_bd_offset_c;
         self.qp_cr = Self::chroma_qp_from_luma(qpi_cr) + qp_bd_offset_c;

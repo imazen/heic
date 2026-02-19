@@ -181,7 +181,9 @@ fn write_comparison_images() {
     let data = std::fs::read(image_path).expect("Failed to read test file");
 
     let ref_image = ref_decoder.decode(&data).expect("Reference decode failed");
-    let our_image = our_decoder.decode(&data, heic_decoder::PixelLayout::Rgb8).expect("Our decode failed");
+    let our_image = our_decoder
+        .decode(&data, heic_decoder::PixelLayout::Rgb8)
+        .expect("Our decode failed");
 
     // Write reference PPM
     let ref_path = "/tmp/reference.ppm";

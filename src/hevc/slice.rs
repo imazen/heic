@@ -408,7 +408,7 @@ impl SliceHeader {
         }
 
         // Byte alignment
-        let alignment_bit = reader.read_bit()?; // alignment_bit_equal_to_one (should be 1)
+        let _alignment_bit = reader.read_bit()?; // alignment_bit_equal_to_one (should be 1)
         reader.byte_align();
 
         // Get the byte offset where slice data begins

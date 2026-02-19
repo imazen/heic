@@ -846,13 +846,11 @@ fn parse_scaling_list_data(reader: &mut BitstreamReader<'_>) -> Result<ScalingLi
                     // Use default scaling list (already initialized)
                 } else if let Some(ref_id) =
                     matrix_id.checked_sub(pred_matrix_id_delta * matrix_step)
+                    && ref_id < 6
                 {
-                    if ref_id < 6 {
-                        data.lists[size_id][matrix_id] = data.lists[size_id][ref_id];
-                        if size_id >= 2 {
-                            data.dc_coef[size_id - 2][matrix_id] =
-                                data.dc_coef[size_id - 2][ref_id];
-                        }
+                    data.lists[size_id][matrix_id] = data.lists[size_id][ref_id];
+                    if size_id >= 2 {
+                        data.dc_coef[size_id - 2][matrix_id] = data.dc_coef[size_id - 2][ref_id];
                     }
                 }
             } else {
@@ -862,8 +860,7 @@ fn parse_scaling_list_data(reader: &mut BitstreamReader<'_>) -> Result<ScalingLi
                 if size_id > 1 {
                     let dc_coef_minus8 = reader.read_se()?;
                     next_coef = dc_coef_minus8 + 8;
-                    data.dc_coef[size_id - 2][matrix_id] =
-                        ((next_coef + 256) % 256) as u8;
+                    data.dc_coef[size_id - 2][matrix_id] = ((next_coef + 256) % 256) as u8;
                 }
                 for i in 0..coef_num {
                     let delta = reader.read_se()?;

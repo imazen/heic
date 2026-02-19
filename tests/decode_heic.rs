@@ -61,7 +61,9 @@ fn test_decode() {
     let data = std::fs::read(EXAMPLE_HEIC).expect("Failed to read test file");
     let decoder = DecoderConfig::new();
 
-    let image = decoder.decode(&data, heic_decoder::PixelLayout::Rgb8).expect("Failed to decode");
+    let image = decoder
+        .decode(&data, heic_decoder::PixelLayout::Rgb8)
+        .expect("Failed to decode");
 
     // example.heic is 1280x854 (cropped from 1280x856 via conformance window)
     assert_eq!(image.width, 1280, "Expected width 1280");

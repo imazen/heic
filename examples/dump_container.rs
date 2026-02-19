@@ -50,7 +50,10 @@ fn main() {
             ItemProperty::HevcConfig(cfg) => {
                 eprintln!(
                     "  [{}]: hvcC profile={} level={} nal_units={}",
-                    i, cfg.general_profile_idc, cfg.general_level_idc, cfg.nal_units.len()
+                    i,
+                    cfg.general_profile_idc,
+                    cfg.general_level_idc,
+                    cfg.nal_units.len()
                 );
             }
             ItemProperty::ColorInfo(_) => {
@@ -59,15 +62,26 @@ fn main() {
             ItemProperty::CleanAperture(clap) => {
                 eprintln!(
                     "  [{}]: clap w={}/{} h={}/{} hoff={}/{} voff={}/{}",
-                    i, clap.width_n, clap.width_d, clap.height_n, clap.height_d,
-                    clap.horiz_off_n, clap.horiz_off_d, clap.vert_off_n, clap.vert_off_d
+                    i,
+                    clap.width_n,
+                    clap.width_d,
+                    clap.height_n,
+                    clap.height_d,
+                    clap.horiz_off_n,
+                    clap.horiz_off_d,
+                    clap.vert_off_n,
+                    clap.vert_off_d
                 );
             }
             ItemProperty::Rotation(rot) => {
                 eprintln!("  [{}]: irot angle={}°", i, rot.angle);
             }
             ItemProperty::Mirror(m) => {
-                let desc = if m.axis == 0 { "horizontal (left-right)" } else { "vertical (top-bottom)" };
+                let desc = if m.axis == 0 {
+                    "horizontal (left-right)"
+                } else {
+                    "vertical (top-bottom)"
+                };
                 eprintln!("  [{}]: imir axis={} ({})", i, m.axis, desc);
             }
             ItemProperty::AuxiliaryType(aux_type) => {
@@ -85,9 +99,14 @@ fn main() {
         eprintln!(
             "  Item #{}: properties={:?}",
             assoc.item_id,
-            assoc.properties
+            assoc
+                .properties
                 .iter()
-                .map(|(idx, essential)| format!("{}({})", idx, if *essential { "essential" } else { "non-ess" }))
+                .map(|(idx, essential)| format!(
+                    "{}({})",
+                    idx,
+                    if *essential { "essential" } else { "non-ess" }
+                ))
                 .collect::<Vec<_>>()
         );
     }
@@ -161,7 +180,9 @@ fn main() {
     // Dump auxiliary images
     if let Some(ref item) = container.primary_item() {
         let mut alpha_ids = container.find_auxiliary_items(item.id, "urn:mpeg:hevc:2015:auxid:1");
-        alpha_ids.extend(container.find_auxiliary_items(item.id, "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha"));
+        alpha_ids.extend(
+            container.find_auxiliary_items(item.id, "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha"),
+        );
         if !alpha_ids.is_empty() {
             eprintln!();
             eprintln!("=== Alpha Plane ===");
@@ -175,7 +196,8 @@ fn main() {
             }
         }
 
-        let gainmap_ids = container.find_auxiliary_items(item.id, "urn:com:apple:photo:2020:aux:hdrgainmap");
+        let gainmap_ids =
+            container.find_auxiliary_items(item.id, "urn:com:apple:photo:2020:aux:hdrgainmap");
         if !gainmap_ids.is_empty() {
             eprintln!();
             eprintln!("=== HDR Gain Map ===");
@@ -194,73 +216,94 @@ fn main() {
     eprintln!();
     eprintln!("=== EXIF Items ===");
     for info in &container.item_infos {
-        if info.item_type == FourCC(*b"Exif") {
-            if let Some(data) = container.get_item_data(info.item_id) {
-                eprintln!("  Exif item #{}: {} bytes", info.item_id, data.len());
-                // HEIF Exif: 4 bytes offset to TIFF header, then the TIFF data
-                if data.len() > 10 {
-                    let tiff_offset = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
-                    let tiff_start = 4 + tiff_offset;
-                    if tiff_start < data.len() {
-                        let tiff_data = &data[tiff_start..];
-                        eprintln!("    TIFF header offset: {}", tiff_offset);
-                        eprintln!("    TIFF header bytes: {:02x?}", &tiff_data[..tiff_data.len().min(16)]);
-                        // Check byte order
-                        if tiff_data.len() > 2 {
-                            let byte_order = if tiff_data[0..2] == [0x4D, 0x4D] {
-                                "big-endian"
-                            } else if tiff_data[0..2] == [0x49, 0x49] {
-                                "little-endian"
+        if info.item_type == FourCC(*b"Exif")
+            && let Some(data) = container.get_item_data(info.item_id)
+        {
+            eprintln!("  Exif item #{}: {} bytes", info.item_id, data.len());
+            // HEIF Exif: 4 bytes offset to TIFF header, then the TIFF data
+            if data.len() > 10 {
+                let tiff_offset = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+                let tiff_start = 4 + tiff_offset;
+                if tiff_start < data.len() {
+                    let tiff_data = &data[tiff_start..];
+                    eprintln!("    TIFF header offset: {}", tiff_offset);
+                    eprintln!(
+                        "    TIFF header bytes: {:02x?}",
+                        &tiff_data[..tiff_data.len().min(16)]
+                    );
+                    // Check byte order
+                    if tiff_data.len() > 2 {
+                        let byte_order = if tiff_data[0..2] == [0x4D, 0x4D] {
+                            "big-endian"
+                        } else if tiff_data[0..2] == [0x49, 0x49] {
+                            "little-endian"
+                        } else {
+                            "unknown"
+                        };
+                        eprintln!("    Byte order: {}", byte_order);
+
+                        // Parse IFD0 to find orientation tag (0x0112)
+                        let is_le = tiff_data[0] == 0x49;
+                        let read_u16 = |offset: usize| -> u16 {
+                            if is_le {
+                                u16::from_le_bytes([tiff_data[offset], tiff_data[offset + 1]])
                             } else {
-                                "unknown"
-                            };
-                            eprintln!("    Byte order: {}", byte_order);
+                                u16::from_be_bytes([tiff_data[offset], tiff_data[offset + 1]])
+                            }
+                        };
+                        let read_u32 = |offset: usize| -> u32 {
+                            if is_le {
+                                u32::from_le_bytes([
+                                    tiff_data[offset],
+                                    tiff_data[offset + 1],
+                                    tiff_data[offset + 2],
+                                    tiff_data[offset + 3],
+                                ])
+                            } else {
+                                u32::from_be_bytes([
+                                    tiff_data[offset],
+                                    tiff_data[offset + 1],
+                                    tiff_data[offset + 2],
+                                    tiff_data[offset + 3],
+                                ])
+                            }
+                        };
 
-                            // Parse IFD0 to find orientation tag (0x0112)
-                            let is_le = tiff_data[0] == 0x49;
-                            let read_u16 = |offset: usize| -> u16 {
-                                if is_le {
-                                    u16::from_le_bytes([tiff_data[offset], tiff_data[offset + 1]])
-                                } else {
-                                    u16::from_be_bytes([tiff_data[offset], tiff_data[offset + 1]])
-                                }
-                            };
-                            let read_u32 = |offset: usize| -> u32 {
-                                if is_le {
-                                    u32::from_le_bytes([tiff_data[offset], tiff_data[offset + 1], tiff_data[offset + 2], tiff_data[offset + 3]])
-                                } else {
-                                    u32::from_be_bytes([tiff_data[offset], tiff_data[offset + 1], tiff_data[offset + 2], tiff_data[offset + 3]])
-                                }
-                            };
-
-                            // IFD0 offset is at byte 4-7 of TIFF header
-                            if tiff_data.len() > 8 {
-                                let ifd0_offset = read_u32(4) as usize;
-                                if ifd0_offset < tiff_data.len() - 2 {
-                                    let num_entries = read_u16(ifd0_offset);
-                                    eprintln!("    IFD0 at offset {}, {} entries", ifd0_offset, num_entries);
-                                    for i in 0..num_entries as usize {
-                                        let entry_offset = ifd0_offset + 2 + i * 12;
-                                        if entry_offset + 12 > tiff_data.len() { break; }
-                                        let tag = read_u16(entry_offset);
-                                        let typ = read_u16(entry_offset + 2);
-                                        let count = read_u32(entry_offset + 4);
-                                        let value = read_u16(entry_offset + 8);
-                                        if tag == 0x0112 {
-                                            eprintln!("    ** Orientation tag (0x0112): value={} (type={}, count={})", value, typ, count);
-                                            let orient_str = match value {
-                                                1 => "Normal",
-                                                2 => "Mirrored horizontal",
-                                                3 => "Rotated 180",
-                                                4 => "Mirrored vertical",
-                                                5 => "Mirrored horizontal + rotated 270 CW",
-                                                6 => "Rotated 90 CW",
-                                                7 => "Mirrored horizontal + rotated 90 CW",
-                                                8 => "Rotated 270 CW (= 90 CCW)",
-                                                _ => "Unknown",
-                                            };
-                                            eprintln!("    ** Orientation meaning: {}", orient_str);
-                                        }
+                        // IFD0 offset is at byte 4-7 of TIFF header
+                        if tiff_data.len() > 8 {
+                            let ifd0_offset = read_u32(4) as usize;
+                            if ifd0_offset < tiff_data.len() - 2 {
+                                let num_entries = read_u16(ifd0_offset);
+                                eprintln!(
+                                    "    IFD0 at offset {}, {} entries",
+                                    ifd0_offset, num_entries
+                                );
+                                for i in 0..num_entries as usize {
+                                    let entry_offset = ifd0_offset + 2 + i * 12;
+                                    if entry_offset + 12 > tiff_data.len() {
+                                        break;
+                                    }
+                                    let tag = read_u16(entry_offset);
+                                    let typ = read_u16(entry_offset + 2);
+                                    let count = read_u32(entry_offset + 4);
+                                    let value = read_u16(entry_offset + 8);
+                                    if tag == 0x0112 {
+                                        eprintln!(
+                                            "    ** Orientation tag (0x0112): value={} (type={}, count={})",
+                                            value, typ, count
+                                        );
+                                        let orient_str = match value {
+                                            1 => "Normal",
+                                            2 => "Mirrored horizontal",
+                                            3 => "Rotated 180",
+                                            4 => "Mirrored vertical",
+                                            5 => "Mirrored horizontal + rotated 270 CW",
+                                            6 => "Rotated 90 CW",
+                                            7 => "Mirrored horizontal + rotated 90 CW",
+                                            8 => "Rotated 270 CW (= 90 CCW)",
+                                            _ => "Unknown",
+                                        };
+                                        eprintln!("    ** Orientation meaning: {}", orient_str);
                                     }
                                 }
                             }

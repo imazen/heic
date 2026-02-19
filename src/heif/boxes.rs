@@ -8,29 +8,53 @@ use alloc::vec::Vec;
 pub struct FourCC(pub [u8; 4]);
 
 impl FourCC {
+    /// File type box
     pub const FTYP: Self = Self(*b"ftyp");
+    /// Metadata container box
     pub const META: Self = Self(*b"meta");
+    /// Handler reference box
     pub const HDLR: Self = Self(*b"hdlr");
+    /// Primary item box
     pub const PITM: Self = Self(*b"pitm");
+    /// Item location box
     pub const ILOC: Self = Self(*b"iloc");
+    /// Item information box
     pub const IINF: Self = Self(*b"iinf");
+    /// Item information entry box
     pub const INFE: Self = Self(*b"infe");
+    /// Item properties box
     pub const IPRP: Self = Self(*b"iprp");
+    /// Item property container box
     pub const IPCO: Self = Self(*b"ipco");
+    /// Item property association box
     pub const IPMA: Self = Self(*b"ipma");
+    /// Media data box
     pub const MDAT: Self = Self(*b"mdat");
+    /// Image spatial extents property
     pub const ISPE: Self = Self(*b"ispe");
+    /// HEVC bitstream configuration (tile variant)
     pub const HVCB: Self = Self(*b"hvcB");
+    /// HEVC decoder configuration
     pub const HVCC: Self = Self(*b"hvcC");
+    /// Color information property
     pub const COLR: Self = Self(*b"colr");
+    /// Pixel information property
     pub const PIXI: Self = Self(*b"pixi");
+    /// Item reference box
     pub const IREF: Self = Self(*b"iref");
+    /// Auxiliary type property
     pub const AUXC: Self = Self(*b"auxC");
+    /// Item data box
     pub const IDAT: Self = Self(*b"idat");
+    /// Derived image reference
     pub const DIMG: Self = Self(*b"dimg");
+    /// Clean aperture property
     pub const CLAP: Self = Self(*b"clap");
+    /// Image rotation property
     pub const IROT: Self = Self(*b"irot");
+    /// Auxiliary image reference
     pub const AUXL: Self = Self(*b"auxl");
+    /// Image mirror property
     pub const IMIR: Self = Self(*b"imir");
 
     /// Create from bytes
@@ -139,7 +163,6 @@ impl<'a> Iterator for BoxIterator<'a> {
         if size_usize < header_size {
             return None;
         }
-        let content_len = size_usize - header_size;
         let box_end = self.offset.checked_add(size_usize)?;
         if box_end > self.data.len() {
             return None;
@@ -192,17 +215,21 @@ pub struct ItemInfo {
 /// Clean aperture from clap box (ISO 14496-12)
 #[derive(Debug, Clone, Copy)]
 pub struct CleanAperture {
-    /// Clean aperture width (numerator/denominator)
+    /// Clean aperture width numerator
     pub width_n: u32,
+    /// Clean aperture width denominator
     pub width_d: u32,
-    /// Clean aperture height (numerator/denominator)
+    /// Clean aperture height numerator
     pub height_n: u32,
+    /// Clean aperture height denominator
     pub height_d: u32,
-    /// Horizontal offset (signed numerator/denominator)
+    /// Horizontal offset numerator (signed)
     pub horiz_off_n: i32,
+    /// Horizontal offset denominator
     pub horiz_off_d: u32,
-    /// Vertical offset (signed numerator/denominator)
+    /// Vertical offset numerator (signed)
     pub vert_off_n: i32,
+    /// Vertical offset denominator
     pub vert_off_d: u32,
 }
 

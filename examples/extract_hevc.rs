@@ -1,8 +1,8 @@
 /// Extract raw HEVC Annex B bitstream from a HEIC file for use with dec265
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| {
-        "/home/lilith/work/heic/libheif/examples/example.heic".to_string()
-    });
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "/home/lilith/work/heic/libheif/examples/example.heic".to_string());
     let data = std::fs::read(&path).expect("read");
     let container = heic_decoder::heif::parse(&data).expect("parse");
 

@@ -20,7 +20,6 @@ pub use picture::DecodedFrame;
 
 use crate::error::HevcError;
 use crate::heif::HevcDecoderConfig;
-use alloc::format;
 use alloc::vec::Vec;
 
 type Result<T> = core::result::Result<T, HevcError>;
@@ -239,15 +238,23 @@ fn decode_slice(
     let skip_all = false;
     let skip_deblock = skip_all || {
         #[cfg(feature = "std")]
-        { std::env::var("HEIC_NODEBLOCK").is_ok() }
+        {
+            std::env::var("HEIC_NODEBLOCK").is_ok()
+        }
         #[cfg(not(feature = "std"))]
-        { false }
+        {
+            false
+        }
     };
     let skip_sao = skip_all || {
         #[cfg(feature = "std")]
-        { std::env::var("HEIC_NOSAO").is_ok() }
+        {
+            std::env::var("HEIC_NOSAO").is_ok()
+        }
         #[cfg(not(feature = "std"))]
-        { false }
+        {
+            false
+        }
     };
     if !skip_deblock && !slice_header.slice_deblocking_filter_disabled_flag {
         let beta_offset = slice_header.slice_beta_offset_div2 as i32 * 2;

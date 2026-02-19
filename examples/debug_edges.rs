@@ -1,6 +1,5 @@
 fn main() {
-    let data = std::fs::read("/home/lilith/work/heic/libheif/examples/example.heic")
-        .expect("read");
+    let data = std::fs::read("/home/lilith/work/heic/libheif/examples/example.heic").expect("read");
     let decoder = heic_decoder::DecoderConfig::new();
     let frame = decoder.decode_to_frame(&data).expect("decode");
 

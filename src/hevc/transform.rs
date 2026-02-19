@@ -9,7 +9,6 @@
 /// Maximum number of coefficients (32x32 transform)
 pub const MAX_COEFF: usize = 32 * 32;
 
-
 /// DST-VII basis functions for 4x4 (scaled by 64)
 static DST4_MATRIX: [[i16; 4]; 4] = [
     [29, 55, 74, 84],
@@ -265,7 +264,6 @@ pub fn idct32(coeffs: &[i16; 1024], output: &mut [i16; 1024], bit_depth: u8) {
     let shift1 = 7;
     let shift2 = 20 - bit_depth;
     let add1 = 1i32 << (shift1 - 1);
-
 
     let mut tmp = [0i32; 1024];
 

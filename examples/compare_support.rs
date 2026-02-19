@@ -85,7 +85,10 @@ impl PixelStats {
     }
 }
 
-fn compare_pixels(ours: &heic_decoder::DecodeOutput, reference: &heic_wasm_rs::DecodedImage) -> Option<PixelStats> {
+fn compare_pixels(
+    ours: &heic_decoder::DecodeOutput,
+    reference: &heic_wasm_rs::DecodedImage,
+) -> Option<PixelStats> {
     if ours.width != reference.width || ours.height != reference.height {
         return None;
     }
@@ -137,9 +140,9 @@ fn main() {
 
     // Load decoders
     let our_decoder = heic_decoder::DecoderConfig::new();
-    let wasm_decoder = heic_wasm_rs::HeicDecoder::from_file(
-        std::path::Path::new("/home/lilith/work/heic/wasm-module/heic_decoder.wasm"),
-    )
+    let wasm_decoder = heic_wasm_rs::HeicDecoder::from_file(std::path::Path::new(
+        "/home/lilith/work/heic/wasm-module/heic_decoder.wasm",
+    ))
     .expect("Failed to load WASM decoder");
 
     let strip_prefix = base_dir.clone();
@@ -158,8 +161,10 @@ fn main() {
     let mut pixel_close_files = 0u32; // max_diff <= 3
     let mut pixel_diff_files = Vec::new(); // files with differences
 
-    eprintln!("{:65} {:12} {:>6} {:>6} {:>8} {:>8} {:>8}  meta",
-        "file", "status", "dims", "alpha", "max_d", "MAE", "PSNR");
+    eprintln!(
+        "{:65} {:12} {:>6} {:>6} {:>8} {:>8} {:>8}  meta",
+        "file", "status", "dims", "alpha", "max_d", "MAE", "PSNR"
+    );
     eprintln!("{}", "-".repeat(140));
 
     for file in &files {
@@ -192,7 +197,10 @@ fn main() {
                 let dim_str = if dim_match {
                     format!("{}x{}", ours.width, ours.height)
                 } else {
-                    format!("{}x{} vs {}x{}", ours.width, ours.height, reference.width, reference.height)
+                    format!(
+                        "{}x{} vs {}x{}",
+                        ours.width, ours.height, reference.width, reference.height
+                    )
                 };
 
                 let alpha_str = match (ours.layout.has_alpha(), reference.has_alpha) {
@@ -219,9 +227,18 @@ fn main() {
                         pixel_exact_files += 1;
                         eprintln!(
                             "{:65} {:12} {:>6} {:>6} {:>8} {:>8} {:>8}  {}",
-                            name, "EXACT", dim_str, alpha_str,
-                            "0", "0.000", "inf",
-                            if dim_match && alpha_match { "ok" } else { "META DIFF" }
+                            name,
+                            "EXACT",
+                            dim_str,
+                            alpha_str,
+                            "0",
+                            "0.000",
+                            "inf",
+                            if dim_match && alpha_match {
+                                "ok"
+                            } else {
+                                "META DIFF"
+                            }
                         );
                     } else {
                         if stats.max_diff <= 3 {
@@ -238,10 +255,21 @@ fn main() {
                         eprintln!(
                             "{:65} {:12} {:>6} {:>6} {:>8} {:>8.3} {:>7.1}dB  {}",
                             name,
-                            if stats.max_diff <= 3 { "CLOSE" } else { "DIFFERS" },
-                            dim_str, alpha_str,
-                            stats.max_diff, stats.mae(), stats.psnr(),
-                            if dim_match && alpha_match { "ok" } else { "META DIFF" }
+                            if stats.max_diff <= 3 {
+                                "CLOSE"
+                            } else {
+                                "DIFFERS"
+                            },
+                            dim_str,
+                            alpha_str,
+                            stats.max_diff,
+                            stats.mae(),
+                            stats.psnr(),
+                            if dim_match && alpha_match {
+                                "ok"
+                            } else {
+                                "META DIFF"
+                            }
                         );
                     }
                 } else {
@@ -257,9 +285,14 @@ fn main() {
                 let ours = our_result.unwrap();
                 eprintln!(
                     "{:65} {:12} {:>6} {:>6}",
-                    name, "OURS ONLY",
+                    name,
+                    "OURS ONLY",
                     format!("{}x{}", ours.width, ours.height),
-                    if ours.layout.has_alpha() { "alpha" } else { "none" }
+                    if ours.layout.has_alpha() {
+                        "alpha"
+                    } else {
+                        "none"
+                    }
                 );
             }
             (false, true) => {
@@ -269,7 +302,8 @@ fn main() {
                 let reference = ref_result.unwrap();
                 eprintln!(
                     "{:65} {:12} {:>6} {:>6}  err={}",
-                    name, "LIBHEIF ONLY",
+                    name,
+                    "LIBHEIF ONLY",
                     format!("{}x{}", reference.width, reference.height),
                     if reference.has_alpha { "alpha" } else { "none" },
                     err
@@ -296,23 +330,17 @@ fn main() {
     eprintln!("  libheif only: {}", libheif_only);
     eprintln!("  Both fail:    {}", both_fail);
     eprintln!();
-    eprintln!("=== PIXEL COMPARISON ({} files where both decode) ===", both_ok);
+    eprintln!(
+        "=== PIXEL COMPARISON ({} files where both decode) ===",
+        both_ok
+    );
     eprintln!("  Pixel-exact:     {}", pixel_exact_files);
-    eprintln!(
-        "  Close (max<=3):  {}",
-        pixel_close_files
-    );
-    eprintln!(
-        "  With diffs:      {}",
-        pixel_diff_files.len()
-    );
+    eprintln!("  Close (max<=3):  {}", pixel_close_files);
+    eprintln!("  With diffs:      {}", pixel_diff_files.len());
     eprintln!();
     eprintln!("=== GLOBAL PIXEL STATS (RGB channels, all files) ===");
     eprintln!("  Total samples:   {}", global_stats.pixel_count);
-    eprintln!(
-        "  Exact match:     {:.4}%",
-        global_stats.exact_pct()
-    );
+    eprintln!("  Exact match:     {:.4}%", global_stats.exact_pct());
     eprintln!("  Max difference:  {}", global_stats.max_diff);
     eprintln!("  MAE:             {:.4}", global_stats.mae());
     eprintln!("  PSNR:            {:.2} dB", global_stats.psnr());
@@ -322,12 +350,19 @@ fn main() {
     eprintln!("=== DIFFERENCE DISTRIBUTION ===");
     let nonzero: u64 = global_stats.pixel_count - global_stats.exact_matches;
     if nonzero > 0 {
-        eprintln!("  diff=0:  {} ({:.2}%)", global_stats.diff_histogram[0],
-            global_stats.diff_histogram[0] as f64 / global_stats.pixel_count as f64 * 100.0);
+        eprintln!(
+            "  diff=0:  {} ({:.2}%)",
+            global_stats.diff_histogram[0],
+            global_stats.diff_histogram[0] as f64 / global_stats.pixel_count as f64 * 100.0
+        );
         for d in 1..=global_stats.max_diff as usize {
             if global_stats.diff_histogram[d] > 0 {
-                eprintln!("  diff={}: {} ({:.4}%)", d, global_stats.diff_histogram[d],
-                    global_stats.diff_histogram[d] as f64 / global_stats.pixel_count as f64 * 100.0);
+                eprintln!(
+                    "  diff={}: {} ({:.4}%)",
+                    d,
+                    global_stats.diff_histogram[d],
+                    global_stats.diff_histogram[d] as f64 / global_stats.pixel_count as f64 * 100.0
+                );
             }
         }
     } else {
@@ -339,7 +374,10 @@ fn main() {
         eprintln!();
         eprintln!("=== FILES WITH PIXEL DIFFERENCES (sorted by max diff) ===");
         let mut sorted = pixel_diff_files;
-        sorted.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)));
+        sorted.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then(b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal))
+        });
         for (name, max_diff, mae, psnr, exact_pct, dims) in &sorted {
             eprintln!(
                 "  {:60} {:>6}  max={:>3}  MAE={:.3}  PSNR={:.1}dB  exact={:.2}%",

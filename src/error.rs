@@ -101,11 +101,21 @@ pub enum HevcError {
     /// Missing required parameter set
     MissingParameterSet(&'static str),
     /// Invalid parameter set
-    InvalidParameterSet { kind: &'static str, msg: String },
+    InvalidParameterSet {
+        /// Parameter set type (e.g. "SPS", "PPS")
+        kind: &'static str,
+        /// Description of the issue
+        msg: String,
+    },
     /// CABAC decoding error
     CabacError(&'static str),
     /// Unsupported profile/level
-    UnsupportedProfile { profile: u8, level: u8 },
+    UnsupportedProfile {
+        /// HEVC profile IDC
+        profile: u8,
+        /// HEVC level IDC
+        level: u8,
+    },
     /// Unsupported feature
     Unsupported(&'static str),
     /// Decoding error

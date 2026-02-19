@@ -5,9 +5,9 @@ fn main() {
     let data = std::fs::read(&path).expect("read");
     let decoder = heic_decoder::DecoderConfig::new();
     let frame = decoder.decode_to_frame(&data).expect("decode");
-    
+
     eprintln!("QP map stride: {}", frame.deblock_stride);
-    
+
     // Edge at x=96 (bx=24), y=0 (by=0)
     for by in 0..4u32 {
         for bx in 20..30u32 {
@@ -22,14 +22,15 @@ fn main() {
         }
         eprintln!();
     }
-    
+
     let bx_edge = 96u32 / 4;
-    let idx_q = (0 * frame.deblock_stride + bx_edge) as usize;
-    let idx_p = (0 * frame.deblock_stride + bx_edge - 1) as usize;
-    
+    let y_row = 0u32; // examining row 0
+    let idx_q = (y_row * frame.deblock_stride + bx_edge) as usize;
+    let idx_p = (y_row * frame.deblock_stride + bx_edge - 1) as usize;
+
     eprintln!();
     eprintln!("Edge at x=96, y=0:");
-    eprintln!("  P side (bx={}): qp={}", bx_edge-1, frame.qp_map[idx_p]);
+    eprintln!("  P side (bx={}): qp={}", bx_edge - 1, frame.qp_map[idx_p]);
     eprintln!("  Q side (bx={}): qp={}", bx_edge, frame.qp_map[idx_q]);
     let qp_l = (frame.qp_map[idx_p] as i32 + frame.qp_map[idx_q] as i32 + 1) >> 1;
     eprintln!("  qp_l = {}", qp_l);

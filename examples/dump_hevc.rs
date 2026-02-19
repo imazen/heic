@@ -1,5 +1,5 @@
-/// Dump the raw HEVC bitstream from a HEIC file in Annex B format
-/// Usage: cargo run --release --example dump_hevc <input.heic> <output.265>
+// Dump the raw HEVC bitstream from a HEIC file in Annex B format
+// Usage: cargo run --release --example dump_hevc <input.heic> <output.265>
 
 fn main() {
     let input = std::env::args().nth(1).expect("input HEIC file path");
@@ -12,9 +12,7 @@ fn main() {
     let item = container.primary_item().expect("no primary item");
 
     let config = item.hevc_config.as_ref().expect("no hvcC config");
-    let image_data = container
-        .get_item_data(primary_id)
-        .expect("no image data");
+    let image_data = container.get_item_data(primary_id).expect("no image data");
 
     eprintln!("Config NAL units: {}", config.nal_units.len());
     eprintln!("Image data: {} bytes", image_data.len());

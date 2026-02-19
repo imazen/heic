@@ -9,39 +9,53 @@ type Result<T> = core::result::Result<T, HevcError>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum NalType {
-    /// Coded slice segment of trailing picture (non-TSA, non-STSA)
+    /// Trailing picture, non-reference
     TrailN = 0,
+    /// Trailing picture, reference
     TrailR = 1,
-    /// Coded slice segment of TSA picture
+    /// Temporal sub-layer access, non-reference
     TsaN = 2,
+    /// Temporal sub-layer access, reference
     TsaR = 3,
-    /// Coded slice segment of STSA picture
+    /// Step-wise temporal sub-layer access, non-reference
     StsaN = 4,
+    /// Step-wise temporal sub-layer access, reference
     StsaR = 5,
-    /// Coded slice segment of RADL picture
+    /// Random access decodable leading, non-reference
     RadlN = 6,
+    /// Random access decodable leading, reference
     RadlR = 7,
-    /// Coded slice segment of RASL picture
+    /// Random access skipped leading, non-reference
     RaslN = 8,
+    /// Random access skipped leading, reference
     RaslR = 9,
-    /// Reserved non-IRAP sublayer non-reference
+    /// Reserved VCL non-reference (10)
     RsvVclN10 = 10,
+    /// Reserved VCL reference (11)
     RsvVclR11 = 11,
+    /// Reserved VCL non-reference (12)
     RsvVclN12 = 12,
+    /// Reserved VCL reference (13)
     RsvVclR13 = 13,
+    /// Reserved VCL non-reference (14)
     RsvVclN14 = 14,
+    /// Reserved VCL reference (15)
     RsvVclR15 = 15,
-    /// Coded slice segment of BLA picture
+    /// Broken link access, no leading pictures
     BlaNLp = 16,
+    /// Broken link access, with leading pictures
     BlaWLp = 17,
+    /// Broken link access, with RADL
     BlaWRadl = 18,
-    /// Coded slice segment of IDR picture
+    /// Instantaneous decoding refresh, with RADL
     IdrWRadl = 19,
+    /// Instantaneous decoding refresh, no leading pictures
     IdrNLp = 20,
-    /// Coded slice segment of CRA picture
+    /// Clean random access
     CraNut = 21,
-    /// Reserved IRAP
+    /// Reserved IRAP (22)
     RsvIrap22 = 22,
+    /// Reserved IRAP (23)
     RsvIrap23 = 23,
     // Reserved 24-31
     /// Video parameter set
@@ -64,6 +78,7 @@ pub enum NalType {
     SuffixSeiNut = 40,
     // Reserved 41-47
     // Unspecified 48-63
+    /// Unknown or unrecognized NAL unit type
     Unknown = 255,
 }
 
@@ -264,9 +279,7 @@ pub fn parse_length_prefixed_ext(data: &[u8], length_size: usize) -> Result<Vec<
             1 => data[i] as usize,
             2 => u16::from_be_bytes([data[i], data[i + 1]]) as usize,
             3 => {
-                ((data[i] as usize) << 16)
-                    | ((data[i + 1] as usize) << 8)
-                    | (data[i + 2] as usize)
+                ((data[i] as usize) << 16) | ((data[i + 1] as usize) << 8) | (data[i + 2] as usize)
             }
             4 => u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]) as usize,
             _ => return Err(HevcError::InvalidBitstream("unsupported length size")),

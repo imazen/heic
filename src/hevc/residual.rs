@@ -191,6 +191,7 @@ impl CoeffBuffer {
 pub static DEBUG_RESIDUAL_COUNTER: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
 
+#[allow(clippy::too_many_arguments)]
 pub fn decode_residual(
     cabac: &mut CabacDecoder<'_>,
     ctx: &mut [ContextModel],
@@ -200,15 +201,17 @@ pub fn decode_residual(
     sign_data_hiding_enabled: bool,
     cu_transquant_bypass: bool,
     transform_skip_enabled: bool,
-    x0: u32,
-    y0: u32,
+    _x0: u32,
+    _y0: u32,
 ) -> Result<(CoeffBuffer, bool)> {
     DEBUG_RESIDUAL_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
     // SE trace for differential testing against libde265
     #[cfg(feature = "std")]
     {
-        let se_num = crate::hevc::ctu::SE_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let se_num =
+            crate::hevc::ctu::SE_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        #[allow(clippy::absurd_extreme_comparisons)]
         if se_num < crate::hevc::ctu::SE_TRACE_LIMIT {
             let (range, _, _) = cabac.get_state_extended();
             let (byte_pos, _, _) = cabac.get_position();
@@ -239,7 +242,13 @@ pub fn decode_residual(
         if rc_trace {
             let (range, _, _) = cabac.get_state_extended();
             let (byte_pos, _, _) = cabac.get_position();
-            rc_eprintln!("{rcp}_TSKIP c_idx={} val={} range={} byte={}", c_idx, flag as u8, range, byte_pos);
+            rc_eprintln!(
+                "{rcp}_TSKIP c_idx={} val={} range={} byte={}",
+                c_idx,
+                flag as u8,
+                range,
+                byte_pos
+            );
         }
         flag
     } else {
@@ -251,7 +260,13 @@ pub fn decode_residual(
     if rc_trace {
         let (range, _, _) = cabac.get_state_extended();
         let (byte_pos, _, _) = cabac.get_position();
-        rc_eprintln!("{rcp}_LAST lastX={} lastY={} range={} byte={}", last_x, last_y, range, byte_pos);
+        rc_eprintln!(
+            "{rcp}_LAST lastX={} lastY={} range={} byte={}",
+            last_x,
+            last_y,
+            range,
+            byte_pos
+        );
     }
 
     // Swap coordinates for vertical scan
@@ -288,8 +303,16 @@ pub fn decode_residual(
     let last_pos_in_sb = find_scan_pos_4x4(scan_pos, local_x, local_y);
 
     if rc_trace {
-        rc_eprintln!("{rcp}_SCAN scanIdx={} lastSB={} lastPos={} sb=({},{}) local=({},{})",
-            scan_idx, last_sb_idx, last_pos_in_sb, last_sb_x, last_sb_y, local_x, local_y);
+        rc_eprintln!(
+            "{rcp}_SCAN scanIdx={} lastSB={} lastPos={} sb=({},{}) local=({},{})",
+            scan_idx,
+            last_sb_idx,
+            last_pos_in_sb,
+            last_sb_x,
+            last_sb_y,
+            local_x,
+            local_y
+        );
     }
 
     // Track coded_sub_block_flag for prevCsbf calculation
@@ -388,9 +411,18 @@ pub fn decode_residual(
                 let (x_in_sb, y_in_sb) = scan_pos[n as usize];
                 let xc = sb_x * 4 + x_in_sb;
                 let yc = sb_y * 4 + y_in_sb;
-                let ctx_idx = calc_sig_coeff_flag_ctx(xc, yc, log2_size, c_idx, scan_idx, prev_csbf);
-                rc_eprintln!("{rcp}_SIG n={} pos=({},{}) ctx={} val={} range={} byte={}",
-                    n, xc, yc, ctx_idx, if sig {1} else {0}, range, byte_pos);
+                let ctx_idx =
+                    calc_sig_coeff_flag_ctx(xc, yc, log2_size, c_idx, scan_idx, prev_csbf);
+                rc_eprintln!(
+                    "{rcp}_SIG n={} pos=({},{}) ctx={} val={} range={} byte={}",
+                    n,
+                    xc,
+                    yc,
+                    ctx_idx,
+                    if sig { 1 } else { 0 },
+                    range,
+                    byte_pos
+                );
             }
             if sig {
                 coeff_flags[n as usize] = true;
@@ -408,7 +440,9 @@ pub fn decode_residual(
                 coeff_flags[0] = true;
                 coeff_values[0] = 1;
                 num_coeffs += 1;
-                if rc_trace { rc_eprintln!("{rcp}_SIG n=0 DC_INFERRED"); }
+                if rc_trace {
+                    rc_eprintln!("{rcp}_SIG n=0 DC_INFERRED");
+                }
             } else {
                 let sig = decode_sig_coeff_flag(
                     cabac, ctx, c_idx, 0, log2_size, scan_idx, sb_x, sb_y, prev_csbf, scan_pos,
@@ -416,9 +450,23 @@ pub fn decode_residual(
                 if rc_trace {
                     let (range, _, _) = cabac.get_state_extended();
                     let (byte_pos, _, _) = cabac.get_position();
-                    let ctx_idx = calc_sig_coeff_flag_ctx(sb_x * 4, sb_y * 4, log2_size, c_idx, scan_idx, prev_csbf);
-                    rc_eprintln!("{rcp}_SIG n=0 pos=({},{}) ctx={} val={} range={} byte={}",
-                        sb_x * 4, sb_y * 4, ctx_idx, if sig {1} else {0}, range, byte_pos);
+                    let ctx_idx = calc_sig_coeff_flag_ctx(
+                        sb_x * 4,
+                        sb_y * 4,
+                        log2_size,
+                        c_idx,
+                        scan_idx,
+                        prev_csbf,
+                    );
+                    rc_eprintln!(
+                        "{rcp}_SIG n=0 pos=({},{}) ctx={} val={} range={} byte={}",
+                        sb_x * 4,
+                        sb_y * 4,
+                        ctx_idx,
+                        if sig { 1 } else { 0 },
+                        range,
+                        byte_pos
+                    );
                 }
                 if sig {
                     coeff_flags[0] = true;
@@ -440,7 +488,12 @@ pub fn decode_residual(
         let ctx_set = base + if prev_subblock_had_gt1 { 1 } else { 0 };
 
         if rc_trace {
-            rc_eprintln!("{rcp}_COEFF sb_idx={} num_coeffs={} ctx_set={}", sb_idx, num_coeffs, ctx_set);
+            rc_eprintln!(
+                "{rcp}_COEFF sb_idx={} num_coeffs={} ctx_set={}",
+                sb_idx,
+                num_coeffs,
+                ctx_set
+            );
         }
 
         // Track if this subblock has any g1=1 (for next subblock's ctx_set)
@@ -491,8 +544,16 @@ pub fn decode_residual(
                     + if c_idx > 0 { 16 } else { 0 }
                     + (ctx_set as usize) * 4
                     + (greater1_ctx as usize).min(3);
-                rc_eprintln!("{rcp}_G1 c={} ctxSet={} g1ctx={} fullCtx={} val={} range={} byte={}",
-                    g1_count, ctx_set, greater1_ctx, full_ctx, if g1 {1} else {0}, range, byte_pos);
+                rc_eprintln!(
+                    "{rcp}_G1 c={} ctxSet={} g1ctx={} fullCtx={} val={} range={} byte={}",
+                    g1_count,
+                    ctx_set,
+                    greater1_ctx,
+                    full_ctx,
+                    if g1 { 1 } else { 0 },
+                    range,
+                    byte_pos
+                );
             }
             last_greater1_flag = g1;
 
@@ -517,7 +578,13 @@ pub fn decode_residual(
             if rc_trace {
                 let (range, _, _) = cabac.get_state_extended();
                 let (byte_pos, _, _) = cabac.get_position();
-                rc_eprintln!("{rcp}_G2 ctxSet={} val={} range={} byte={}", ctx_set, if g2 {1} else {0}, range, byte_pos);
+                rc_eprintln!(
+                    "{rcp}_G2 ctxSet={} val={} range={} byte={}",
+                    ctx_set,
+                    if g2 { 1 } else { 0 },
+                    range,
+                    byte_pos
+                );
             }
             if g2 {
                 coeff_values[g1_idx as usize] = 3;
@@ -584,8 +651,14 @@ pub fn decode_residual(
         if rc_trace {
             let (range, _, _) = cabac.get_state_extended();
             let (byte_pos, _, _) = cabac.get_position();
-            rc_eprintln!("{rcp}_SIGNS n_sig={} hidden={} signs={:?} range={} byte={}",
-                n_sig, sign_hidden, &coeff_signs[..n_sig], range, byte_pos);
+            rc_eprintln!(
+                "{rcp}_SIGNS n_sig={} hidden={} signs={:?} range={} byte={}",
+                n_sig,
+                sign_hidden,
+                &coeff_signs[..n_sig],
+                range,
+                byte_pos
+            );
         }
 
         // Decode remaining levels for all coefficients that need it
@@ -601,8 +674,16 @@ pub fn decode_residual(
                 if rc_trace {
                     let (range, _, _) = cabac.get_state_extended();
                     let (byte_pos, _, _) = cabac.get_position();
-                    rc_eprintln!("{rcp}_REM n={} base={} rice={} rem={} final={} range={} byte={}",
-                        n, base, rice_param, remaining, base + remaining, range, byte_pos);
+                    rc_eprintln!(
+                        "{rcp}_REM n={} base={} rice={} rem={} final={} range={} byte={}",
+                        n,
+                        base,
+                        rice_param,
+                        remaining,
+                        base + remaining,
+                        range,
+                        byte_pos
+                    );
                 }
                 rice_param = new_rice;
                 coeff_values[n as usize] = base + remaining;
@@ -689,17 +770,70 @@ fn get_scan_sub_block(log2_size: u8, order: ScanOrder) -> &'static [(u8, u8)] {
     ];
     // Per libde265 init_scan_d(blkSize=8): verified against C++ trace
     static SCAN_8X8_DIAG: [(u8, u8); 64] = [
-        (0, 0), (0, 1), (1, 0), (0, 2), (1, 1), (2, 0),
-        (0, 3), (1, 2), (2, 1), (3, 0), (0, 4), (1, 3),
-        (2, 2), (3, 1), (4, 0), (0, 5), (1, 4), (2, 3),
-        (3, 2), (4, 1), (5, 0), (0, 6), (1, 5), (2, 4),
-        (3, 3), (4, 2), (5, 1), (6, 0), (0, 7), (1, 6),
-        (2, 5), (3, 4), (4, 3), (5, 2), (6, 1), (7, 0),
-        (1, 7), (2, 6), (3, 5), (4, 4), (5, 3), (6, 2),
-        (7, 1), (2, 7), (3, 6), (4, 5), (5, 4), (6, 3),
-        (7, 2), (3, 7), (4, 6), (5, 5), (6, 4), (7, 3),
-        (4, 7), (5, 6), (6, 5), (7, 4), (5, 7), (6, 6),
-        (7, 5), (6, 7), (7, 6), (7, 7),
+        (0, 0),
+        (0, 1),
+        (1, 0),
+        (0, 2),
+        (1, 1),
+        (2, 0),
+        (0, 3),
+        (1, 2),
+        (2, 1),
+        (3, 0),
+        (0, 4),
+        (1, 3),
+        (2, 2),
+        (3, 1),
+        (4, 0),
+        (0, 5),
+        (1, 4),
+        (2, 3),
+        (3, 2),
+        (4, 1),
+        (5, 0),
+        (0, 6),
+        (1, 5),
+        (2, 4),
+        (3, 3),
+        (4, 2),
+        (5, 1),
+        (6, 0),
+        (0, 7),
+        (1, 6),
+        (2, 5),
+        (3, 4),
+        (4, 3),
+        (5, 2),
+        (6, 1),
+        (7, 0),
+        (1, 7),
+        (2, 6),
+        (3, 5),
+        (4, 4),
+        (5, 3),
+        (6, 2),
+        (7, 1),
+        (2, 7),
+        (3, 6),
+        (4, 5),
+        (5, 4),
+        (6, 3),
+        (7, 2),
+        (3, 7),
+        (4, 6),
+        (5, 5),
+        (6, 4),
+        (7, 3),
+        (4, 7),
+        (5, 6),
+        (6, 5),
+        (7, 4),
+        (5, 7),
+        (6, 6),
+        (7, 5),
+        (6, 7),
+        (7, 6),
+        (7, 7),
     ];
 
     match log2_size {
