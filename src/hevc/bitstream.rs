@@ -263,6 +263,11 @@ pub fn parse_length_prefixed_ext(data: &[u8], length_size: usize) -> Result<Vec<
         let nal_len = match length_size {
             1 => data[i] as usize,
             2 => u16::from_be_bytes([data[i], data[i + 1]]) as usize,
+            3 => {
+                ((data[i] as usize) << 16)
+                    | ((data[i + 1] as usize) << 8)
+                    | (data[i + 2] as usize)
+            }
             4 => u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]) as usize,
             _ => return Err(HevcError::InvalidBitstream("unsupported length size")),
         };
