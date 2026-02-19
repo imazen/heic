@@ -56,6 +56,8 @@ impl FourCC {
     pub const AUXL: Self = Self(*b"auxl");
     /// Image mirror property
     pub const IMIR: Self = Self(*b"imir");
+    /// Thumbnail reference
+    pub const THMB: Self = Self(*b"thmb");
 
     /// Create from bytes
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {

@@ -426,3 +426,47 @@ fn test_extract_xmp() {
         println!("No XMP found (expected for some files)");
     }
 }
+
+#[test]
+fn test_decode_thumbnail() {
+    let data = std::fs::read(EXAMPLE_HEIC).expect("read");
+    let decoder = DecoderConfig::new();
+    let thumb = decoder
+        .decode_thumbnail(&data, heic_decoder::PixelLayout::Rgb8)
+        .expect("decode_thumbnail");
+    let thumb = thumb.expect("example.heic should have a thumbnail");
+    // Thumbnail should be 320x212 per the container dump
+    assert_eq!(thumb.width, 320);
+    assert_eq!(thumb.height, 212);
+    assert_eq!(thumb.data.len(), 320 * 212 * 3);
+    println!(
+        "Thumbnail: {}x{}, {} bytes",
+        thumb.width,
+        thumb.height,
+        thumb.data.len()
+    );
+}
+
+#[test]
+fn test_image_info_has_thumbnail() {
+    let data = std::fs::read(EXAMPLE_HEIC).expect("read");
+    let info = heic_decoder::ImageInfo::from_bytes(&data).expect("probe");
+    assert!(info.has_thumbnail, "example.heic should report has_thumbnail=true");
+}
+
+#[test]
+fn test_decode_thumbnail_none() {
+    // Nokia test files typically don't have thumbnails
+    let nokia_path = "/home/lilith/work/heic/test-images/nokia/C001.heic";
+    if let Ok(data) = std::fs::read(nokia_path) {
+        let decoder = DecoderConfig::new();
+        let thumb = decoder
+            .decode_thumbnail(&data, heic_decoder::PixelLayout::Rgb8)
+            .expect("decode_thumbnail");
+        if thumb.is_none() {
+            println!("C001.heic has no thumbnail (expected)");
+        } else {
+            println!("C001.heic has a thumbnail (unexpected but OK)");
+        }
+    }
+}

@@ -66,6 +66,13 @@ let frame = DecoderConfig::new().decode_to_frame(&data)?;
 
 // HDR gain map
 let gainmap = DecoderConfig::new().decode_gain_map(&data)?;
+
+// EXIF/XMP extraction (zero-copy from input buffer)
+let exif: Option<&[u8]> = DecoderConfig::new().extract_exif(&data)?;
+let xmp: Option<&[u8]> = DecoderConfig::new().extract_xmp(&data)?;
+
+// Thumbnail decode (smaller embedded preview image)
+let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, PixelLayout::Rgb8)?;
 ```
 
 ### Key Types
@@ -74,7 +81,7 @@ let gainmap = DecoderConfig::new().decode_gain_map(&data)?;
 - `DecodeOutput` — decoded pixels (data + width + height + layout)
 - `PixelLayout` — Rgb8, Rgba8, Bgr8, Bgra8
 - `Limits` — max_width, max_height, max_pixels, max_memory_bytes
-- `ImageInfo` — probe result (width, height, has_alpha, bit_depth, chroma_format)
+- `ImageInfo` — probe result (width, height, has_alpha, bit_depth, chroma_format, has_exif, has_xmp, has_thumbnail)
 - `enough::Stop` — cooperative cancellation (re-exported)
 
 ### Dependencies
@@ -131,6 +138,11 @@ let gainmap = DecoderConfig::new().decode_gain_map(&data)?;
 - Hardened parser: checked arithmetic throughout, 16M fuzz runs clean
 - cargo-fuzz targets: decode, decode_limits, probe
 - whereat error location tracking (At<HeicError> Result type)
+- EXIF extraction (zero-copy, strips 4-byte HEIF prefix, returns raw TIFF)
+- XMP extraction (zero-copy, returns raw XML from mime items)
+- ImageInfo::from_bytes grid/iden/iovl probing (reads ispe + first tile hvcC)
+- Thumbnail decode support (thmb references, decode_thumbnail API)
+- Zero compiler warnings (clippy clean, all doc comments present)
 
 ### Current Quality (RGB comparison vs libheif)
 - 103/162 test files decode successfully

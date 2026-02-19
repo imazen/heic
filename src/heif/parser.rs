@@ -252,6 +252,20 @@ impl<'a> HeifContainer<'a> {
             .flat_map(|r| r.to_item_ids.iter().copied())
             .collect()
     }
+
+    /// Find thumbnail items for a given target item.
+    ///
+    /// Returns item IDs of thumbnails linked via `thmb` references.
+    /// `thmb` references point FROM the thumbnail TO the target item.
+    pub fn find_thumbnails(&self, target_item_id: u32) -> Vec<u32> {
+        self.item_references
+            .iter()
+            .filter(|r| {
+                r.reference_type == FourCC::THMB && r.to_item_ids.contains(&target_item_id)
+            })
+            .map(|r| r.from_item_id)
+            .collect()
+    }
 }
 
 /// Parse a HEIF container

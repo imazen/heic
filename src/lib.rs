@@ -182,6 +182,8 @@ pub struct ImageInfo {
     pub has_exif: bool,
     /// Whether the file contains XMP metadata
     pub has_xmp: bool,
+    /// Whether the file contains a thumbnail image
+    pub has_thumbnail: bool,
 }
 
 impl ImageInfo {
@@ -239,6 +241,7 @@ impl ImageInfo {
             i.item_type == FourCC(*b"mime")
                 && (i.content_type.contains("xmp") || i.content_type.contains("rdf+xml"))
         });
+        let has_thumbnail = !container.find_thumbnails(primary_item.id).is_empty();
 
         // Try to get info from HEVC config (fast path for direct HEVC items)
         if let Some(ref config) = primary_item.hevc_config
@@ -254,6 +257,7 @@ impl ImageInfo {
                 chroma_format,
                 has_exif,
                 has_xmp,
+                has_thumbnail,
             });
         }
 
@@ -284,6 +288,7 @@ impl ImageInfo {
                 chroma_format,
                 has_exif,
                 has_xmp,
+                has_thumbnail,
             });
         }
 
@@ -303,6 +308,7 @@ impl ImageInfo {
             chroma_format: 1,
             has_exif,
             has_xmp,
+            has_thumbnail,
         })
     }
 
@@ -488,6 +494,19 @@ impl DecoderConfig {
     pub fn extract_xmp<'a>(&self, data: &'a [u8]) -> Result<Option<&'a [u8]>> {
         extract_xmp_inner(data)
     }
+
+    /// Decode the thumbnail image from a HEIC file.
+    ///
+    /// Returns the decoded thumbnail as a `DecodeOutput` in the requested layout,
+    /// or `None` if no thumbnail is present. Thumbnails are typically much smaller
+    /// than the primary image (e.g. 320x212 for a 1280x854 primary).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HEIF container is malformed or thumbnail decoding fails.
+    pub fn decode_thumbnail(&self, data: &[u8], layout: PixelLayout) -> Result<Option<DecodeOutput>> {
+        decode_thumbnail_inner(data, layout)
+    }
 }
 
 /// A decode request binding data, output format, limits, and cancellation.
@@ -624,6 +643,7 @@ impl<'a> DecodeRequest<'a> {
             chroma_format: frame.chroma_format,
             has_exif: false, // Use ImageInfo::from_bytes() for metadata probing
             has_xmp: false,
+            has_thumbnail: false,
         })
     }
 
@@ -1386,6 +1406,41 @@ fn extract_exif_inner(data: &[u8]) -> Result<Option<&[u8]>> {
     }
 
     Ok(None)
+}
+
+/// Internal: decode thumbnail image from HEIC container
+fn decode_thumbnail_inner(data: &[u8], layout: PixelLayout) -> Result<Option<DecodeOutput>> {
+    let container = heif::parse(data)?;
+    let primary_item = container.primary_item().ok_or(HeicError::NoPrimaryImage)?;
+
+    let thumb_ids = container.find_thumbnails(primary_item.id);
+    let Some(&thumb_id) = thumb_ids.first() else {
+        return Ok(None);
+    };
+
+    let thumb_item = container
+        .get_item(thumb_id)
+        .ok_or(HeicError::InvalidData("Thumbnail item not found"))?;
+
+    let stop: &dyn Stop = &Unstoppable;
+    let frame = decode_item(&container, &thumb_item, 0, &NO_LIMITS, stop)?;
+
+    let width = frame.cropped_width();
+    let height = frame.cropped_height();
+
+    let pixels = match layout {
+        PixelLayout::Rgb8 => frame.to_rgb(),
+        PixelLayout::Rgba8 => frame.to_rgba(),
+        PixelLayout::Bgr8 => frame.to_bgr(),
+        PixelLayout::Bgra8 => frame.to_bgra(),
+    };
+
+    Ok(Some(DecodeOutput {
+        data: pixels,
+        width,
+        height,
+        layout,
+    }))
 }
 
 /// Internal: extract XMP XML data from HEIC container
