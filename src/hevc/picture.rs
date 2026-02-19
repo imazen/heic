@@ -388,4 +388,224 @@ impl DecodedFrame {
             128 << (self.bit_depth - 8)
         }
     }
+
+    /// Get chroma plane dimensions (width, height)
+    fn chroma_dims(&self) -> (u32, u32) {
+        match self.chroma_format {
+            0 => (0, 0),
+            1 => (self.width.div_ceil(2), self.height.div_ceil(2)),
+            2 => (self.width.div_ceil(2), self.height),
+            3 => (self.width, self.height),
+            _ => (self.width.div_ceil(2), self.height.div_ceil(2)),
+        }
+    }
+
+    /// Rotate the frame 90° clockwise, returning a new frame
+    pub fn rotate_90_cw(&self) -> Self {
+        let ow = self.width;
+        let oh = self.height;
+        let nw = oh;
+        let nh = ow;
+
+        // Rotate luma: dst(dx, dy) = src(dy, oh-1-dx)
+        let mut y_plane = vec![0u16; (nw * nh) as usize];
+        for dy in 0..nh {
+            for dx in 0..nw {
+                y_plane[(dy * nw + dx) as usize] =
+                    self.y_plane[((oh - 1 - dx) * ow + dy) as usize];
+            }
+        }
+
+        // Rotate chroma planes
+        let (ocw, och) = self.chroma_dims();
+        if ocw > 0 && och > 0 {
+            let ncw = och;
+            let nch = ocw;
+            let csz = (ncw * nch) as usize;
+            let mut cb_plane = vec![0u16; csz];
+            let mut cr_plane = vec![0u16; csz];
+            for dy in 0..nch {
+                for dx in 0..ncw {
+                    let si = (och - 1 - dx) as usize * ocw as usize + dy as usize;
+                    let di = dy as usize * ncw as usize + dx as usize;
+                    if si < self.cb_plane.len() {
+                        cb_plane[di] = self.cb_plane[si];
+                        cr_plane[di] = self.cr_plane[si];
+                    }
+                }
+            }
+
+            Self {
+                width: nw,
+                height: nh,
+                y_plane,
+                cb_plane,
+                cr_plane,
+                bit_depth: self.bit_depth,
+                chroma_format: self.chroma_format,
+                crop_left: self.crop_bottom,
+                crop_right: self.crop_top,
+                crop_top: self.crop_left,
+                crop_bottom: self.crop_right,
+                deblock_flags: Vec::new(),
+                deblock_stride: 0,
+                qp_map: Vec::new(),
+            }
+        } else {
+            Self {
+                width: nw,
+                height: nh,
+                y_plane,
+                cb_plane: Vec::new(),
+                cr_plane: Vec::new(),
+                bit_depth: self.bit_depth,
+                chroma_format: self.chroma_format,
+                crop_left: self.crop_bottom,
+                crop_right: self.crop_top,
+                crop_top: self.crop_left,
+                crop_bottom: self.crop_right,
+                deblock_flags: Vec::new(),
+                deblock_stride: 0,
+                qp_map: Vec::new(),
+            }
+        }
+    }
+
+    /// Rotate the frame 180°, returning a new frame
+    pub fn rotate_180(&self) -> Self {
+        let w = self.width;
+        let h = self.height;
+
+        // Rotate luma: dst(dx, dy) = src(w-1-dx, h-1-dy)
+        let mut y_plane = vec![0u16; (w * h) as usize];
+        for dy in 0..h {
+            for dx in 0..w {
+                y_plane[(dy * w + dx) as usize] =
+                    self.y_plane[((h - 1 - dy) * w + (w - 1 - dx)) as usize];
+            }
+        }
+
+        // Rotate chroma planes
+        let (cw, ch) = self.chroma_dims();
+        if cw > 0 && ch > 0 {
+            let csz = (cw * ch) as usize;
+            let mut cb_plane = vec![0u16; csz];
+            let mut cr_plane = vec![0u16; csz];
+            for dy in 0..ch {
+                for dx in 0..cw {
+                    let si = (ch - 1 - dy) as usize * cw as usize + (cw - 1 - dx) as usize;
+                    let di = dy as usize * cw as usize + dx as usize;
+                    if si < self.cb_plane.len() {
+                        cb_plane[di] = self.cb_plane[si];
+                        cr_plane[di] = self.cr_plane[si];
+                    }
+                }
+            }
+
+            Self {
+                width: w,
+                height: h,
+                y_plane,
+                cb_plane,
+                cr_plane,
+                bit_depth: self.bit_depth,
+                chroma_format: self.chroma_format,
+                crop_left: self.crop_right,
+                crop_right: self.crop_left,
+                crop_top: self.crop_bottom,
+                crop_bottom: self.crop_top,
+                deblock_flags: Vec::new(),
+                deblock_stride: 0,
+                qp_map: Vec::new(),
+            }
+        } else {
+            Self {
+                width: w,
+                height: h,
+                y_plane,
+                cb_plane: Vec::new(),
+                cr_plane: Vec::new(),
+                bit_depth: self.bit_depth,
+                chroma_format: self.chroma_format,
+                crop_left: self.crop_right,
+                crop_right: self.crop_left,
+                crop_top: self.crop_bottom,
+                crop_bottom: self.crop_top,
+                deblock_flags: Vec::new(),
+                deblock_stride: 0,
+                qp_map: Vec::new(),
+            }
+        }
+    }
+
+    /// Rotate the frame 270° clockwise (= 90° counter-clockwise), returning a new frame
+    pub fn rotate_270_cw(&self) -> Self {
+        let ow = self.width;
+        let oh = self.height;
+        let nw = oh;
+        let nh = ow;
+
+        // Rotate luma: dst(dx, dy) = src(ow-1-dy, dx)
+        let mut y_plane = vec![0u16; (nw * nh) as usize];
+        for dy in 0..nh {
+            for dx in 0..nw {
+                y_plane[(dy * nw + dx) as usize] =
+                    self.y_plane[(dx * ow + (ow - 1 - dy)) as usize];
+            }
+        }
+
+        // Rotate chroma planes
+        let (ocw, och) = self.chroma_dims();
+        if ocw > 0 && och > 0 {
+            let ncw = och;
+            let nch = ocw;
+            let csz = (ncw * nch) as usize;
+            let mut cb_plane = vec![0u16; csz];
+            let mut cr_plane = vec![0u16; csz];
+            for dy in 0..nch {
+                for dx in 0..ncw {
+                    let si = dx as usize * ocw as usize + (ocw - 1 - dy) as usize;
+                    let di = dy as usize * ncw as usize + dx as usize;
+                    if si < self.cb_plane.len() {
+                        cb_plane[di] = self.cb_plane[si];
+                        cr_plane[di] = self.cr_plane[si];
+                    }
+                }
+            }
+
+            Self {
+                width: nw,
+                height: nh,
+                y_plane,
+                cb_plane,
+                cr_plane,
+                bit_depth: self.bit_depth,
+                chroma_format: self.chroma_format,
+                crop_left: self.crop_top,
+                crop_right: self.crop_bottom,
+                crop_top: self.crop_right,
+                crop_bottom: self.crop_left,
+                deblock_flags: Vec::new(),
+                deblock_stride: 0,
+                qp_map: Vec::new(),
+            }
+        } else {
+            Self {
+                width: nw,
+                height: nh,
+                y_plane,
+                cb_plane: Vec::new(),
+                cr_plane: Vec::new(),
+                bit_depth: self.bit_depth,
+                chroma_format: self.chroma_format,
+                crop_left: self.crop_top,
+                crop_right: self.crop_bottom,
+                crop_top: self.crop_right,
+                crop_bottom: self.crop_left,
+                deblock_flags: Vec::new(),
+                deblock_stride: 0,
+                qp_map: Vec::new(),
+            }
+        }
+    }
 }

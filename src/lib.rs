@@ -115,6 +115,16 @@ impl HeicDecoder {
             apply_clean_aperture(&mut frame, &clap);
         }
 
+        // Apply image rotation (irot box) if present
+        if let Some(rotation) = primary_item.rotation {
+            frame = match rotation.angle {
+                90 => frame.rotate_90_cw(),
+                180 => frame.rotate_180(),
+                270 => frame.rotate_270_cw(),
+                _ => frame,
+            };
+        }
+
         Ok(frame)
     }
 
