@@ -202,20 +202,22 @@ impl<'a> HeifContainer<'a> {
         // Single extent: return slice directly (avoids allocation)
         if loc.extents.len() == 1 {
             let (offset, length) = loc.extents[0];
-            let offset = (loc.base_offset + offset) as usize;
-            let length = length as usize;
-            if offset + length <= source.len() {
-                return Some(&source[offset..offset + length]);
+            let offset = usize::try_from(loc.base_offset.checked_add(offset)?).ok()?;
+            let length = usize::try_from(length).ok()?;
+            let end = offset.checked_add(length)?;
+            if end <= source.len() {
+                return Some(&source[offset..end]);
             }
             return None;
         }
 
         // Multiple extents: not common for items we handle, return first for now
         let (offset, length) = loc.extents[0];
-        let offset = (loc.base_offset + offset) as usize;
-        let length = length as usize;
-        if offset + length <= source.len() {
-            Some(&source[offset..offset + length])
+        let offset = usize::try_from(loc.base_offset.checked_add(offset)?).ok()?;
+        let length = usize::try_from(length).ok()?;
+        let end = offset.checked_add(length)?;
+        if end <= source.len() {
+            Some(&source[offset..end])
         } else {
             None
         }
