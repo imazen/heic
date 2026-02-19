@@ -361,6 +361,38 @@ impl DecoderConfig {
         decode_to_frame_inner(data, None, &Unstoppable)
     }
 
+    /// Estimate the peak memory usage for decoding an image of given dimensions.
+    ///
+    /// Returns the estimated byte count including:
+    /// - YCbCr frame planes (Y + Cb + Cr at 4:2:0)
+    /// - Output pixel buffer at the requested layout
+    /// - Deblocking metadata
+    ///
+    /// This is a conservative upper bound. Actual usage may be lower if the
+    /// image uses monochrome or if tiles are decoded sequentially.
+    #[must_use]
+    pub fn estimate_memory(width: u32, height: u32, layout: PixelLayout) -> u64 {
+        let w = u64::from(width);
+        let h = u64::from(height);
+        let pixels = w * h;
+
+        // YCbCr planes (u16 per sample)
+        let luma_bytes = pixels * 2;
+        let chroma_w = (w + 1) / 2;
+        let chroma_h = (h + 1) / 2;
+        let chroma_bytes = chroma_w * chroma_h * 2 * 2; // Cb + Cr
+
+        // Output pixel buffer
+        let output_bytes = pixels * layout.bytes_per_pixel() as u64;
+
+        // Deblocking metadata (flags + QP map at 4x4 granularity)
+        let blocks_w = (w + 3) / 4;
+        let blocks_h = (h + 3) / 4;
+        let deblock_bytes = blocks_w * blocks_h * 2; // flags(u8) + qp(i8)
+
+        luma_bytes + chroma_bytes + output_bytes + deblock_bytes
+    }
+
     /// Decode the HDR gain map from an Apple HDR HEIC file.
     ///
     /// Returns the raw gain map pixel data normalized to 0.0-1.0.
@@ -571,6 +603,9 @@ fn decode_to_frame_inner(
     // Check limits on primary item dimensions if available from ispe
     if let Some((w, h)) = primary_item.dimensions {
         limits.check_dimensions(w, h)?;
+        // Estimate memory before allocating frames
+        let estimated = DecoderConfig::estimate_memory(w, h, PixelLayout::Rgba8);
+        limits.check_memory(estimated)?;
     }
 
     stop.check()?;
