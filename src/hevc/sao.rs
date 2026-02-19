@@ -70,11 +70,41 @@ pub fn apply_sao(frame: &mut DecodedFrame, sao_map: &SaoMap, ctb_size: u32) {
     let height = frame.height;
     let bit_depth = frame.bit_depth;
 
-    // SAO edge offset reads neighbor pixels that may also be modified.
-    // To avoid data dependency, clone the planes and read from clones.
-    let orig_y = frame.y_plane.clone();
-    let orig_cb = frame.cb_plane.clone();
-    let orig_cr = frame.cr_plane.clone();
+    // Only clone planes that have edge offset (type 2), since edge offset
+    // reads neighbors that may be modified. Band offset (type 1) is in-place.
+    let mut need_y_clone = false;
+    let mut need_cb_clone = false;
+    let mut need_cr_clone = false;
+    for sao in &sao_map.data {
+        if sao.sao_type_idx[0] == 2 {
+            need_y_clone = true;
+        }
+        if sao.sao_type_idx[1] == 2 {
+            need_cb_clone = true;
+        }
+        if sao.sao_type_idx[2] == 2 {
+            need_cr_clone = true;
+        }
+        if need_y_clone && need_cb_clone && need_cr_clone {
+            break;
+        }
+    }
+
+    let orig_y = if need_y_clone {
+        frame.y_plane.clone()
+    } else {
+        Vec::new()
+    };
+    let orig_cb = if need_cb_clone {
+        frame.cb_plane.clone()
+    } else {
+        Vec::new()
+    };
+    let orig_cr = if need_cr_clone {
+        frame.cr_plane.clone()
+    } else {
+        Vec::new()
+    };
 
     let y_stride = frame.y_stride();
     let c_stride = frame.c_stride();
@@ -94,25 +124,41 @@ pub fn apply_sao(frame: &mut DecodedFrame, sao_map: &SaoMap, ctb_size: u32) {
             let ctb_y_px = ctb_y * ctb_size;
 
             // Luma
-            if sao.sao_type_idx[0] != 0 {
-                let x_end = (ctb_x_px + ctb_size).min(width);
-                let y_end = (ctb_y_px + ctb_size).min(height);
-                apply_sao_component(
-                    &orig_y,
-                    &mut frame.y_plane,
-                    y_stride as u32,
-                    width,
-                    height,
-                    ctb_x_px,
-                    ctb_y_px,
-                    x_end,
-                    y_end,
-                    sao.sao_type_idx[0],
-                    sao.sao_eo_class[0],
-                    sao.sao_band_position[0],
-                    &sao.sao_offset_val[0],
-                    bit_depth,
-                );
+            match sao.sao_type_idx[0] {
+                1 => {
+                    let x_end = (ctb_x_px + ctb_size).min(width);
+                    let y_end = (ctb_y_px + ctb_size).min(height);
+                    apply_sao_band_inplace(
+                        &mut frame.y_plane,
+                        y_stride as u32,
+                        ctb_x_px,
+                        ctb_y_px,
+                        x_end,
+                        y_end,
+                        sao.sao_band_position[0],
+                        &sao.sao_offset_val[0],
+                        bit_depth,
+                    );
+                }
+                2 => {
+                    let x_end = (ctb_x_px + ctb_size).min(width);
+                    let y_end = (ctb_y_px + ctb_size).min(height);
+                    apply_sao_edge(
+                        &orig_y,
+                        &mut frame.y_plane,
+                        y_stride as u32,
+                        width,
+                        height,
+                        ctb_x_px,
+                        ctb_y_px,
+                        x_end,
+                        y_end,
+                        sao.sao_eo_class[0],
+                        &sao.sao_offset_val[0],
+                        bit_depth,
+                    );
+                }
+                _ => {}
             }
 
             // Chroma (4:2:0: halved coordinates)
@@ -125,43 +171,71 @@ pub fn apply_sao(frame: &mut DecodedFrame, sao_map: &SaoMap, ctb_size: u32) {
                 let c_h = height / sub_y;
 
                 // Cb
-                if sao.sao_type_idx[1] != 0 {
-                    apply_sao_component(
-                        &orig_cb,
-                        &mut frame.cb_plane,
-                        c_stride as u32,
-                        c_w,
-                        c_h,
-                        cx_start,
-                        cy_start,
-                        cx_end,
-                        cy_end,
-                        sao.sao_type_idx[1],
-                        sao.sao_eo_class[1],
-                        sao.sao_band_position[1],
-                        &sao.sao_offset_val[1],
-                        bit_depth,
-                    );
+                match sao.sao_type_idx[1] {
+                    1 => {
+                        apply_sao_band_inplace(
+                            &mut frame.cb_plane,
+                            c_stride as u32,
+                            cx_start,
+                            cy_start,
+                            cx_end,
+                            cy_end,
+                            sao.sao_band_position[1],
+                            &sao.sao_offset_val[1],
+                            bit_depth,
+                        );
+                    }
+                    2 => {
+                        apply_sao_edge(
+                            &orig_cb,
+                            &mut frame.cb_plane,
+                            c_stride as u32,
+                            c_w,
+                            c_h,
+                            cx_start,
+                            cy_start,
+                            cx_end,
+                            cy_end,
+                            sao.sao_eo_class[1],
+                            &sao.sao_offset_val[1],
+                            bit_depth,
+                        );
+                    }
+                    _ => {}
                 }
 
                 // Cr
-                if sao.sao_type_idx[2] != 0 {
-                    apply_sao_component(
-                        &orig_cr,
-                        &mut frame.cr_plane,
-                        c_stride as u32,
-                        c_w,
-                        c_h,
-                        cx_start,
-                        cy_start,
-                        cx_end,
-                        cy_end,
-                        sao.sao_type_idx[2],
-                        sao.sao_eo_class[2],
-                        sao.sao_band_position[2],
-                        &sao.sao_offset_val[2],
-                        bit_depth,
-                    );
+                match sao.sao_type_idx[2] {
+                    1 => {
+                        apply_sao_band_inplace(
+                            &mut frame.cr_plane,
+                            c_stride as u32,
+                            cx_start,
+                            cy_start,
+                            cx_end,
+                            cy_end,
+                            sao.sao_band_position[2],
+                            &sao.sao_offset_val[2],
+                            bit_depth,
+                        );
+                    }
+                    2 => {
+                        apply_sao_edge(
+                            &orig_cr,
+                            &mut frame.cr_plane,
+                            c_stride as u32,
+                            c_w,
+                            c_h,
+                            cx_start,
+                            cy_start,
+                            cx_end,
+                            cy_end,
+                            sao.sao_eo_class[2],
+                            &sao.sao_offset_val[2],
+                            bit_depth,
+                        );
+                    }
+                    _ => {}
                 }
             }
         }
@@ -218,9 +292,46 @@ fn apply_sao_edge_pixel(
     }
 }
 
-/// Apply SAO to one component in a rectangular CTB region
+/// Apply SAO band offset in-place (type 1). Reads and writes same buffer.
 #[allow(clippy::too_many_arguments)]
-fn apply_sao_component(
+fn apply_sao_band_inplace(
+    plane: &mut [u16],
+    stride: u32,
+    x_start: u32,
+    y_start: u32,
+    x_end: u32,
+    y_end: u32,
+    band_position: u8,
+    offsets: &[i8; 4],
+    bit_depth: u8,
+) {
+    let max_val = (1i32 << bit_depth) - 1;
+    let band_shift = bit_depth - 5;
+
+    // Build lookup table for the 32 bands
+    let mut band_table = [0i8; 32];
+    for k in 0..4u8 {
+        let band_idx = (band_position + k) & 31;
+        band_table[band_idx as usize] = offsets[k as usize];
+    }
+
+    for y in y_start..y_end {
+        let row = (y * stride) as usize;
+        for x in x_start..x_end {
+            let idx = row + x as usize;
+            let sample = (plane[idx] as i32).min(max_val);
+            let band = (sample >> band_shift) as usize;
+            let offset = band_table[band] as i32;
+            if offset != 0 {
+                plane[idx] = (sample + offset).clamp(0, max_val) as u16;
+            }
+        }
+    }
+}
+
+/// Apply SAO edge offset (type 2). Reads from pre-cloned src, writes to dst.
+#[allow(clippy::too_many_arguments)]
+fn apply_sao_edge(
     src: &[u16],
     dst: &mut [u16],
     stride: u32,
@@ -230,119 +341,79 @@ fn apply_sao_component(
     y_start: u32,
     x_end: u32,
     y_end: u32,
-    sao_type_idx: u8,
     eo_class: u8,
-    band_position: u8,
     offsets: &[i8; 4],
     bit_depth: u8,
 ) {
     let max_val = (1i32 << bit_depth) - 1;
+    let (dx0, dy0, dx1, dy1) = EO_OFFSETS[eo_class as usize & 3];
 
-    match sao_type_idx {
-        1 => {
-            // Band offset
-            let band_shift = bit_depth - 5;
+    let offset_table: [i32; 5] = [
+        offsets[0] as i32,
+        offsets[1] as i32,
+        0,
+        -(offsets[2] as i32),
+        -(offsets[3] as i32),
+    ];
 
-            // Build lookup table for the 32 bands
-            let mut band_table = [0i8; 32];
-            for k in 0..4u8 {
-                let band_idx = (band_position + k) & 31;
-                band_table[band_idx as usize] = offsets[k as usize];
-            }
+    // Compute safe interior bounds where neighbor access never goes out of frame.
+    let safe_x_start = x_start.max((-dx0).max(-dx1).max(0) as u32);
+    let safe_x_end = x_end.min(plane_w - dx0.max(dx1).max(0) as u32);
+    let safe_y_start = y_start.max((-dy0).max(-dy1).max(0) as u32);
+    let safe_y_end = y_end.min(plane_h - dy0.max(dy1).max(0) as u32);
 
-            for y in y_start..y_end {
-                let row = (y * stride) as usize;
-                for x in x_start..x_end {
-                    let idx = row + x as usize;
-                    let sample = (src[idx] as i32).min(max_val);
-                    let band = (sample >> band_shift) as usize;
-                    let offset = band_table[band] as i32;
-                    if offset != 0 {
-                        dst[idx] = (sample + offset).clamp(0, max_val) as u16;
-                    }
-                }
-            }
-        }
-        2 => {
-            // Edge offset
-            let (dx0, dy0, dx1, dy1) = EO_OFFSETS[eo_class as usize & 3];
+    let stride_u = stride as usize;
+    let dx0_u = dx0 as isize;
+    let dy0_s = dy0 as isize * stride_u as isize;
+    let dx1_u = dx1 as isize;
+    let dy1_s = dy1 as isize * stride_u as isize;
 
-            let offset_table: [i32; 5] = [
-                offsets[0] as i32,
-                offsets[1] as i32,
-                0,
-                -(offsets[2] as i32),
-                -(offsets[3] as i32),
-            ];
+    // Interior: no bounds checks needed
+    for y in safe_y_start..safe_y_end {
+        let row = y as usize * stride_u;
+        for x in safe_x_start..safe_x_end {
+            let idx = row + x as usize;
+            let sample = src[idx] as i32;
+            let n0_idx = (idx as isize + dy0_s + dx0_u) as usize;
+            let n1_idx = (idx as isize + dy1_s + dx1_u) as usize;
+            let n0 = src[n0_idx] as i32;
+            let n1 = src[n1_idx] as i32;
 
-            // Compute safe interior bounds where neighbor access never goes out of frame.
-            // This lets us skip the 8-condition bounds check for the vast majority of pixels.
-            let safe_x_start =
-                x_start.max((-dx0).max(-dx1).max(0) as u32);
-            let safe_x_end =
-                x_end.min(plane_w - dx0.max(dx1).max(0) as u32);
-            let safe_y_start =
-                y_start.max((-dy0).max(-dy1).max(0) as u32);
-            let safe_y_end =
-                y_end.min(plane_h - dy0.max(dy1).max(0) as u32);
+            let sign0 = (sample - n0).signum();
+            let sign1 = (sample - n1).signum();
+            let edge_idx = (2 + sign0 + sign1) as usize;
 
-            let stride_u = stride as usize;
-            let dx0_u = dx0 as isize;
-            let dy0_s = dy0 as isize * stride_u as isize;
-            let dx1_u = dx1 as isize;
-            let dy1_s = dy1 as isize * stride_u as isize;
-
-            // Interior: no bounds checks needed
-            for y in safe_y_start..safe_y_end {
-                let row = y as usize * stride_u;
-                for x in safe_x_start..safe_x_end {
-                    let idx = row + x as usize;
-                    let sample = src[idx] as i32;
-                    let n0_idx = (idx as isize + dy0_s + dx0_u) as usize;
-                    let n1_idx = (idx as isize + dy1_s + dx1_u) as usize;
-                    let n0 = src[n0_idx] as i32;
-                    let n1 = src[n1_idx] as i32;
-
-                    let sign0 = (sample - n0).signum();
-                    let sign1 = (sample - n1).signum();
-                    let edge_idx = (2 + sign0 + sign1) as usize;
-
-                    let offset = offset_table[edge_idx];
-                    if offset != 0 {
-                        dst[idx] = (sample + offset).clamp(0, max_val) as u16;
-                    }
-                }
-            }
-
-            // Border rows/columns: with bounds checks
-            for y in y_start..y_end {
-                if y >= safe_y_start && y < safe_y_end {
-                    // Only process left/right border columns in safe rows
-                    let row = y as usize * stride_u;
-                    for x in x_start..safe_x_start.min(x_end) {
-                        apply_sao_edge_pixel(
-                            src, dst, row, x, dx0, dy0, dx1, dy1, stride, plane_w, plane_h,
-                            max_val, &offset_table,
-                        );
-                    }
-                    for x in safe_x_end.max(x_start)..x_end {
-                        apply_sao_edge_pixel(
-                            src, dst, row, x, dx0, dy0, dx1, dy1, stride, plane_w, plane_h,
-                            max_val, &offset_table,
-                        );
-                    }
-                } else {
-                    // Full row with bounds checks
-                    let row = y as usize * stride_u;
-                    for x in x_start..x_end {
-                        apply_sao_edge_pixel(
-                            src, dst, row, x, dx0, dy0, dx1, dy1, stride, plane_w, plane_h,
-                            max_val, &offset_table,
-                        );
-                    }
-                }
+            let offset = offset_table[edge_idx];
+            if offset != 0 {
+                dst[idx] = (sample + offset).clamp(0, max_val) as u16;
             }
         }
-        _ => {}
+    }
+
+    // Border rows/columns: with bounds checks
+    for y in y_start..y_end {
+        if y >= safe_y_start && y < safe_y_end {
+            let row = y as usize * stride_u;
+            for x in x_start..safe_x_start.min(x_end) {
+                apply_sao_edge_pixel(
+                    src, dst, row, x, dx0, dy0, dx1, dy1, stride, plane_w, plane_h,
+                    max_val, &offset_table,
+                );
+            }
+            for x in safe_x_end.max(x_start)..x_end {
+                apply_sao_edge_pixel(
+                    src, dst, row, x, dx0, dy0, dx1, dy1, stride, plane_w, plane_h,
+                    max_val, &offset_table,
+                );
+            }
+        } else {
+            let row = y as usize * stride_u;
+            for x in x_start..x_end {
+                apply_sao_edge_pixel(
+                    src, dst, row, x, dx0, dy0, dx1, dy1, stride, plane_w, plane_h,
+                    max_val, &offset_table,
+                );
+            }
+        }
     }
 }
