@@ -145,6 +145,7 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 - Zero compiler warnings (clippy clean, all doc comments present)
 - Criterion benchmarks (63ms RGB, 1.3µs probe, 4.4µs EXIF, 4.2ms thumbnail)
 - 10-bit HEVC support (u16 planes, transparent downconvert to 8-bit output)
+- SIMD-accelerated color conversion via archmage (AVX2 with scalar fallback)
 
 ### Current Quality (RGB comparison vs libheif)
 - 104/162 test files decode successfully
@@ -162,20 +163,17 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 - overlay_1000x680: 13.1dB — remaining diff from color conversion on fill regions
 - example_q10: 36.1dB RGB — low-QP amplifies color conversion rounding
 
-### Performance (scalar optimizations applied)
+### Performance
 - Release profile: thin LTO + codegen-units=1
-- Callgrind progression: 731M → 653M → 632M → ~717M* for 1280x854 decode
-  (*717M includes to_rgb at 81M counted separately due to inlining change)
+- Callgrind: 645M instructions for 1280x854 decode (progression: 731M → 653M → 717M → 645M)
 - Key optimizations applied:
   - Plane-direct writes, in-place dequant, border fill inlining (731M→653M)
   - Partial butterfly IDCT for 8/16/32 (decode_and_apply_residual -14%)
   - SAO edge interior/border split + lazy plane cloning (SAO -26%)
-  - Color conversion: 4:2:0 specialization, pre-allocated buffer, f32→×8192 fixed-point (to_rgb -38%)
+  - Color conversion: 4:2:0 specialization, ×8192 fixed-point (to_rgb -38%)
   - Row-slice bounds-check elimination in intra prediction and residual add
-- Remaining hotspots: CABAC+residual (32%), intra prediction (14%), color convert (11%)
-
-### Pending
-- SIMD optimization (archmage-based)
+  - SIMD color conversion via archmage AVX2 (81M → 9.2M, -88%)
+- Remaining hotspots: decode_and_apply_residual (35%), predict_intra (16%), CABAC (9%), memcpy/memset (11%)
 
 ## Known Limitations
 
