@@ -133,7 +133,7 @@ pub fn decode_rgba_into(
 ### Known Edge Cases
 - MIAF003 (4:4:4 chroma, RExt profile): 5.7dB — chroma format not fully supported
 - overlay_1000x680: 13.2dB — remaining diff from color conversion on fill regions
-- example_q10: 35.7dB — low-QP rounding amplification (max diff 61)
+- example_q10: 36.0dB RGB — remaining gap from color conversion rounding (YUV: 76.1dB, 128 Y-plane diffs vs dec265)
 
 ### Pending
 - SIMD optimization
