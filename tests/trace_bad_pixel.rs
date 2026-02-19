@@ -3,7 +3,7 @@
 //! This test finds pixels with large RGB differences and traces
 //! backwards through the decoding pipeline to find the source.
 
-use heic_decoder::HeicDecoder;
+use heic_decoder::DecoderConfig;
 use std::path::Path;
 
 const WASM_MODULE: &str = "/home/lilith/work/heic/wasm-module/heic_decoder.wasm";
@@ -112,12 +112,12 @@ fn pixel_to_provenance(x: u32, y: u32, ctb_size: u32, pic_width_ctb: u32) -> Pix
 #[test]
 fn find_first_bad_pixel() {
     let ref_decoder = load_reference_decoder();
-    let our_decoder = HeicDecoder::new();
+    let our_decoder = DecoderConfig::new();
 
     let data = std::fs::read(TEST_IMAGE).expect("Failed to read test file");
 
     let ref_image = ref_decoder.decode(&data).expect("Reference decode failed");
-    let our_image = our_decoder.decode(&data).expect("Our decode failed");
+    let our_image = our_decoder.decode(&data, heic_decoder::PixelLayout::Rgb8).expect("Our decode failed");
 
     assert_eq!(ref_image.width, our_image.width);
     assert_eq!(ref_image.height, our_image.height);
@@ -199,7 +199,7 @@ fn find_first_bad_pixel() {
 /// Examine YCbCr values at the first bad pixel location
 #[test]
 fn examine_ycbcr_at_bad_pixel() {
-    let our_decoder = HeicDecoder::new();
+    let our_decoder = DecoderConfig::new();
 
     let data = std::fs::read(TEST_IMAGE).expect("Failed to read test file");
 
@@ -268,7 +268,7 @@ fn examine_ycbcr_at_bad_pixel() {
 #[test]
 fn compare_y_plane_approximation() {
     let ref_decoder = load_reference_decoder();
-    let our_decoder = HeicDecoder::new();
+    let our_decoder = DecoderConfig::new();
 
     let data = std::fs::read(TEST_IMAGE).expect("Failed to read test file");
 

@@ -21,7 +21,7 @@ fn main() {
         .collect();
     entries.sort_by_key(|e| e.file_name());
 
-    let decoder = heic_decoder::HeicDecoder::new();
+    let decoder = heic_decoder::DecoderConfig::new();
     let mut pass = 0u32;
     let mut fail = 0u32;
 

@@ -253,6 +253,223 @@ impl DecodedFrame {
         rgb
     }
 
+    /// Convert YCbCr to BGRA with conformance window cropping.
+    /// Produces BGRA byte order (blue, green, red, alpha).
+    /// Uses real alpha values from `alpha_plane` if present, otherwise alpha=255.
+    pub fn to_bgra(&self) -> Vec<u8> {
+        let out_width = self.cropped_width();
+        let out_height = self.cropped_height();
+        let mut bgra = Vec::with_capacity((out_width * out_height * 4) as usize);
+        let shift = self.bit_depth - 8;
+
+        let y_start = self.crop_top;
+        let y_end = self.height - self.crop_bottom;
+        let x_start = self.crop_left;
+        let x_end = self.width - self.crop_right;
+
+        let mut pixel_idx = 0usize;
+        for y in y_start..y_end {
+            for x in x_start..x_end {
+                let y_idx = (y * self.width + x) as usize;
+                let y_val = (self.y_plane[y_idx] >> shift) as i32;
+
+                let (cb_val, cr_val) = self.get_chroma(x, y, shift);
+
+                let (r, g, b) = self.ycbcr_to_rgb(y_val, cb_val, cr_val);
+                bgra.push(b);
+                bgra.push(g);
+                bgra.push(r);
+
+                let alpha = if let Some(ref alpha) = self.alpha_plane {
+                    if pixel_idx < alpha.len() {
+                        (alpha[pixel_idx] >> shift).min(255) as u8
+                    } else {
+                        255
+                    }
+                } else {
+                    255
+                };
+                bgra.push(alpha);
+
+                pixel_idx += 1;
+            }
+        }
+
+        bgra
+    }
+
+    /// Convert YCbCr to BGR with conformance window cropping.
+    pub fn to_bgr(&self) -> Vec<u8> {
+        let out_width = self.cropped_width();
+        let out_height = self.cropped_height();
+        let mut bgr = Vec::with_capacity((out_width * out_height * 3) as usize);
+        let shift = self.bit_depth - 8;
+
+        let y_start = self.crop_top;
+        let y_end = self.height - self.crop_bottom;
+        let x_start = self.crop_left;
+        let x_end = self.width - self.crop_right;
+
+        for y in y_start..y_end {
+            for x in x_start..x_end {
+                let y_idx = (y * self.width + x) as usize;
+                let y_val = (self.y_plane[y_idx] >> shift) as i32;
+                let (cb_val, cr_val) = self.get_chroma(x, y, shift);
+
+                let (r, g, b) = self.ycbcr_to_rgb(y_val, cb_val, cr_val);
+                bgr.push(b);
+                bgr.push(g);
+                bgr.push(r);
+            }
+        }
+
+        bgr
+    }
+
+    /// Write pixels into a pre-allocated buffer in RGB format.
+    /// Returns the number of bytes written.
+    pub fn write_rgb_into(&self, output: &mut [u8]) -> usize {
+        let out_width = self.cropped_width();
+        let out_height = self.cropped_height();
+        let shift = self.bit_depth - 8;
+
+        let y_start = self.crop_top;
+        let y_end = self.height - self.crop_bottom;
+        let x_start = self.crop_left;
+        let x_end = self.width - self.crop_right;
+
+        let mut offset = 0;
+        for y in y_start..y_end {
+            for x in x_start..x_end {
+                let y_idx = (y * self.width + x) as usize;
+                let y_val = (self.y_plane[y_idx] >> shift) as i32;
+                let (cb_val, cr_val) = self.get_chroma(x, y, shift);
+                let (r, g, b) = self.ycbcr_to_rgb(y_val, cb_val, cr_val);
+                if offset + 3 <= output.len() {
+                    output[offset] = r;
+                    output[offset + 1] = g;
+                    output[offset + 2] = b;
+                    offset += 3;
+                }
+            }
+        }
+        (out_width * out_height * 3) as usize
+    }
+
+    /// Write pixels into a pre-allocated buffer in RGBA format.
+    /// Returns the number of bytes written.
+    pub fn write_rgba_into(&self, output: &mut [u8]) -> usize {
+        let out_width = self.cropped_width();
+        let out_height = self.cropped_height();
+        let shift = self.bit_depth - 8;
+
+        let y_start = self.crop_top;
+        let y_end = self.height - self.crop_bottom;
+        let x_start = self.crop_left;
+        let x_end = self.width - self.crop_right;
+
+        let mut offset = 0;
+        let mut pixel_idx = 0usize;
+        for y in y_start..y_end {
+            for x in x_start..x_end {
+                let y_idx = (y * self.width + x) as usize;
+                let y_val = (self.y_plane[y_idx] >> shift) as i32;
+                let (cb_val, cr_val) = self.get_chroma(x, y, shift);
+                let (r, g, b) = self.ycbcr_to_rgb(y_val, cb_val, cr_val);
+                let alpha = if let Some(ref alpha) = self.alpha_plane {
+                    if pixel_idx < alpha.len() {
+                        (alpha[pixel_idx] >> shift).min(255) as u8
+                    } else {
+                        255
+                    }
+                } else {
+                    255
+                };
+                if offset + 4 <= output.len() {
+                    output[offset] = r;
+                    output[offset + 1] = g;
+                    output[offset + 2] = b;
+                    output[offset + 3] = alpha;
+                    offset += 4;
+                }
+                pixel_idx += 1;
+            }
+        }
+        (out_width * out_height * 4) as usize
+    }
+
+    /// Write pixels into a pre-allocated buffer in BGRA format.
+    /// Returns the number of bytes written.
+    pub fn write_bgra_into(&self, output: &mut [u8]) -> usize {
+        let out_width = self.cropped_width();
+        let out_height = self.cropped_height();
+        let shift = self.bit_depth - 8;
+
+        let y_start = self.crop_top;
+        let y_end = self.height - self.crop_bottom;
+        let x_start = self.crop_left;
+        let x_end = self.width - self.crop_right;
+
+        let mut offset = 0;
+        let mut pixel_idx = 0usize;
+        for y in y_start..y_end {
+            for x in x_start..x_end {
+                let y_idx = (y * self.width + x) as usize;
+                let y_val = (self.y_plane[y_idx] >> shift) as i32;
+                let (cb_val, cr_val) = self.get_chroma(x, y, shift);
+                let (r, g, b) = self.ycbcr_to_rgb(y_val, cb_val, cr_val);
+                let alpha = if let Some(ref alpha) = self.alpha_plane {
+                    if pixel_idx < alpha.len() {
+                        (alpha[pixel_idx] >> shift).min(255) as u8
+                    } else {
+                        255
+                    }
+                } else {
+                    255
+                };
+                if offset + 4 <= output.len() {
+                    output[offset] = b;
+                    output[offset + 1] = g;
+                    output[offset + 2] = r;
+                    output[offset + 3] = alpha;
+                    offset += 4;
+                }
+                pixel_idx += 1;
+            }
+        }
+        (out_width * out_height * 4) as usize
+    }
+
+    /// Write pixels into a pre-allocated buffer in BGR format.
+    /// Returns the number of bytes written.
+    pub fn write_bgr_into(&self, output: &mut [u8]) -> usize {
+        let out_width = self.cropped_width();
+        let out_height = self.cropped_height();
+        let shift = self.bit_depth - 8;
+
+        let y_start = self.crop_top;
+        let y_end = self.height - self.crop_bottom;
+        let x_start = self.crop_left;
+        let x_end = self.width - self.crop_right;
+
+        let mut offset = 0;
+        for y in y_start..y_end {
+            for x in x_start..x_end {
+                let y_idx = (y * self.width + x) as usize;
+                let y_val = (self.y_plane[y_idx] >> shift) as i32;
+                let (cb_val, cr_val) = self.get_chroma(x, y, shift);
+                let (r, g, b) = self.ycbcr_to_rgb(y_val, cb_val, cr_val);
+                if offset + 3 <= output.len() {
+                    output[offset] = b;
+                    output[offset + 1] = g;
+                    output[offset + 2] = r;
+                    offset += 3;
+                }
+            }
+        }
+        (out_width * out_height * 3) as usize
+    }
+
     /// Convert YCbCr to RGBA with conformance window cropping.
     /// Uses real alpha values from `alpha_plane` if present, otherwise alpha=255.
     pub fn to_rgba(&self) -> Vec<u8> {

@@ -9,7 +9,7 @@ fn main() {
     let ref_path = std::env::args().nth(2).expect("reference YUV file path");
 
     let data = std::fs::read(&input).expect("read input");
-    let decoder = heic_decoder::HeicDecoder::new();
+    let decoder = heic_decoder::DecoderConfig::new();
     let frame = decoder.decode_to_frame(&data).expect("decode HEIC");
 
     // Use cropped dimensions (conformance window applied) to match dec265 output

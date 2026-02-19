@@ -85,13 +85,13 @@ impl PixelStats {
     }
 }
 
-fn compare_pixels(ours: &heic_decoder::DecodedImage, reference: &heic_wasm_rs::DecodedImage) -> Option<PixelStats> {
+fn compare_pixels(ours: &heic_decoder::DecodeOutput, reference: &heic_wasm_rs::DecodedImage) -> Option<PixelStats> {
     if ours.width != reference.width || ours.height != reference.height {
         return None;
     }
 
-    // Both must be same format (RGB vs RGBA)
-    let our_bpp = if ours.has_alpha { 4 } else { 3 };
+    // Determine bytes per pixel from layout / has_alpha
+    let our_bpp = ours.layout.bytes_per_pixel();
     let ref_bpp = if reference.has_alpha { 4 } else { 3 };
 
     // Compare only the common channels (RGB)
@@ -136,7 +136,7 @@ fn main() {
     });
 
     // Load decoders
-    let our_decoder = heic_decoder::HeicDecoder::new();
+    let our_decoder = heic_decoder::DecoderConfig::new();
     let wasm_decoder = heic_wasm_rs::HeicDecoder::from_file(
         std::path::Path::new("/home/lilith/work/heic/wasm-module/heic_decoder.wasm"),
     )
@@ -174,7 +174,7 @@ fn main() {
             Err(_) => continue,
         };
 
-        let our_result = our_decoder.decode(&data);
+        let our_result = our_decoder.decode(&data, heic_decoder::PixelLayout::Rgba8);
         let ref_result = wasm_decoder.decode(&data);
 
         let our_ok = our_result.is_ok();
@@ -187,7 +187,7 @@ fn main() {
                 let reference = ref_result.unwrap();
 
                 let dim_match = ours.width == reference.width && ours.height == reference.height;
-                let alpha_match = ours.has_alpha == reference.has_alpha;
+                let alpha_match = ours.layout.has_alpha() == reference.has_alpha;
 
                 let dim_str = if dim_match {
                     format!("{}x{}", ours.width, ours.height)
@@ -195,7 +195,7 @@ fn main() {
                     format!("{}x{} vs {}x{}", ours.width, ours.height, reference.width, reference.height)
                 };
 
-                let alpha_str = match (ours.has_alpha, reference.has_alpha) {
+                let alpha_str = match (ours.layout.has_alpha(), reference.has_alpha) {
                     (true, true) => "both",
                     (false, false) => "none",
                     (true, false) => "OURS",
@@ -259,7 +259,7 @@ fn main() {
                     "{:65} {:12} {:>6} {:>6}",
                     name, "OURS ONLY",
                     format!("{}x{}", ours.width, ours.height),
-                    if ours.has_alpha { "alpha" } else { "none" }
+                    if ours.layout.has_alpha() { "alpha" } else { "none" }
                 );
             }
             (false, true) => {

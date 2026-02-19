@@ -12,13 +12,9 @@ categories = ["multimedia::images", "multimedia::encoding"]
 [features]
 default = ["std"]
 std = []
-# Unsafe SIMD optimizations for maximum performance
-unsafe-simd = []
 
 [dependencies]
-thiserror = "2.0.18"
-wide = "1.1.1"
-multiversed = { version = "0.1.0", features = ["x86-64-v4", "aarch64-sve2"] }
+enough = "0.3"
 
 [dev-dependencies]
 criterion = "0.6"

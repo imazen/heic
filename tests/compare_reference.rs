@@ -1,7 +1,7 @@
 //! Compare our decoder output against reference (heic-wasm-rs / libheif)
 
 use fast_ssim2::compute_ssimulacra2;
-use heic_decoder::HeicDecoder;
+use heic_decoder::DecoderConfig;
 use imgref::ImgVec;
 use std::path::Path;
 
@@ -39,7 +39,7 @@ fn rgb_to_imgvec(rgb: &[u8], width: u32, height: u32) -> ImgVec<[u8; 3]> {
 fn test_ssim2_against_reference() {
     // Load reference decoder
     let ref_decoder = load_reference_decoder();
-    let our_decoder = HeicDecoder::new();
+    let our_decoder = DecoderConfig::new();
 
     for image_path in TEST_IMAGES {
         if !Path::new(image_path).exists() {
@@ -61,7 +61,7 @@ fn test_ssim2_against_reference() {
         };
 
         // Decode with our decoder
-        let our_result = our_decoder.decode(&data);
+        let our_result = our_decoder.decode(&data, heic_decoder::PixelLayout::Rgb8);
         let our_image = match our_result {
             Ok(img) => img,
             Err(e) => {
@@ -105,7 +105,7 @@ fn test_ssim2_against_reference() {
 #[test]
 fn test_pixel_difference_stats() {
     let ref_decoder = load_reference_decoder();
-    let our_decoder = HeicDecoder::new();
+    let our_decoder = DecoderConfig::new();
 
     for image_path in TEST_IMAGES {
         if !Path::new(image_path).exists() {
@@ -120,7 +120,7 @@ fn test_pixel_difference_stats() {
             Err(_) => continue,
         };
 
-        let our_image = match our_decoder.decode(&data) {
+        let our_image = match our_decoder.decode(&data, heic_decoder::PixelLayout::Rgb8) {
             Ok(img) => img,
             Err(_) => continue,
         };
@@ -175,13 +175,13 @@ fn write_comparison_images() {
     use std::io::Write;
 
     let ref_decoder = load_reference_decoder();
-    let our_decoder = HeicDecoder::new();
+    let our_decoder = DecoderConfig::new();
 
     let image_path = TEST_IMAGES[0];
     let data = std::fs::read(image_path).expect("Failed to read test file");
 
     let ref_image = ref_decoder.decode(&data).expect("Reference decode failed");
-    let our_image = our_decoder.decode(&data).expect("Our decode failed");
+    let our_image = our_decoder.decode(&data, heic_decoder::PixelLayout::Rgb8).expect("Our decode failed");
 
     // Write reference PPM
     let ref_path = "/tmp/reference.ppm";

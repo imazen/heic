@@ -4,7 +4,7 @@ fn main() {
         .unwrap_or_else(|| "/home/lilith/work/heic/libheif/examples/example.heic".to_string());
     let output_path = std::env::args().nth(2);
     let data = std::fs::read(&path).expect("Failed to read test file");
-    let decoder = heic_decoder::HeicDecoder::new();
+    let decoder = heic_decoder::DecoderConfig::new();
     let frame = decoder.decode_to_frame(&data).expect("decode failed");
 
     // Write PPM if output path provided

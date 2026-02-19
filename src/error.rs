@@ -2,6 +2,7 @@
 
 use alloc::string::String;
 use core::fmt;
+use enough::StopReason;
 
 /// Result type for HEIC operations
 pub type Result<T> = core::result::Result<T, HeicError>;
@@ -20,13 +21,17 @@ pub enum HeicError {
     NoPrimaryImage,
     /// HEVC decoding error
     HevcDecode(HevcError),
-    /// Buffer too small
+    /// Buffer too small for decode_into
     BufferTooSmall {
-        /// Required size
+        /// Required buffer size in bytes
         required: usize,
-        /// Actual size
+        /// Actual buffer size provided
         actual: usize,
     },
+    /// A resource limit was exceeded (dimensions, pixel count, or memory)
+    LimitExceeded(&'static str),
+    /// Operation was cancelled via cooperative cancellation
+    Cancelled(StopReason),
 }
 
 impl fmt::Display for HeicError {
@@ -40,13 +45,14 @@ impl fmt::Display for HeicError {
             Self::BufferTooSmall { required, actual } => {
                 write!(f, "buffer too small: need {required}, got {actual}")
             }
+            Self::LimitExceeded(msg) => write!(f, "limit exceeded: {msg}"),
+            Self::Cancelled(reason) => write!(f, "{reason}"),
         }
     }
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for HeicError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl core::error::Error for HeicError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::HevcDecode(e) => Some(e),
             _ => None,
@@ -57,6 +63,12 @@ impl std::error::Error for HeicError {
 impl From<HevcError> for HeicError {
     fn from(e: HevcError) -> Self {
         Self::HevcDecode(e)
+    }
+}
+
+impl From<StopReason> for HeicError {
+    fn from(r: StopReason) -> Self {
+        Self::Cancelled(r)
     }
 }
 
@@ -101,5 +113,35 @@ impl fmt::Display for HevcError {
     }
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for HevcError {}
+impl core::error::Error for HevcError {}
+
+/// Errors from probing image headers
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ProbeError {
+    /// Not enough bytes to parse the header
+    NeedMoreData,
+    /// Data is not a recognized HEIC/HEIF format
+    InvalidFormat,
+    /// Header is present but malformed
+    Corrupt(HeicError),
+}
+
+impl fmt::Display for ProbeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NeedMoreData => write!(f, "not enough data to parse header"),
+            Self::InvalidFormat => write!(f, "not a valid HEIC/HEIF file"),
+            Self::Corrupt(e) => write!(f, "corrupt header: {e}"),
+        }
+    }
+}
+
+impl core::error::Error for ProbeError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Corrupt(e) => Some(e),
+            _ => None,
+        }
+    }
+}
