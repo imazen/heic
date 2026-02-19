@@ -385,6 +385,10 @@ fn parse_iloc(iloc: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
     };
 
     for _ in 0..item_count {
+        let id_size = if version < 2 { 2usize } else { 4 };
+        if pos + id_size > content.len() {
+            break;
+        }
         let item_id = if version < 2 {
             let id = u16::from_be_bytes([content[pos], content[pos + 1]]) as u32;
             pos += 2;
@@ -401,6 +405,9 @@ fn parse_iloc(iloc: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
         };
 
         let construction_method = if version >= 1 {
+            if pos + 2 > content.len() {
+                break;
+            }
             let method = content[pos + 1] & 0xF;
             pos += 2;
             method
@@ -409,10 +416,16 @@ fn parse_iloc(iloc: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
         };
 
         // Data reference index (2 bytes) - skip
+        if pos + 2 > content.len() {
+            break;
+        }
         pos += 2;
 
         let base_offset = read_sized_int(content, &mut pos, base_offset_size as usize);
 
+        if pos + 2 > content.len() {
+            break;
+        }
         let extent_count = u16::from_be_bytes([content[pos], content[pos + 1]]);
         pos += 2;
 
@@ -420,6 +433,9 @@ fn parse_iloc(iloc: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
         for _ in 0..extent_count {
             if version >= 1 && index_size > 0 {
                 // Extent index - skip
+                if pos + index_size as usize > content.len() {
+                    break;
+                }
                 pos += index_size as usize;
             }
 
