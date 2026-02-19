@@ -3,8 +3,14 @@
 //! This module implements the inverse transforms used in HEVC:
 //! - 4x4 Inverse DST (for intra 4x4 luma)
 //! - 4x4, 8x8, 16x16, 32x32 Inverse DCT
+//!
+//! The 8x8 and 16x16 IDCTs dispatch to AVX2 SIMD via `incant!` when available.
 
 // Transform and inverse quantization for HEVC
+use archmage::incant;
+use super::transform_simd::{
+    idct8_scalar, idct8_v3, idct16_scalar, idct16_v3, idct32_scalar, idct32_v3,
+};
 
 /// Maximum number of coefficients (32x32 transform)
 pub const MAX_COEFF: usize = 32 * 32;
@@ -234,8 +240,13 @@ fn idct8_1d(src: [i32; 8], shift: i32) -> [i32; 8] {
     ]
 }
 
-/// Inverse 8x8 DCT using partial butterfly
+/// Inverse 8x8 DCT — dispatches to AVX2 when available, scalar fallback otherwise
 pub fn idct8(coeffs: &[i16; 64], output: &mut [i16; 64], bit_depth: u8) {
+    incant!(idct8(coeffs, output, bit_depth), [v3])
+}
+
+/// Scalar 8x8 IDCT using partial butterfly (called by SIMD scalar fallback)
+pub(crate) fn idct8_inner(coeffs: &[i16; 64], output: &mut [i16; 64], bit_depth: u8) {
     let shift1 = 7i32;
     let shift2 = 20 - bit_depth as i32;
 
@@ -359,8 +370,13 @@ fn idct16_1d(src: [i32; 16], shift: i32) -> [i32; 16] {
     ]
 }
 
-/// Inverse 16x16 DCT using partial butterfly
+/// Inverse 16x16 DCT — dispatches to AVX2 when available, scalar fallback otherwise
 pub fn idct16(coeffs: &[i16; 256], output: &mut [i16; 256], bit_depth: u8) {
+    incant!(idct16(coeffs, output, bit_depth), [v3])
+}
+
+/// Scalar 16x16 IDCT using partial butterfly (called by SIMD scalar fallback)
+pub(crate) fn idct16_inner(coeffs: &[i16; 256], output: &mut [i16; 256], bit_depth: u8) {
     let shift1 = 7i32;
     let shift2 = 20 - bit_depth as i32;
 
@@ -580,8 +596,13 @@ fn idct32_1d(src: [i32; 32], shift: i32) -> [i32; 32] {
     ]
 }
 
-/// Inverse 32x32 DCT using partial butterfly
+/// Inverse 32x32 DCT — dispatches to AVX2 when available, scalar fallback otherwise
 pub fn idct32(coeffs: &[i16; 1024], output: &mut [i16; 1024], bit_depth: u8) {
+    incant!(idct32(coeffs, output, bit_depth), [v3])
+}
+
+/// Scalar 32x32 IDCT using partial butterfly (called by SIMD scalar fallback)
+pub(crate) fn idct32_inner(coeffs: &[i16; 1024], output: &mut [i16; 1024], bit_depth: u8) {
     let shift1 = 7i32;
     let shift2 = 20 - bit_depth as i32;
 
