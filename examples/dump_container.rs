@@ -66,6 +66,9 @@ fn main() {
             ItemProperty::Rotation(rot) => {
                 eprintln!("  [{}]: irot angle={}°", i, rot.angle);
             }
+            ItemProperty::AuxiliaryType(aux_type) => {
+                eprintln!("  [{}]: auxC type={:?}", i, aux_type);
+            }
             ItemProperty::Unknown => {
                 eprintln!("  [{}]: (unknown)", i);
             }
@@ -147,6 +150,38 @@ fn main() {
             eprintln!("  data length: {} bytes", data.len());
         } else {
             eprintln!("  data: NOT FOUND");
+        }
+    }
+
+    // Dump auxiliary images
+    if let Some(ref item) = container.primary_item() {
+        let mut alpha_ids = container.find_auxiliary_items(item.id, "urn:mpeg:hevc:2015:auxid");
+        alpha_ids.extend(container.find_auxiliary_items(item.id, "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha"));
+        if !alpha_ids.is_empty() {
+            eprintln!();
+            eprintln!("=== Alpha Plane ===");
+            for &aid in &alpha_ids {
+                if let Some(aux_item) = container.get_item(aid) {
+                    eprintln!(
+                        "  Item #{}: type={:?} dims={:?} aux_type={:?}",
+                        aid, aux_item.item_type, aux_item.dimensions, aux_item.auxiliary_type
+                    );
+                }
+            }
+        }
+
+        let gainmap_ids = container.find_auxiliary_items(item.id, "urn:com:apple:photo:2020:aux:hdrgainmap");
+        if !gainmap_ids.is_empty() {
+            eprintln!();
+            eprintln!("=== HDR Gain Map ===");
+            for &gid in &gainmap_ids {
+                if let Some(gm_item) = container.get_item(gid) {
+                    eprintln!(
+                        "  Item #{}: type={:?} dims={:?} aux_type={:?}",
+                        gid, gm_item.item_type, gm_item.dimensions, gm_item.auxiliary_type
+                    );
+                }
+            }
         }
     }
 

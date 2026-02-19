@@ -55,6 +55,26 @@ pub struct ImageInfo {
     pub has_alpha: bool,
 }
 
+/// HDR gain map data extracted from an auxiliary image.
+///
+/// The gain map can be used with the Apple HDR formula to reconstruct HDR:
+/// ```text
+/// sdr_linear = sRGB_EOTF(sdr_pixel)
+/// gainmap_linear = sRGB_EOTF(gainmap_pixel)
+/// scale = 1.0 + (headroom - 1.0) * gainmap_linear
+/// hdr_linear = sdr_linear * scale
+/// ```
+/// Where `headroom` comes from EXIF maker notes (tags 0x0021 and 0x0030).
+#[derive(Debug, Clone)]
+pub struct HdrGainMap {
+    /// Gain map pixel data normalized to 0.0-1.0
+    pub data: Vec<f32>,
+    /// Gain map width in pixels
+    pub width: u32,
+    /// Gain map height in pixels
+    pub height: u32,
+}
+
 /// HEIC image decoder
 #[derive(Debug, Default)]
 pub struct HeicDecoder {
@@ -68,7 +88,9 @@ impl HeicDecoder {
         Self { _private: () }
     }
 
-    /// Decode HEIC data to raw pixels
+    /// Decode HEIC data to raw pixels.
+    ///
+    /// Returns RGB data normally, or RGBA data when the image has an alpha plane.
     ///
     /// # Errors
     ///
@@ -77,12 +99,21 @@ impl HeicDecoder {
     pub fn decode(&self, data: &[u8]) -> Result<DecodedImage> {
         let frame = self.decode_to_frame(data)?;
 
-        Ok(DecodedImage {
-            data: frame.to_rgb(),
-            width: frame.cropped_width(),
-            height: frame.cropped_height(),
-            has_alpha: false, // TODO: handle alpha plane
-        })
+        if frame.alpha_plane.is_some() {
+            Ok(DecodedImage {
+                data: frame.to_rgba(),
+                width: frame.cropped_width(),
+                height: frame.cropped_height(),
+                has_alpha: true,
+            })
+        } else {
+            Ok(DecodedImage {
+                data: frame.to_rgb(),
+                width: frame.cropped_width(),
+                height: frame.cropped_height(),
+                has_alpha: false,
+            })
+        }
     }
 
     /// Decode HEIC data to raw YCbCr frame (for debugging)
@@ -107,6 +138,29 @@ impl HeicDecoder {
                 hevc::decode(image_data)?
             }
         };
+
+        // Try to decode alpha plane from auxiliary image.
+        // Two known alpha URIs:
+        //   "urn:mpeg:hevc:2015:auxid:1" — HEVC alpha (older)
+        //   "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha" — MPEG CICP alpha (newer)
+        let alpha_id = container
+            .find_auxiliary_items(primary_item.id, "urn:mpeg:hevc:2015:auxid")
+            .first()
+            .copied()
+            .or_else(|| {
+                container
+                    .find_auxiliary_items(
+                        primary_item.id,
+                        "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha",
+                    )
+                    .first()
+                    .copied()
+            });
+        if let Some(alpha_id) = alpha_id {
+            if let Some(alpha_plane) = self.decode_alpha_plane(&container, alpha_id, &frame) {
+                frame.alpha_plane = Some(alpha_plane);
+            }
+        }
 
         // Apply clean aperture crop (clap box) if present
         // The clap box specifies the true image dimensions within the
@@ -268,6 +322,83 @@ impl HeicDecoder {
         Ok(output)
     }
 
+    /// Decode an auxiliary alpha plane and return it sized to match the primary frame.
+    ///
+    /// Returns the alpha plane as a Vec<u16> with one value per cropped pixel,
+    /// or None if decoding fails.
+    fn decode_alpha_plane(
+        &self,
+        container: &heif::HeifContainer<'_>,
+        alpha_id: u32,
+        primary_frame: &hevc::DecodedFrame,
+    ) -> Option<Vec<u16>> {
+        let alpha_item = container.get_item(alpha_id)?;
+        let alpha_data = container.get_item_data(alpha_id)?;
+        let alpha_config = alpha_item.hevc_config.as_ref()?;
+
+        let alpha_frame = hevc::decode_with_config(alpha_config, alpha_data).ok()?;
+
+        let primary_w = primary_frame.cropped_width();
+        let primary_h = primary_frame.cropped_height();
+        let alpha_w = alpha_frame.cropped_width();
+        let alpha_h = alpha_frame.cropped_height();
+
+        let total_pixels = (primary_w * primary_h) as usize;
+        let mut alpha_plane = Vec::with_capacity(total_pixels);
+
+        if alpha_w == primary_w && alpha_h == primary_h {
+            // Same dimensions — direct copy of Y plane from cropped region
+            let y_start = alpha_frame.crop_top;
+            let x_start = alpha_frame.crop_left;
+            for y in 0..primary_h {
+                for x in 0..primary_w {
+                    let src_idx =
+                        ((y_start + y) * alpha_frame.width + (x_start + x)) as usize;
+                    alpha_plane.push(alpha_frame.y_plane[src_idx]);
+                }
+            }
+        } else {
+            // Different dimensions — bilinear resize
+            for dy in 0..primary_h {
+                for dx in 0..primary_w {
+                    // Map destination pixel to source coordinates
+                    let sx = (dx as f64) * (alpha_w as f64 - 1.0) / (primary_w as f64 - 1.0).max(1.0);
+                    let sy = (dy as f64) * (alpha_h as f64 - 1.0) / (primary_h as f64 - 1.0).max(1.0);
+
+                    let x0 = sx.floor() as u32;
+                    let y0 = sy.floor() as u32;
+                    let x1 = (x0 + 1).min(alpha_w - 1);
+                    let y1 = (y0 + 1).min(alpha_h - 1);
+                    let fx = sx - x0 as f64;
+                    let fy = sy - y0 as f64;
+
+                    let stride = alpha_frame.width;
+                    let off_y = alpha_frame.crop_top;
+                    let off_x = alpha_frame.crop_left;
+
+                    let get = |px: u32, py: u32| -> f64 {
+                        let idx = ((off_y + py) * stride + (off_x + px)) as usize;
+                        alpha_frame.y_plane.get(idx).copied().unwrap_or(0) as f64
+                    };
+
+                    let v00 = get(x0, y0);
+                    let v10 = get(x1, y0);
+                    let v01 = get(x0, y1);
+                    let v11 = get(x1, y1);
+
+                    let val = v00 * (1.0 - fx) * (1.0 - fy)
+                        + v10 * fx * (1.0 - fy)
+                        + v01 * (1.0 - fx) * fy
+                        + v11 * fx * fy;
+
+                    alpha_plane.push(val.round() as u16);
+                }
+            }
+        }
+
+        Some(alpha_plane)
+    }
+
     /// Get image info without full decoding
     ///
     /// # Errors
@@ -278,6 +409,17 @@ impl HeicDecoder {
 
         let primary_item = container.primary_item().ok_or(HeicError::NoPrimaryImage)?;
 
+        // Check for alpha auxiliary image (two known URIs)
+        let has_alpha = !container
+            .find_auxiliary_items(primary_item.id, "urn:mpeg:hevc:2015:auxid")
+            .is_empty()
+            || !container
+                .find_auxiliary_items(
+                    primary_item.id,
+                    "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha",
+                )
+                .is_empty();
+
         // Try to get info from HEVC config first (faster, no mdat access needed)
         if let Some(ref config) = primary_item.hevc_config
             && let Ok(info) = hevc::get_info_from_config(config)
@@ -285,7 +427,7 @@ impl HeicDecoder {
             return Ok(ImageInfo {
                 width: info.width,
                 height: info.height,
-                has_alpha: false,
+                has_alpha,
             });
         }
 
@@ -299,7 +441,64 @@ impl HeicDecoder {
         Ok(ImageInfo {
             width: info.width,
             height: info.height,
-            has_alpha: false,
+            has_alpha,
+        })
+    }
+
+    /// Decode the HDR gain map from an Apple HDR HEIC file.
+    ///
+    /// Returns the raw gain map pixel data normalized to 0.0-1.0.
+    /// The gain map is typically lower resolution than the primary image.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file has no gain map or decoding fails.
+    pub fn decode_gain_map(&self, data: &[u8]) -> Result<HdrGainMap> {
+        let container = heif::parse(data)?;
+        let primary_item = container.primary_item().ok_or(HeicError::NoPrimaryImage)?;
+
+        let gainmap_ids = container.find_auxiliary_items(
+            primary_item.id,
+            "urn:com:apple:photo:2020:aux:hdrgainmap",
+        );
+
+        let &gainmap_id = gainmap_ids
+            .first()
+            .ok_or(HeicError::InvalidData("No HDR gain map found"))?;
+
+        let gainmap_item = container
+            .get_item(gainmap_id)
+            .ok_or(HeicError::InvalidData("Missing gain map item"))?;
+        let gainmap_data = container
+            .get_item_data(gainmap_id)
+            .ok_or(HeicError::InvalidData("Missing gain map data"))?;
+        let gainmap_config = gainmap_item
+            .hevc_config
+            .as_ref()
+            .ok_or(HeicError::InvalidData("Missing gain map hvcC config"))?;
+
+        let frame = hevc::decode_with_config(gainmap_config, gainmap_data)?;
+
+        let width = frame.cropped_width();
+        let height = frame.cropped_height();
+        let max_val = ((1u32 << frame.bit_depth) - 1) as f32;
+
+        let mut float_data = Vec::with_capacity((width * height) as usize);
+        let y_start = frame.crop_top;
+        let x_start = frame.crop_left;
+
+        for y in 0..height {
+            for x in 0..width {
+                let src_idx = ((y_start + y) * frame.width + (x_start + x)) as usize;
+                let raw = frame.y_plane[src_idx] as f32;
+                float_data.push(raw / max_val);
+            }
+        }
+
+        Ok(HdrGainMap {
+            data: float_data,
+            width,
+            height,
         })
     }
 }

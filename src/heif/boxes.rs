@@ -30,6 +30,7 @@ impl FourCC {
     pub const DIMG: Self = Self(*b"dimg");
     pub const CLAP: Self = Self(*b"clap");
     pub const IROT: Self = Self(*b"irot");
+    pub const AUXL: Self = Self(*b"auxl");
 
     /// Create from bytes
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
@@ -275,6 +276,8 @@ pub enum ItemProperty {
     CleanAperture(CleanAperture),
     /// Image rotation (irot)
     Rotation(ImageRotation),
+    /// Auxiliary type (auxC)
+    AuxiliaryType(String),
     /// Unknown property
     Unknown,
 }

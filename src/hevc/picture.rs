@@ -45,6 +45,8 @@ pub struct DecodedFrame {
     pub deblock_stride: u32,
     /// QP map at 4x4 block granularity (for deblocking)
     pub qp_map: Vec<i8>,
+    /// Alpha plane (optional, from auxiliary alpha image)
+    pub alpha_plane: Option<Vec<u16>>,
 }
 
 impl DecodedFrame {
@@ -74,6 +76,7 @@ impl DecodedFrame {
             deblock_flags: vec![0; deblock_size],
             deblock_stride,
             qp_map: vec![0; deblock_size],
+            alpha_plane: None,
         }
     }
 
@@ -110,6 +113,7 @@ impl DecodedFrame {
             deblock_flags: vec![0; deblock_size],
             deblock_stride,
             qp_map: vec![0; deblock_size],
+            alpha_plane: None,
         }
     }
 
@@ -230,7 +234,8 @@ impl DecodedFrame {
         rgb
     }
 
-    /// Convert YCbCr to RGBA with conformance window cropping
+    /// Convert YCbCr to RGBA with conformance window cropping.
+    /// Uses real alpha values from `alpha_plane` if present, otherwise alpha=255.
     pub fn to_rgba(&self) -> Vec<u8> {
         let out_width = self.cropped_width();
         let out_height = self.cropped_height();
@@ -243,6 +248,7 @@ impl DecodedFrame {
         let x_start = self.crop_left;
         let x_end = self.width - self.crop_right;
 
+        let mut pixel_idx = 0usize;
         for y in y_start..y_end {
             for x in x_start..x_end {
                 let y_idx = (y * self.width + x) as usize;
@@ -260,7 +266,19 @@ impl DecodedFrame {
                 rgba.push(r.clamp(0, 255) as u8);
                 rgba.push(g.clamp(0, 255) as u8);
                 rgba.push(b.clamp(0, 255) as u8);
-                rgba.push(255); // Alpha
+
+                let alpha = if let Some(ref alpha) = self.alpha_plane {
+                    if pixel_idx < alpha.len() {
+                        (alpha[pixel_idx] >> shift).min(255) as u8
+                    } else {
+                        255
+                    }
+                } else {
+                    255
+                };
+                rgba.push(alpha);
+
+                pixel_idx += 1;
             }
         }
 
@@ -416,6 +434,18 @@ impl DecodedFrame {
             }
         }
 
+        // Rotate alpha plane (same transform as luma)
+        let alpha_plane = self.alpha_plane.as_ref().map(|alpha| {
+            let mut rotated = vec![0u16; (nw * nh) as usize];
+            for dy in 0..nh {
+                for dx in 0..nw {
+                    rotated[(dy * nw + dx) as usize] =
+                        alpha[((oh - 1 - dx) * ow + dy) as usize];
+                }
+            }
+            rotated
+        });
+
         // Rotate chroma planes
         let (ocw, och) = self.chroma_dims();
         if ocw > 0 && och > 0 {
@@ -450,6 +480,7 @@ impl DecodedFrame {
                 deblock_flags: Vec::new(),
                 deblock_stride: 0,
                 qp_map: Vec::new(),
+                alpha_plane,
             }
         } else {
             Self {
@@ -467,6 +498,7 @@ impl DecodedFrame {
                 deblock_flags: Vec::new(),
                 deblock_stride: 0,
                 qp_map: Vec::new(),
+                alpha_plane,
             }
         }
     }
@@ -484,6 +516,18 @@ impl DecodedFrame {
                     self.y_plane[((h - 1 - dy) * w + (w - 1 - dx)) as usize];
             }
         }
+
+        // Rotate alpha plane
+        let alpha_plane = self.alpha_plane.as_ref().map(|alpha| {
+            let mut rotated = vec![0u16; (w * h) as usize];
+            for dy in 0..h {
+                for dx in 0..w {
+                    rotated[(dy * w + dx) as usize] =
+                        alpha[((h - 1 - dy) * w + (w - 1 - dx)) as usize];
+                }
+            }
+            rotated
+        });
 
         // Rotate chroma planes
         let (cw, ch) = self.chroma_dims();
@@ -517,6 +561,7 @@ impl DecodedFrame {
                 deblock_flags: Vec::new(),
                 deblock_stride: 0,
                 qp_map: Vec::new(),
+                alpha_plane,
             }
         } else {
             Self {
@@ -534,6 +579,7 @@ impl DecodedFrame {
                 deblock_flags: Vec::new(),
                 deblock_stride: 0,
                 qp_map: Vec::new(),
+                alpha_plane,
             }
         }
     }
@@ -553,6 +599,18 @@ impl DecodedFrame {
                     self.y_plane[(dx * ow + (ow - 1 - dy)) as usize];
             }
         }
+
+        // Rotate alpha plane
+        let alpha_plane = self.alpha_plane.as_ref().map(|alpha| {
+            let mut rotated = vec![0u16; (nw * nh) as usize];
+            for dy in 0..nh {
+                for dx in 0..nw {
+                    rotated[(dy * nw + dx) as usize] =
+                        alpha[(dx * ow + (ow - 1 - dy)) as usize];
+                }
+            }
+            rotated
+        });
 
         // Rotate chroma planes
         let (ocw, och) = self.chroma_dims();
@@ -588,6 +646,7 @@ impl DecodedFrame {
                 deblock_flags: Vec::new(),
                 deblock_stride: 0,
                 qp_map: Vec::new(),
+                alpha_plane,
             }
         } else {
             Self {
@@ -605,6 +664,7 @@ impl DecodedFrame {
                 deblock_flags: Vec::new(),
                 deblock_stride: 0,
                 qp_map: Vec::new(),
+                alpha_plane,
             }
         }
     }

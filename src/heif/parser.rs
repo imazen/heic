@@ -95,6 +95,8 @@ pub struct Item {
     pub clean_aperture: Option<CleanAperture>,
     /// Image rotation (if available)
     pub rotation: Option<ImageRotation>,
+    /// Auxiliary type URI (from auxC property, e.g. "urn:mpeg:hevc:2015:auxid:1" for alpha)
+    pub auxiliary_type: Option<String>,
 }
 
 impl<'a> HeifContainer<'a> {
@@ -117,6 +119,7 @@ impl<'a> HeifContainer<'a> {
         let mut hevc_config = None;
         let mut clean_aperture = None;
         let mut rotation = None;
+        let mut auxiliary_type = None;
 
         if let Some(assoc) = assoc {
             for &(prop_idx, _essential) in &assoc.properties {
@@ -135,6 +138,9 @@ impl<'a> HeifContainer<'a> {
                         ItemProperty::Rotation(rot) => {
                             rotation = Some(*rot);
                         }
+                        ItemProperty::AuxiliaryType(s) => {
+                            auxiliary_type = Some(s.clone());
+                        }
                         _ => {}
                     }
                 }
@@ -149,6 +155,7 @@ impl<'a> HeifContainer<'a> {
             hevc_config,
             clean_aperture,
             rotation,
+            auxiliary_type,
         })
     }
 
@@ -186,6 +193,27 @@ impl<'a> HeifContainer<'a> {
         } else {
             None
         }
+    }
+
+    /// Find auxiliary items that reference a given target item, filtered by aux type prefix.
+    ///
+    /// `auxl` references point FROM the auxiliary item TO the primary item.
+    /// This searches for items whose `auxl` reference targets `target_item_id`
+    /// and whose `auxiliary_type` starts with `aux_type_prefix`.
+    pub fn find_auxiliary_items(&self, target_item_id: u32, aux_type_prefix: &str) -> Vec<u32> {
+        self.item_references
+            .iter()
+            .filter(|r| r.reference_type == FourCC::AUXL && r.to_item_ids.contains(&target_item_id))
+            .filter_map(|r| {
+                let item = self.get_item(r.from_item_id)?;
+                if let Some(ref aux_type) = item.auxiliary_type {
+                    if aux_type.starts_with(aux_type_prefix) {
+                        return Some(r.from_item_id);
+                    }
+                }
+                None
+            })
+            .collect()
     }
 
     /// Get item references of a given type from a source item
@@ -583,6 +611,13 @@ fn parse_ipco(ipco: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
                     ItemProperty::Unknown
                 }
             }
+            FourCC::AUXC => {
+                if let Ok(aux_type) = parse_auxc(&child) {
+                    ItemProperty::AuxiliaryType(aux_type)
+                } else {
+                    ItemProperty::Unknown
+                }
+            }
             _ => ItemProperty::Unknown,
         };
         container.properties.push(prop);
@@ -637,6 +672,23 @@ fn parse_irot(irot: &Box<'_>) -> Result<ImageRotation> {
         _ => 0,
     };
     Ok(ImageRotation { angle })
+}
+
+fn parse_auxc(auxc: &Box<'_>) -> Result<String> {
+    let content = auxc.content;
+    // auxC is a full box: version/flags (4 bytes) + null-terminated UTF-8 aux_type string
+    if content.len() < 5 {
+        return Err(HeicError::InvalidContainer("auxC too short"));
+    }
+
+    // Skip version/flags (4 bytes)
+    let data = &content[4..];
+    // Find null terminator
+    let end = data.iter().position(|&b| b == 0).unwrap_or(data.len());
+    let aux_type = str::from_utf8(&data[..end])
+        .unwrap_or("")
+        .to_string();
+    Ok(aux_type)
 }
 
 fn parse_ispe(ispe: &Box<'_>) -> Result<ImageSpatialExtents> {

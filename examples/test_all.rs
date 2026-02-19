@@ -79,7 +79,8 @@ fn main() {
                 total_time_ms += elapsed;
                 let w = frame.cropped_width();
                 let h = frame.cropped_height();
-                eprintln!("OK  {}x{}  ({}ms)", w, h, elapsed);
+                let alpha_tag = if frame.alpha_plane.is_some() { " [ALPHA]" } else { "" };
+                eprintln!("OK  {}x{}  ({}ms){}", w, h, elapsed, alpha_tag);
                 ok += 1;
             }
             Err(e) => {
