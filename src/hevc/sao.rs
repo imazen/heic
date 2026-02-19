@@ -207,7 +207,7 @@ fn apply_sao_component(
                 let row = (y * stride) as usize;
                 for x in x_start..x_end {
                     let idx = row + x as usize;
-                    let sample = src[idx] as i32;
+                    let sample = (src[idx] as i32).min(max_val);
                     let band = (sample >> band_shift) as usize;
                     let offset = band_table[band] as i32;
                     if offset != 0 {

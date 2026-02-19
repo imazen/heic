@@ -92,10 +92,12 @@ fn decode_nal_units(nal_units: &[bitstream::NalUnit<'_>]) -> Result<DecodedFrame
     let sps = sps.ok_or(HevcError::MissingParameterSet("SPS"))?;
     let pps = pps.ok_or(HevcError::MissingParameterSet("PPS"))?;
 
-    // Create frame buffer
-    let mut frame = DecodedFrame::new(
+    // Create frame buffer with actual bit depth and chroma format from SPS
+    let mut frame = DecodedFrame::with_params(
         sps.pic_width_in_luma_samples,
         sps.pic_height_in_luma_samples,
+        sps.bit_depth_y(),
+        sps.chroma_format_idc,
     );
 
     // Set conformance window cropping from SPS
