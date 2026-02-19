@@ -120,15 +120,21 @@ let gainmap = DecoderConfig::new().decode_gain_map(&data)?;
 - Identity-derived (iden) and overlay (iovl) image types
 - Image mirror (imir) with ordered transform application (ipma order)
 - VUI color info parsing (video_full_range_flag, matrix_coefficients)
-- Proper YCbCr→RGB conversion (full range + BT.601 limited range)
+- YCbCr→RGB with BT.601, BT.709, BT.2020 matrices (full + limited range)
 - colr nclx box color info override from HEIF container
 - HEVC scaling list support (custom dequantization matrices from SPS/PPS)
+- `#![forbid(unsafe_code)]` — zero unsafe blocks in codebase
+- `no_std + alloc` support (compiles for wasm32-unknown-unknown)
+- Integer overflow protection for dimension calculations
+- Memory estimation before decode (DecoderConfig::estimate_memory)
+- Hardened parser: checked arithmetic throughout, 16M fuzz runs clean
+- cargo-fuzz targets: decode, decode_limits, probe
 
 ### Current Quality (RGB comparison vs libheif)
 - 103/162 test files decode successfully
-- Best: example_q95 65.7dB (98% pixel-exact), classic-car 58.5dB (95% exact)
+- Best: example_q95 65.7dB (98% pixel-exact), classic-car 77.3dB (BT.709)
 - Nokia C001-C052: 50.5dB (77% pixel-exact)
-- Grid images: image1 50.4dB, classic-car 58.5dB
+- Grid images: image1 50.4dB, classic-car 77.3dB
 - Scaling list files: iphone_rotated 55.3dB (91% exact), iphone_telephoto 50.9dB
 - All CABAC SEs match libde265 perfectly
 - YUV-level: pixel-perfect for q50+ (76.1dB for q10, 128 Y-plane diffs vs dec265)
@@ -141,8 +147,6 @@ let gainmap = DecoderConfig::new().decode_gain_map(&data)?;
 
 ### Pending
 - SIMD optimization
-- BT.709 / BT.2020 matrix coefficients (currently only BT.601)
-- Fuzzing targets (decode, limits)
 - whereat error location tracking
 
 ## Known Limitations
