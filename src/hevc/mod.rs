@@ -172,14 +172,21 @@ fn get_cropped_dimensions(sps: &params::Sps) -> (u32, u32) {
             3 => (1, 1), // 4:4:4
             _ => (2, 2), // Default to 4:2:0
         };
-        let crop_left = sps.conf_win_offset.0 * sub_width_c;
-        let crop_right = sps.conf_win_offset.1 * sub_width_c;
-        let crop_top = sps.conf_win_offset.2 * sub_height_c;
-        let crop_bottom = sps.conf_win_offset.3 * sub_height_c;
-        (
-            sps.pic_width_in_luma_samples - crop_left - crop_right,
-            sps.pic_height_in_luma_samples - crop_top - crop_bottom,
-        )
+        let crop_left = sps.conf_win_offset.0.saturating_mul(sub_width_c);
+        let crop_right = sps.conf_win_offset.1.saturating_mul(sub_width_c);
+        let crop_top = sps.conf_win_offset.2.saturating_mul(sub_height_c);
+        let crop_bottom = sps.conf_win_offset.3.saturating_mul(sub_height_c);
+        let w = sps
+            .pic_width_in_luma_samples
+            .saturating_sub(crop_left)
+            .saturating_sub(crop_right)
+            .max(1);
+        let h = sps
+            .pic_height_in_luma_samples
+            .saturating_sub(crop_top)
+            .saturating_sub(crop_bottom)
+            .max(1);
+        (w, h)
     } else {
         (
             sps.pic_width_in_luma_samples,

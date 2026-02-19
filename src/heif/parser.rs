@@ -134,6 +134,9 @@ impl<'a> HeifContainer<'a> {
 
         if let Some(assoc) = assoc {
             for &(prop_idx, _essential) in &assoc.properties {
+                if prop_idx == 0 {
+                    continue; // invalid 0-index in ipma
+                }
                 let idx = prop_idx as usize - 1; // 1-based index in ipma
                 if let Some(prop) = self.properties.get(idx) {
                     match prop {
@@ -535,11 +538,18 @@ fn parse_iinf(iinf: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
 
 fn parse_infe(infe: &Box<'_>) -> Result<ItemInfo> {
     let content = infe.content;
-    if content.len() < 8 {
+
+    let version = *content.first().ok_or(HeicError::InvalidContainer("infe too short"))?;
+    // Minimum: 4 (ver+flags) + id (2 or 4) + 2 (protection) + type (4 if v>=2)
+    let min_len = match version {
+        0..=1 => 4 + 2 + 2,    // 8
+        2 => 4 + 2 + 2 + 4,    // 12
+        _ => 4 + 4 + 2 + 4,    // 14 (version >= 3 uses 4-byte item_id)
+    };
+    if content.len() < min_len {
         return Err(HeicError::InvalidContainer("infe too short"));
     }
 
-    let version = content[0];
     let flags = u32::from_be_bytes([0, content[1], content[2], content[3]]);
     let hidden = (flags & 1) != 0;
 
@@ -572,6 +582,15 @@ fn parse_infe(infe: &Box<'_>) -> Result<ItemInfo> {
     };
 
     // Item name (null-terminated string)
+    if pos >= content.len() {
+        return Ok(ItemInfo {
+            item_id,
+            item_type,
+            item_name: String::new(),
+            content_type: String::new(),
+            hidden,
+        });
+    }
     let name_end = content[pos..].iter().position(|&b| b == 0).unwrap_or(0);
     let item_name = str::from_utf8(&content[pos..pos + name_end])
         .unwrap_or("")
@@ -954,7 +973,8 @@ fn parse_ipma(ipma: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
     pos += 4;
 
     for _ in 0..entry_count {
-        if pos + 2 > content.len() {
+        let id_size = if version < 1 { 2 } else { 4 };
+        if pos + id_size > content.len() {
             break;
         }
 

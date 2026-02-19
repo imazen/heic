@@ -135,12 +135,17 @@ impl<'a> Iterator for BoxIterator<'a> {
             (size_32 as u64, 8)
         };
 
-        let content_len = size as usize - header_size;
-        if self.offset + header_size + content_len > self.data.len() {
+        let size_usize = usize::try_from(size).ok()?;
+        if size_usize < header_size {
+            return None;
+        }
+        let content_len = size_usize - header_size;
+        let box_end = self.offset.checked_add(size_usize)?;
+        if box_end > self.data.len() {
             return None;
         }
 
-        let content = &data[header_size..size as usize];
+        let content = &data[header_size..size_usize];
 
         let box_item = Box {
             header: BoxHeader {
@@ -151,7 +156,7 @@ impl<'a> Iterator for BoxIterator<'a> {
             content,
         };
 
-        self.offset += size as usize;
+        self.offset = box_end;
         Some(box_item)
     }
 }
