@@ -111,23 +111,39 @@ pub fn decode_rgba_into(
 - Deblocking filter (deblock.rs) — H.265 8.7.2, strong/weak luma + chroma
 - SAO filter (sao.rs) — H.265 8.7.3, band offset + edge offset
 - Grid-based HEIC decoding (idat, iref/dimg, tile assembly)
+- Alpha plane decoding from auxiliary images (auxl/auxC)
+- HDR gain map extraction (Apple HDR aux format)
+- Identity-derived (iden) and overlay (iovl) image types
+- Image mirror (imir) with ordered transform application (ipma order)
+- VUI color info parsing (video_full_range_flag, matrix_coefficients)
+- Proper YCbCr→RGB conversion (full range + BT.601 limited range)
+- colr nclx box color info override from HEIF container
+- HEVC scaling list support (custom dequantization matrices from SPS/PPS)
 
-### Current Quality (full pipeline: deblocking + SAO)
-- **example.heic** (1280x854): Y 102.50 dB (4 pixels ±1), Cb/Cr pixel-exact
-- **sample1.heic** (1440x960, transform_skip): Y 68.26 dB (max ±3), Cb/Cr pixel-exact
-- Without filters: 100% pixel-exact vs libde265 --disable-deblocking --disable-sao
+### Current Quality (RGB comparison vs libheif)
+- 100/162 test files decode successfully (0 that libheif handles but we don't)
+- Best: example_q95 51.3dB (max diff 2), iPhone files 50-52dB (max diff 6-11)
+- Nokia C001-C052: 45.1dB (limited-range color conversion rounding)
+- Grid images: image1 48.2dB, classic-car 50.6dB
+- 10-bit HEVC (MIAF002): 43.7dB
+- Scaling list files: iphone_rotated 50.4dB, iphone_telephoto 50.9dB
 - All CABAC SEs match libde265 perfectly
-- Clean aperture (clap box) crop applied after conformance window
-- Image rotation (irot box) — 90°/180°/270° CW rotation of decoded frames
-- Batch tested 11 images: 11/11 pass
+- Remaining PSNR gap is from color conversion coefficient precision
+
+### Known Edge Cases
+- MIAF003 (4:4:4 chroma, RExt profile): 5.7dB — chroma format not fully supported
+- overlay_1000x680: 13.2dB — remaining diff from color conversion on fill regions
+- example_q10: 35.7dB — low-QP rounding amplification (max diff 61)
 
 ### Pending
 - SIMD optimization
+- BT.709 / BT.2020 matrix coefficients (currently only BT.601)
 
 ## Known Limitations
 
 - Only I-slices supported (sufficient for HEIC still images)
 - No inter prediction (P/B slices)
+- 4:4:4 chroma format partially supported (SAO clamped, but decode artifacts remain)
 
 ## Known Bugs
 
