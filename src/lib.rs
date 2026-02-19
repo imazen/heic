@@ -178,6 +178,10 @@ pub struct ImageInfo {
     pub bit_depth: u8,
     /// Chroma format (0=mono, 1=4:2:0, 2=4:2:2, 3=4:4:4)
     pub chroma_format: u8,
+    /// Whether the file contains EXIF metadata
+    pub has_exif: bool,
+    /// Whether the file contains XMP metadata
+    pub has_xmp: bool,
 }
 
 impl ImageInfo {
@@ -226,11 +230,20 @@ impl ImageInfo {
                 )
                 .is_empty();
 
-        // Try to get info from HEVC config (fast path, no mdat access needed)
+        // Check for EXIF and XMP metadata
+        let has_exif = container
+            .item_infos
+            .iter()
+            .any(|i| i.item_type == FourCC(*b"Exif"));
+        let has_xmp = container.item_infos.iter().any(|i| {
+            i.item_type == FourCC(*b"mime")
+                && (i.content_type.contains("xmp") || i.content_type.contains("rdf+xml"))
+        });
+
+        // Try to get info from HEVC config (fast path for direct HEVC items)
         if let Some(ref config) = primary_item.hevc_config
             && let Ok(hevc_info) = hevc::get_info_from_config(config)
         {
-            // Get bit depth and chroma from config
             let bit_depth = config.bit_depth_luma_minus8 + 8;
             let chroma_format = config.chroma_format;
             return Ok(ImageInfo {
@@ -239,6 +252,38 @@ impl ImageInfo {
                 has_alpha,
                 bit_depth,
                 chroma_format,
+                has_exif,
+                has_xmp,
+            });
+        }
+
+        // For grid/iden/iovl: get dimensions from ispe, bit depth from first tile's hvcC
+        if primary_item.item_type != ItemType::Hvc1
+            && let Some((w, h)) = primary_item.dimensions
+        {
+            // Try to get bit depth from the first dimg tile reference
+            let mut bit_depth = 8u8;
+            let mut chroma_format = 1u8;
+            for r in &container.item_references {
+                if r.reference_type == FourCC::DIMG
+                    && r.from_item_id == primary_item.id
+                    && let Some(&tile_id) = r.to_item_ids.first()
+                    && let Some(tile) = container.get_item(tile_id)
+                    && let Some(ref config) = tile.hevc_config
+                {
+                    bit_depth = config.bit_depth_luma_minus8 + 8;
+                    chroma_format = config.chroma_format;
+                    break;
+                }
+            }
+            return Ok(ImageInfo {
+                width: w,
+                height: h,
+                has_alpha,
+                bit_depth,
+                chroma_format,
+                has_exif,
+                has_xmp,
             });
         }
 
@@ -256,6 +301,8 @@ impl ImageInfo {
             has_alpha,
             bit_depth: 8,
             chroma_format: 1,
+            has_exif,
+            has_xmp,
         })
     }
 
@@ -411,6 +458,36 @@ impl DecoderConfig {
     pub fn decode_gain_map(&self, data: &[u8]) -> Result<HdrGainMap> {
         decode_gain_map_inner(data)
     }
+
+    /// Extract raw EXIF (TIFF) data from a HEIC file.
+    ///
+    /// Returns the TIFF-header data (starting with byte-order mark `II` or `MM`)
+    /// with the HEIF 4-byte offset prefix stripped. Returns `None` if the file
+    /// contains no EXIF metadata.
+    ///
+    /// The returned bytes can be passed to any EXIF parser (e.g., `exif` or `kamadak-exif` crate).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HEIF container is malformed.
+    pub fn extract_exif<'a>(&self, data: &'a [u8]) -> Result<Option<&'a [u8]>> {
+        extract_exif_inner(data)
+    }
+
+    /// Extract raw XMP (XML) data from a HEIC file.
+    ///
+    /// Returns the raw XML bytes of the XMP metadata. Returns `None` if the
+    /// file contains no XMP metadata.
+    ///
+    /// XMP items are stored as `mime` type items with content type
+    /// `application/rdf+xml` in the HEIF container.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HEIF container is malformed.
+    pub fn extract_xmp<'a>(&self, data: &'a [u8]) -> Result<Option<&'a [u8]>> {
+        extract_xmp_inner(data)
+    }
 }
 
 /// A decode request binding data, output format, limits, and cancellation.
@@ -545,6 +622,8 @@ impl<'a> DecodeRequest<'a> {
             has_alpha: frame.alpha_plane.is_some(),
             bit_depth: frame.bit_depth,
             chroma_format: frame.chroma_format,
+            has_exif: false, // Use ImageInfo::from_bytes() for metadata probing
+            has_xmp: false,
         })
     }
 
@@ -1279,4 +1358,51 @@ fn apply_clean_aperture(frame: &mut hevc::DecodedFrame, clap: &heif::CleanApertu
     frame.crop_right += extra_right;
     frame.crop_top += extra_top;
     frame.crop_bottom += extra_bottom;
+}
+
+/// Internal: extract EXIF TIFF data from HEIC container
+fn extract_exif_inner(data: &[u8]) -> Result<Option<&[u8]>> {
+    let container = heif::parse(data)?;
+
+    // Find Exif item(s)
+    for info in &container.item_infos {
+        if info.item_type == FourCC(*b"Exif")
+            && let Some(exif_data) = container.get_item_data(info.item_id)
+        {
+            // HEIF EXIF format: 4 bytes big-endian offset to TIFF header, then data.
+            // The offset is from byte 4 (after the 4-byte offset field itself).
+            // Typically 0, meaning TIFF data starts at byte 4.
+            if exif_data.len() < 4 {
+                continue;
+            }
+            let tiff_offset =
+                u32::from_be_bytes([exif_data[0], exif_data[1], exif_data[2], exif_data[3]])
+                    as usize;
+            let tiff_start = 4 + tiff_offset;
+            if tiff_start < exif_data.len() {
+                return Ok(Some(&exif_data[tiff_start..]));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Internal: extract XMP XML data from HEIC container
+fn extract_xmp_inner(data: &[u8]) -> Result<Option<&[u8]>> {
+    let container = heif::parse(data)?;
+
+    // Find mime items with XMP content type
+    for info in &container.item_infos {
+        if info.item_type == FourCC(*b"mime")
+            && (info.content_type.contains("xmp")
+                || info.content_type.contains("rdf+xml")
+                || info.content_type == "application/rdf+xml")
+            && let Some(xmp_data) = container.get_item_data(info.item_id)
+        {
+            return Ok(Some(xmp_data));
+        }
+    }
+
+    Ok(None)
 }

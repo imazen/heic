@@ -186,7 +186,7 @@ impl<'a> HeifContainer<'a> {
     }
 
     /// Get raw data for an item
-    pub fn get_item_data(&self, item_id: u32) -> Option<&[u8]> {
+    pub fn get_item_data(&self, item_id: u32) -> Option<&'a [u8]> {
         let loc = self.item_locations.iter().find(|l| l.item_id == item_id)?;
 
         if loc.extents.is_empty() {

@@ -345,3 +345,84 @@ fn test_raw_yuv_values() {
     println!("  first 8 Cb: {:?}", &cb_at_31[..8.min(cb_at_31.len())]);
     println!("  first 8 Cr: {:?}", &cr_at_31[..8.min(cr_at_31.len())]);
 }
+
+const IPHONE_HEIC: &str = "/home/lilith/work/heic/test-images/classic-car-iphone12pro.heic";
+
+#[test]
+fn test_extract_exif() {
+    let data = std::fs::read(IPHONE_HEIC).expect("read");
+    let decoder = DecoderConfig::new();
+
+    let exif = decoder.extract_exif(&data).expect("extract_exif");
+    let exif = exif.expect("should have EXIF data");
+
+    // EXIF TIFF data starts with byte-order mark: II (little-endian) or MM (big-endian)
+    assert!(exif.len() > 8, "EXIF data too short: {} bytes", exif.len());
+    assert!(
+        &exif[..2] == b"II" || &exif[..2] == b"MM",
+        "EXIF data should start with TIFF byte order mark, got {:02x?}",
+        &exif[..2]
+    );
+    println!(
+        "EXIF: {} bytes, byte order: {}",
+        exif.len(),
+        if exif[0] == b'I' {
+            "little-endian"
+        } else {
+            "big-endian"
+        }
+    );
+}
+
+#[test]
+fn test_extract_exif_none() {
+    // example.heic has no EXIF
+    let data = std::fs::read(EXAMPLE_HEIC).expect("read");
+    let decoder = DecoderConfig::new();
+    let exif = decoder.extract_exif(&data).expect("extract_exif");
+    assert!(exif.is_none(), "example.heic should not have EXIF");
+}
+
+#[test]
+fn test_image_info_no_exif() {
+    // example.heic: no EXIF, non-grid — probe should work
+    let data = std::fs::read(EXAMPLE_HEIC).expect("read");
+    let info = heic_decoder::ImageInfo::from_bytes(&data).expect("probe");
+    assert!(!info.has_exif, "example.heic should not have EXIF");
+    assert!(!info.has_xmp, "example.heic should not have XMP");
+    println!(
+        "ImageInfo: {}x{}, has_exif={}, has_xmp={}",
+        info.width, info.height, info.has_exif, info.has_xmp
+    );
+}
+
+#[test]
+fn test_image_info_grid_with_exif() {
+    // iPhone HEIC: grid image with EXIF + XMP
+    let data = std::fs::read(IPHONE_HEIC).expect("read");
+    let info = heic_decoder::ImageInfo::from_bytes(&data).expect("probe grid image");
+    assert!(info.has_exif, "iPhone HEIC should have EXIF");
+    assert!(info.has_xmp, "iPhone HEIC should have XMP");
+    assert_eq!(info.width, 4032);
+    assert_eq!(info.height, 3024);
+    println!(
+        "Grid ImageInfo: {}x{}, bit_depth={}, has_exif={}, has_xmp={}",
+        info.width, info.height, info.bit_depth, info.has_exif, info.has_xmp
+    );
+}
+
+#[test]
+fn test_extract_xmp() {
+    let data = std::fs::read(IPHONE_HEIC).expect("read");
+    let decoder = DecoderConfig::new();
+    let xmp = decoder.extract_xmp(&data).expect("extract_xmp");
+    // XMP may or may not be present; just ensure no crash
+    if let Some(xmp_data) = xmp {
+        // XMP should start with XML-like content
+        let start =
+            std::str::from_utf8(&xmp_data[..xmp_data.len().min(100)]).unwrap_or("(non-utf8)");
+        println!("XMP: {} bytes, starts with: {:?}", xmp_data.len(), start);
+    } else {
+        println!("No XMP found (expected for some files)");
+    }
+}
