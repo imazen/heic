@@ -608,8 +608,14 @@ fn decode_item(
     };
 
     // Set color conversion parameters from colr nclx box if present.
-    if let Some(ColorInfo::Nclx { full_range, .. }) = &item.color_info {
+    if let Some(ColorInfo::Nclx {
+        full_range,
+        matrix_coefficients,
+        ..
+    }) = &item.color_info
+    {
         frame.full_range = *full_range;
+        frame.matrix_coeffs = *matrix_coefficients as u8;
     }
 
     // Apply transformative properties in ipma listing order (HEIF spec requirement)

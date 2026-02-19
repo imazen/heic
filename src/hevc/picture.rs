@@ -202,26 +202,57 @@ impl DecodedFrame {
 
     /// Convert a single YCbCr pixel to RGB.
     /// y_val, cb_val, cr_val are 8-bit values (0-255).
-    /// Coefficients match libheif's BT.601 implementation for max compatibility.
+    /// Selects coefficient matrix based on `matrix_coeffs` field.
     #[inline(always)]
     fn ycbcr_to_rgb(&self, y_val: i32, cb_val: i32, cr_val: i32) -> (u8, u8, u8) {
+        // Fixed-point coefficients (scaled by 1024) for full-range conversion:
+        //   R = Y + Cr * (2 - 2*Kr)
+        //   G = Y - Cb * (2 - 2*Kb) * Kb/Kg - Cr * (2 - 2*Kr) * Kr/Kg
+        //   B = Y + Cb * (2 - 2*Kb)
+        //
+        // For limited-range, Y is scaled by 255/219 ≈ 1.1644, Cb/Cr by 255/224 ≈ 1.1384.
+        // Combined into single multiply.
+        //
+        // Coefficients per standard:
+        //   BT.601  (5,6): Kr=0.299,  Kb=0.114,  Kg=0.587
+        //   BT.709  (1):   Kr=0.2126, Kb=0.0722, Kg=0.7152
+        //   BT.2020 (9):   Kr=0.2627, Kb=0.0593, Kg=0.6780
+
         let cb = cb_val - 128;
         let cr = cr_val - 128;
 
         if self.full_range {
-            // BT.601 full range: Y [0,255], Cb/Cr [0,255]
-            let r = (y_val * 1024 + 1436 * cr + 512) >> 10;
-            let g = (y_val * 1024 - 352 * cb - 731 * cr + 512) >> 10;
-            let b = (y_val * 1024 + 1815 * cb + 512) >> 10;
-            (r.clamp(0, 255) as u8, g.clamp(0, 255) as u8, b.clamp(0, 255) as u8)
+            // Full range coefficients (×1024)
+            let (cr_r, cb_g, cr_g, cb_b) = match self.matrix_coeffs {
+                1 => (1613, 192, 479, 1900),   // BT.709
+                9 => (1510, 169, 585, 1927),   // BT.2020
+                _ => (1436, 352, 731, 1815),   // BT.601 (default/unspecified)
+            };
+            let r = (y_val * 1024 + cr_r * cr + 512) >> 10;
+            let g = (y_val * 1024 - cb_g * cb - cr_g * cr + 512) >> 10;
+            let b = (y_val * 1024 + cb_b * cb + 512) >> 10;
+            (
+                r.clamp(0, 255) as u8,
+                g.clamp(0, 255) as u8,
+                b.clamp(0, 255) as u8,
+            )
         } else {
-            // BT.601 limited range: Y [16,235], Cb/Cr [16,240]
-            // Coefficients: Y scale=1197/1024≈1.1689, chroma scale includes 1.1429 factor
+            // Limited range: Y [16,235], Cb/Cr [16,240]
+            // Y scale = 1197/1024 = 256/219. Chroma scale = 256/224.
             let y16 = y_val - 16;
-            let r = (1197 * y16 + 1641 * cr + 512) >> 10;
-            let g = (1197 * y16 - 403 * cb - 836 * cr + 512) >> 10;
-            let b = (1197 * y16 + 2074 * cb + 512) >> 10;
-            (r.clamp(0, 255) as u8, g.clamp(0, 255) as u8, b.clamp(0, 255) as u8)
+            let (cr_r, cb_g, cr_g, cb_b) = match self.matrix_coeffs {
+                1 => (1843, 219, 547, 2171),   // BT.709
+                9 => (1726, 193, 669, 2202),   // BT.2020
+                _ => (1641, 403, 836, 2074),   // BT.601 (default/unspecified)
+            };
+            let r = (1197 * y16 + cr_r * cr + 512) >> 10;
+            let g = (1197 * y16 - cb_g * cb - cr_g * cr + 512) >> 10;
+            let b = (1197 * y16 + cb_b * cb + 512) >> 10;
+            (
+                r.clamp(0, 255) as u8,
+                g.clamp(0, 255) as u8,
+                b.clamp(0, 255) as u8,
+            )
         }
     }
 
