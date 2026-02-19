@@ -5,7 +5,7 @@
 //! - Mode 1: DC (average of reference samples)
 //! - Modes 2-34: Angular (directional prediction)
 
-use super::picture::DecodedFrame;
+use super::picture::{DecodedFrame, UNINIT_SAMPLE};
 use super::slice::IntraPredMode;
 
 /// Maximum block size for intra prediction
@@ -50,6 +50,7 @@ pub fn predict_intra(
     log2_size: u8,
     mode: IntraPredMode,
     c_idx: u8, // 0=Y, 1=Cb, 2=Cr
+    strong_intra_smoothing_enabled: bool,
 ) {
     let size = 1u32 << log2_size;
 
@@ -59,89 +60,111 @@ pub fn predict_intra(
 
     fill_border_samples(frame, x, y, size, c_idx, &mut border, border_center);
 
-    // DEBUG: Track order and print border samples for chroma blocks near the problem area
-    static PRED_SEQ: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-    let debug_output = c_idx == 1 && y == 0 && (16..=36).contains(&x);
-    let seq = if debug_output {
-        PRED_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
-    } else {
-        0
-    };
-
-    // Print BEFORE prediction to see what border samples are read
-    if c_idx == 1 && y == 0 && (20..=28).contains(&x) {
-        let left_samples: Vec<i32> = (0..size as usize)
-            .map(|i| border[border_center - 1 - i])
-            .collect();
-        let actual_frame_val = frame.get_cb(x.saturating_sub(1), y);
-        eprintln!(
-            "DEBUG Cb[{}]: at ({},{}) BEFORE predict: border_left[0]={} frame.get_cb({},0)={}",
-            seq,
-            x,
-            y,
-            left_samples[0],
-            x.saturating_sub(1),
-            actual_frame_val
-        );
-    }
-
-    // DEBUG: Print detailed info for Cr around the corruption point (x=104-112)
-    if c_idx == 2 && y == 0 && (100..=116).contains(&x) {
-        let left_samples: Vec<i32> = (0..size.min(8) as usize)
-            .map(|i| border[border_center - 1 - i])
-            .collect();
-        let top_samples: Vec<i32> = (0..size.min(8) as usize)
-            .map(|i| border[border_center + 1 + i])
-            .collect();
-        let top_left = border[border_center];
-        let left_frame_val = if x > 0 { frame.get_cr(x - 1, 0) } else { 0 };
-        eprintln!("DEBUG Cr: at ({},{}) size={} mode={:?}", x, y, size, mode);
-        eprintln!(
-            "  border: top_left={} left={:?} top={:?}",
-            top_left, left_samples, top_samples
-        );
-        eprintln!(
-            "  frame.get_cr({},0)={}",
-            x.saturating_sub(1),
-            left_frame_val
-        );
-    }
+    // Reference sample filtering (H.265 8.4.4.2.3)
+    intra_prediction_sample_filtering(
+        &mut border,
+        border_center,
+        size as usize,
+        c_idx,
+        mode.as_u8(),
+        strong_intra_smoothing_enabled,
+        frame.bit_depth as usize,
+    );
 
     // Apply prediction based on mode
     match mode {
         IntraPredMode::Planar => {
-            predict_planar(frame, x, y, size, c_idx, &border, border_center);
+            predict_planar(frame, x, y, size, log2_size, c_idx, &border, border_center);
         }
         IntraPredMode::Dc => {
-            predict_dc(frame, x, y, size, c_idx, &border, border_center);
+            predict_dc(frame, x, y, size, log2_size, c_idx, &border, border_center);
         }
         _ => {
             let mode_val = mode.as_u8();
             predict_angular(frame, x, y, size, c_idx, mode_val, &border, border_center);
         }
     }
+}
 
-    // DEBUG: Print predicted values for first block
-    if x == 0 && y == 0 && c_idx == 0 {
-        eprintln!("DEBUG: predicted Y values at (0,0):");
-        for py in 0..size.min(4) {
-            let row: Vec<u16> = (0..size.min(4))
-                .map(|px| frame.get_y(x + px, y + py))
-                .collect();
-            eprintln!("  {:?}", row);
+/// Intra prediction reference sample filtering (H.265 8.4.4.2.3)
+///
+/// Applies [1,2,1]/4 low-pass filter to reference samples before prediction.
+/// For 32x32 luma blocks with strong_intra_smoothing, uses bilinear interpolation instead.
+fn intra_prediction_sample_filtering(
+    border: &mut [i32],
+    center: usize,
+    n_t: usize,       // block size (4, 8, 16, 32)
+    c_idx: u8,         // 0=luma, 1/2=chroma
+    intra_pred_mode: u8,
+    strong_intra_smoothing_enabled: bool,
+    bit_depth: usize,
+) {
+    // Determine filterFlag
+    let filter_flag = if intra_pred_mode == 1 || n_t == 4 {
+        // DC mode or 4x4: no filtering
+        false
+    } else {
+        let min_dist_ver_hor = (intra_pred_mode as i32 - 26)
+            .abs()
+            .min((intra_pred_mode as i32 - 10).abs());
+
+        match n_t {
+            8 => min_dist_ver_hor > 7,
+            16 => min_dist_ver_hor > 1,
+            32 => min_dist_ver_hor > 0,
+            _ => false, // 64 or other sizes: no filtering
+        }
+    };
+
+    if !filter_flag {
+        return;
+    }
+
+    // Check for strong intra smoothing (bilinear interpolation for 32x32 luma)
+    let bi_int_flag = strong_intra_smoothing_enabled
+        && c_idx == 0
+        && n_t == 32
+        && (border[center] + border[center + 64] - 2 * border[center + 32]).abs()
+            < (1 << (bit_depth - 5)) as i32
+        && (border[center] + border[center.wrapping_sub(64)] - 2 * border[center.wrapping_sub(32)])
+            .abs()
+            < (1 << (bit_depth - 5)) as i32;
+
+    // Temporary filtered array
+    let mut pf = [0i32; 4 * MAX_INTRA_PRED_BLOCK_SIZE + 1];
+    let pf_center = 2 * MAX_INTRA_PRED_BLOCK_SIZE;
+
+    if bi_int_flag {
+        // Strong intra smoothing: bilinear interpolation from corner samples
+        pf[pf_center - 2 * n_t] = border[center - 2 * n_t]; // bottom-left
+        pf[pf_center + 2 * n_t] = border[center + 2 * n_t]; // top-right
+        pf[pf_center] = border[center]; // top-left
+
+        let p0 = border[center];
+        let p_neg64 = border[center - 64];
+        let p_pos64 = border[center + 64];
+
+        for i in 1..64i32 {
+            pf[(pf_center as i32 - i) as usize] = p0 + ((i * (p_neg64 - p0) + 32) >> 6);
+            pf[(pf_center as i32 + i) as usize] = p0 + ((i * (p_pos64 - p0) + 32) >> 6);
+        }
+    } else {
+        // Normal [1,2,1]/4 filter
+        // Keep endpoints unfiltered
+        pf[pf_center - 2 * n_t] = border[center - 2 * n_t];
+        pf[pf_center + 2 * n_t] = border[center + 2 * n_t];
+
+        // Filter all samples from -(2*nT-1) to (2*nT-1)
+        for i in -(2 * n_t as i32 - 1)..=(2 * n_t as i32 - 1) {
+            let idx = (center as i32 + i) as usize;
+            pf[(pf_center as i32 + i) as usize] =
+                (border[idx + 1] + 2 * border[idx] + border[idx - 1] + 2) >> 2;
         }
     }
 
-    // DEBUG: Print Cb output after prediction for problem area
-    if debug_output {
-        // Print the right edge of the block (which will be read by the next block)
-        let right_edge: Vec<u16> = (0..size)
-            .map(|py| frame.get_cb(x + size - 1, y + py))
-            .collect();
-        eprintln!(
-            "DEBUG Cb: predicted at ({},{}) size={} mode={:?} right_edge={:?}",
-            x, y, size, mode, right_edge
-        );
+    // Copy filtered values back
+    for i in 0..=(4 * n_t) {
+        border[center - 2 * n_t + i] = pf[pf_center - 2 * n_t + i];
     }
 }
 
@@ -156,9 +179,13 @@ fn fill_border_samples(
     center: usize,
 ) {
     // Border layout (indexed from center):
-    //   border[-2*size .. -1] = left samples (bottom to top)
-    //   border[0] = top-left corner
-    //   border[1 .. 2*size] = top samples (left to right)
+    //   border[-2*size .. -1] = left samples (bottom to top): p[-1][2*nTbS-1] .. p[-1][0]
+    //   border[0] = top-left corner: p[-1][-1]
+    //   border[1 .. 2*size] = top samples (left to right): p[0][-1] .. p[2*nTbS-1][-1]
+    //
+    // Availability tracking: avail[] parallel array, same layout as border
+    // avail[i] = true means the reference sample was read from a decoded block
+    let mut avail = [false; 4 * MAX_INTRA_PRED_BLOCK_SIZE + 1];
 
     let (frame_w, frame_h) = if c_idx == 0 {
         (frame.width, frame.height)
@@ -167,117 +194,180 @@ fn fill_border_samples(
         (frame.width / 2, frame.height / 2)
     };
 
-    // Check availability of neighbors
+    // Per-sample availability is approximated using picture boundaries.
+    // With TU-level prediction ordering, samples from already-decoded TUs
+    // in the frame are valid. Samples from not-yet-decoded regions are 0
+    // (frame init) and must NOT be read as available.
+    //
+    // We use a conservative check: boundary + non-zero frame value as proxy
+    // for "this sample was actually written by a decoded block."
+    // This is imperfect (legit 0 values treated as unavailable) but correct
+    // for the vast majority of cases.
+
     let avail_left = x > 0;
     let avail_top = y > 0;
     let avail_top_left = avail_left && avail_top;
-    let avail_top_right = avail_top && (x + size * 2) <= frame_w;
-    let avail_bottom_left = avail_left && (y + size * 2) <= frame_h;
 
     // Fill with default value if no neighbors available
     let default_val = 1i32 << (frame.bit_depth - 1);
 
     // Top-left corner
     if avail_top_left {
-        border[center] = get_sample(frame, x - 1, y - 1, c_idx) as i32;
-    } else if avail_top {
-        border[center] = get_sample(frame, x, y - 1, c_idx) as i32;
-    } else if avail_left {
-        border[center] = get_sample(frame, x - 1, y, c_idx) as i32;
-    } else {
+        let raw = get_sample(frame, x - 1, y - 1, c_idx);
+        if raw != UNINIT_SAMPLE {
+            border[center] = raw as i32;
+            avail[center] = true;
+        }
+    }
+    if !avail[center] && avail_top {
+        let raw = get_sample(frame, x, y - 1, c_idx);
+        if raw != UNINIT_SAMPLE {
+            border[center] = raw as i32;
+            avail[center] = true;
+        }
+    }
+    if !avail[center] && avail_left {
+        let raw = get_sample(frame, x - 1, y, c_idx);
+        if raw != UNINIT_SAMPLE {
+            border[center] = raw as i32;
+            avail[center] = true;
+        }
+    }
+    if !avail[center] {
         border[center] = default_val;
     }
 
-    // Top samples (border[1..size] and border[size+1..2*size] for top-right)
+    // Top samples p[0][-1] .. p[nTbS-1][-1]
     for i in 0..size {
-        if avail_top {
-            border[center + 1 + i as usize] = get_sample(frame, x + i, y - 1, c_idx) as i32;
-        } else {
-            border[center + 1 + i as usize] = border[center];
+        let idx = center + 1 + i as usize;
+        if avail_top && (x + i) < frame_w {
+            let raw = get_sample(frame, x + i, y - 1, c_idx);
+            if raw != UNINIT_SAMPLE {
+                border[idx] = raw as i32;
+                avail[idx] = true;
+            }
         }
     }
 
-    // Top-right samples
+    // Above-right samples p[nTbS][-1] .. p[2*nTbS-1][-1]
+    // Available only if the block containing the sample has been decoded.
+    // We check the UNINIT_SAMPLE sentinel to detect uninitialized regions.
     for i in size..(2 * size) {
-        if avail_top_right && (x + i) < frame_w {
-            border[center + 1 + i as usize] = get_sample(frame, x + i, y - 1, c_idx) as i32;
-        } else if avail_top {
-            // Replicate last available top sample
-            border[center + 1 + i as usize] = border[center + size as usize];
-        } else {
-            border[center + 1 + i as usize] = border[center];
+        let idx = center + 1 + i as usize;
+        if avail_top && (x + i) < frame_w {
+            let raw = get_sample(frame, x + i, y - 1, c_idx);
+            if raw != UNINIT_SAMPLE {
+                border[idx] = raw as i32;
+                avail[idx] = true;
+            }
         }
     }
 
-    // Left samples (border[-1..-size] and border[-size-1..-2*size] for bottom-left)
+    // Left samples p[-1][0] .. p[-1][nTbS-1]
     for i in 0..size {
-        if avail_left {
-            border[center - 1 - i as usize] = get_sample(frame, x - 1, y + i, c_idx) as i32;
-        } else {
-            border[center - 1 - i as usize] = border[center];
+        let idx = center - 1 - i as usize;
+        if avail_left && (y + i) < frame_h {
+            let raw = get_sample(frame, x - 1, y + i, c_idx);
+            if raw != UNINIT_SAMPLE {
+                border[idx] = raw as i32;
+                avail[idx] = true;
+            }
         }
     }
 
-    // Bottom-left samples
+    // Bottom-left samples p[-1][nTbS] .. p[-1][2*nTbS-1]
+    // Available only if the block containing the sample has been decoded.
     for i in size..(2 * size) {
-        if avail_bottom_left && (y + i) < frame_h {
-            border[center - 1 - i as usize] = get_sample(frame, x - 1, y + i, c_idx) as i32;
-        } else if avail_left {
-            // Replicate last available left sample
-            border[center - 1 - i as usize] = border[center - size as usize];
-        } else {
-            border[center - 1 - i as usize] = border[center];
+        let idx = center - 1 - i as usize;
+        if avail_left && (y + i) < frame_h {
+            let raw = get_sample(frame, x - 1, y + i, c_idx);
+            if raw != UNINIT_SAMPLE {
+                border[idx] = raw as i32;
+                avail[idx] = true;
+            }
         }
     }
 
     // Reference sample substitution (H.265 8.4.4.2.2)
-    // If any sample is unavailable, substitute from available samples
-    // NOTE: This uses 0 as a sentinel for "unavailable" which is technically a bug
-    // since 0 is a valid sample value. However, removing this breaks the decoder
-    // due to interactions with how the border array is initialized.
-    reference_sample_substitution(border, center, size as usize);
+    // Uses forward propagation: scan from bottom-left to top-right,
+    // each unavailable sample gets the last seen available value.
+    reference_sample_substitution(border, &avail, center, size as usize, default_val);
 }
 
 /// Substitute unavailable reference samples (H.265 8.4.4.2.2)
-fn reference_sample_substitution(border: &mut [i32], center: usize, size: usize) {
-    // Find first available sample
-    let mut first_avail = None;
+///
+/// Scans from p[-1][2*nTbS-1] (bottom-left) to p[2*nTbS-1][-1] (top-right).
+/// First finds any available sample, then propagates forward:
+/// each unavailable sample gets the value of the most recently seen
+/// available (or previously substituted) sample.
+fn reference_sample_substitution(
+    border: &mut [i32],
+    avail: &[bool],
+    center: usize,
+    size: usize,
+    default_val: i32,
+) {
+    // Total reference samples: 4*size + 1 (2*size left + corner + 2*size top)
+    // Layout in border array: center-2*size .. center+2*size
 
-    // Search from bottom-left to top-right
+    // Step 1: Find first available sample (scan from bottom-left to top-right)
+    let mut first_avail_val = None;
+
+    // Scan left column (bottom-left to top): p[-1][2*nTbS-1] .. p[-1][0]
     for i in (0..(2 * size)).rev() {
-        if border[center - 1 - i] != 0 {
-            first_avail = Some(border[center - 1 - i]);
+        let idx = center - 1 - i;
+        if avail[idx] {
+            first_avail_val = Some(border[idx]);
             break;
         }
     }
 
-    if first_avail.is_none() && border[center] != 0 {
-        first_avail = Some(border[center]);
+    // Corner: p[-1][-1]
+    if first_avail_val.is_none() && avail[center] {
+        first_avail_val = Some(border[center]);
     }
 
-    if first_avail.is_none() {
+    // Top row: p[0][-1] .. p[2*nTbS-1][-1]
+    if first_avail_val.is_none() {
         for i in 0..(2 * size) {
-            if border[center + 1 + i] != 0 {
-                first_avail = Some(border[center + 1 + i]);
+            let idx = center + 1 + i;
+            if avail[idx] {
+                first_avail_val = Some(border[idx]);
                 break;
             }
         }
     }
 
-    // Substitute unavailable samples with first available
-    let val = first_avail.unwrap_or(1 << 7); // Default to mid-gray if all unavailable
+    let first_val = first_avail_val.unwrap_or(default_val);
 
-    for i in 0..(2 * size) {
-        if border[center - 1 - i] == 0 {
-            border[center - 1 - i] = val;
+    // Step 2: Forward propagation from bottom-left to top-right
+    // Each unavailable sample gets the last propagated value
+    let mut current = first_val;
+
+    // Left column (bottom to top): p[-1][2*nTbS-1] .. p[-1][0]
+    for i in (0..(2 * size)).rev() {
+        let idx = center - 1 - i;
+        if avail[idx] {
+            current = border[idx];
+        } else {
+            border[idx] = current;
         }
     }
-    if border[center] == 0 {
-        border[center] = val;
+
+    // Corner
+    if avail[center] {
+        current = border[center];
+    } else {
+        border[center] = current;
     }
+
+    // Top row (left to right): p[0][-1] .. p[2*nTbS-1][-1]
     for i in 0..(2 * size) {
-        if border[center + 1 + i] == 0 {
-            border[center + 1 + i] = val;
+        let idx = center + 1 + i;
+        if avail[idx] {
+            current = border[idx];
+        } else {
+            border[idx] = current;
         }
     }
 }
@@ -294,12 +384,6 @@ fn get_sample(frame: &DecodedFrame, x: u32, y: u32, c_idx: u8) -> u16 {
 
 /// Set a sample in the frame
 fn set_sample(frame: &mut DecodedFrame, x: u32, y: u32, c_idx: u8, value: u16) {
-    // DEBUG: Track Cr writes at y=0 for x=104-111 to find corruption
-    if c_idx == 2 && y == 0 && (104..=111).contains(&x) {
-        let old_val = frame.get_cr(x, y);
-        eprintln!("DEBUG: set_cr({},{}) = {} (was {})", x, y, value, old_val);
-    }
-
     match c_idx {
         0 => frame.set_y(x, y, value),
         1 => frame.set_cb(x, y, value),
@@ -314,12 +398,12 @@ fn predict_planar(
     x: u32,
     y: u32,
     size: u32,
+    log2_size: u8,
     c_idx: u8,
     border: &[i32],
     center: usize,
 ) {
     let n = size as i32;
-    let log2_size = (size as f32).log2() as u32;
 
     for py in 0..size {
         for px in 0..size {
@@ -353,12 +437,12 @@ fn predict_dc(
     x: u32,
     y: u32,
     size: u32,
+    log2_size: u8,
     c_idx: u8,
     border: &[i32],
     center: usize,
 ) {
     let n = size as i32;
-    let log2_size = (size as f32).log2() as u32;
 
     // Calculate DC value as average of top and left samples
     let mut dc_val = 0i32;

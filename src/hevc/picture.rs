@@ -3,6 +3,11 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+/// Sentinel value for uninitialized pixels.
+/// Used during decoding to distinguish decoded samples from uninitialized ones
+/// for reference sample availability (H.265 8.4.4.2.2).
+pub const UNINIT_SAMPLE: u16 = u16::MAX;
+
 /// Decoded video frame
 #[derive(Debug)]
 pub struct DecodedFrame {
@@ -42,9 +47,9 @@ impl DecodedFrame {
         Self {
             width,
             height,
-            y_plane: vec![0; luma_size],
-            cb_plane: vec![0; chroma_size],
-            cr_plane: vec![0; chroma_size],
+            y_plane: vec![UNINIT_SAMPLE; luma_size],
+            cb_plane: vec![UNINIT_SAMPLE; chroma_size],
+            cr_plane: vec![UNINIT_SAMPLE; chroma_size],
             bit_depth: 8,
             chroma_format: 1, // 4:2:0
             crop_left: 0,
@@ -71,9 +76,9 @@ impl DecodedFrame {
         Self {
             width,
             height,
-            y_plane: vec![0; luma_size],
-            cb_plane: vec![0; chroma_size],
-            cr_plane: vec![0; chroma_size],
+            y_plane: vec![UNINIT_SAMPLE; luma_size],
+            cb_plane: vec![UNINIT_SAMPLE; chroma_size],
+            cr_plane: vec![UNINIT_SAMPLE; chroma_size],
             bit_depth,
             chroma_format,
             crop_left: 0,

@@ -23,7 +23,7 @@ type Result<T> = core::result::Result<T, HevcError>;
 
 /// Global SE counter for syntax element tracing
 pub static SE_COUNTER: AtomicU32 = AtomicU32::new(0);
-pub const SE_TRACE_LIMIT: u32 = 500000;
+pub const SE_TRACE_LIMIT: u32 = 0;
 
 /// Log a syntax element decode for differential testing
 fn se_trace(name: &str, val: i64, cabac: &CabacDecoder) {
@@ -92,6 +92,22 @@ pub struct SliceContext<'a> {
     intra_mode_map_stride: u32,
     /// Intra chroma mode map (indexed by min_pu_size grid, stores IntraPredMode as u8)
     intra_chroma_mode_map: Vec<u8>,
+    /// Current CU base position (set at decode_coding_unit start)
+    cu_base_x: u32,
+    cu_base_y: u32,
+    /// Current CU log2 size (set at decode_coding_unit start)
+    cu_log2_size: u8,
+    /// QP map: stores per-CU QPY values (indexed by min_tb_size grid)
+    qp_map: Vec<i8>,
+    /// Width of QP map in min_tb_size units
+    qp_map_stride: u32,
+    /// Current QPY for the current quantization group
+    current_qpy: i32,
+    /// Last QPY from previous quantization group (for prediction)
+    last_qpy_in_prev_qg: i32,
+    /// Current quantization group position
+    current_qg_x: i32,
+    current_qg_y: i32,
 }
 
 impl<'a> SliceContext<'a> {
@@ -180,6 +196,12 @@ impl<'a> SliceContext<'a> {
         let intra_mode_map = vec![IntraPredMode::Dc.as_u8(); pu_map_size];
         let intra_chroma_mode_map = vec![IntraPredMode::Dc.as_u8(); pu_map_size];
 
+        // QP map at min_tb_size granularity
+        let min_tb_size = 1u32 << sps.log2_min_tb_size();
+        let qp_map_stride = sps.pic_width_in_luma_samples.div_ceil(min_tb_size);
+        let qp_map_height = sps.pic_height_in_luma_samples.div_ceil(min_tb_size);
+        let qp_map = vec![slice_qp as i8; (qp_map_stride * qp_map_height) as usize];
+
         Ok(Self {
             sps,
             pps,
@@ -201,6 +223,15 @@ impl<'a> SliceContext<'a> {
             intra_mode_map,
             intra_mode_map_stride,
             intra_chroma_mode_map,
+            cu_base_x: 0,
+            cu_base_y: 0,
+            cu_log2_size: 0,
+            qp_map,
+            qp_map_stride,
+            current_qpy: slice_qp,
+            last_qpy_in_prev_qg: slice_qp,
+            current_qg_x: -1,
+            current_qg_y: -1,
         })
     }
 
@@ -632,6 +663,15 @@ impl<'a> SliceContext<'a> {
         let cb_size = 1u32 << log2_cb_size;
         let _ = cb_size; // Used in PartNxN
 
+        // Track CU base position for transform unit QP derivation
+        self.cu_base_x = x0;
+        self.cu_base_y = y0;
+        self.cu_log2_size = log2_cb_size;
+
+        // Decode quantization parameters at CU start (H.265 8.6.1)
+        self.decode_quantization_parameters(x0, y0, x0, y0);
+        self.store_qpy(x0, y0, log2_cb_size, self.current_qpy);
+
         // Set ct_depth for this CU (used by split_cu_flag context derivation)
         self.set_ct_depth(x0, y0, log2_cb_size, ct_depth);
 
@@ -737,18 +777,9 @@ impl<'a> SliceContext<'a> {
                 // Store chroma mode for the whole CU region
                 self.store_intra_chroma_mode(x0, y0, log2_cb_size, chroma_mode);
 
-                // Apply luma predictions for all 4 PUs
-                intra::predict_intra(frame, x0, y0, log2_pu_size, luma_mode_0, 0);
-                intra::predict_intra(frame, x0 + half, y0, log2_pu_size, luma_mode_1, 0);
-                intra::predict_intra(frame, x0, y0 + half, log2_pu_size, luma_mode_2, 0);
-                intra::predict_intra(frame, x0 + half, y0 + half, log2_pu_size, luma_mode_3, 0);
-
-                // Apply chroma prediction once for the whole 8x8 region
-                let chroma_x = x0 / 2;
-                let chroma_y = y0 / 2;
-                let chroma_log2_size = log2_cb_size.saturating_sub(1).max(2);
-                intra::predict_intra(frame, chroma_x, chroma_y, chroma_log2_size, chroma_mode, 1);
-                intra::predict_intra(frame, chroma_x, chroma_y, chroma_log2_size, chroma_mode, 2);
+                // NOTE: Prediction is NOT done here. It happens in decode_transform_unit_leaf
+                // and the 8x8→4x4 chroma split handler, so each TU is predicted →
+                // reconstructed before the next TU reads its neighbors.
 
                 (luma_mode_0, chroma_mode)
             }
@@ -958,15 +989,21 @@ impl<'a> SliceContext<'a> {
                 frame,
             )?;
 
-            // For 4:2:0, if we split from 8x8 to 4x4, decode chroma residuals now
+            // For 4:2:0, if we split from 8x8 to 4x4, predict + decode chroma now
             // (because 4x4 children can't have chroma TUs)
             if log2_size == 3 {
+                let sis = self.sps.strong_intra_smoothing_enabled_flag;
                 let scan_order =
                     residual::get_scan_order(2, intra_chroma_mode.as_u8(), 1);
 
+                // Predict and apply Cb
+                intra::predict_intra(frame, x0 / 2, y0 / 2, 2, intra_chroma_mode, 1, sis);
                 if cbf_cb {
                     self.decode_and_apply_residual(x0 / 2, y0 / 2, 2, 1, scan_order, frame)?;
                 }
+
+                // Predict and apply Cr
+                intra::predict_intra(frame, x0 / 2, y0 / 2, 2, intra_chroma_mode, 2, sis);
                 if cbf_cr {
                     self.decode_and_apply_residual(x0 / 2, y0 / 2, 2, 2, scan_order, frame)?;
                 }
@@ -990,6 +1027,11 @@ impl<'a> SliceContext<'a> {
     }
 
     /// Decode transform unit at leaf node
+    ///
+    /// Per libde265's decode_TU(): prediction and reconstruction happen PER TU,
+    /// so each TU is fully predicted + reconstructed before the next TU starts.
+    /// This ensures subsequent TUs read reconstructed neighbor samples (not just
+    /// prediction values) for their own intra prediction.
     #[allow(clippy::too_many_arguments)]
     fn decode_transform_unit_leaf(
         &mut self,
@@ -1029,26 +1071,36 @@ impl<'a> SliceContext<'a> {
             self.is_cu_qp_delta_coded = true;
             self.cu_qp_delta = cu_qp_delta_abs as i32 * (1 - 2 * cu_qp_delta_sign as i32);
             se_trace("cu_qp_delta", self.cu_qp_delta as i64, &self.cabac);
+
+            // Re-derive quantization parameters with the actual delta
+            let cu_x = self.cu_base_x;
+            let cu_y = self.cu_base_y;
+            let cu_log2 = self.cu_log2_size;
+            self.decode_quantization_parameters(x0, y0, cu_x, cu_y);
+            // Store QPY in the QP map for neighbor lookups
+            self.store_qpy(cu_x, cu_y, cu_log2, self.current_qpy);
         }
 
         // Look up intra mode at actual TU position (correct for NxN where sub-TUs differ)
         let actual_luma_mode = self.get_intra_mode_at(x0, y0);
+        let sis = self.sps.strong_intra_smoothing_enabled_flag;
+
+        // Predict luma at TU level BEFORE residual application
+        // This ensures each TU reads reconstructed neighbors from prior TUs
+        intra::predict_intra(frame, x0, y0, log2_size, actual_luma_mode, 0, sis);
+
         let scan_order = residual::get_scan_order(log2_size, actual_luma_mode.as_u8(), 0);
 
-        // Decode and apply luma residuals
+        // Decode and apply luma residuals (adds to prediction already in frame)
         if cbf_luma {
             if debug_tt {
                 let (r, o) = self.cabac.get_state();
-                eprintln!("    TT(1144,120): decoding luma residual (r={},o={})", r, o);
+                eprintln!("    TT: decoding luma residual at ({},{}) log2={} (r={},o={})", x0, y0, log2_size, r, o);
             }
             self.decode_and_apply_residual(x0, y0, log2_size, 0, scan_order, frame)?;
-            if debug_tt {
-                let (r, o) = self.cabac.get_state();
-                eprintln!("    TT(1144,120): after luma residual (r={},o={})", r, o);
-            }
         }
 
-        // Decode chroma residuals if not handled by parent (log2_size >= 3)
+        // Decode chroma: predict + residual per component if not handled by parent
         if log2_size >= 3 {
             let chroma_log2_size = log2_size - 1;
             let chroma_scan_order = residual::get_scan_order(
@@ -1056,44 +1108,28 @@ impl<'a> SliceContext<'a> {
                 intra_chroma_mode.as_u8(),
                 1,
             );
+
+            // Predict and apply Cb
+            intra::predict_intra(
+                frame, x0 / 2, y0 / 2, chroma_log2_size, intra_chroma_mode, 1, sis,
+            );
             if cbf_cb {
-                if debug_tt {
-                    let (r, o) = self.cabac.get_state();
-                    eprintln!("    TT(1144,120): decoding Cb residual (r={},o={})", r, o);
-                }
                 self.decode_and_apply_residual(
-                    x0 / 2,
-                    y0 / 2,
-                    chroma_log2_size,
-                    1,
-                    chroma_scan_order,
-                    frame,
+                    x0 / 2, y0 / 2, chroma_log2_size, 1, chroma_scan_order, frame,
                 )?;
-                if debug_tt {
-                    let (r, o) = self.cabac.get_state();
-                    eprintln!("    TT(1144,120): after Cb residual (r={},o={})", r, o);
-                }
             }
+
+            // Predict and apply Cr
+            intra::predict_intra(
+                frame, x0 / 2, y0 / 2, chroma_log2_size, intra_chroma_mode, 2, sis,
+            );
             if cbf_cr {
-                if debug_tt {
-                    let (r, o) = self.cabac.get_state();
-                    eprintln!("    TT(1144,120): decoding Cr residual (r={},o={})", r, o);
-                }
                 self.decode_and_apply_residual(
-                    x0 / 2,
-                    y0 / 2,
-                    chroma_log2_size,
-                    2,
-                    chroma_scan_order,
-                    frame,
+                    x0 / 2, y0 / 2, chroma_log2_size, 2, chroma_scan_order, frame,
                 )?;
-                if debug_tt {
-                    let (r, o) = self.cabac.get_state();
-                    eprintln!("    TT(1144,120): after Cr residual (r={},o={})", r, o);
-                }
             }
         }
-        // Note: if log2_size < 3, chroma was decoded by parent when splitting from 8x8
+        // Note: if log2_size < 3, chroma was predicted+decoded by parent when splitting from 8x8
 
         Ok(())
     }
@@ -1157,17 +1193,30 @@ impl<'a> SliceContext<'a> {
             return Ok(());
         }
 
-        // DEBUG: Print first few coefficient blocks
-        if x0 < 8 && y0 < 8 && c_idx == 0 {
+        // DEBUG: Print first few Y TU blocks (pred + coeffs + residual)
+        let debug_tu = x0 < 8 && y0 < 8 && c_idx == 0;
+        if debug_tu {
             let size = 1usize << log2_size;
             eprintln!(
-                "DEBUG: coeffs at ({},{}) c_idx={} size={}:",
-                x0, y0, c_idx, size
+                "DEBUG TU: ({},{}) c_idx={} size={} qp={}",
+                x0, y0, c_idx, size, self.qp_y
             );
-            for y in 0..size.min(4) {
-                let row: Vec<i16> = (0..size.min(4)).map(|x| coeff_buf.get(x, y)).collect();
-                eprintln!("  {:?}", row);
+            // Print prediction from frame (already written by predict_intra)
+            eprint!("  pred: ");
+            for y in 0..size {
+                for x in 0..size {
+                    eprint!("{} ", frame.get_y(x0 + x as u32, y0 + y as u32));
+                }
             }
+            eprintln!();
+            // Print raw coefficients
+            eprint!("  coeff: ");
+            for y in 0..size {
+                for x in 0..size {
+                    eprint!("{} ", coeff_buf.get(x, y));
+                }
+            }
+            eprintln!();
         }
 
         // DEBUG: Print Cr coefficients at CTU 1 boundary
@@ -1240,6 +1289,16 @@ impl<'a> SliceContext<'a> {
         let mut residual = [0i16; 1024];
         let is_intra_4x4_luma = log2_size == 2 && c_idx == 0;
         transform::inverse_transform(&coeffs, &mut residual, size, bit_depth, is_intra_4x4_luma);
+
+        // DEBUG: Print dequantized and residual for first Y TUs
+        if debug_tu {
+            eprint!("  dequant: ");
+            for i in 0..num_coeffs { eprint!("{} ", coeffs[i]); }
+            eprintln!();
+            eprint!("  residual: ");
+            for i in 0..num_coeffs { eprint!("{} ", residual[i]); }
+            eprintln!();
+        }
 
         // DEBUG: Print residuals for first blocks (all components)
         if x0 < 4 && y0 < 4 {
@@ -1422,7 +1481,7 @@ impl<'a> SliceContext<'a> {
         x0: u32,
         y0: u32,
         log2_size: u8,
-        apply_chroma: bool,
+        _apply_chroma: bool,
         frame: &mut DecodedFrame,
     ) -> Result<(IntraPredMode, IntraPredMode)> {
         let (intra_luma_mode, intra_chroma_mode) =
@@ -1432,31 +1491,9 @@ impl<'a> SliceContext<'a> {
         self.store_intra_mode(x0, y0, log2_size, intra_luma_mode);
         self.store_intra_chroma_mode(x0, y0, log2_size, intra_chroma_mode);
 
-        // Apply luma intra prediction
-        intra::predict_intra(frame, x0, y0, log2_size, intra_luma_mode, 0);
-
-        // Apply chroma intra prediction (half resolution for 4:2:0)
-        if apply_chroma && log2_size >= 3 {
-            let chroma_x = x0 / 2;
-            let chroma_y = y0 / 2;
-            let chroma_log2_size = log2_size.saturating_sub(1).max(2);
-            intra::predict_intra(
-                frame,
-                chroma_x,
-                chroma_y,
-                chroma_log2_size,
-                intra_chroma_mode,
-                1,
-            );
-            intra::predict_intra(
-                frame,
-                chroma_x,
-                chroma_y,
-                chroma_log2_size,
-                intra_chroma_mode,
-                2,
-            );
-        }
+        // NOTE: Prediction is NOT applied here. It happens in decode_transform_unit_leaf
+        // and the 8x8→4x4 chroma split handler, so each TU is predicted →
+        // reconstructed before the next TU reads its neighbors.
 
         Ok((intra_luma_mode, intra_chroma_mode))
     }
@@ -1610,6 +1647,18 @@ impl<'a> SliceContext<'a> {
         }
     }
 
+    /// Get intra chroma prediction mode at a sample position
+    fn get_intra_chroma_mode_at(&self, x: u32, y: u32) -> IntraPredMode {
+        let min_pu = self.min_pu_size();
+        let stride = self.intra_mode_map_stride;
+        let idx = ((y / min_pu) * stride + (x / min_pu)) as usize;
+        if idx < self.intra_chroma_mode_map.len() {
+            IntraPredMode::from_u8(self.intra_chroma_mode_map[idx]).unwrap_or(IntraPredMode::Dc)
+        } else {
+            IntraPredMode::Dc
+        }
+    }
+
     /// Get intra prediction mode of the left neighbor (x0-1, y0)
     ///
     /// Returns DC if the left neighbor is outside the picture boundary.
@@ -1678,6 +1727,145 @@ impl<'a> SliceContext<'a> {
         }
         se_trace("rem_intra_luma", val as i64, &self.cabac);
         Ok(val)
+    }
+
+    /// H.265 Table 8-6: chroma QP mapping for 4:2:0
+    fn chroma_qp_from_luma(qpi: i32) -> i32 {
+        static TAB8_22: [i32; 13] = [29, 30, 31, 32, 33, 33, 34, 34, 35, 35, 36, 36, 37];
+        if qpi < 30 {
+            qpi
+        } else if qpi >= 43 {
+            qpi - 6
+        } else {
+            TAB8_22[(qpi - 30) as usize]
+        }
+    }
+
+    /// Get QPY at a sample position from the QP map
+    fn get_qpy_at(&self, x: u32, y: u32) -> i32 {
+        let min_tb = 1u32 << self.sps.log2_min_tb_size();
+        let idx = ((y / min_tb) * self.qp_map_stride + (x / min_tb)) as usize;
+        if idx < self.qp_map.len() {
+            self.qp_map[idx] as i32
+        } else {
+            self.header.slice_qp_y
+        }
+    }
+
+    /// Store QPY for a CU region in the QP map
+    fn store_qpy(&mut self, x0: u32, y0: u32, log2_cb_size: u8, qpy: i32) {
+        let min_tb = 1u32 << self.sps.log2_min_tb_size();
+        let count = ((1u32 << log2_cb_size) / min_tb).max(1);
+        let start_x = x0 / min_tb;
+        let start_y = y0 / min_tb;
+        for dy in 0..count {
+            for dx in 0..count {
+                let idx = ((start_y + dy) * self.qp_map_stride + (start_x + dx)) as usize;
+                if idx < self.qp_map.len() {
+                    self.qp_map[idx] = qpy as i8;
+                }
+            }
+        }
+    }
+
+    /// Decode quantization parameters (H.265 section 8.6.1)
+    /// Matching libde265's decode_quantization_parameters()
+    fn decode_quantization_parameters(&mut self, x0: u32, y0: u32, x_cu_base: u32, y_cu_base: u32) {
+        let log2_min_cu_qp_delta_size = self.sps.log2_ctb_size() - self.pps.diff_cu_qp_delta_depth;
+        let qg_mask = (1u32 << log2_min_cu_qp_delta_size) - 1;
+
+        // Top-left pixel of current quantization group
+        let x_qg = (x_cu_base & !qg_mask) as i32;
+        let y_qg = (y_cu_base & !qg_mask) as i32;
+
+        // Track QG transitions
+        if x_qg != self.current_qg_x || y_qg != self.current_qg_y {
+            self.last_qpy_in_prev_qg = self.current_qpy;
+            self.current_qg_x = x_qg;
+            self.current_qg_y = y_qg;
+        }
+
+        // Determine QP prediction
+        let ctb_mask = ((1u32 << self.sps.log2_ctb_size()) - 1) as i32;
+        let first_in_ctb_row = x_qg == 0 && (y_qg & ctb_mask) == 0;
+
+        let first_ctb_in_slice = self.header.slice_segment_address;
+        let slice_start_x = (first_ctb_in_slice % self.sps.pic_width_in_ctbs()) as i32
+            * (1 << self.sps.log2_ctb_size()) as i32;
+        let slice_start_y = (first_ctb_in_slice / self.sps.pic_width_in_ctbs()) as i32
+            * (1 << self.sps.log2_ctb_size()) as i32;
+        let first_qg_in_slice = slice_start_x == x_qg && slice_start_y == y_qg;
+
+        let qp_y_pred = if first_qg_in_slice
+            || (first_in_ctb_row && self.pps.entropy_coding_sync_enabled_flag)
+        {
+            self.header.slice_qp_y
+        } else {
+            self.last_qpy_in_prev_qg
+        };
+
+        // Get neighbor QP values for averaging
+        let qp_y_a = if x_qg > 0 {
+            // Check if left neighbor is in same CTB
+            let left_x = (x_qg - 1) as u32;
+            let left_y = y_qg as u32;
+            // Simplified: check if in same CTB
+            let ctb_size = self.sps.ctb_size();
+            let our_ctb_x = x0 / ctb_size;
+            let left_ctb_x = left_x / ctb_size;
+            if our_ctb_x == left_ctb_x || (x_qg as u32) < ctb_size {
+                // Left neighbor might be in previous CTB, use prediction
+                if left_ctb_x == self.ctb_x {
+                    self.get_qpy_at(left_x, left_y)
+                } else {
+                    qp_y_pred
+                }
+            } else {
+                qp_y_pred
+            }
+        } else {
+            qp_y_pred
+        };
+
+        let qp_y_b = if y_qg > 0 {
+            let above_x = x_qg as u32;
+            let above_y = (y_qg - 1) as u32;
+            let ctb_size = self.sps.ctb_size();
+            let our_ctb_y = y0 / ctb_size;
+            let above_ctb_y = above_y / ctb_size;
+            if above_ctb_y == self.ctb_y {
+                self.get_qpy_at(above_x, above_y)
+            } else {
+                qp_y_pred
+            }
+        } else {
+            qp_y_pred
+        };
+
+        let qp_y_pred = (qp_y_a + qp_y_b + 1) >> 1;
+
+        // Compute final QPY
+        let qp_bd_offset_y = 6 * (self.sps.bit_depth_y() as i32 - 8);
+        let qpy = ((qp_y_pred + self.cu_qp_delta + 52 + 2 * qp_bd_offset_y)
+            % (52 + qp_bd_offset_y))
+            - qp_bd_offset_y;
+
+        self.qp_y = qpy + qp_bd_offset_y;
+        if self.qp_y < 0 {
+            self.qp_y = 0;
+        }
+
+        // Compute chroma QP (4:2:0)
+        let qp_bd_offset_c = 6 * (self.sps.bit_depth_c() as i32 - 8);
+        let qpi_cb = (qpy + self.pps.pps_cb_qp_offset as i32 + self.header.slice_cb_qp_offset as i32)
+            .clamp(-qp_bd_offset_c, 57);
+        let qpi_cr = (qpy + self.pps.pps_cr_qp_offset as i32 + self.header.slice_cr_qp_offset as i32)
+            .clamp(-qp_bd_offset_c, 57);
+
+        self.qp_cb = Self::chroma_qp_from_luma(qpi_cb) + qp_bd_offset_c;
+        self.qp_cr = Self::chroma_qp_from_luma(qpi_cr) + qp_bd_offset_c;
+
+        self.current_qpy = qpy;
     }
 }
 
