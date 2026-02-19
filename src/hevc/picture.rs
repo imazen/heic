@@ -202,6 +202,7 @@ impl DecodedFrame {
 
     /// Convert a single YCbCr pixel to RGB.
     /// y_val, cb_val, cr_val are 8-bit values (0-255).
+    /// Coefficients match libheif's BT.601 implementation for max compatibility.
     #[inline(always)]
     fn ycbcr_to_rgb(&self, y_val: i32, cb_val: i32, cr_val: i32) -> (u8, u8, u8) {
         let cb = cb_val - 128;
@@ -209,16 +210,17 @@ impl DecodedFrame {
 
         if self.full_range {
             // BT.601 full range: Y [0,255], Cb/Cr [0,255]
-            let r = y_val + ((1436 * cr) >> 10);
-            let g = y_val - ((352 * cb + 731 * cr) >> 10);
-            let b = y_val + ((1815 * cb) >> 10);
+            let r = (y_val * 1024 + 1436 * cr + 512) >> 10;
+            let g = (y_val * 1024 - 352 * cb - 731 * cr + 512) >> 10;
+            let b = (y_val * 1024 + 1815 * cb + 512) >> 10;
             (r.clamp(0, 255) as u8, g.clamp(0, 255) as u8, b.clamp(0, 255) as u8)
         } else {
             // BT.601 limited range: Y [16,235], Cb/Cr [16,240]
+            // Coefficients: Y scale=1197/1024≈1.1689, chroma scale includes 1.1429 factor
             let y16 = y_val - 16;
-            let r = (1192 * y16 + 1634 * cr) >> 10;
-            let g = (1192 * y16 - 401 * cb - 832 * cr) >> 10;
-            let b = (1192 * y16 + 2066 * cb) >> 10;
+            let r = (1197 * y16 + 1641 * cr + 512) >> 10;
+            let g = (1197 * y16 - 403 * cb - 836 * cr + 512) >> 10;
+            let b = (1197 * y16 + 2074 * cb + 512) >> 10;
             (r.clamp(0, 255) as u8, g.clamp(0, 255) as u8, b.clamp(0, 255) as u8)
         }
     }
