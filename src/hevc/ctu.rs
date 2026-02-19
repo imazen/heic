@@ -9,6 +9,18 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+/// Set to true to enable verbose debug tracing to stderr
+const DEBUG_TRACE: bool = false;
+
+/// Debug print macro gated behind DEBUG_TRACE const
+macro_rules! debug_trace {
+    ($($arg:tt)*) => {
+        if DEBUG_TRACE {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
 use super::cabac::{CabacDecoder, ContextModel, INIT_VALUES, context};
 use super::debug;
 use super::intra;
@@ -122,11 +134,11 @@ impl<'a> SliceContext<'a> {
         slice_data: &'a [u8],
     ) -> Result<Self> {
         // DEBUG: Print first few bytes of slice data
-        eprintln!(
+        debug_trace!(
             "DEBUG: Slice data first 16 bytes: {:02x?}",
             &slice_data[..16.min(slice_data.len())]
         );
-        eprintln!(
+        debug_trace!(
             "DEBUG: SPS: {}x{}, ctb_size={}, min_cb_size={}, scaling_list={}",
             sps.pic_width_in_luma_samples,
             sps.pic_height_in_luma_samples,
@@ -134,11 +146,11 @@ impl<'a> SliceContext<'a> {
             1 << sps.log2_min_cb_size(),
             sps.scaling_list_enabled_flag
         );
-        eprintln!(
+        debug_trace!(
             "DEBUG: SPS: max_transform_hierarchy_depth_intra={}",
             sps.max_transform_hierarchy_depth_intra
         );
-        eprintln!(
+        debug_trace!(
             "DEBUG: SPS: log2_min_tb={}, log2_max_tb={}",
             sps.log2_min_tb_size(),
             sps.log2_max_tb_size()
@@ -146,7 +158,7 @@ impl<'a> SliceContext<'a> {
 
         let cabac = CabacDecoder::new(slice_data)?;
         let (range, offset) = cabac.get_state();
-        eprintln!(
+        debug_trace!(
             "DEBUG: CABAC init state: range={}, offset={}",
             range, offset
         );
@@ -159,6 +171,17 @@ impl<'a> SliceContext<'a> {
             ctx[i].init(*init_val, slice_qp);
         }
 
+        // Dump context init state for LAST_SIG_COEFF debugging
+        eprintln!("CTX_INIT: slice_qp={}", slice_qp);
+        for i in 0..18 {
+            let (state, mps) = ctx[context::LAST_SIG_COEFF_X_PREFIX + i].get_state();
+            eprintln!("  LAST_X[{}] init_val={} -> state={} mps={}", i, INIT_VALUES[context::LAST_SIG_COEFF_X_PREFIX + i], state, mps);
+        }
+        for i in 0..18 {
+            let (state, mps) = ctx[context::LAST_SIG_COEFF_Y_PREFIX + i].get_state();
+            eprintln!("  LAST_Y[{}] init_val={} -> state={} mps={}", i, INIT_VALUES[context::LAST_SIG_COEFF_Y_PREFIX + i], state, mps);
+        }
+
         // Calculate chroma QP values (H.265 Table 8-10 and section 8.6.1)
         // qPi_Cb = qP_Y + pps_cb_qp_offset + slice_cb_qp_offset
         // qPi_Cr = qP_Y + pps_cr_qp_offset + slice_cr_qp_offset
@@ -169,17 +192,21 @@ impl<'a> SliceContext<'a> {
         let qp_cb = chroma_qp_mapping(qp_i_cb.clamp(0, 57));
         let qp_cr = chroma_qp_mapping(qp_i_cr.clamp(0, 57));
 
-        eprintln!(
+        debug_trace!(
             "DEBUG: Chroma QP: qp_y={}, qp_cb={}, qp_cr={}",
             slice_qp, qp_cb, qp_cr
         );
-        eprintln!(
+        debug_trace!(
             "DEBUG: sign_data_hiding_enabled_flag={}",
             pps.sign_data_hiding_enabled_flag
         );
-        eprintln!(
+        debug_trace!(
             "DEBUG: tiles_enabled={} entropy_coding_sync={}",
             pps.tiles_enabled_flag, pps.entropy_coding_sync_enabled_flag
+        );
+        eprintln!(
+            "DEBUG: transform_skip_enabled_flag={}",
+            pps.transform_skip_enabled_flag
         );
 
         // Initialize ct_depth_map for split_cu_flag context derivation
@@ -281,7 +308,7 @@ impl<'a> SliceContext<'a> {
             // DEBUG: Print CTU state periodically
             if ctu_count.is_multiple_of(50) || ctu_count <= 3 {
                 let (range, offset) = self.cabac.get_state();
-                eprintln!(
+                debug_trace!(
                     "DEBUG: CTU {} byte={} cabac=({},{}) x={} y={}",
                     ctu_count, byte_pos, range, offset, self.ctb_x, self.ctb_y
                 );
@@ -301,7 +328,7 @@ impl<'a> SliceContext<'a> {
             let end_of_slice = self.cabac.decode_terminate()?;
             se_trace("end_of_slice", end_of_slice as i64, &self.cabac);
             if end_of_slice != 0 {
-                eprintln!(
+                debug_trace!(
                     "DEBUG: end_of_slice after CTU {}, decoded {}/{} CTUs",
                     ctu_count, ctu_count, total_ctus
                 );
@@ -330,8 +357,9 @@ impl<'a> SliceContext<'a> {
             }
         }
 
-        // Print CABAC tracker summary
-        debug::print_tracker_summary();
+        if DEBUG_TRACE {
+            debug::print_tracker_summary();
+        }
         Ok(())
     }
 
@@ -535,7 +563,7 @@ impl<'a> SliceContext<'a> {
             let flag = self.decode_split_cu_flag(x0, y0, ct_depth)?;
             if self.debug_ctu {
                 let (r, o) = self.cabac.get_state();
-                eprintln!(
+                debug_trace!(
                     "  CTU37: split_cu_flag at ({},{}) depth={} log2={} → {} (r={},o={})",
                     x0, y0, ct_depth, log2_cb_size, flag, r, o
                 );
@@ -544,7 +572,7 @@ impl<'a> SliceContext<'a> {
         } else if log2_cb_size > log2_min_cb_size {
             // Must split if partially outside picture
             if self.debug_ctu {
-                eprintln!(
+                debug_trace!(
                     "  CTU37: forced split at ({},{}) depth={} - outside picture",
                     x0, y0, ct_depth
                 );
@@ -553,7 +581,7 @@ impl<'a> SliceContext<'a> {
         } else {
             // At minimum size, don't split
             if self.debug_ctu {
-                eprintln!(
+                debug_trace!(
                     "  CTU37: no split at ({},{}) depth={} - min size",
                     x0, y0, ct_depth
                 );
@@ -723,7 +751,7 @@ impl<'a> SliceContext<'a> {
                 let count = NXN_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 if count == 0 || x0 < 64 && y0 < 64 {
                     let (r, o) = self.cabac.get_state();
-                    eprintln!(
+                    debug_trace!(
                         "DEBUG: part_mode at ({},{}) log2={}: {:?} cabac=({},{})",
                         x0, y0, log2_cb_size, pm, r, o
                     );
@@ -731,7 +759,7 @@ impl<'a> SliceContext<'a> {
             }
             if self.debug_ctu {
                 let (r, o) = self.cabac.get_state();
-                eprintln!(
+                debug_trace!(
                     "  CTU37: CU at ({},{}) log2={} part_mode={:?} (r={},o={})",
                     x0, y0, log2_cb_size, pm, r, o
                 );
@@ -740,7 +768,7 @@ impl<'a> SliceContext<'a> {
         } else {
             // Larger sizes are always 2Nx2N for intra
             if self.debug_ctu {
-                eprintln!(
+                debug_trace!(
                     "  CTU37: CU at ({},{}) log2={} part_mode=2Nx2N (implicit)",
                     x0, y0, log2_cb_size
                 );
@@ -755,7 +783,7 @@ impl<'a> SliceContext<'a> {
                 let modes = self.decode_intra_prediction(x0, y0, log2_cb_size, true, frame)?;
                 if self.debug_ctu {
                     let (r, o) = self.cabac.get_state();
-                    eprintln!(
+                    debug_trace!(
                         "  CTU37: After intra_prediction at (1144,120): mode={:?} (r={},o={}) bits={}",
                         modes,
                         r,
@@ -835,7 +863,7 @@ impl<'a> SliceContext<'a> {
 
             if self.debug_ctu {
                 let (r, o) = self.cabac.get_state();
-                eprintln!(
+                debug_trace!(
                     "  CTU37: After transform_tree at ({},{}) log2={} (r={},o={})",
                     x0, y0, log2_cb_size, r, o
                 );
@@ -922,7 +950,7 @@ impl<'a> SliceContext<'a> {
             true // Must split: larger than max OR IntraSplitFlag at depth 0
         } else {
             if debug_tt {
-                eprintln!(
+                debug_trace!(
                     "    TT(1144,120): no split (log2={} min={} max={} depth={} maxdepth={})",
                     log2_size,
                     log2_min_trafo_size,
@@ -1127,7 +1155,7 @@ impl<'a> SliceContext<'a> {
         if cbf_luma {
             if debug_tt {
                 let (r, o) = self.cabac.get_state();
-                eprintln!("    TT: decoding luma residual at ({},{}) log2={} (r={},o={})", x0, y0, log2_size, r, o);
+                debug_trace!("    TT: decoding luma residual at ({},{}) log2={} (r={},o={})", x0, y0, log2_size, r, o);
             }
             self.decode_and_apply_residual(x0, y0, log2_size, 0, scan_order, frame)?;
         }
@@ -1209,7 +1237,7 @@ impl<'a> SliceContext<'a> {
             core::sync::atomic::AtomicI64::new(0);
 
         // Decode coefficients via CABAC
-        let coeff_buf = residual::decode_residual(
+        let (coeff_buf, transform_skip) = residual::decode_residual(
             &mut self.cabac,
             &mut self.ctx,
             log2_size,
@@ -1217,6 +1245,7 @@ impl<'a> SliceContext<'a> {
             scan_order,
             self.pps.sign_data_hiding_enabled_flag,
             self.cu_transquant_bypass_flag,
+            self.pps.transform_skip_enabled_flag,
             x0,
             y0,
         )?;
@@ -1229,44 +1258,44 @@ impl<'a> SliceContext<'a> {
         let debug_tu = x0 < 8 && y0 < 8 && c_idx == 0;
         if debug_tu {
             let size = 1usize << log2_size;
-            eprintln!(
+            debug_trace!(
                 "DEBUG TU: ({},{}) c_idx={} size={} qp={}",
                 x0, y0, c_idx, size, self.qp_y
             );
             // Print prediction from frame (already written by predict_intra)
-            eprint!("  pred: ");
+            debug_trace!("  pred: ");
             for y in 0..size {
                 for x in 0..size {
-                    eprint!("{} ", frame.get_y(x0 + x as u32, y0 + y as u32));
+                    debug_trace!("{} ", frame.get_y(x0 + x as u32, y0 + y as u32));
                 }
             }
-            eprintln!();
+            debug_trace!();
             // Print raw coefficients
-            eprint!("  coeff: ");
+            debug_trace!("  coeff: ");
             for y in 0..size {
                 for x in 0..size {
-                    eprint!("{} ", coeff_buf.get(x, y));
+                    debug_trace!("{} ", coeff_buf.get(x, y));
                 }
             }
-            eprintln!();
+            debug_trace!();
         }
 
         // DEBUG: Print Cr coefficients at CTU 1 boundary
         if x0 == 32 && y0 == 0 && c_idx == 2 {
             let size = 1usize << log2_size;
-            eprintln!("DEBUG: Cr coeffs at (32,0) raw:");
+            debug_trace!("DEBUG: Cr coeffs at (32,0) raw:");
             for y in 0..size.min(4) {
                 let row: Vec<i16> = (0..size.min(4)).map(|x| coeff_buf.get(x, y)).collect();
-                eprintln!("  {:?}", row);
+                debug_trace!("  {:?}", row);
             }
         }
         // DEBUG: Print Cb coefficients at CTU 1 boundary for comparison
         if x0 == 32 && y0 == 0 && c_idx == 1 {
             let size = 1usize << log2_size;
-            eprintln!("DEBUG: Cb coeffs at (32,0) raw:");
+            debug_trace!("DEBUG: Cb coeffs at (32,0) raw:");
             for y in 0..size.min(4) {
                 let row: Vec<i16> = (0..size.min(4)).map(|x| coeff_buf.get(x, y)).collect();
-                eprintln!("  {:?}", row);
+                debug_trace!("  {:?}", row);
             }
         }
 
@@ -1293,11 +1322,11 @@ impl<'a> SliceContext<'a> {
 
         // DEBUG: Print dequantized coefficients for first block
         if x0 == 0 && y0 == 0 && c_idx == 0 {
-            eprintln!("DEBUG: QP={}, bit_depth={}", self.qp_y, bit_depth);
-            eprintln!("DEBUG: dequantized coeffs:");
+            debug_trace!("DEBUG: QP={}, bit_depth={}", self.qp_y, bit_depth);
+            debug_trace!("DEBUG: dequantized coeffs:");
             for y in 0..size.min(4) {
                 let row: Vec<i16> = (0..size.min(4)).map(|px| coeffs[y * size + px]).collect();
-                eprintln!("  {:?}", row);
+                debug_trace!("  {:?}", row);
             }
         }
 
@@ -1305,51 +1334,66 @@ impl<'a> SliceContext<'a> {
         if x0 == 104 && y0 == 0 && c_idx == 2 {
             let call_num =
                 residual::DEBUG_RESIDUAL_COUNTER.load(core::sync::atomic::Ordering::Relaxed);
-            eprintln!(
+            debug_trace!(
                 "DEBUG: Cr at (104,0) residual_call #{} BEFORE dequant: {:?}",
                 call_num - 1,
                 &coeff_buf.coeffs[..num_coeffs]
             );
-            eprintln!(
+            debug_trace!(
                 "DEBUG: Cr at (104,0) AFTER dequant QP={}, bit_depth={}:",
                 qp, bit_depth
             );
-            eprintln!("  {:?}", &coeffs[..num_coeffs]);
+            debug_trace!("  {:?}", &coeffs[..num_coeffs]);
         }
 
-        // Apply inverse transform
+        // Apply inverse transform (or skip for transform_skip mode)
         let mut residual = [0i16; 1024];
-        let is_intra_4x4_luma = log2_size == 2 && c_idx == 0;
-        transform::inverse_transform(&coeffs, &mut residual, size, bit_depth, is_intra_4x4_luma);
+        if transform_skip {
+            // Per libde265 transform.cc transform_skip_residual_fallback():
+            // tsShift = 5 + Log2(nTbS)           (no extended_precision)
+            // bdShift = max(20 - bit_depth, 0)    (no extended_precision)
+            // residual = (coeff << tsShift + rnd) >> bdShift
+            // where rnd = 1 << (bdShift - 1)
+            let ts_shift = 5 + log2_size as i32;
+            let bd_shift = (20 - bit_depth as i32).max(0);
+            let rnd = if bd_shift > 0 { 1i32 << (bd_shift - 1) } else { 0 };
+            for i in 0..num_coeffs {
+                let c = (coeffs[i] as i32) << ts_shift;
+                residual[i] = ((c + rnd) >> bd_shift) as i16;
+            }
+        } else {
+            let is_intra_4x4_luma = log2_size == 2 && c_idx == 0;
+            transform::inverse_transform(&coeffs, &mut residual, size, bit_depth, is_intra_4x4_luma);
+        }
 
         // DEBUG: Print dequantized and residual for first Y TUs
         if debug_tu {
-            eprint!("  dequant: ");
-            for i in 0..num_coeffs { eprint!("{} ", coeffs[i]); }
-            eprintln!();
-            eprint!("  residual: ");
-            for i in 0..num_coeffs { eprint!("{} ", residual[i]); }
-            eprintln!();
+            debug_trace!("  dequant: ");
+            for i in 0..num_coeffs { debug_trace!("{} ", coeffs[i]); }
+            debug_trace!();
+            debug_trace!("  residual: ");
+            for i in 0..num_coeffs { debug_trace!("{} ", residual[i]); }
+            debug_trace!();
         }
 
         // DEBUG: Print residuals for first blocks (all components)
         if x0 < 4 && y0 < 4 {
-            eprintln!("DEBUG: residuals at ({},{}) c_idx={}:", x0, y0, c_idx);
+            debug_trace!("DEBUG: residuals at ({},{}) c_idx={}:", x0, y0, c_idx);
             for y in 0..size.min(4) {
                 let row: Vec<i16> = (0..size.min(4)).map(|x| residual[y * size + x]).collect();
-                eprintln!("  {:?}", row);
+                debug_trace!("  {:?}", row);
             }
         }
 
         // DEBUG: Print residuals for Cb/Cr at CTU 1 boundary
         if x0 == 32 && y0 == 0 && (c_idx == 1 || c_idx == 2) {
-            eprintln!(
+            debug_trace!(
                 "DEBUG: {} residuals at (32,0):",
                 if c_idx == 1 { "Cb" } else { "Cr" }
             );
             for y in 0..size.min(4) {
                 let row: Vec<i16> = (0..size.min(4)).map(|px| residual[y * size + px]).collect();
-                eprintln!("  {:?}", row);
+                debug_trace!("  {:?}", row);
             }
         }
 
@@ -1373,7 +1417,7 @@ impl<'a> SliceContext<'a> {
             let count = CB_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             let pred_avg = pred_sum as f64 / num_coeffs as f64;
             if count < 5 || (50..55).contains(&count) || (pred_avg > 240.0 && count < 30) {
-                eprintln!(
+                debug_trace!(
                     "DEBUG: Cb TU at ({},{}) size={} residual_sum={} pred_avg={:.1}",
                     x0, y0, size, res_sum, pred_avg
                 );
@@ -1392,14 +1436,14 @@ impl<'a> SliceContext<'a> {
             let pred_avg = pred_sum as f64 / num_coeffs as f64;
             // Debug for all Cr TUs at y=0 to trace corruption
             if y0 == 0 {
-                eprintln!(
+                debug_trace!(
                     "DEBUG: Cr TU at ({},{}) size={} residual_sum={} pred_avg={:.1}",
                     x0, y0, size, res_sum, pred_avg
                 );
                 // Extra debug: print residual array for corrupted TU
                 if (104..=108).contains(&x0) {
                     let res_vals: Vec<i16> = residual[..num_coeffs].to_vec();
-                    eprintln!("  residual array: {:?}", res_vals);
+                    debug_trace!("  residual array: {:?}", res_vals);
                 }
             }
         }
@@ -1412,7 +1456,7 @@ impl<'a> SliceContext<'a> {
                 _ => 0,
             };
             let r = residual[0] as i32;
-            eprintln!(
+            debug_trace!(
                 "DEBUG: c_idx={} at (0,0): pred={}, residual={}, recon={}",
                 c_idx,
                 pred,
@@ -1438,7 +1482,7 @@ impl<'a> SliceContext<'a> {
 
                 // DEBUG: Track Cr writes from residual at x=104-111, y=0
                 if c_idx == 2 && y == 0 && (104..=111).contains(&x) {
-                    eprintln!(
+                    debug_trace!(
                         "DEBUG: residual set_cr({},{}) = {} (pred={} r={})",
                         x, y, recon, pred, r
                     );
@@ -1462,14 +1506,14 @@ impl<'a> SliceContext<'a> {
                 let cr_res_sum = CR_RESIDUAL_SUM.load(core::sync::atomic::Ordering::Relaxed);
                 let cb_pred_sum = CB_PRED_SUM.load(core::sync::atomic::Ordering::Relaxed);
                 let cr_pred_sum = CR_PRED_SUM.load(core::sync::atomic::Ordering::Relaxed);
-                eprintln!(
+                debug_trace!(
                     "DEBUG CHROMA STATS: Cb count={} res_sum={} pred_sum={} pred_avg={:.1}",
                     cb_count,
                     cb_res_sum,
                     cb_pred_sum,
                     cb_pred_sum as f64 / (cb_count * 16) as f64
                 );
-                eprintln!(
+                debug_trace!(
                     "DEBUG CHROMA STATS: Cr count={} res_sum={} pred_sum={} pred_avg={:.1}",
                     cr_count,
                     cr_res_sum,
@@ -1614,7 +1658,7 @@ impl<'a> SliceContext<'a> {
 
         // DEBUG: Print first few intra modes
         if x0 < 16 && y0 < 16 {
-            eprintln!(
+            debug_trace!(
                 "DEBUG: intra_mode at ({},{}) size={}: mode={:?}",
                 x0,
                 y0,

@@ -191,9 +191,10 @@ pub fn decode_residual(
     scan_order: ScanOrder,
     sign_data_hiding_enabled: bool,
     cu_transquant_bypass: bool,
+    transform_skip_enabled: bool,
     x0: u32,
     y0: u32,
-) -> Result<CoeffBuffer> {
+) -> Result<(CoeffBuffer, bool)> {
     // Track initial CABAC state for debugging
     let (init_range, init_offset) = cabac.get_state();
 
@@ -214,12 +215,29 @@ pub fn decode_residual(
         }
     }
 
-    // Surgical trace for diverging Cr residual
-    let rc_trace = residual_call_num == 982;
+    // Surgical trace for diverging residual (set to u32::MAX to disable)
+    let rc_trace = false; // residual_call_num == 0;
     let rcp = "RCX";
 
     let mut buffer = CoeffBuffer::new(log2_size);
     let size = 1u32 << log2_size;
+
+    // Decode transform_skip_flag (H.265 7.3.8.11)
+    // Per spec: if transform_skip_enabled_flag && !cu_transquant_bypass_flag
+    //           && log2TrafoSize <= Log2MaxTransformSkipSize
+    // Log2MaxTransformSkipSize defaults to 2 (4x4 blocks only)
+    let transform_skip = if transform_skip_enabled && !cu_transquant_bypass && log2_size <= 2 {
+        let ctx_idx = context::TRANSFORM_SKIP_FLAG + if c_idx > 0 { 1 } else { 0 };
+        let flag = cabac.decode_bin(&mut ctx[ctx_idx])? != 0;
+        if rc_trace {
+            let (range, _, _) = cabac.get_state_extended();
+            let (byte_pos, _, _) = cabac.get_position();
+            eprintln!("{rcp}_TSKIP c_idx={} val={} range={} byte={}", c_idx, flag as u8, range, byte_pos);
+        }
+        flag
+    } else {
+        false
+    };
 
     // Decode last significant coefficient position
     let (last_x, last_y) = decode_last_sig_coeff_pos(cabac, ctx, log2_size, c_idx)?;
@@ -610,13 +628,9 @@ pub fn decode_residual(
 
                 buffer.set(x, y, coeff_values[n]);
 
-                // Invariant check: track large coefficients (indicates CABAC desync)
+                // Track large coefficients (indicates CABAC desync)
                 if coeff_values[n].abs() > 500 {
                     let (byte_pos, _, _) = cabac.get_position();
-                    eprintln!(
-                        "LARGE COEFF: call#{} c_idx={} pos=({},{}) sb=({},{}) n={} val={} byte={}",
-                        residual_call_num, c_idx, x, y, sb_x, sb_y, n, coeff_values[n], byte_pos
-                    );
                     debug::track_large_coeff(byte_pos);
                 }
             }
@@ -632,7 +646,7 @@ pub fn decode_residual(
         eprintln!("{rcp}_END range={} byte={}", range, byte_pos);
     }
     let _ = (init_range, init_offset);
-    Ok(buffer)
+    Ok((buffer, transform_skip))
 }
 
 /// Get sub-block scan order
@@ -776,14 +790,44 @@ fn decode_last_sig_coeff_prefix(
 
     let max_prefix = (log2_size << 1) - 1;
 
+    // Bin-level tracing for debugging sample1.heic divergence
+    let rc_num = DEBUG_RESIDUAL_COUNTER.load(core::sync::atomic::Ordering::Relaxed);
+    let bin_trace = false; // rc_num <= 1;
+
+    if bin_trace {
+        let (range, value, bits_needed) = cabac.get_state_extended();
+        let (byte_pos, _, _) = cabac.get_position();
+        eprintln!(
+            "LAST_PREFIX {} c_idx={} log2={} ctx_base={} ctx_offset={} ctx_shift={} max_prefix={} range={} value={} bits_needed={} byte={}",
+            if is_x { "X" } else { "Y" }, c_idx, log2_size,
+            ctx_base, ctx_offset, ctx_shift, max_prefix,
+            range, value, bits_needed, byte_pos
+        );
+    }
+
     let mut prefix = 0u32;
     while prefix < max_prefix as u32 {
         let ctx_idx = ctx_base + ctx_offset + (prefix as usize >> ctx_shift as usize);
+        let (state, mps) = ctx[ctx_idx].get_state();
+        let (range_before, value_before, _) = cabac.get_state_extended();
         let bin = cabac.decode_bin(&mut ctx[ctx_idx])?;
+        if bin_trace {
+            let (range_after, value_after, _) = cabac.get_state_extended();
+            let (byte_pos, _, _) = cabac.get_position();
+            eprintln!(
+                "  LAST_BIN {} prefix={} ctx_idx={} state={} mps={} range_before={} value_before={} -> bin={} range_after={} value_after={} byte={}",
+                if is_x { "X" } else { "Y" }, prefix, ctx_idx, state, mps,
+                range_before, value_before, bin, range_after, value_after, byte_pos
+            );
+        }
         if bin == 0 {
             break;
         }
         prefix += 1;
+    }
+
+    if bin_trace {
+        eprintln!("  LAST_PREFIX_RESULT {} = {}", if is_x { "X" } else { "Y" }, prefix);
     }
 
     Ok(prefix)

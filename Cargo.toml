@@ -25,6 +25,7 @@ criterion = "0.6"
 fast-ssim2 = { version = "0.6.5", features = ["imgref"] }
 imgref = "1.11"
 heic-wasm-rs = { path = "../heic-wasm-rs" }
+png = "0.17"
 
 # [[bench]]
 # name = "decode"
