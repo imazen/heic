@@ -143,16 +143,19 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 - ImageInfo::from_bytes grid/iden/iovl probing (reads ispe + first tile hvcC)
 - Thumbnail decode support (thmb references, decode_thumbnail API)
 - Zero compiler warnings (clippy clean, all doc comments present)
+- Criterion benchmarks (63ms RGB, 1.3µs probe, 4.4µs EXIF, 4.2ms thumbnail)
+- 10-bit HEVC support (u16 planes, transparent downconvert to 8-bit output)
 
 ### Current Quality (RGB comparison vs libheif)
-- 103/162 test files decode successfully
+- 104/162 test files decode successfully
 - Best: example_q95 65.7dB (98% pixel-exact), classic-car 77.3dB (BT.709)
 - Nokia C001-C052: 50.5dB (77% pixel-exact)
 - Grid images: image1 50.4dB, classic-car 77.3dB
 - Scaling list files: iphone_rotated 55.3dB (91% exact), iphone_telephoto 50.9dB
 - All CABAC SEs match libde265 perfectly
 - YUV-level: pixel-perfect for q50+ (76.1dB for q10, 128 Y-plane diffs vs dec265)
-- Remaining RGB PSNR gap from fixed-point vs float color conversion rounding
+- Color conversion: f32 for limited-range (matches libheif float path), ×256 for full-range
+- example.heic: 73.4% pixel-exact, SSIM2 91.96, avg diff 0.45, max diff 12
 
 ### Known Edge Cases
 - MIAF003 (4:4:4 chroma, RExt profile): 5.7dB — chroma format not fully supported
