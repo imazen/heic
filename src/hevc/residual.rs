@@ -195,12 +195,7 @@ pub fn decode_residual(
     x0: u32,
     y0: u32,
 ) -> Result<(CoeffBuffer, bool)> {
-    // Track initial CABAC state for debugging
-    let (init_range, init_offset) = cabac.get_state();
-
-    // Increment and capture counter for debugging
-    let residual_call_num =
-        DEBUG_RESIDUAL_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    DEBUG_RESIDUAL_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
     // SE trace for differential testing against libde265
     {
@@ -216,7 +211,7 @@ pub fn decode_residual(
     }
 
     // Surgical trace for diverging residual (set to u32::MAX to disable)
-    let rc_trace = false; // residual_call_num == 0;
+    let rc_trace = false;
     let rcp = "RCX";
 
     let mut buffer = CoeffBuffer::new(log2_size);
@@ -645,7 +640,6 @@ pub fn decode_residual(
         let (byte_pos, _, _) = cabac.get_position();
         eprintln!("{rcp}_END range={} byte={}", range, byte_pos);
     }
-    let _ = (init_range, init_offset);
     Ok((buffer, transform_skip))
 }
 
@@ -790,59 +784,17 @@ fn decode_last_sig_coeff_prefix(
 
     let max_prefix = (log2_size << 1) - 1;
 
-    // Bin-level tracing for debugging sample1.heic divergence
-    let rc_num = DEBUG_RESIDUAL_COUNTER.load(core::sync::atomic::Ordering::Relaxed);
-    let bin_trace = false; // rc_num <= 1;
-
-    if bin_trace {
-        let (range, value, bits_needed) = cabac.get_state_extended();
-        let (byte_pos, _, _) = cabac.get_position();
-        eprintln!(
-            "LAST_PREFIX {} c_idx={} log2={} ctx_base={} ctx_offset={} ctx_shift={} max_prefix={} range={} value={} bits_needed={} byte={}",
-            if is_x { "X" } else { "Y" }, c_idx, log2_size,
-            ctx_base, ctx_offset, ctx_shift, max_prefix,
-            range, value, bits_needed, byte_pos
-        );
-    }
-
     let mut prefix = 0u32;
     while prefix < max_prefix as u32 {
         let ctx_idx = ctx_base + ctx_offset + (prefix as usize >> ctx_shift as usize);
-        let (state, mps) = ctx[ctx_idx].get_state();
-        let (range_before, value_before, _) = cabac.get_state_extended();
         let bin = cabac.decode_bin(&mut ctx[ctx_idx])?;
-        if bin_trace {
-            let (range_after, value_after, _) = cabac.get_state_extended();
-            let (byte_pos, _, _) = cabac.get_position();
-            eprintln!(
-                "  LAST_BIN {} prefix={} ctx_idx={} state={} mps={} range_before={} value_before={} -> bin={} range_after={} value_after={} byte={}",
-                if is_x { "X" } else { "Y" }, prefix, ctx_idx, state, mps,
-                range_before, value_before, bin, range_after, value_after, byte_pos
-            );
-        }
         if bin == 0 {
             break;
         }
         prefix += 1;
     }
 
-    if bin_trace {
-        eprintln!("  LAST_PREFIX_RESULT {} = {}", if is_x { "X" } else { "Y" }, prefix);
-    }
-
     Ok(prefix)
-}
-
-/// Decode coded_sub_block_flag (simplified - without neighbor context)
-/// This always uses context 0 or 2 (for chroma), which is a simplification
-fn decode_coded_sub_block_flag_simple(
-    cabac: &mut CabacDecoder<'_>,
-    ctx: &mut [ContextModel],
-    c_idx: u8,
-) -> Result<bool> {
-    // Simplified: always use ctx 0 or 2
-    let ctx_idx = context::CODED_SUB_BLOCK_FLAG + if c_idx > 0 { 2 } else { 0 };
-    Ok(cabac.decode_bin(&mut ctx[ctx_idx])? != 0)
 }
 
 /// Decode coded_sub_block_flag
