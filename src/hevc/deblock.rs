@@ -246,12 +246,12 @@ fn filter_edge_luma(
                 write_sample(frame, x, y, k, vertical, 0, (q[0][k] - delta).clamp(0, max_val), max_val);
 
                 if d_ep == 1 {
-                    let delta_p = (((p[2][k] + p[0][k] + 1) >> 1) - p[1][k] + delta)
+                    let delta_p = ((((p[2][k] + p[0][k] + 1) >> 1) - p[1][k] + delta) >> 1)
                         .clamp(-(tc >> 1), tc >> 1);
                     write_sample(frame, x, y, k, vertical, -2, (p[1][k] + delta_p).clamp(0, max_val), max_val);
                 }
                 if d_eq == 1 {
-                    let delta_q = (((q[2][k] + q[0][k] + 1) >> 1) - q[1][k] - delta)
+                    let delta_q = ((((q[2][k] + q[0][k] + 1) >> 1) - q[1][k] - delta) >> 1)
                         .clamp(-(tc >> 1), tc >> 1);
                     write_sample(frame, x, y, k, vertical, 1, (q[1][k] + delta_q).clamp(0, max_val), max_val);
                 }

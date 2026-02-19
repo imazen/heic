@@ -9,6 +9,7 @@
 /// Maximum number of coefficients (32x32 transform)
 pub const MAX_COEFF: usize = 32 * 32;
 
+
 /// DST-VII basis functions for 4x4 (scaled by 64)
 static DST4_MATRIX: [[i16; 4]; 4] = [
     [29, 55, 74, 84],
@@ -143,7 +144,8 @@ pub fn idst4(coeffs: &[i16; 16], output: &mut [i16; 16], bit_depth: u8) {
             for k in 0..4 {
                 sum += DST4_MATRIX[k][j] as i32 * coeffs[k * 4 + i] as i32;
             }
-            tmp[j * 4 + i] = (sum + add1) >> shift1;
+            // H.265 Eq. 8-314: clip intermediate results to 16-bit range
+            tmp[j * 4 + i] = ((sum + add1) >> shift1).clamp(-32768, 32767);
         }
     }
 
@@ -175,7 +177,8 @@ pub fn idct4(coeffs: &[i16; 16], output: &mut [i16; 16], bit_depth: u8) {
             for k in 0..4 {
                 sum += DCT4_MATRIX[k][j] as i32 * coeffs[k * 4 + i] as i32;
             }
-            tmp[j * 4 + i] = (sum + add1) >> shift1;
+            // H.265 Eq. 8-314: clip intermediate results to 16-bit range
+            tmp[j * 4 + i] = ((sum + add1) >> shift1).clamp(-32768, 32767);
         }
     }
 
@@ -207,7 +210,8 @@ pub fn idct8(coeffs: &[i16; 64], output: &mut [i16; 64], bit_depth: u8) {
             for k in 0..8 {
                 sum += DCT8_MATRIX[k][j] as i32 * coeffs[k * 8 + i] as i32;
             }
-            tmp[j * 8 + i] = (sum + add1) >> shift1;
+            // H.265 Eq. 8-314: clip intermediate results to 16-bit range
+            tmp[j * 8 + i] = ((sum + add1) >> shift1).clamp(-32768, 32767);
         }
     }
 
@@ -239,7 +243,8 @@ pub fn idct16(coeffs: &[i16; 256], output: &mut [i16; 256], bit_depth: u8) {
             for k in 0..16 {
                 sum += DCT16_MATRIX[k][j] as i32 * coeffs[k * 16 + i] as i32;
             }
-            tmp[j * 16 + i] = (sum + add1) >> shift1;
+            // H.265 Eq. 8-314: clip intermediate results to 16-bit range
+            tmp[j * 16 + i] = ((sum + add1) >> shift1).clamp(-32768, 32767);
         }
     }
 
@@ -260,7 +265,7 @@ pub fn idct32(coeffs: &[i16; 1024], output: &mut [i16; 1024], bit_depth: u8) {
     let shift1 = 7;
     let shift2 = 20 - bit_depth;
     let add1 = 1i32 << (shift1 - 1);
-    let add2 = 1i64 << (shift2 - 1);
+
 
     let mut tmp = [0i32; 1024];
 
@@ -271,18 +276,20 @@ pub fn idct32(coeffs: &[i16; 1024], output: &mut [i16; 1024], bit_depth: u8) {
             for k in 0..32 {
                 sum += DCT32_MATRIX[k][j] as i32 * coeffs[k * 32 + i] as i32;
             }
-            tmp[j * 32 + i] = (sum + add1) >> shift1;
+            // H.265 Eq. 8-314: clip intermediate results to 16-bit range
+            tmp[j * 32 + i] = ((sum + add1) >> shift1).clamp(-32768, 32767);
         }
     }
 
     // Second pass (horizontal)
-    // Use i64 accumulator: intermediate values can be up to ~700K,
-    // and 32 * 90 * 700K ≈ 2B which is near i32::MAX
+    // With clipped intermediates (max 32767), i32 accumulator suffices:
+    // 32 * 90 * 32767 ≈ 94M, well within i32::MAX
+    let add2 = 1i32 << (shift2 - 1);
     for i in 0..32 {
         for j in 0..32 {
-            let mut sum = 0i64;
+            let mut sum = 0i32;
             for k in 0..32 {
-                sum += DCT32_MATRIX[k][j] as i64 * tmp[i * 32 + k] as i64;
+                sum += DCT32_MATRIX[k][j] as i32 * tmp[i * 32 + k];
             }
             output[i * 32 + j] = ((sum + add2) >> shift2) as i16;
         }
