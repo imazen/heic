@@ -154,8 +154,8 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 - Scaling list files: iphone_rotated 55.3dB (91% exact), iphone_telephoto 50.9dB
 - All CABAC SEs match libde265 perfectly
 - YUV-level: pixel-perfect for q50+ (76.1dB for q10, 128 Y-plane diffs vs dec265)
-- Color conversion: f32 for limited-range (matches libheif float path), ×256 for full-range
-- example.heic: 73.4% pixel-exact, SSIM2 91.96, avg diff 0.45, max diff 12
+- Color conversion: ×8192 fixed-point for limited-range, ×256 for full-range
+- example.heic: 73.0% pixel-exact, SSIM2 91.86, avg diff 0.45, max diff 12
 
 ### Known Edge Cases
 - MIAF003 (4:4:4 chroma, RExt profile): 5.7dB — chroma format not fully supported
@@ -164,9 +164,15 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 
 ### Performance (scalar optimizations applied)
 - Release profile: thin LTO + codegen-units=1
-- Callgrind instruction count: 731M → 653M (-10.8%) for 1280x854 decode
-- Key optimizations: plane-direct writes, in-place dequant, border fill inlining
-- Remaining hotspots: CABAC+residual (40%), intra prediction (15%), SAO+deblock (9%)
+- Callgrind progression: 731M → 653M → 632M → ~717M* for 1280x854 decode
+  (*717M includes to_rgb at 81M counted separately due to inlining change)
+- Key optimizations applied:
+  - Plane-direct writes, in-place dequant, border fill inlining (731M→653M)
+  - Partial butterfly IDCT for 8/16/32 (decode_and_apply_residual -14%)
+  - SAO edge interior/border split + lazy plane cloning (SAO -26%)
+  - Color conversion: 4:2:0 specialization, pre-allocated buffer, f32→×8192 fixed-point (to_rgb -38%)
+  - Row-slice bounds-check elimination in intra prediction and residual add
+- Remaining hotspots: CABAC+residual (32%), intra prediction (14%), color convert (11%)
 
 ### Pending
 - SIMD optimization (archmage-based)
