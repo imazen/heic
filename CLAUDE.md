@@ -159,6 +159,12 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 - overlay_1000x680: 13.1dB — remaining diff from color conversion on fill regions
 - example_q10: 36.1dB RGB — low-QP amplifies color conversion rounding
 
+### Performance (scalar optimizations applied)
+- Release profile: thin LTO + codegen-units=1
+- Callgrind instruction count: 731M → 653M (-10.8%) for 1280x854 decode
+- Key optimizations: plane-direct writes, in-place dequant, border fill inlining
+- Remaining hotspots: CABAC+residual (40%), intra prediction (15%), SAO+deblock (9%)
+
 ### Pending
 - SIMD optimization (archmage-based)
 
