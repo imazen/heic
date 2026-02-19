@@ -5,8 +5,8 @@ use alloc::vec::Vec;
 use core::str;
 
 use super::boxes::{
-    Box, BoxIterator, ColorInfo, FourCC, HevcDecoderConfig, ImageSpatialExtents, ItemInfo,
-    ItemLocation, ItemProperty, ItemReference, PropertyAssociation,
+    Box, BoxIterator, CleanAperture, ColorInfo, FourCC, HevcDecoderConfig, ImageRotation,
+    ImageSpatialExtents, ItemInfo, ItemLocation, ItemProperty, ItemReference, PropertyAssociation,
 };
 use crate::error::{HeicError, Result};
 
@@ -91,6 +91,10 @@ pub struct Item {
     pub dimensions: Option<(u32, u32)>,
     /// HEVC config (if available)
     pub hevc_config: Option<HevcDecoderConfig>,
+    /// Clean aperture crop (if available)
+    pub clean_aperture: Option<CleanAperture>,
+    /// Image rotation (if available)
+    pub rotation: Option<ImageRotation>,
 }
 
 impl<'a> HeifContainer<'a> {
@@ -111,6 +115,8 @@ impl<'a> HeifContainer<'a> {
 
         let mut dimensions = None;
         let mut hevc_config = None;
+        let mut clean_aperture = None;
+        let mut rotation = None;
 
         if let Some(assoc) = assoc {
             for &(prop_idx, _essential) in &assoc.properties {
@@ -122,6 +128,12 @@ impl<'a> HeifContainer<'a> {
                         }
                         ItemProperty::HevcConfig(config) => {
                             hevc_config = Some(config.clone());
+                        }
+                        ItemProperty::CleanAperture(clap) => {
+                            clean_aperture = Some(*clap);
+                        }
+                        ItemProperty::Rotation(rot) => {
+                            rotation = Some(*rot);
                         }
                         _ => {}
                     }
@@ -135,6 +147,8 @@ impl<'a> HeifContainer<'a> {
             name: info.item_name.clone(),
             dimensions,
             hevc_config,
+            clean_aperture,
+            rotation,
         })
     }
 
@@ -555,12 +569,74 @@ fn parse_ipco(ipco: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
                     ItemProperty::Unknown
                 }
             }
+            FourCC::CLAP => {
+                if let Ok(clap) = parse_clap(&child) {
+                    ItemProperty::CleanAperture(clap)
+                } else {
+                    ItemProperty::Unknown
+                }
+            }
+            FourCC::IROT => {
+                if let Ok(rot) = parse_irot(&child) {
+                    ItemProperty::Rotation(rot)
+                } else {
+                    ItemProperty::Unknown
+                }
+            }
             _ => ItemProperty::Unknown,
         };
         container.properties.push(prop);
     }
 
     Ok(())
+}
+
+fn parse_clap(clap: &Box<'_>) -> Result<CleanAperture> {
+    let content = clap.content;
+    // clap box: 8 fields of 4 bytes each = 32 bytes (no version/flags)
+    if content.len() < 32 {
+        return Err(HeicError::InvalidContainer("clap too short"));
+    }
+
+    let width_n = u32::from_be_bytes([content[0], content[1], content[2], content[3]]);
+    let width_d = u32::from_be_bytes([content[4], content[5], content[6], content[7]]);
+    let height_n = u32::from_be_bytes([content[8], content[9], content[10], content[11]]);
+    let height_d = u32::from_be_bytes([content[12], content[13], content[14], content[15]]);
+    let horiz_off_n =
+        i32::from_be_bytes([content[16], content[17], content[18], content[19]]);
+    let horiz_off_d =
+        u32::from_be_bytes([content[20], content[21], content[22], content[23]]);
+    let vert_off_n =
+        i32::from_be_bytes([content[24], content[25], content[26], content[27]]);
+    let vert_off_d =
+        u32::from_be_bytes([content[28], content[29], content[30], content[31]]);
+
+    Ok(CleanAperture {
+        width_n,
+        width_d,
+        height_n,
+        height_d,
+        horiz_off_n,
+        horiz_off_d,
+        vert_off_n,
+        vert_off_d,
+    })
+}
+
+fn parse_irot(irot: &Box<'_>) -> Result<ImageRotation> {
+    let content = irot.content;
+    // irot box: 1 byte angle (0=0°, 1=90°CCW, 2=180°, 3=270°CCW)
+    if content.is_empty() {
+        return Err(HeicError::InvalidContainer("irot too short"));
+    }
+    let angle = match content[0] & 0x03 {
+        0 => 0,
+        1 => 270, // HEIF irot: 1 = 90° CCW = 270° CW
+        2 => 180,
+        3 => 90, // HEIF irot: 3 = 270° CCW = 90° CW
+        _ => 0,
+    };
+    Ok(ImageRotation { angle })
 }
 
 fn parse_ispe(ispe: &Box<'_>) -> Result<ImageSpatialExtents> {

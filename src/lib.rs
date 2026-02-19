@@ -94,19 +94,28 @@ impl HeicDecoder {
         let container = heif::parse(data)?;
         let primary_item = container.primary_item().ok_or(HeicError::NoPrimaryImage)?;
 
-        if primary_item.item_type == ItemType::Grid {
-            return self.decode_grid(&container, &primary_item);
-        }
-
-        let image_data = container
-            .get_item_data(primary_item.id)
-            .ok_or(HeicError::InvalidData("Missing image data"))?;
-
-        if let Some(ref config) = primary_item.hevc_config {
-            Ok(hevc::decode_with_config(config, image_data)?)
+        let mut frame = if primary_item.item_type == ItemType::Grid {
+            self.decode_grid(&container, &primary_item)?
         } else {
-            Ok(hevc::decode(image_data)?)
+            let image_data = container
+                .get_item_data(primary_item.id)
+                .ok_or(HeicError::InvalidData("Missing image data"))?;
+
+            if let Some(ref config) = primary_item.hevc_config {
+                hevc::decode_with_config(config, image_data)?
+            } else {
+                hevc::decode(image_data)?
+            }
+        };
+
+        // Apply clean aperture crop (clap box) if present
+        // The clap box specifies the true image dimensions within the
+        // conformance-window-cropped frame
+        if let Some(clap) = primary_item.clean_aperture {
+            apply_clean_aperture(&mut frame, &clap);
         }
+
+        Ok(frame)
     }
 
     /// Decode a grid-based HEIC image
@@ -283,4 +292,62 @@ impl HeicDecoder {
             has_alpha: false,
         })
     }
+}
+
+/// Apply clean aperture (clap box) crop to a decoded frame
+///
+/// The clap box specifies the clean aperture within the conformance-window-cropped
+/// image. This adjusts the frame's crop values to include the additional clap crop.
+///
+/// Per ISO 14496-12:
+///   crop_left = (coded_width - clean_width) / 2 + horiz_off
+///   crop_top  = (coded_height - clean_height) / 2 + vert_off
+fn apply_clean_aperture(frame: &mut hevc::DecodedFrame, clap: &heif::CleanAperture) {
+    // Get current cropped dimensions (after conformance window)
+    let conf_width = frame.cropped_width();
+    let conf_height = frame.cropped_height();
+
+    // Compute clean aperture dimensions (integer division for rational)
+    let clean_width = if clap.width_d > 0 {
+        clap.width_n / clap.width_d
+    } else {
+        conf_width
+    };
+    let clean_height = if clap.height_d > 0 {
+        clap.height_n / clap.height_d
+    } else {
+        conf_height
+    };
+
+    // Only apply if clap actually further constrains the image
+    if clean_width >= conf_width && clean_height >= conf_height {
+        return;
+    }
+
+    // Compute offsets: how many pixels to crop from top-left
+    // offset = (coded - clean) / 2 + rational_offset
+    // We use integer arithmetic with rounding
+    let horiz_off_pixels = if clap.horiz_off_d > 0 {
+        (clap.horiz_off_n as f64) / (clap.horiz_off_d as f64)
+    } else {
+        0.0
+    };
+    let vert_off_pixels = if clap.vert_off_d > 0 {
+        (clap.vert_off_n as f64) / (clap.vert_off_d as f64)
+    } else {
+        0.0
+    };
+
+    let extra_left =
+        ((conf_width as f64 - clean_width as f64) / 2.0 + horiz_off_pixels).round() as u32;
+    let extra_top =
+        ((conf_height as f64 - clean_height as f64) / 2.0 + vert_off_pixels).round() as u32;
+    let extra_right = conf_width.saturating_sub(clean_width).saturating_sub(extra_left);
+    let extra_bottom = conf_height.saturating_sub(clean_height).saturating_sub(extra_top);
+
+    // Add the clap crop on top of existing conformance window crop
+    frame.crop_left += extra_left;
+    frame.crop_right += extra_right;
+    frame.crop_top += extra_top;
+    frame.crop_bottom += extra_bottom;
 }

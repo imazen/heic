@@ -28,6 +28,8 @@ impl FourCC {
     pub const AUXC: Self = Self(*b"auxC");
     pub const IDAT: Self = Self(*b"idat");
     pub const DIMG: Self = Self(*b"dimg");
+    pub const CLAP: Self = Self(*b"clap");
+    pub const IROT: Self = Self(*b"irot");
 
     /// Create from bytes
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
@@ -180,6 +182,30 @@ pub struct ItemInfo {
     pub hidden: bool,
 }
 
+/// Clean aperture from clap box (ISO 14496-12)
+#[derive(Debug, Clone, Copy)]
+pub struct CleanAperture {
+    /// Clean aperture width (numerator/denominator)
+    pub width_n: u32,
+    pub width_d: u32,
+    /// Clean aperture height (numerator/denominator)
+    pub height_n: u32,
+    pub height_d: u32,
+    /// Horizontal offset (signed numerator/denominator)
+    pub horiz_off_n: i32,
+    pub horiz_off_d: u32,
+    /// Vertical offset (signed numerator/denominator)
+    pub vert_off_n: i32,
+    pub vert_off_d: u32,
+}
+
+/// Image rotation from irot box
+#[derive(Debug, Clone, Copy)]
+pub struct ImageRotation {
+    /// Rotation angle in degrees counter-clockwise (0, 90, 180, 270)
+    pub angle: u16,
+}
+
 /// Image spatial extents from ispe box
 #[derive(Debug, Clone, Copy)]
 pub struct ImageSpatialExtents {
@@ -245,6 +271,10 @@ pub enum ItemProperty {
     HevcConfig(HevcDecoderConfig),
     /// Color info (colr)
     ColorInfo(ColorInfo),
+    /// Clean aperture (clap)
+    CleanAperture(CleanAperture),
+    /// Image rotation (irot)
+    Rotation(ImageRotation),
     /// Unknown property
     Unknown,
 }
