@@ -116,9 +116,9 @@ fn decode_nal_units(nal_units: &[bitstream::NalUnit<'_>]) -> Result<DecodedFrame
         );
     }
 
-    // Decode slice data
+    // Decode slice data (base layer only — skip enhancement layer NALs in L-HEVC streams)
     for nal in nal_units {
-        if nal.nal_type.is_slice() {
+        if nal.nal_type.is_slice() && nal.nuh_layer_id == 0 {
             decode_slice(nal, &sps, &pps, &mut frame)?;
         }
     }
