@@ -192,6 +192,17 @@ fn write_sample(plane: &mut [u16], stride: usize, x: u32, y: u32, value: u16) {
     }
 }
 
+/// Read a sample directly from a plane slice
+#[inline(always)]
+fn read_plane(plane: &[u16], stride: usize, x: u32, y: u32) -> u16 {
+    let idx = y as usize * stride + x as usize;
+    if idx < plane.len() {
+        plane[idx]
+    } else {
+        0
+    }
+}
+
 /// Fill border samples from neighboring pixels
 fn fill_border_samples(
     frame: &DecodedFrame,
@@ -211,22 +222,15 @@ fn fill_border_samples(
     // avail[i] = true means the reference sample was read from a decoded block
     let mut avail = [false; 4 * MAX_INTRA_PRED_BLOCK_SIZE + 1];
 
+    // Resolve plane once to avoid per-pixel match dispatch
+    let (plane, stride) = frame.plane(c_idx);
+
     let (frame_w, frame_h) = if c_idx == 0 {
         (frame.width, frame.height)
     } else {
         // Chroma is half resolution for 4:2:0
         (frame.width / 2, frame.height / 2)
     };
-
-    // Per-sample availability is approximated using picture boundaries.
-    // With TU-level prediction ordering, samples from already-decoded TUs
-    // in the frame are valid. Samples from not-yet-decoded regions are 0
-    // (frame init) and must NOT be read as available.
-    //
-    // We use a conservative check: boundary + non-zero frame value as proxy
-    // for "this sample was actually written by a decoded block."
-    // This is imperfect (legit 0 values treated as unavailable) but correct
-    // for the vast majority of cases.
 
     let avail_left = x > 0;
     let avail_top = y > 0;
@@ -237,21 +241,21 @@ fn fill_border_samples(
 
     // Top-left corner
     if avail_top_left {
-        let raw = get_sample(frame, x - 1, y - 1, c_idx);
+        let raw = read_plane(plane, stride, x - 1, y - 1);
         if raw != UNINIT_SAMPLE {
             border[center] = raw as i32;
             avail[center] = true;
         }
     }
     if !avail[center] && avail_top {
-        let raw = get_sample(frame, x, y - 1, c_idx);
+        let raw = read_plane(plane, stride, x, y - 1);
         if raw != UNINIT_SAMPLE {
             border[center] = raw as i32;
             avail[center] = true;
         }
     }
     if !avail[center] && avail_left {
-        let raw = get_sample(frame, x - 1, y, c_idx);
+        let raw = read_plane(plane, stride, x - 1, y);
         if raw != UNINIT_SAMPLE {
             border[center] = raw as i32;
             avail[center] = true;
@@ -261,53 +265,42 @@ fn fill_border_samples(
         border[center] = default_val;
     }
 
-    // Top samples p[0][-1] .. p[nTbS-1][-1]
-    for i in 0..size {
-        let idx = center + 1 + i as usize;
-        if avail_top && (x + i) < frame_w {
-            let raw = get_sample(frame, x + i, y - 1, c_idx);
-            if raw != UNINIT_SAMPLE {
-                border[idx] = raw as i32;
-                avail[idx] = true;
+    // Top samples p[0][-1] .. p[2*nTbS-1][-1]
+    // Merged loop for top and above-right (both read from row y-1)
+    if avail_top {
+        let top_row_start = (y - 1) as usize * stride;
+        for i in 0..(2 * size) {
+            let sx = x + i;
+            if sx < frame_w {
+                let plane_idx = top_row_start + sx as usize;
+                if plane_idx < plane.len() {
+                    let raw = plane[plane_idx];
+                    if raw != UNINIT_SAMPLE {
+                        let idx = center + 1 + i as usize;
+                        border[idx] = raw as i32;
+                        avail[idx] = true;
+                    }
+                }
             }
         }
     }
 
-    // Above-right samples p[nTbS][-1] .. p[2*nTbS-1][-1]
-    // Available only if the block containing the sample has been decoded.
-    // We check the UNINIT_SAMPLE sentinel to detect uninitialized regions.
-    for i in size..(2 * size) {
-        let idx = center + 1 + i as usize;
-        if avail_top && (x + i) < frame_w {
-            let raw = get_sample(frame, x + i, y - 1, c_idx);
-            if raw != UNINIT_SAMPLE {
-                border[idx] = raw as i32;
-                avail[idx] = true;
-            }
-        }
-    }
-
-    // Left samples p[-1][0] .. p[-1][nTbS-1]
-    for i in 0..size {
-        let idx = center - 1 - i as usize;
-        if avail_left && (y + i) < frame_h {
-            let raw = get_sample(frame, x - 1, y + i, c_idx);
-            if raw != UNINIT_SAMPLE {
-                border[idx] = raw as i32;
-                avail[idx] = true;
-            }
-        }
-    }
-
-    // Bottom-left samples p[-1][nTbS] .. p[-1][2*nTbS-1]
-    // Available only if the block containing the sample has been decoded.
-    for i in size..(2 * size) {
-        let idx = center - 1 - i as usize;
-        if avail_left && (y + i) < frame_h {
-            let raw = get_sample(frame, x - 1, y + i, c_idx);
-            if raw != UNINIT_SAMPLE {
-                border[idx] = raw as i32;
-                avail[idx] = true;
+    // Left + bottom-left samples p[-1][0] .. p[-1][2*nTbS-1]
+    // All read from column x-1, merged into one loop
+    if avail_left {
+        let left_x = (x - 1) as usize;
+        for i in 0..(2 * size) {
+            let sy = y + i;
+            if sy < frame_h {
+                let plane_idx = sy as usize * stride + left_x;
+                if plane_idx < plane.len() {
+                    let raw = plane[plane_idx];
+                    if raw != UNINIT_SAMPLE {
+                        let idx = center - 1 - i as usize;
+                        border[idx] = raw as i32;
+                        avail[idx] = true;
+                    }
+                }
             }
         }
     }
@@ -393,26 +386,6 @@ fn reference_sample_substitution(
         } else {
             border[idx] = current;
         }
-    }
-}
-
-/// Get a sample from the frame
-fn get_sample(frame: &DecodedFrame, x: u32, y: u32, c_idx: u8) -> u16 {
-    match c_idx {
-        0 => frame.get_y(x, y),
-        1 => frame.get_cb(x, y),
-        2 => frame.get_cr(x, y),
-        _ => 0,
-    }
-}
-
-/// Set a sample in the frame
-fn set_sample(frame: &mut DecodedFrame, x: u32, y: u32, c_idx: u8, value: u16) {
-    match c_idx {
-        0 => frame.set_y(x, y, value),
-        1 => frame.set_cb(x, y, value),
-        2 => frame.set_cr(x, y, value),
-        _ => {}
     }
 }
 
