@@ -5,6 +5,7 @@
 
 pub mod bitstream;
 mod cabac;
+mod color_convert;
 mod ctu;
 mod deblock;
 pub mod debug;

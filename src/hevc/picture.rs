@@ -3,6 +3,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use super::color_convert;
+
 /// Sentinel value for uninitialized pixels.
 /// Used during decoding to distinguish decoded samples from uninitialized ones
 /// for reference sample availability (H.265 8.4.4.2.2).
@@ -275,25 +277,23 @@ impl DecodedFrame {
         let mut out_idx = 0;
 
         if self.chroma_format == 1 {
-            // Specialized 4:2:0 path — avoids per-pixel match dispatch and
-            // hoists c_stride computation out of the loop.
+            // SIMD-accelerated 4:2:0 path (AVX2 when available, scalar fallback)
             let c_stride = self.c_stride();
-            for y in y_start..y_end {
-                let y_row = y as usize * w;
-                let c_row = (y as usize / 2) * c_stride;
-                for x in x_start..x_end {
-                    let y_val = (self.y_plane[y_row + x as usize] >> shift) as i32;
-                    let cx = x as usize / 2;
-                    let c_idx = c_row + cx;
-                    let cb_val = (self.cb_plane[c_idx] >> shift) as i32;
-                    let cr_val = (self.cr_plane[c_idx] >> shift) as i32;
-                    let (r, g, b) = self.ycbcr_to_rgb(y_val, cb_val, cr_val);
-                    rgb[out_idx] = r;
-                    rgb[out_idx + 1] = g;
-                    rgb[out_idx + 2] = b;
-                    out_idx += 3;
-                }
-            }
+            color_convert::convert_420_to_rgb(
+                &self.y_plane,
+                &self.cb_plane,
+                &self.cr_plane,
+                w,
+                c_stride,
+                y_start,
+                y_end,
+                x_start,
+                x_end,
+                shift as u32,
+                self.full_range,
+                self.matrix_coeffs,
+                &mut rgb,
+            );
         } else {
             for y in y_start..y_end {
                 for x in x_start..x_end {
@@ -400,24 +400,25 @@ impl DecodedFrame {
 
         let mut offset = 0;
         if self.chroma_format == 1 {
+            // SIMD-accelerated 4:2:0 path
             let c_stride = self.c_stride();
-            for y in y_start..y_end {
-                let y_row = y as usize * w;
-                let c_row = (y as usize / 2) * c_stride;
-                for x in x_start..x_end {
-                    let y_val = (self.y_plane[y_row + x as usize] >> shift) as i32;
-                    let cx = x as usize / 2;
-                    let c_idx = c_row + cx;
-                    let cb_val = (self.cb_plane[c_idx] >> shift) as i32;
-                    let cr_val = (self.cr_plane[c_idx] >> shift) as i32;
-                    let (r, g, b) = self.ycbcr_to_rgb(y_val, cb_val, cr_val);
-                    if offset + 3 <= output.len() {
-                        output[offset] = r;
-                        output[offset + 1] = g;
-                        output[offset + 2] = b;
-                        offset += 3;
-                    }
-                }
+            let needed = (out_width * out_height * 3) as usize;
+            if output.len() >= needed {
+                color_convert::convert_420_to_rgb(
+                    &self.y_plane,
+                    &self.cb_plane,
+                    &self.cr_plane,
+                    w,
+                    c_stride,
+                    y_start,
+                    y_end,
+                    x_start,
+                    x_end,
+                    shift as u32,
+                    self.full_range,
+                    self.matrix_coeffs,
+                    output,
+                );
             }
         } else {
             for y in y_start..y_end {
