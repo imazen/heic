@@ -3,13 +3,13 @@
 //! This module implements the HEVC (High Efficiency Video Coding) decoder
 //! for decoding HEIC still images.
 
-mod bitstream;
+pub mod bitstream;
 mod cabac;
 mod ctu;
 mod deblock;
 pub mod debug;
 mod intra;
-mod params;
+pub mod params;
 mod picture;
 mod residual;
 mod sao;
@@ -99,6 +99,8 @@ fn decode_nal_units(nal_units: &[bitstream::NalUnit<'_>]) -> Result<DecodedFrame
         sps.bit_depth_y(),
         sps.chroma_format_idc,
     );
+    frame.full_range = sps.video_full_range_flag;
+    frame.matrix_coeffs = sps.matrix_coeffs;
 
     // Set conformance window cropping from SPS
     // Offsets are in units of SubWidthC/SubHeightC, need to convert to luma samples

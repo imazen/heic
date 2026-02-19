@@ -101,6 +101,8 @@ pub struct Item {
     /// Ordered transformative properties (clap, imir, irot) in ipma order.
     /// HEIF spec requires these be applied in listing order.
     pub transforms: Vec<Transform>,
+    /// Color info from colr box (nclx or ICC)
+    pub color_info: Option<ColorInfo>,
     /// Auxiliary type URI (from auxC property, e.g. "urn:mpeg:hevc:2015:auxid:1" for alpha)
     pub auxiliary_type: Option<String>,
 }
@@ -127,6 +129,7 @@ impl<'a> HeifContainer<'a> {
         let mut rotation = None;
         let mut mirror = None;
         let mut transforms = Vec::new();
+        let mut color_info = None;
         let mut auxiliary_type = None;
 
         if let Some(assoc) = assoc {
@@ -152,6 +155,9 @@ impl<'a> HeifContainer<'a> {
                             mirror = Some(*m);
                             transforms.push(Transform::Mirror(*m));
                         }
+                        ItemProperty::ColorInfo(ci) => {
+                            color_info = Some(ci.clone());
+                        }
                         ItemProperty::AuxiliaryType(s) => {
                             auxiliary_type = Some(s.clone());
                         }
@@ -171,6 +177,7 @@ impl<'a> HeifContainer<'a> {
             rotation,
             mirror,
             transforms,
+            color_info,
             auxiliary_type,
         })
     }

@@ -29,7 +29,7 @@ pub mod hevc;
 pub use error::{HeicError, Result};
 
 use alloc::vec::Vec;
-use heif::{FourCC, ItemType, Transform};
+use heif::{ColorInfo, FourCC, ItemType, Transform};
 
 /// Decoded image data
 #[derive(Debug, Clone)]
@@ -182,6 +182,13 @@ impl HeicDecoder {
             }
         };
 
+        // Set color conversion parameters from colr nclx box if present.
+        // Otherwise keep the SPS VUI value (defaults to limited range when VUI absent,
+        // per H.265 spec — which matches observed libheif behavior).
+        if let Some(ColorInfo::Nclx { full_range, .. }) = &item.color_info {
+            frame.full_range = *full_range;
+        }
+
         // Apply transformative properties in ipma listing order (HEIF spec requirement)
         for transform in &item.transforms {
             match transform {
@@ -251,9 +258,6 @@ impl HeicDecoder {
         let flags = iovl_data[1];
         let large = (flags & 1) != 0;
 
-        // Skip version/flags (4 bytes), skip fill value (we'll use 0 fill)
-        // Fill value is 2 bytes per channel, but number of channels varies
-        // Simpler: look at total data size vs number of tile references to find offset
         let tile_ids = container.get_item_references(iovl_item.id, FourCC::DIMG);
         if tile_ids.is_empty() {
             return Err(HeicError::InvalidData("Overlay has no tile references"));
@@ -261,13 +265,10 @@ impl HeicDecoder {
 
         // Calculate expected layout:
         // 4 bytes (version/flags) + fill_bytes + width/height + N*(x_off + y_off)
-        // For HEVC images: fill = 2 bytes * 3 channels = 6 bytes typically (but RGBA = 8)
+        // Fill = 2 bytes * num_channels (3 for YCbCr, 4 for RGBA)
         // Width/height = 4 bytes each (large) or 2 bytes each
         // Offsets = 4 bytes each (large) or 2 bytes each, N offsets of 2 values
         let off_size = if large { 4usize } else { 2 };
-        // Work backwards from the expected total:
-        // total = 4 + fill_bytes + 2*off_size + N*2*off_size
-        // fill_bytes = total - 4 - 2*off_size - N*2*off_size
         let per_tile = 2 * off_size;
         let fixed_end = 4 + 2 * off_size; // version/flags + width/height
         let tile_data_size = tile_ids.len() * per_tile;
@@ -275,6 +276,14 @@ impl HeicDecoder {
             .len()
             .checked_sub(fixed_end + tile_data_size)
             .ok_or(HeicError::InvalidData("Overlay descriptor too short for tiles"))?;
+
+        // Parse canvas fill values (16-bit per channel)
+        let num_fill_channels = fill_bytes / 2;
+        let mut fill_values = [0u16; 4];
+        for i in 0..num_fill_channels.min(4) {
+            fill_values[i] =
+                u16::from_be_bytes([iovl_data[4 + i * 2], iovl_data[4 + i * 2 + 1]]);
+        }
 
         let mut pos = 4 + fill_bytes;
 
@@ -359,6 +368,23 @@ impl HeicDecoder {
             chroma_format,
         );
 
+        // Apply canvas fill values (16-bit values scaled to bit depth)
+        let fill_shift = 16u32.saturating_sub(bit_depth as u32);
+        let y_fill = (fill_values[0] >> fill_shift) as u16;
+        let cb_fill = if num_fill_channels > 1 {
+            (fill_values[1] >> fill_shift) as u16
+        } else {
+            1u16 << (bit_depth - 1) // neutral chroma
+        };
+        let cr_fill = if num_fill_channels > 2 {
+            (fill_values[2] >> fill_shift) as u16
+        } else {
+            1u16 << (bit_depth - 1) // neutral chroma
+        };
+        output.y_plane.fill(y_fill);
+        output.cb_plane.fill(cb_fill);
+        output.cr_plane.fill(cr_fill);
+
         // Decode each tile and composite onto the canvas
         for (idx, &tile_id) in tile_ids.iter().enumerate() {
             let tile_item = container
@@ -366,6 +392,12 @@ impl HeicDecoder {
                 .ok_or(HeicError::InvalidData("Missing overlay tile"))?;
 
             let tile_frame = self.decode_item(container, &tile_item, depth + 1)?;
+
+            // Propagate color conversion settings from first tile
+            if idx == 0 {
+                output.full_range = tile_frame.full_range;
+                output.matrix_coeffs = tile_frame.matrix_coeffs;
+            }
 
             let (off_x, off_y) = offsets[idx];
             let dst_x = off_x.max(0) as u32;
@@ -507,6 +539,12 @@ impl HeicDecoder {
 
             // Decode tile
             let tile_frame = hevc::decode_with_config(tile_config, tile_data)?;
+
+            // Propagate color conversion settings from first tile
+            if tile_idx == 0 {
+                output.full_range = tile_frame.full_range;
+                output.matrix_coeffs = tile_frame.matrix_coeffs;
+            }
 
             // Copy tile into output frame
             let dst_x = tile_col * tile_width;

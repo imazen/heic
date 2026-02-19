@@ -47,6 +47,10 @@ pub struct DecodedFrame {
     pub qp_map: Vec<i8>,
     /// Alpha plane (optional, from auxiliary alpha image)
     pub alpha_plane: Option<Vec<u16>>,
+    /// Video full range flag (from SPS VUI). true = full [0,255], false = limited [16,235]
+    pub full_range: bool,
+    /// Matrix coefficients (from SPS VUI). 1=BT.709, 5/6=BT.601, 9=BT.2020, 2=unspecified
+    pub matrix_coeffs: u8,
 }
 
 impl DecodedFrame {
@@ -77,6 +81,8 @@ impl DecodedFrame {
             deblock_stride,
             qp_map: vec![0; deblock_size],
             alpha_plane: None,
+            full_range: false,
+            matrix_coeffs: 2,
         }
     }
 
@@ -114,6 +120,8 @@ impl DecodedFrame {
             deblock_stride,
             qp_map: vec![0; deblock_size],
             alpha_plane: None,
+            full_range: false,
+            matrix_coeffs: 2,
         }
     }
 
@@ -192,6 +200,29 @@ impl DecodedFrame {
         }
     }
 
+    /// Convert a single YCbCr pixel to RGB.
+    /// y_val, cb_val, cr_val are 8-bit values (0-255).
+    #[inline(always)]
+    fn ycbcr_to_rgb(&self, y_val: i32, cb_val: i32, cr_val: i32) -> (u8, u8, u8) {
+        let cb = cb_val - 128;
+        let cr = cr_val - 128;
+
+        if self.full_range {
+            // BT.601 full range: Y [0,255], Cb/Cr [0,255]
+            let r = y_val + ((1436 * cr) >> 10);
+            let g = y_val - ((352 * cb + 731 * cr) >> 10);
+            let b = y_val + ((1815 * cb) >> 10);
+            (r.clamp(0, 255) as u8, g.clamp(0, 255) as u8, b.clamp(0, 255) as u8)
+        } else {
+            // BT.601 limited range: Y [16,235], Cb/Cr [16,240]
+            let y16 = y_val - 16;
+            let r = (1192 * y16 + 1634 * cr) >> 10;
+            let g = (1192 * y16 - 401 * cb - 832 * cr) >> 10;
+            let b = (1192 * y16 + 2066 * cb) >> 10;
+            (r.clamp(0, 255) as u8, g.clamp(0, 255) as u8, b.clamp(0, 255) as u8)
+        }
+    }
+
     /// Convert YCbCr to RGB with conformance window cropping
     pub fn to_rgb(&self) -> Vec<u8> {
         let out_width = self.cropped_width();
@@ -199,7 +230,6 @@ impl DecodedFrame {
         let mut rgb = Vec::with_capacity((out_width * out_height * 3) as usize);
         let shift = self.bit_depth - 8;
 
-        // Iterate over cropped region
         let y_start = self.crop_top;
         let y_end = self.height - self.crop_bottom;
         let x_start = self.crop_left;
@@ -209,25 +239,12 @@ impl DecodedFrame {
             for x in x_start..x_end {
                 let y_idx = (y * self.width + x) as usize;
                 let y_val = (self.y_plane[y_idx] >> shift) as i32;
-
-                // Get chroma values based on format
                 let (cb_val, cr_val) = self.get_chroma(x, y, shift);
 
-                // BT.601 YCbCr to RGB conversion
-                // R = Y + 1.402 * (Cr - 128)
-                // G = Y - 0.344136 * (Cb - 128) - 0.714136 * (Cr - 128)
-                // B = Y + 1.772 * (Cb - 128)
-
-                let cb = cb_val - 128;
-                let cr = cr_val - 128;
-
-                let r = y_val + ((1436 * cr) >> 10);
-                let g = y_val - ((352 * cb + 731 * cr) >> 10);
-                let b = y_val + ((1815 * cb) >> 10);
-
-                rgb.push(r.clamp(0, 255) as u8);
-                rgb.push(g.clamp(0, 255) as u8);
-                rgb.push(b.clamp(0, 255) as u8);
+                let (r, g, b) = self.ycbcr_to_rgb(y_val, cb_val, cr_val);
+                rgb.push(r);
+                rgb.push(g);
+                rgb.push(b);
             }
         }
 
@@ -256,16 +273,10 @@ impl DecodedFrame {
 
                 let (cb_val, cr_val) = self.get_chroma(x, y, shift);
 
-                let cb = cb_val - 128;
-                let cr = cr_val - 128;
-
-                let r = y_val + ((1436 * cr) >> 10);
-                let g = y_val - ((352 * cb + 731 * cr) >> 10);
-                let b = y_val + ((1815 * cb) >> 10);
-
-                rgba.push(r.clamp(0, 255) as u8);
-                rgba.push(g.clamp(0, 255) as u8);
-                rgba.push(b.clamp(0, 255) as u8);
+                let (r, g, b) = self.ycbcr_to_rgb(y_val, cb_val, cr_val);
+                rgba.push(r);
+                rgba.push(g);
+                rgba.push(b);
 
                 let alpha = if let Some(ref alpha) = self.alpha_plane {
                     if pixel_idx < alpha.len() {
@@ -481,6 +492,8 @@ impl DecodedFrame {
                 deblock_stride: 0,
                 qp_map: Vec::new(),
                 alpha_plane,
+                full_range: self.full_range,
+                matrix_coeffs: self.matrix_coeffs,
             }
         } else {
             Self {
@@ -499,6 +512,8 @@ impl DecodedFrame {
                 deblock_stride: 0,
                 qp_map: Vec::new(),
                 alpha_plane,
+                full_range: self.full_range,
+                matrix_coeffs: self.matrix_coeffs,
             }
         }
     }
@@ -562,6 +577,8 @@ impl DecodedFrame {
                 deblock_stride: 0,
                 qp_map: Vec::new(),
                 alpha_plane,
+                full_range: self.full_range,
+                matrix_coeffs: self.matrix_coeffs,
             }
         } else {
             Self {
@@ -580,6 +597,8 @@ impl DecodedFrame {
                 deblock_stride: 0,
                 qp_map: Vec::new(),
                 alpha_plane,
+                full_range: self.full_range,
+                matrix_coeffs: self.matrix_coeffs,
             }
         }
     }
@@ -647,6 +666,8 @@ impl DecodedFrame {
                 deblock_stride: 0,
                 qp_map: Vec::new(),
                 alpha_plane,
+                full_range: self.full_range,
+                matrix_coeffs: self.matrix_coeffs,
             }
         } else {
             Self {
@@ -665,6 +686,8 @@ impl DecodedFrame {
                 deblock_stride: 0,
                 qp_map: Vec::new(),
                 alpha_plane,
+                full_range: self.full_range,
+                matrix_coeffs: self.matrix_coeffs,
             }
         }
     }
@@ -715,6 +738,7 @@ impl DecodedFrame {
                 crop_top: self.crop_top, crop_bottom: self.crop_bottom,
                 deblock_flags: Vec::new(), deblock_stride: 0, qp_map: Vec::new(),
                 alpha_plane,
+                full_range: self.full_range, matrix_coeffs: self.matrix_coeffs,
             }
         } else {
             Self {
@@ -725,6 +749,7 @@ impl DecodedFrame {
                 crop_top: self.crop_top, crop_bottom: self.crop_bottom,
                 deblock_flags: Vec::new(), deblock_stride: 0, qp_map: Vec::new(),
                 alpha_plane,
+                full_range: self.full_range, matrix_coeffs: self.matrix_coeffs,
             }
         }
     }
@@ -775,6 +800,7 @@ impl DecodedFrame {
                 crop_top: self.crop_bottom, crop_bottom: self.crop_top,
                 deblock_flags: Vec::new(), deblock_stride: 0, qp_map: Vec::new(),
                 alpha_plane,
+                full_range: self.full_range, matrix_coeffs: self.matrix_coeffs,
             }
         } else {
             Self {
@@ -785,6 +811,7 @@ impl DecodedFrame {
                 crop_top: self.crop_bottom, crop_bottom: self.crop_top,
                 deblock_flags: Vec::new(), deblock_stride: 0, qp_map: Vec::new(),
                 alpha_plane,
+                full_range: self.full_range, matrix_coeffs: self.matrix_coeffs,
             }
         }
     }

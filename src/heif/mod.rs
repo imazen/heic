@@ -8,7 +8,7 @@ mod boxes;
 mod parser;
 
 pub use boxes::{
-    CleanAperture, FourCC, HevcDecoderConfig, ImageMirror, ImageRotation, ImageSpatialExtents,
-    ItemProperty, Transform,
+    CleanAperture, ColorInfo, FourCC, HevcDecoderConfig, ImageMirror, ImageRotation,
+    ImageSpatialExtents, ItemProperty, Transform,
 };
 pub use parser::{parse, HeifContainer, Item, ItemType};

@@ -92,6 +92,10 @@ pub struct Sps {
     pub strong_intra_smoothing_enabled_flag: bool,
     /// VUI parameters present flag
     pub vui_parameters_present_flag: bool,
+    /// Video full range flag (from VUI). true = full [0,255], false = limited [16,235]
+    pub video_full_range_flag: bool,
+    /// Matrix coefficients (from VUI). 1=BT.709, 5/6=BT.601, 9=BT.2020
+    pub matrix_coeffs: u8,
 }
 
 impl Sps {
@@ -417,7 +421,37 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
     let strong_intra_smoothing_enabled_flag = reader.read_bit()? != 0;
 
     let vui_parameters_present_flag = reader.read_bit()? != 0;
-    // Skip VUI parameters (optional)
+
+    // Parse VUI color parameters if present
+    let mut video_full_range_flag = false; // default: limited range
+    let mut matrix_coeffs = 2u8; // default: unspecified
+    if vui_parameters_present_flag {
+        let aspect_ratio_info_present = reader.read_bit()? != 0;
+        if aspect_ratio_info_present {
+            let aspect_ratio_idc = reader.read_bits(8)?;
+            if aspect_ratio_idc == 255 {
+                // Extended_SAR
+                let _sar_width = reader.read_bits(16)?;
+                let _sar_height = reader.read_bits(16)?;
+            }
+        }
+        let overscan_info_present = reader.read_bit()? != 0;
+        if overscan_info_present {
+            let _overscan_appropriate = reader.read_bit()?;
+        }
+        let video_signal_type_present = reader.read_bit()? != 0;
+        if video_signal_type_present {
+            let _video_format = reader.read_bits(3)?;
+            video_full_range_flag = reader.read_bit()? != 0;
+            let colour_description_present = reader.read_bit()? != 0;
+            if colour_description_present {
+                let _colour_primaries = reader.read_bits(8)?;
+                let _transfer_characteristics = reader.read_bits(8)?;
+                matrix_coeffs = reader.read_bits(8)? as u8;
+            }
+        }
+        // Don't parse the rest of VUI — we only need color info
+    }
 
     Ok(Sps {
         sps_id,
@@ -451,6 +485,8 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
         sps_temporal_mvp_enabled_flag,
         strong_intra_smoothing_enabled_flag,
         vui_parameters_present_flag,
+        video_full_range_flag,
+        matrix_coeffs,
     })
 }
 
