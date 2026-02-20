@@ -507,7 +507,11 @@ impl DecoderConfig {
     /// # Errors
     ///
     /// Returns an error if the HEIF container is malformed or thumbnail decoding fails.
-    pub fn decode_thumbnail(&self, data: &[u8], layout: PixelLayout) -> Result<Option<DecodeOutput>> {
+    pub fn decode_thumbnail(
+        &self,
+        data: &[u8],
+        layout: PixelLayout,
+    ) -> Result<Option<DecodeOutput>> {
         decode_thumbnail_inner(data, layout)
     }
 }

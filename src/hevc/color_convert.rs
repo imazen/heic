@@ -8,9 +8,7 @@ use archmage::prelude::*;
 
 // Explicit imports for safe SIMD load/store (can't glob-import alongside core::arch)
 #[cfg(target_arch = "x86_64")]
-use safe_unaligned_simd::x86_64::{
-    _mm256_storeu_si256, _mm_loadu_si128, _mm_loadu_si64,
-};
+use safe_unaligned_simd::x86_64::{_mm_loadu_si64, _mm_loadu_si128, _mm256_storeu_si256};
 
 /// Get color matrix coefficients for YCbCr→RGB conversion.
 ///
@@ -23,16 +21,16 @@ fn get_coefficients(
 ) -> (i32, i32, i32, i32, i32, i32, i32, i32) {
     if full_range {
         let (cr_r, cb_g, cr_g, cb_b) = match matrix_coeffs {
-            1 => (403, -48, -120, 475),  // BT.709
-            9 => (377, -42, -146, 482),  // BT.2020
-            _ => (359, -88, -183, 454),  // BT.601
+            1 => (403, -48, -120, 475), // BT.709
+            9 => (377, -42, -146, 482), // BT.2020
+            _ => (359, -88, -183, 454), // BT.601
         };
         (cr_r, cb_g, cr_g, cb_b, 0, 256, 128, 8)
     } else {
         let (cr_r, cb_g, cr_g, cb_b) = match matrix_coeffs {
-            1 => (14744, -1754, -4383, 17373),  // BT.709
-            9 => (13806, -1541, -5349, 17615),  // BT.2020
-            _ => (13126, -3222, -6686, 16591),  // BT.601
+            1 => (14744, -1754, -4383, 17373), // BT.709
+            9 => (13806, -1541, -5349, 17615), // BT.2020
+            _ => (13126, -3222, -6686, 16591), // BT.601
         };
         (cr_r, cb_g, cr_g, cb_b, 16, 9576, 4096, 13)
     }
@@ -60,8 +58,19 @@ pub fn convert_420_to_rgb(
 ) {
     incant!(
         convert_420_to_rgb(
-            y_plane, cb_plane, cr_plane, y_stride, c_stride, y_start, y_end,
-            x_start, x_end, shift, full_range, matrix_coeffs, rgb
+            y_plane,
+            cb_plane,
+            cr_plane,
+            y_stride,
+            c_stride,
+            y_start,
+            y_end,
+            x_start,
+            x_end,
+            shift,
+            full_range,
+            matrix_coeffs,
+            rgb
         ),
         [v3]
     )
@@ -154,8 +163,8 @@ fn convert_420_to_rgb_v3(
     // Shuffle mask: interleave packed [R0..R3, G0..G3, B0..B3, 0000] per lane
     // into [R0,G0,B0, R1,G1,B1, R2,G2,B2, R3,G3,B3, 0000]
     let shuffle = _mm256_setr_epi8(
-        0, 4, 8, 1, 5, 9, 2, 6, 10, 3, 7, 11, -1, -1, -1, -1, 0, 4, 8, 1, 5, 9, 2, 6, 10, 3,
-        7, 11, -1, -1, -1, -1,
+        0, 4, 8, 1, 5, 9, 2, 6, 10, 3, 7, 11, -1, -1, -1, -1, 0, 4, 8, 1, 5, 9, 2, 6, 10, 3, 7, 11,
+        -1, -1, -1, -1,
     );
 
     // Align SIMD start to even x for 4:2:0 chroma alignment
@@ -173,8 +182,23 @@ fn convert_420_to_rgb_v3(
         // Scalar prefix: handle odd x_start (0 or 1 pixel)
         for x in x_start..x_simd_start.min(x_end) {
             scalar_pixel(
-                y_plane, cb_plane, cr_plane, y_row, c_row, x as usize, shift, y_bias,
-                y_scale, cr_r, cb_g, cr_g, cb_b, rnd, shr, rgb, &mut out_idx,
+                y_plane,
+                cb_plane,
+                cr_plane,
+                y_row,
+                c_row,
+                x as usize,
+                shift,
+                y_bias,
+                y_scale,
+                cr_r,
+                cb_g,
+                cr_g,
+                cb_b,
+                rnd,
+                shr,
+                rgb,
+                &mut out_idx,
             );
         }
 
@@ -185,16 +209,13 @@ fn convert_420_to_rgb_v3(
             let cx = x / 2;
 
             // Load 8 Y values (u16) → zero-extend to 8×i32
-            let y_arr: &[u16; 8] =
-                (&y_plane[y_row + x..y_row + x + 8]).try_into().unwrap();
+            let y_arr: &[u16; 8] = (&y_plane[y_row + x..y_row + x + 8]).try_into().unwrap();
             let y_raw = _mm_loadu_si128(y_arr);
             let mut y_i32 = _mm256_cvtepu16_epi32(y_raw);
 
             // Load 4 Cb/Cr values, duplicate each for 4:2:0 → 8×i32
-            let cb_arr: &[u16; 4] =
-                (&cb_plane[c_row + cx..c_row + cx + 4]).try_into().unwrap();
-            let cr_arr: &[u16; 4] =
-                (&cr_plane[c_row + cx..c_row + cx + 4]).try_into().unwrap();
+            let cb_arr: &[u16; 4] = (&cb_plane[c_row + cx..c_row + cx + 4]).try_into().unwrap();
+            let cr_arr: &[u16; 4] = (&cr_plane[c_row + cx..c_row + cx + 4]).try_into().unwrap();
             let cb_raw = _mm_loadu_si64(cb_arr);
             let cr_raw = _mm_loadu_si64(cr_arr);
             let cb_dup = _mm_unpacklo_epi16(cb_raw, cb_raw);
@@ -263,8 +284,23 @@ fn convert_420_to_rgb_v3(
         // Scalar tail: remaining 0–7 pixels
         for x in x_simd_end..x_end {
             scalar_pixel(
-                y_plane, cb_plane, cr_plane, y_row, c_row, x as usize, shift, y_bias,
-                y_scale, cr_r, cb_g, cr_g, cb_b, rnd, shr, rgb, &mut out_idx,
+                y_plane,
+                cb_plane,
+                cr_plane,
+                y_row,
+                c_row,
+                x as usize,
+                shift,
+                y_bias,
+                y_scale,
+                cr_r,
+                cb_g,
+                cr_g,
+                cb_b,
+                rnd,
+                shr,
+                rgb,
+                &mut out_idx,
             );
         }
     }

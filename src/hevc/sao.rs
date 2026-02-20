@@ -396,22 +396,55 @@ fn apply_sao_edge(
             let row = y as usize * stride_u;
             for x in x_start..safe_x_start.min(x_end) {
                 apply_sao_edge_pixel(
-                    src, dst, row, x, dx0, dy0, dx1, dy1, stride, plane_w, plane_h,
-                    max_val, &offset_table,
+                    src,
+                    dst,
+                    row,
+                    x,
+                    dx0,
+                    dy0,
+                    dx1,
+                    dy1,
+                    stride,
+                    plane_w,
+                    plane_h,
+                    max_val,
+                    &offset_table,
                 );
             }
             for x in safe_x_end.max(x_start)..x_end {
                 apply_sao_edge_pixel(
-                    src, dst, row, x, dx0, dy0, dx1, dy1, stride, plane_w, plane_h,
-                    max_val, &offset_table,
+                    src,
+                    dst,
+                    row,
+                    x,
+                    dx0,
+                    dy0,
+                    dx1,
+                    dy1,
+                    stride,
+                    plane_w,
+                    plane_h,
+                    max_val,
+                    &offset_table,
                 );
             }
         } else {
             let row = y as usize * stride_u;
             for x in x_start..x_end {
                 apply_sao_edge_pixel(
-                    src, dst, row, x, dx0, dy0, dx1, dy1, stride, plane_w, plane_h,
-                    max_val, &offset_table,
+                    src,
+                    dst,
+                    row,
+                    x,
+                    dx0,
+                    dy0,
+                    dx1,
+                    dy1,
+                    stride,
+                    plane_w,
+                    plane_h,
+                    max_val,
+                    &offset_table,
                 );
             }
         }

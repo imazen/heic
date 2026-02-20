@@ -451,7 +451,10 @@ fn test_decode_thumbnail() {
 fn test_image_info_has_thumbnail() {
     let data = std::fs::read(EXAMPLE_HEIC).expect("read");
     let info = heic_decoder::ImageInfo::from_bytes(&data).expect("probe");
-    assert!(info.has_thumbnail, "example.heic should report has_thumbnail=true");
+    assert!(
+        info.has_thumbnail,
+        "example.heic should report has_thumbnail=true"
+    );
 }
 
 #[test]

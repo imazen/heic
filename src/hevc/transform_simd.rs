@@ -8,7 +8,7 @@ use archmage::prelude::*;
 
 #[cfg(target_arch = "x86_64")]
 use safe_unaligned_simd::x86_64::{
-    _mm256_loadu_si256, _mm256_storeu_si256, _mm_loadu_si128, _mm_storeu_si128,
+    _mm_loadu_si128, _mm_storeu_si128, _mm256_loadu_si256, _mm256_storeu_si256,
 };
 
 /// Pack two i16 coefficients into one i32 for `_mm256_set1_epi32` + `_mm256_madd_epi16`.
@@ -38,7 +38,16 @@ fn transpose_8x8(
     r5: __m128i,
     r6: __m128i,
     r7: __m128i,
-) -> (__m128i, __m128i, __m128i, __m128i, __m128i, __m128i, __m128i, __m128i) {
+) -> (
+    __m128i,
+    __m128i,
+    __m128i,
+    __m128i,
+    __m128i,
+    __m128i,
+    __m128i,
+    __m128i,
+) {
     // Phase 1: interleave 16-bit pairs
     let t0 = _mm_unpacklo_epi16(r0, r1);
     let t1 = _mm_unpackhi_epi16(r0, r1);
@@ -90,7 +99,16 @@ fn idct8_1d_columns(
     r7: __m128i,
     shift: __m128i,
     add: __m256i,
-) -> (__m128i, __m128i, __m128i, __m128i, __m128i, __m128i, __m128i, __m128i) {
+) -> (
+    __m128i,
+    __m128i,
+    __m128i,
+    __m128i,
+    __m128i,
+    __m128i,
+    __m128i,
+    __m128i,
+) {
     // Interleave odd rows: (r1,r3) and (r5,r7)
     // Each pair produces a __m256i with interleaved values for all 8 columns
     let i13 = _mm256_set_m128i(_mm_unpackhi_epi16(r1, r3), _mm_unpacklo_epi16(r1, r3));
@@ -191,8 +209,7 @@ pub(crate) fn idct8_v3(
         idct8_1d_columns(_token, r0, r1, r2, r3, r4, r5, r6, r7, shift1, add1);
 
     // Transpose for horizontal pass
-    let (t0, t1, t2, t3, t4, t5, t6, t7) =
-        transpose_8x8(_token, d0, d1, d2, d3, d4, d5, d6, d7);
+    let (t0, t1, t2, t3, t4, t5, t6, t7) = transpose_8x8(_token, d0, d1, d2, d3, d4, d5, d6, d7);
 
     // Pass 2: horizontal (row transform), shift = 20 - bit_depth
     let shift2 = 20 - bit_depth as i32;
@@ -202,8 +219,7 @@ pub(crate) fn idct8_v3(
         idct8_1d_columns(_token, t0, t1, t2, t3, t4, t5, t6, t7, shift2_v, add2);
 
     // Transpose back for row-major storage
-    let (f0, f1, f2, f3, f4, f5, f6, f7) =
-        transpose_8x8(_token, e0, e1, e2, e3, e4, e5, e6, e7);
+    let (f0, f1, f2, f3, f4, f5, f6, f7) = transpose_8x8(_token, e0, e1, e2, e3, e4, e5, e6, e7);
 
     // Store 8 output rows (combine pairs into __m256i for efficient 256-bit stores)
     let out01 = _mm256_set_m128i(f1, f0);
@@ -280,36 +296,52 @@ fn idct16_1d_columns(
     // Odd part: 8 outputs from rows 1,3,5,7,9,11,13,15
     // O[0] = 90*r1 + 87*r3 + 80*r5 + 70*r7 + 57*r9 + 43*r11 + 25*r13 + 9*r15
     let (o0l, o0h) = sum4_pairs!(
-        (r[1], r[3], 90, 87), (r[5], r[7], 80, 70),
-        (r[9], r[11], 57, 43), (r[13], r[15], 25, 9)
+        (r[1], r[3], 90, 87),
+        (r[5], r[7], 80, 70),
+        (r[9], r[11], 57, 43),
+        (r[13], r[15], 25, 9)
     );
     let (o1l, o1h) = sum4_pairs!(
-        (r[1], r[3], 87, 57), (r[5], r[7], 9, -43),
-        (r[9], r[11], -80, -90), (r[13], r[15], -70, -25)
+        (r[1], r[3], 87, 57),
+        (r[5], r[7], 9, -43),
+        (r[9], r[11], -80, -90),
+        (r[13], r[15], -70, -25)
     );
     let (o2l, o2h) = sum4_pairs!(
-        (r[1], r[3], 80, 9), (r[5], r[7], -70, -87),
-        (r[9], r[11], -25, 57), (r[13], r[15], 90, 43)
+        (r[1], r[3], 80, 9),
+        (r[5], r[7], -70, -87),
+        (r[9], r[11], -25, 57),
+        (r[13], r[15], 90, 43)
     );
     let (o3l, o3h) = sum4_pairs!(
-        (r[1], r[3], 70, -43), (r[5], r[7], -87, 9),
-        (r[9], r[11], 90, 25), (r[13], r[15], -80, -57)
+        (r[1], r[3], 70, -43),
+        (r[5], r[7], -87, 9),
+        (r[9], r[11], 90, 25),
+        (r[13], r[15], -80, -57)
     );
     let (o4l, o4h) = sum4_pairs!(
-        (r[1], r[3], 57, -80), (r[5], r[7], -25, 90),
-        (r[9], r[11], -9, -87), (r[13], r[15], 43, 70)
+        (r[1], r[3], 57, -80),
+        (r[5], r[7], -25, 90),
+        (r[9], r[11], -9, -87),
+        (r[13], r[15], 43, 70)
     );
     let (o5l, o5h) = sum4_pairs!(
-        (r[1], r[3], 43, -90), (r[5], r[7], 57, 25),
-        (r[9], r[11], -87, 70), (r[13], r[15], 9, -80)
+        (r[1], r[3], 43, -90),
+        (r[5], r[7], 57, 25),
+        (r[9], r[11], -87, 70),
+        (r[13], r[15], 9, -80)
     );
     let (o6l, o6h) = sum4_pairs!(
-        (r[1], r[3], 25, -70), (r[5], r[7], 90, -80),
-        (r[9], r[11], 43, 9), (r[13], r[15], -57, 87)
+        (r[1], r[3], 25, -70),
+        (r[5], r[7], 90, -80),
+        (r[9], r[11], 43, 9),
+        (r[13], r[15], -57, 87)
     );
     let (o7l, o7h) = sum4_pairs!(
-        (r[1], r[3], 9, -25), (r[5], r[7], 43, -57),
-        (r[9], r[11], 70, -80), (r[13], r[15], 87, -90)
+        (r[1], r[3], 9, -25),
+        (r[5], r[7], 43, -57),
+        (r[9], r[11], 70, -80),
+        (r[13], r[15], 87, -90)
     );
 
     // Even part: 8-point butterfly on even rows (0,2,4,6,8,10,12,14)
@@ -366,25 +398,13 @@ fn idct16_1d_columns(
     // Helper: compute (e ± o + add) >> shift, pack lo and hi halves back to __m256i of i16
     macro_rules! butterfly_pack {
         ($el:expr, $eh:expr, $ol:expr, $oh:expr, add) => {{
-            let dl = _mm256_sra_epi32(
-                _mm256_add_epi32(_mm256_add_epi32($el, $ol), add),
-                shift,
-            );
-            let dh = _mm256_sra_epi32(
-                _mm256_add_epi32(_mm256_add_epi32($eh, $oh), add),
-                shift,
-            );
+            let dl = _mm256_sra_epi32(_mm256_add_epi32(_mm256_add_epi32($el, $ol), add), shift);
+            let dh = _mm256_sra_epi32(_mm256_add_epi32(_mm256_add_epi32($eh, $oh), add), shift);
             _mm256_packs_epi32(dl, dh)
         }};
         ($el:expr, $eh:expr, $ol:expr, $oh:expr, sub) => {{
-            let dl = _mm256_sra_epi32(
-                _mm256_add_epi32(_mm256_sub_epi32($el, $ol), add),
-                shift,
-            );
-            let dh = _mm256_sra_epi32(
-                _mm256_add_epi32(_mm256_sub_epi32($eh, $oh), add),
-                shift,
-            );
+            let dl = _mm256_sra_epi32(_mm256_add_epi32(_mm256_sub_epi32($el, $ol), add), shift);
+            let dh = _mm256_sra_epi32(_mm256_add_epi32(_mm256_sub_epi32($eh, $oh), add), shift);
             _mm256_packs_epi32(dl, dh)
         }};
     }
@@ -415,30 +435,90 @@ fn idct16_1d_columns(
 #[rite]
 fn transpose_16x16(token: X64V3Token, r: &[__m256i; 16]) -> [__m256i; 16] {
     // Extract 128-bit halves
-    macro_rules! lo { ($v:expr) => { _mm256_castsi256_si128($v) }; }
-    macro_rules! hi { ($v:expr) => { _mm256_extracti128_si256::<1>($v) }; }
-    macro_rules! combine { ($l:expr, $h:expr) => { _mm256_set_m128i($h, $l) }; }
+    macro_rules! lo {
+        ($v:expr) => {
+            _mm256_castsi256_si128($v)
+        };
+    }
+    macro_rules! hi {
+        ($v:expr) => {
+            _mm256_extracti128_si256::<1>($v)
+        };
+    }
+    macro_rules! combine {
+        ($l:expr, $h:expr) => {
+            _mm256_set_m128i($h, $l)
+        };
+    }
 
     // Sub-transpose top-left (rows 0-7, cols 0-7) and top-right (rows 0-7, cols 8-15)
-    let (tl0, tl1, tl2, tl3, tl4, tl5, tl6, tl7) =
-        transpose_8x8(token, lo!(r[0]), lo!(r[1]), lo!(r[2]), lo!(r[3]), lo!(r[4]), lo!(r[5]), lo!(r[6]), lo!(r[7]));
-    let (tr0, tr1, tr2, tr3, tr4, tr5, tr6, tr7) =
-        transpose_8x8(token, hi!(r[0]), hi!(r[1]), hi!(r[2]), hi!(r[3]), hi!(r[4]), hi!(r[5]), hi!(r[6]), hi!(r[7]));
+    let (tl0, tl1, tl2, tl3, tl4, tl5, tl6, tl7) = transpose_8x8(
+        token,
+        lo!(r[0]),
+        lo!(r[1]),
+        lo!(r[2]),
+        lo!(r[3]),
+        lo!(r[4]),
+        lo!(r[5]),
+        lo!(r[6]),
+        lo!(r[7]),
+    );
+    let (tr0, tr1, tr2, tr3, tr4, tr5, tr6, tr7) = transpose_8x8(
+        token,
+        hi!(r[0]),
+        hi!(r[1]),
+        hi!(r[2]),
+        hi!(r[3]),
+        hi!(r[4]),
+        hi!(r[5]),
+        hi!(r[6]),
+        hi!(r[7]),
+    );
     // Sub-transpose bottom-left (rows 8-15, cols 0-7) and bottom-right (rows 8-15, cols 8-15)
-    let (bl0, bl1, bl2, bl3, bl4, bl5, bl6, bl7) =
-        transpose_8x8(token, lo!(r[8]), lo!(r[9]), lo!(r[10]), lo!(r[11]), lo!(r[12]), lo!(r[13]), lo!(r[14]), lo!(r[15]));
-    let (br0, br1, br2, br3, br4, br5, br6, br7) =
-        transpose_8x8(token, hi!(r[8]), hi!(r[9]), hi!(r[10]), hi!(r[11]), hi!(r[12]), hi!(r[13]), hi!(r[14]), hi!(r[15]));
+    let (bl0, bl1, bl2, bl3, bl4, bl5, bl6, bl7) = transpose_8x8(
+        token,
+        lo!(r[8]),
+        lo!(r[9]),
+        lo!(r[10]),
+        lo!(r[11]),
+        lo!(r[12]),
+        lo!(r[13]),
+        lo!(r[14]),
+        lo!(r[15]),
+    );
+    let (br0, br1, br2, br3, br4, br5, br6, br7) = transpose_8x8(
+        token,
+        hi!(r[8]),
+        hi!(r[9]),
+        hi!(r[10]),
+        hi!(r[11]),
+        hi!(r[12]),
+        hi!(r[13]),
+        hi!(r[14]),
+        hi!(r[15]),
+    );
 
     // Combine: output row k gets top-left col k (now row k of tl) as low half,
     // and bottom-left col k (now row k of bl) as high half, etc.
     // After transpose, tl holds cols 0-7 of rows 0-7, bl holds cols 0-7 of rows 8-15
     // Output row 0 = [tl0 (col 0 of rows 0-7), bl0 (col 0 of rows 8-15)]
     [
-        combine!(tl0, bl0), combine!(tl1, bl1), combine!(tl2, bl2), combine!(tl3, bl3),
-        combine!(tl4, bl4), combine!(tl5, bl5), combine!(tl6, bl6), combine!(tl7, bl7),
-        combine!(tr0, br0), combine!(tr1, br1), combine!(tr2, br2), combine!(tr3, br3),
-        combine!(tr4, br4), combine!(tr5, br5), combine!(tr6, br6), combine!(tr7, br7),
+        combine!(tl0, bl0),
+        combine!(tl1, bl1),
+        combine!(tl2, bl2),
+        combine!(tl3, bl3),
+        combine!(tl4, bl4),
+        combine!(tl5, bl5),
+        combine!(tl6, bl6),
+        combine!(tl7, bl7),
+        combine!(tr0, br0),
+        combine!(tr1, br1),
+        combine!(tr2, br2),
+        combine!(tr3, br3),
+        combine!(tr4, br4),
+        combine!(tr5, br5),
+        combine!(tr6, br6),
+        combine!(tr7, br7),
     ]
 }
 
@@ -572,100 +652,164 @@ fn idct32_1d_columns(
     // H.265 Table 8-5 coefficients
     // =========================================================================
     let (o0l, o0h) = sum8_pairs!(
-        (r[1], r[3], 90, 90), (r[5], r[7], 88, 85),
-        (r[9], r[11], 82, 78), (r[13], r[15], 73, 67),
-        (r[17], r[19], 61, 54), (r[21], r[23], 46, 38),
-        (r[25], r[27], 31, 22), (r[29], r[31], 13, 4)
+        (r[1], r[3], 90, 90),
+        (r[5], r[7], 88, 85),
+        (r[9], r[11], 82, 78),
+        (r[13], r[15], 73, 67),
+        (r[17], r[19], 61, 54),
+        (r[21], r[23], 46, 38),
+        (r[25], r[27], 31, 22),
+        (r[29], r[31], 13, 4)
     );
     let (o1l, o1h) = sum8_pairs!(
-        (r[1], r[3], 90, 82), (r[5], r[7], 67, 46),
-        (r[9], r[11], 22, -4), (r[13], r[15], -31, -54),
-        (r[17], r[19], -73, -85), (r[21], r[23], -90, -88),
-        (r[25], r[27], -78, -61), (r[29], r[31], -38, -13)
+        (r[1], r[3], 90, 82),
+        (r[5], r[7], 67, 46),
+        (r[9], r[11], 22, -4),
+        (r[13], r[15], -31, -54),
+        (r[17], r[19], -73, -85),
+        (r[21], r[23], -90, -88),
+        (r[25], r[27], -78, -61),
+        (r[29], r[31], -38, -13)
     );
     let (o2l, o2h) = sum8_pairs!(
-        (r[1], r[3], 88, 67), (r[5], r[7], 31, -13),
-        (r[9], r[11], -54, -82), (r[13], r[15], -90, -78),
-        (r[17], r[19], -46, -4), (r[21], r[23], 38, 73),
-        (r[25], r[27], 90, 85), (r[29], r[31], 61, 22)
+        (r[1], r[3], 88, 67),
+        (r[5], r[7], 31, -13),
+        (r[9], r[11], -54, -82),
+        (r[13], r[15], -90, -78),
+        (r[17], r[19], -46, -4),
+        (r[21], r[23], 38, 73),
+        (r[25], r[27], 90, 85),
+        (r[29], r[31], 61, 22)
     );
     let (o3l, o3h) = sum8_pairs!(
-        (r[1], r[3], 85, 46), (r[5], r[7], -13, -67),
-        (r[9], r[11], -90, -73), (r[13], r[15], -22, 38),
-        (r[17], r[19], 82, 88), (r[21], r[23], 54, -4),
-        (r[25], r[27], -61, -90), (r[29], r[31], -78, -31)
+        (r[1], r[3], 85, 46),
+        (r[5], r[7], -13, -67),
+        (r[9], r[11], -90, -73),
+        (r[13], r[15], -22, 38),
+        (r[17], r[19], 82, 88),
+        (r[21], r[23], 54, -4),
+        (r[25], r[27], -61, -90),
+        (r[29], r[31], -78, -31)
     );
     let (o4l, o4h) = sum8_pairs!(
-        (r[1], r[3], 82, 22), (r[5], r[7], -54, -90),
-        (r[9], r[11], -61, 13), (r[13], r[15], 78, 85),
-        (r[17], r[19], 31, -46), (r[21], r[23], -90, -67),
-        (r[25], r[27], 4, 73), (r[29], r[31], 88, 38)
+        (r[1], r[3], 82, 22),
+        (r[5], r[7], -54, -90),
+        (r[9], r[11], -61, 13),
+        (r[13], r[15], 78, 85),
+        (r[17], r[19], 31, -46),
+        (r[21], r[23], -90, -67),
+        (r[25], r[27], 4, 73),
+        (r[29], r[31], 88, 38)
     );
     let (o5l, o5h) = sum8_pairs!(
-        (r[1], r[3], 78, -4), (r[5], r[7], -82, -73),
-        (r[9], r[11], 13, 85), (r[13], r[15], 67, -22),
-        (r[17], r[19], -88, -61), (r[21], r[23], 31, 90),
-        (r[25], r[27], 54, -38), (r[29], r[31], -90, -46)
+        (r[1], r[3], 78, -4),
+        (r[5], r[7], -82, -73),
+        (r[9], r[11], 13, 85),
+        (r[13], r[15], 67, -22),
+        (r[17], r[19], -88, -61),
+        (r[21], r[23], 31, 90),
+        (r[25], r[27], 54, -38),
+        (r[29], r[31], -90, -46)
     );
     let (o6l, o6h) = sum8_pairs!(
-        (r[1], r[3], 73, -31), (r[5], r[7], -90, -22),
-        (r[9], r[11], 78, 67), (r[13], r[15], -38, -90),
-        (r[17], r[19], -13, 82), (r[21], r[23], 61, -46),
-        (r[25], r[27], -88, -4), (r[29], r[31], 85, 54)
+        (r[1], r[3], 73, -31),
+        (r[5], r[7], -90, -22),
+        (r[9], r[11], 78, 67),
+        (r[13], r[15], -38, -90),
+        (r[17], r[19], -13, 82),
+        (r[21], r[23], 61, -46),
+        (r[25], r[27], -88, -4),
+        (r[29], r[31], 85, 54)
     );
     let (o7l, o7h) = sum8_pairs!(
-        (r[1], r[3], 67, -54), (r[5], r[7], -78, 38),
-        (r[9], r[11], 85, -22), (r[13], r[15], -90, 4),
-        (r[17], r[19], 90, 13), (r[21], r[23], -88, -31),
-        (r[25], r[27], 82, 46), (r[29], r[31], -73, -61)
+        (r[1], r[3], 67, -54),
+        (r[5], r[7], -78, 38),
+        (r[9], r[11], 85, -22),
+        (r[13], r[15], -90, 4),
+        (r[17], r[19], 90, 13),
+        (r[21], r[23], -88, -31),
+        (r[25], r[27], 82, 46),
+        (r[29], r[31], -73, -61)
     );
     let (o8l, o8h) = sum8_pairs!(
-        (r[1], r[3], 61, -73), (r[5], r[7], -46, 82),
-        (r[9], r[11], 31, -88), (r[13], r[15], -13, 90),
-        (r[17], r[19], -4, -90), (r[21], r[23], 22, 85),
-        (r[25], r[27], -38, -78), (r[29], r[31], 54, 67)
+        (r[1], r[3], 61, -73),
+        (r[5], r[7], -46, 82),
+        (r[9], r[11], 31, -88),
+        (r[13], r[15], -13, 90),
+        (r[17], r[19], -4, -90),
+        (r[21], r[23], 22, 85),
+        (r[25], r[27], -38, -78),
+        (r[29], r[31], 54, 67)
     );
     let (o9l, o9h) = sum8_pairs!(
-        (r[1], r[3], 54, -85), (r[5], r[7], -4, 88),
-        (r[9], r[11], -46, -61), (r[13], r[15], 82, 13),
-        (r[17], r[19], -90, 38), (r[21], r[23], 67, -78),
-        (r[25], r[27], -22, 90), (r[29], r[31], -31, -73)
+        (r[1], r[3], 54, -85),
+        (r[5], r[7], -4, 88),
+        (r[9], r[11], -46, -61),
+        (r[13], r[15], 82, 13),
+        (r[17], r[19], -90, 38),
+        (r[21], r[23], 67, -78),
+        (r[25], r[27], -22, 90),
+        (r[29], r[31], -31, -73)
     );
     let (o10l, o10h) = sum8_pairs!(
-        (r[1], r[3], 46, -90), (r[5], r[7], 38, 54),
-        (r[9], r[11], -90, 31), (r[13], r[15], 61, -88),
-        (r[17], r[19], 22, 67), (r[21], r[23], -85, 13),
-        (r[25], r[27], 73, -82), (r[29], r[31], 4, 78)
+        (r[1], r[3], 46, -90),
+        (r[5], r[7], 38, 54),
+        (r[9], r[11], -90, 31),
+        (r[13], r[15], 61, -88),
+        (r[17], r[19], 22, 67),
+        (r[21], r[23], -85, 13),
+        (r[25], r[27], 73, -82),
+        (r[29], r[31], 4, 78)
     );
     let (o11l, o11h) = sum8_pairs!(
-        (r[1], r[3], 38, -88), (r[5], r[7], 73, -4),
-        (r[9], r[11], -67, 90), (r[13], r[15], -46, -31),
-        (r[17], r[19], 85, -78), (r[21], r[23], 13, 61),
-        (r[25], r[27], -90, 54), (r[29], r[31], 22, -82)
+        (r[1], r[3], 38, -88),
+        (r[5], r[7], 73, -4),
+        (r[9], r[11], -67, 90),
+        (r[13], r[15], -46, -31),
+        (r[17], r[19], 85, -78),
+        (r[21], r[23], 13, 61),
+        (r[25], r[27], -90, 54),
+        (r[29], r[31], 22, -82)
     );
     let (o12l, o12h) = sum8_pairs!(
-        (r[1], r[3], 31, -78), (r[5], r[7], 90, -61),
-        (r[9], r[11], 4, 54), (r[13], r[15], -88, 82),
-        (r[17], r[19], -38, -22), (r[21], r[23], 73, -90),
-        (r[25], r[27], 67, -13), (r[29], r[31], -46, 85)
+        (r[1], r[3], 31, -78),
+        (r[5], r[7], 90, -61),
+        (r[9], r[11], 4, 54),
+        (r[13], r[15], -88, 82),
+        (r[17], r[19], -38, -22),
+        (r[21], r[23], 73, -90),
+        (r[25], r[27], 67, -13),
+        (r[29], r[31], -46, 85)
     );
     let (o13l, o13h) = sum8_pairs!(
-        (r[1], r[3], 22, -61), (r[5], r[7], 85, -90),
-        (r[9], r[11], 73, -38), (r[13], r[15], -4, 46),
-        (r[17], r[19], -78, 90), (r[21], r[23], -82, 54),
-        (r[25], r[27], -13, -31), (r[29], r[31], 67, -88)
+        (r[1], r[3], 22, -61),
+        (r[5], r[7], 85, -90),
+        (r[9], r[11], 73, -38),
+        (r[13], r[15], -4, 46),
+        (r[17], r[19], -78, 90),
+        (r[21], r[23], -82, 54),
+        (r[25], r[27], -13, -31),
+        (r[29], r[31], 67, -88)
     );
     let (o14l, o14h) = sum8_pairs!(
-        (r[1], r[3], 13, -38), (r[5], r[7], 61, -78),
-        (r[9], r[11], 88, -90), (r[13], r[15], 85, -73),
-        (r[17], r[19], 54, -31), (r[21], r[23], 4, 22),
-        (r[25], r[27], -46, 67), (r[29], r[31], -82, 90)
+        (r[1], r[3], 13, -38),
+        (r[5], r[7], 61, -78),
+        (r[9], r[11], 88, -90),
+        (r[13], r[15], 85, -73),
+        (r[17], r[19], 54, -31),
+        (r[21], r[23], 4, 22),
+        (r[25], r[27], -46, 67),
+        (r[29], r[31], -82, 90)
     );
     let (o15l, o15h) = sum8_pairs!(
-        (r[1], r[3], 4, -13), (r[5], r[7], 22, -31),
-        (r[9], r[11], 38, -46), (r[13], r[15], 54, -61),
-        (r[17], r[19], 67, -73), (r[21], r[23], 78, -82),
-        (r[25], r[27], 85, -88), (r[29], r[31], 90, -90)
+        (r[1], r[3], 4, -13),
+        (r[5], r[7], 22, -31),
+        (r[9], r[11], 38, -46),
+        (r[13], r[15], 54, -61),
+        (r[17], r[19], 67, -73),
+        (r[21], r[23], 78, -82),
+        (r[25], r[27], 85, -88),
+        (r[29], r[31], 90, -90)
     );
 
     // =========================================================================
@@ -685,36 +829,52 @@ fn idct32_1d_columns(
     }
 
     let (eo0l, eo0h) = sum4_pairs!(
-        (r[2], r[6], 90, 87), (r[10], r[14], 80, 70),
-        (r[18], r[22], 57, 43), (r[26], r[30], 25, 9)
+        (r[2], r[6], 90, 87),
+        (r[10], r[14], 80, 70),
+        (r[18], r[22], 57, 43),
+        (r[26], r[30], 25, 9)
     );
     let (eo1l, eo1h) = sum4_pairs!(
-        (r[2], r[6], 87, 57), (r[10], r[14], 9, -43),
-        (r[18], r[22], -80, -90), (r[26], r[30], -70, -25)
+        (r[2], r[6], 87, 57),
+        (r[10], r[14], 9, -43),
+        (r[18], r[22], -80, -90),
+        (r[26], r[30], -70, -25)
     );
     let (eo2l, eo2h) = sum4_pairs!(
-        (r[2], r[6], 80, 9), (r[10], r[14], -70, -87),
-        (r[18], r[22], -25, 57), (r[26], r[30], 90, 43)
+        (r[2], r[6], 80, 9),
+        (r[10], r[14], -70, -87),
+        (r[18], r[22], -25, 57),
+        (r[26], r[30], 90, 43)
     );
     let (eo3l, eo3h) = sum4_pairs!(
-        (r[2], r[6], 70, -43), (r[10], r[14], -87, 9),
-        (r[18], r[22], 90, 25), (r[26], r[30], -80, -57)
+        (r[2], r[6], 70, -43),
+        (r[10], r[14], -87, 9),
+        (r[18], r[22], 90, 25),
+        (r[26], r[30], -80, -57)
     );
     let (eo4l, eo4h) = sum4_pairs!(
-        (r[2], r[6], 57, -80), (r[10], r[14], -25, 90),
-        (r[18], r[22], -9, -87), (r[26], r[30], 43, 70)
+        (r[2], r[6], 57, -80),
+        (r[10], r[14], -25, 90),
+        (r[18], r[22], -9, -87),
+        (r[26], r[30], 43, 70)
     );
     let (eo5l, eo5h) = sum4_pairs!(
-        (r[2], r[6], 43, -90), (r[10], r[14], 57, 25),
-        (r[18], r[22], -87, 70), (r[26], r[30], 9, -80)
+        (r[2], r[6], 43, -90),
+        (r[10], r[14], 57, 25),
+        (r[18], r[22], -87, 70),
+        (r[26], r[30], 9, -80)
     );
     let (eo6l, eo6h) = sum4_pairs!(
-        (r[2], r[6], 25, -70), (r[10], r[14], 90, -80),
-        (r[18], r[22], 43, 9), (r[26], r[30], -57, 87)
+        (r[2], r[6], 25, -70),
+        (r[10], r[14], 90, -80),
+        (r[18], r[22], 43, 9),
+        (r[26], r[30], -57, 87)
     );
     let (eo7l, eo7h) = sum4_pairs!(
-        (r[2], r[6], 9, -25), (r[10], r[14], 43, -57),
-        (r[18], r[22], 70, -80), (r[26], r[30], 87, -90)
+        (r[2], r[6], 9, -25),
+        (r[10], r[14], 43, -57),
+        (r[18], r[22], 70, -80),
+        (r[26], r[30], 87, -90)
     );
 
     // Even-Even-Odd (EEO): 4 outputs from rows 4,12,20,28
@@ -796,25 +956,13 @@ fn idct32_1d_columns(
     // =========================================================================
     macro_rules! butterfly_pack {
         ($el:expr, $eh:expr, $ol:expr, $oh:expr, add) => {{
-            let dl = _mm256_sra_epi32(
-                _mm256_add_epi32(_mm256_add_epi32($el, $ol), add),
-                shift,
-            );
-            let dh = _mm256_sra_epi32(
-                _mm256_add_epi32(_mm256_add_epi32($eh, $oh), add),
-                shift,
-            );
+            let dl = _mm256_sra_epi32(_mm256_add_epi32(_mm256_add_epi32($el, $ol), add), shift);
+            let dh = _mm256_sra_epi32(_mm256_add_epi32(_mm256_add_epi32($eh, $oh), add), shift);
             _mm256_packs_epi32(dl, dh)
         }};
         ($el:expr, $eh:expr, $ol:expr, $oh:expr, sub) => {{
-            let dl = _mm256_sra_epi32(
-                _mm256_add_epi32(_mm256_sub_epi32($el, $ol), add),
-                shift,
-            );
-            let dh = _mm256_sra_epi32(
-                _mm256_add_epi32(_mm256_sub_epi32($eh, $oh), add),
-                shift,
-            );
+            let dl = _mm256_sra_epi32(_mm256_add_epi32(_mm256_sub_epi32($el, $ol), add), shift);
+            let dh = _mm256_sra_epi32(_mm256_add_epi32(_mm256_sub_epi32($eh, $oh), add), shift);
             _mm256_packs_epi32(dl, dh)
         }};
     }
@@ -1100,10 +1248,7 @@ pub(crate) fn idst4_v3(
 
     let o2 = _mm_sra_epi32(
         _mm_add_epi32(
-            _mm_mullo_epi32(
-                _mm_add_epi32(_mm_sub_epi32(r0, r2), r3),
-                _mm_set1_epi32(74),
-            ),
+            _mm_mullo_epi32(_mm_add_epi32(_mm_sub_epi32(r0, r2), r3), _mm_set1_epi32(74)),
             add2,
         ),
         shift2_v,
@@ -1180,12 +1325,10 @@ pub(crate) fn add_residual_block_v3(
         let chunks = size / 16;
         for c in 0..chunks {
             let offset = c * 16;
-            let pred = _mm256_loadu_si256::<[u16; 16]>(
-                row[offset..offset + 16].try_into().unwrap()
-            );
-            let res = _mm256_loadu_si256::<[i16; 16]>(
-                res_row[offset..offset + 16].try_into().unwrap()
-            );
+            let pred =
+                _mm256_loadu_si256::<[u16; 16]>(row[offset..offset + 16].try_into().unwrap());
+            let res =
+                _mm256_loadu_si256::<[i16; 16]>(res_row[offset..offset + 16].try_into().unwrap());
             let sum = _mm256_add_epi16(pred, res);
             let clamped = _mm256_min_epi16(_mm256_max_epi16(sum, zero), max_v);
             _mm256_storeu_si256::<[u16; 16]>(
@@ -1249,9 +1392,7 @@ pub(crate) fn dequantize_v3(
     let chunks = coeffs.len() / 16;
     for c in 0..chunks {
         let offset = c * 16;
-        let src = _mm256_loadu_si256::<[i16; 16]>(
-            coeffs[offset..offset + 16].try_into().unwrap()
-        );
+        let src = _mm256_loadu_si256::<[i16; 16]>(coeffs[offset..offset + 16].try_into().unwrap());
 
         // Widen low/high 8 i16 to i32
         let lo_128 = _mm256_castsi256_si128(src);

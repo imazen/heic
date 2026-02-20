@@ -1,6 +1,5 @@
 # heic-decoder
 
-[![Build Status](https://github.com/imazen/heic-decoder-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/imazen/heic-decoder-rs/actions)
 [![Crates.io](https://img.shields.io/crates/v/heic-decoder.svg)](https://crates.io/crates/heic-decoder)
 [![Documentation](https://docs.rs/heic-decoder/badge.svg)](https://docs.rs/heic-decoder)
 [![License](https://img.shields.io/crates/l/heic-decoder.svg)](LICENSE)
@@ -14,9 +13,7 @@ Pure Rust HEIC/HEIF image decoder. No C/C++ dependencies, no unsafe code.
 
 ## Status
 
-**Work in Progress** — decodes most HEIC files, but not yet production-ready.
-
-104 of 162 test files decode successfully. SSIM scores range from 50-77 dB against libheif reference output.
+Decodes most HEIC files from iPhones and other cameras. 91% pixel-exact vs libheif, 55 dB PSNR across remaining differences.
 
 ### What works
 - HEIF container parsing (ISOBMFF boxes, grid images, overlays)
@@ -28,7 +25,8 @@ Pure Rust HEIC/HEIF image decoder. No C/C++ dependencies, no unsafe code.
 - EXIF/XMP metadata extraction (zero-copy)
 - Thumbnail decode, image rotation/mirror transforms
 - HEVC scaling lists (custom dequantization matrices)
-- AVX2 SIMD for color conversion and IDCT 8x8/16x16
+- AVX2/SSE4.1 SIMD for color conversion, IDCT 8/16/32, IDST 4, residual add, dequantize
+- Optional tile-parallel decoding via rayon (`parallel` feature)
 
 ### Known limitations
 - I-slices only (sufficient for HEIC still images, no inter prediction)

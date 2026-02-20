@@ -281,16 +281,14 @@ fn filter_edge_luma(
                 plane[base_q + k_off] = (q0 - delta).clamp(0, max_val) as u16;
 
                 if d_ep {
-                    let delta_p = ((((p2 + p0 + 1) >> 1) - p1 + delta) >> 1)
-                        .clamp(-(tc >> 1), tc >> 1);
-                    plane[base_p + k_off - step_across] =
-                        (p1 + delta_p).clamp(0, max_val) as u16;
+                    let delta_p =
+                        ((((p2 + p0 + 1) >> 1) - p1 + delta) >> 1).clamp(-(tc >> 1), tc >> 1);
+                    plane[base_p + k_off - step_across] = (p1 + delta_p).clamp(0, max_val) as u16;
                 }
                 if d_eq {
-                    let delta_q = ((((q2 + q0 + 1) >> 1) - q1 - delta) >> 1)
-                        .clamp(-(tc >> 1), tc >> 1);
-                    plane[base_q + k_off + step_across] =
-                        (q1 + delta_q).clamp(0, max_val) as u16;
+                    let delta_q =
+                        ((((q2 + q0 + 1) >> 1) - q1 - delta) >> 1).clamp(-(tc >> 1), tc >> 1);
+                    plane[base_q + k_off + step_across] = (q1 + delta_q).clamp(0, max_val) as u16;
                 }
             }
         }

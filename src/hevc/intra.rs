@@ -84,18 +84,44 @@ pub fn predict_intra(
     match mode {
         IntraPredMode::Planar => {
             predict_planar(
-                plane, stride, x, y, size, log2_size, max_val, &border, border_center,
+                plane,
+                stride,
+                x,
+                y,
+                size,
+                log2_size,
+                max_val,
+                &border,
+                border_center,
             );
         }
         IntraPredMode::Dc => {
             predict_dc(
-                plane, stride, x, y, size, log2_size, c_idx, max_val, &border, border_center,
+                plane,
+                stride,
+                x,
+                y,
+                size,
+                log2_size,
+                c_idx,
+                max_val,
+                &border,
+                border_center,
             );
         }
         _ => {
             let mode_val = mode.as_u8();
             predict_angular(
-                plane, stride, x, y, size, c_idx, mode_val, max_val, &border, border_center,
+                plane,
+                stride,
+                x,
+                y,
+                size,
+                c_idx,
+                mode_val,
+                max_val,
+                &border,
+                border_center,
             );
         }
     }
@@ -196,11 +222,7 @@ fn write_sample(plane: &mut [u16], stride: usize, x: u32, y: u32, value: u16) {
 #[inline(always)]
 fn read_plane(plane: &[u16], stride: usize, x: u32, y: u32) -> u16 {
     let idx = y as usize * stride + x as usize;
-    if idx < plane.len() {
-        plane[idx]
-    } else {
-        0
-    }
+    if idx < plane.len() { plane[idx] } else { 0 }
 }
 
 /// Fill border samples from neighboring pixels
@@ -653,7 +675,13 @@ fn predict_angular(
             for py in 0..n {
                 let pred =
                     border[center + 1] + ((border[center - 1 - py as usize] - border[center]) >> 1);
-                write_sample(plane, stride, x, y + py as u32, pred.clamp(0, max_val) as u16);
+                write_sample(
+                    plane,
+                    stride,
+                    x,
+                    y + py as u32,
+                    pred.clamp(0, max_val) as u16,
+                );
             }
         }
     } else {
@@ -728,7 +756,13 @@ fn predict_angular(
             for px in 0..n {
                 let pred =
                     border[center - 1] + ((border[center + 1 + px as usize] - border[center]) >> 1);
-                write_sample(plane, stride, x + px as u32, y, pred.clamp(0, max_val) as u16);
+                write_sample(
+                    plane,
+                    stride,
+                    x + px as u32,
+                    y,
+                    pred.clamp(0, max_val) as u16,
+                );
             }
         }
     }

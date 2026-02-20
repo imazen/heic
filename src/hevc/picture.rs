@@ -226,9 +226,9 @@ impl DecodedFrame {
         if self.full_range {
             // Full-range: ×256 fixed-point, matches libheif Op_YCbCr420_to_RGB24.
             let (cr_r, cb_g, cr_g, cb_b) = match self.matrix_coeffs {
-                1 => (403, -48, -120, 475),  // BT.709
-                9 => (377, -42, -146, 482),   // BT.2020
-                _ => (359, -88, -183, 454),   // BT.601 (default/unspecified)
+                1 => (403, -48, -120, 475), // BT.709
+                9 => (377, -42, -146, 482), // BT.2020
+                _ => (359, -88, -183, 454), // BT.601 (default/unspecified)
             };
             let r = y_val + ((cr_r * cr + 128) >> 8);
             let g = y_val + ((cb_g * cb + cr_g * cr + 128) >> 8);
@@ -243,9 +243,9 @@ impl DecodedFrame {
             // Y_scale = 256/219 ≈ 1.1689, C_scale = 256/224 ≈ 1.1429
             // Combined coefficients = round(matrix_coeff * C_scale * 8192)
             let (cr_r, cb_g, cr_g, cb_b) = match self.matrix_coeffs {
-                1 => (14744, -1754, -4383, 17373),  // BT.709
-                9 => (13806, -1541, -5349, 17615),   // BT.2020
-                _ => (13126, -3222, -6686, 16591),   // BT.601 (default/unspecified)
+                1 => (14744, -1754, -4383, 17373), // BT.709
+                9 => (13806, -1541, -5349, 17615), // BT.2020
+                _ => (13126, -3222, -6686, 16591), // BT.601 (default/unspecified)
             };
             // Y_coeff = round(1.1689 * 8192) = 9576
             let yv = (y_val - 16) * 9576;

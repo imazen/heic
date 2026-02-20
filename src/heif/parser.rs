@@ -260,9 +260,7 @@ impl<'a> HeifContainer<'a> {
     pub fn find_thumbnails(&self, target_item_id: u32) -> Vec<u32> {
         self.item_references
             .iter()
-            .filter(|r| {
-                r.reference_type == FourCC::THMB && r.to_item_ids.contains(&target_item_id)
-            })
+            .filter(|r| r.reference_type == FourCC::THMB && r.to_item_ids.contains(&target_item_id))
             .map(|r| r.from_item_id)
             .collect()
     }
