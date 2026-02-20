@@ -8,7 +8,7 @@ use archmage::prelude::*;
 
 #[cfg(target_arch = "x86_64")]
 use safe_unaligned_simd::x86_64::{
-    _mm256_loadu_si256, _mm256_storeu_si256, _mm_loadu_si128,
+    _mm256_loadu_si256, _mm256_storeu_si256, _mm_loadu_si128, _mm_storeu_si128,
 };
 
 /// Pack two i16 coefficients into one i32 for `_mm256_set1_epi32` + `_mm256_madd_epi16`.
@@ -951,6 +951,203 @@ pub(crate) fn idct32_scalar(
     bit_depth: u8,
 ) {
     super::transform::idct32_inner(coeffs, output, bit_depth);
+}
+
+// =============================================================================
+// SSE4.1 IDST 4x4: DST-VII inverse for intra 4x4 luma
+// =============================================================================
+
+/// SSE4.1 inverse DST 4x4: processes all 4 columns in parallel using 128-bit SIMD.
+///
+/// Two-pass approach:
+/// - Pass 1 (vertical): load 4 rows as i32, multiply by DST4 coefficients, shift/clamp
+/// - Transpose 4x4 i16 matrix (4 unpack instructions)
+/// - Pass 2 (horizontal): same multiply pattern, pack and store
+///
+/// Key advantage over scalar: `_mm_packs_epi32` provides the spec-required i16 saturation
+/// (H.265 Eq. 8-314) without any conditional branches. The scalar version generates 32
+/// conditional jumps for 16 clamp operations.
+#[cfg(target_arch = "x86_64")]
+#[arcane]
+pub(crate) fn idst4_v3(
+    _token: X64V3Token,
+    coeffs: &[i16; 16],
+    output: &mut [i16; 16],
+    bit_depth: u8,
+) {
+    // Load all 16 i16 coefficients as 4 rows of 4 i32 values
+    let load01 = _mm_loadu_si128::<[i16; 8]>(coeffs[0..8].try_into().unwrap());
+    let load23 = _mm_loadu_si128::<[i16; 8]>(coeffs[8..16].try_into().unwrap());
+    let row0 = _mm_cvtepi16_epi32(load01);
+    let row1 = _mm_cvtepi16_epi32(_mm_unpackhi_epi64(load01, load01));
+    let row2 = _mm_cvtepi16_epi32(load23);
+    let row3 = _mm_cvtepi16_epi32(_mm_unpackhi_epi64(load23, load23));
+
+    // === Pass 1 (vertical): DST4^T × COEFFS, 4 columns in parallel ===
+    let add1 = _mm_set1_epi32(64); // 1 << (7 - 1)
+
+    // DST4 matrix applied column-wise:
+    //   j=0: 29*r0 + 74*r1 + 84*r2 + 55*r3
+    //   j=1: 55*r0 + 74*r1 - 29*r2 - 84*r3
+    //   j=2: 74*(r0 - r2 + r3)  [coeff for r1 is 0]
+    //   j=3: 84*r0 - 74*r1 + 55*r2 - 29*r3
+    let t0 = _mm_srai_epi32::<7>(_mm_add_epi32(
+        _mm_add_epi32(
+            _mm_add_epi32(
+                _mm_mullo_epi32(row0, _mm_set1_epi32(29)),
+                _mm_mullo_epi32(row1, _mm_set1_epi32(74)),
+            ),
+            _mm_add_epi32(
+                _mm_mullo_epi32(row2, _mm_set1_epi32(84)),
+                _mm_mullo_epi32(row3, _mm_set1_epi32(55)),
+            ),
+        ),
+        add1,
+    ));
+
+    let t1 = _mm_srai_epi32::<7>(_mm_add_epi32(
+        _mm_add_epi32(
+            _mm_add_epi32(
+                _mm_mullo_epi32(row0, _mm_set1_epi32(55)),
+                _mm_mullo_epi32(row1, _mm_set1_epi32(74)),
+            ),
+            _mm_add_epi32(
+                _mm_mullo_epi32(row2, _mm_set1_epi32(-29)),
+                _mm_mullo_epi32(row3, _mm_set1_epi32(-84)),
+            ),
+        ),
+        add1,
+    ));
+
+    // j=2: coefficient for r1 is 0, factor out 74
+    let t2 = _mm_srai_epi32::<7>(_mm_add_epi32(
+        _mm_mullo_epi32(
+            _mm_add_epi32(_mm_sub_epi32(row0, row2), row3),
+            _mm_set1_epi32(74),
+        ),
+        add1,
+    ));
+
+    let t3 = _mm_srai_epi32::<7>(_mm_add_epi32(
+        _mm_add_epi32(
+            _mm_add_epi32(
+                _mm_mullo_epi32(row0, _mm_set1_epi32(84)),
+                _mm_mullo_epi32(row1, _mm_set1_epi32(-74)),
+            ),
+            _mm_add_epi32(
+                _mm_mullo_epi32(row2, _mm_set1_epi32(55)),
+                _mm_mullo_epi32(row3, _mm_set1_epi32(-29)),
+            ),
+        ),
+        add1,
+    ));
+
+    // Clamp to i16 range (H.265 Eq. 8-314): packs_epi32 saturates i32 → i16
+    let packed01 = _mm_packs_epi32(t0, t1);
+    let packed23 = _mm_packs_epi32(t2, t3);
+
+    // Transpose 4x4 i16 matrix for pass 2
+    // Input: packed01 = [r0c0..r0c3, r1c0..r1c3], packed23 = [r2c0..r2c3, r3c0..r3c3]
+    // Output: transposed so columns become rows
+    let a = _mm_unpacklo_epi16(packed01, packed23);
+    let b = _mm_unpackhi_epi16(packed01, packed23);
+    let tp_lo = _mm_unpacklo_epi16(a, b); // [col0_as_row, col1_as_row]
+    let tp_hi = _mm_unpackhi_epi16(a, b); // [col2_as_row, col3_as_row]
+
+    // === Pass 2 (horizontal): DST4^T × TMP^T, then transpose output ===
+    let r0 = _mm_cvtepi16_epi32(tp_lo);
+    let r1 = _mm_cvtepi16_epi32(_mm_unpackhi_epi64(tp_lo, tp_lo));
+    let r2 = _mm_cvtepi16_epi32(tp_hi);
+    let r3 = _mm_cvtepi16_epi32(_mm_unpackhi_epi64(tp_hi, tp_hi));
+
+    let shift2 = 20 - bit_depth as i32;
+    let add2 = _mm_set1_epi32(1i32 << (shift2 - 1));
+    let shift2_v = _mm_cvtsi32_si128(shift2);
+
+    let o0 = _mm_sra_epi32(
+        _mm_add_epi32(
+            _mm_add_epi32(
+                _mm_add_epi32(
+                    _mm_mullo_epi32(r0, _mm_set1_epi32(29)),
+                    _mm_mullo_epi32(r1, _mm_set1_epi32(74)),
+                ),
+                _mm_add_epi32(
+                    _mm_mullo_epi32(r2, _mm_set1_epi32(84)),
+                    _mm_mullo_epi32(r3, _mm_set1_epi32(55)),
+                ),
+            ),
+            add2,
+        ),
+        shift2_v,
+    );
+
+    let o1 = _mm_sra_epi32(
+        _mm_add_epi32(
+            _mm_add_epi32(
+                _mm_add_epi32(
+                    _mm_mullo_epi32(r0, _mm_set1_epi32(55)),
+                    _mm_mullo_epi32(r1, _mm_set1_epi32(74)),
+                ),
+                _mm_add_epi32(
+                    _mm_mullo_epi32(r2, _mm_set1_epi32(-29)),
+                    _mm_mullo_epi32(r3, _mm_set1_epi32(-84)),
+                ),
+            ),
+            add2,
+        ),
+        shift2_v,
+    );
+
+    let o2 = _mm_sra_epi32(
+        _mm_add_epi32(
+            _mm_mullo_epi32(
+                _mm_add_epi32(_mm_sub_epi32(r0, r2), r3),
+                _mm_set1_epi32(74),
+            ),
+            add2,
+        ),
+        shift2_v,
+    );
+
+    let o3 = _mm_sra_epi32(
+        _mm_add_epi32(
+            _mm_add_epi32(
+                _mm_add_epi32(
+                    _mm_mullo_epi32(r0, _mm_set1_epi32(84)),
+                    _mm_mullo_epi32(r1, _mm_set1_epi32(-74)),
+                ),
+                _mm_add_epi32(
+                    _mm_mullo_epi32(r2, _mm_set1_epi32(55)),
+                    _mm_mullo_epi32(r3, _mm_set1_epi32(-29)),
+                ),
+            ),
+            add2,
+        ),
+        shift2_v,
+    );
+
+    // Pack to i16 and transpose back to row-major
+    let out01 = _mm_packs_epi32(o0, o1);
+    let out23 = _mm_packs_epi32(o2, o3);
+
+    let a = _mm_unpacklo_epi16(out01, out23);
+    let b = _mm_unpackhi_epi16(out01, out23);
+    let final_lo = _mm_unpacklo_epi16(a, b);
+    let final_hi = _mm_unpackhi_epi16(a, b);
+
+    _mm_storeu_si128::<[i16; 8]>((&mut output[0..8]).try_into().unwrap(), final_lo);
+    _mm_storeu_si128::<[i16; 8]>((&mut output[8..16]).try_into().unwrap(), final_hi);
+}
+
+/// Scalar fallback for IDST 4x4
+#[cold]
+pub(crate) fn idst4_scalar(
+    _token: ScalarToken,
+    coeffs: &[i16; 16],
+    output: &mut [i16; 16],
+    bit_depth: u8,
+) {
+    super::transform::idst4_inner(coeffs, output, bit_depth);
 }
 
 // =============================================================================

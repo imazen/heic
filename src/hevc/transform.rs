@@ -9,8 +9,8 @@
 // Transform and inverse quantization for HEVC
 use archmage::incant;
 #[cfg(target_arch = "x86_64")]
-use super::transform_simd::{idct8_v3, idct16_v3, idct32_v3, dequantize_v3};
-use super::transform_simd::{idct8_scalar, idct16_scalar, idct32_scalar, dequantize_scalar};
+use super::transform_simd::{idst4_v3, idct8_v3, idct16_v3, idct32_v3, dequantize_v3};
+use super::transform_simd::{idst4_scalar, idct8_scalar, idct16_scalar, idct32_scalar, dequantize_scalar};
 
 /// Maximum number of coefficients (32x32 transform)
 pub const MAX_COEFF: usize = 32 * 32;
@@ -33,6 +33,11 @@ static DCT4_MATRIX: [[i16; 4]; 4] = [
 
 /// Inverse 4x4 DST (for intra 4x4 luma blocks)
 pub fn idst4(coeffs: &[i16; 16], output: &mut [i16; 16], bit_depth: u8) {
+    incant!(idst4(coeffs, output, bit_depth), [v3]);
+}
+
+/// Scalar implementation of inverse 4x4 DST
+pub(crate) fn idst4_inner(coeffs: &[i16; 16], output: &mut [i16; 16], bit_depth: u8) {
     let shift1 = 7;
     let shift2 = 20 - bit_depth;
     let add1 = 1 << (shift1 - 1);
