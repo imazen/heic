@@ -8,27 +8,32 @@ use super::color_convert;
 /// Sentinel value for uninitialized pixels.
 /// Used during decoding to distinguish decoded samples from uninitialized ones
 /// for reference sample availability (H.265 8.4.4.2.2).
-pub const UNINIT_SAMPLE: u16 = u16::MAX;
+pub(crate) const UNINIT_SAMPLE: u16 = u16::MAX;
 
 /// Deblocking edge flags per 4x4 block
-pub const DEBLOCK_FLAG_VERT: u8 = 1;
+pub(crate) const DEBLOCK_FLAG_VERT: u8 = 1;
 /// Horizontal edge flag
-pub const DEBLOCK_FLAG_HORIZ: u8 = 2;
+pub(crate) const DEBLOCK_FLAG_HORIZ: u8 = 2;
 
-/// Decoded video frame
+/// Decoded video frame with YCbCr plane data.
+///
+/// Returned by [`DecoderConfig::decode_to_frame`](crate::DecoderConfig::decode_to_frame)
+/// and [`DecodeRequest::decode_yuv`](crate::DecodeRequest::decode_yuv) for direct
+/// YCbCr access before color conversion.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct DecodedFrame {
     /// Width in pixels (full frame, before cropping)
     pub width: u32,
     /// Height in pixels (full frame, before cropping)
     pub height: u32,
-    /// Luma (Y) plane
+    /// Luma (Y) plane — `u16` samples, `bit_depth` bits significant
     pub y_plane: Vec<u16>,
-    /// Cb chroma plane (half resolution for 4:2:0)
+    /// Cb chroma plane (subsampled per `chroma_format`)
     pub cb_plane: Vec<u16>,
-    /// Cr chroma plane (half resolution for 4:2:0)
+    /// Cr chroma plane (subsampled per `chroma_format`)
     pub cr_plane: Vec<u16>,
-    /// Bit depth
+    /// Bit depth (8 or 10)
     pub bit_depth: u8,
     /// Chroma format (1=4:2:0, 2=4:2:2, 3=4:4:4)
     pub chroma_format: u8,
@@ -40,64 +45,27 @@ pub struct DecodedFrame {
     pub crop_top: u32,
     /// Conformance window bottom offset (in luma samples)
     pub crop_bottom: u32,
-    /// Deblocking edge flags at 4x4 block granularity
-    /// Bit 0 = vertical edge, Bit 1 = horizontal edge
-    pub deblock_flags: Vec<u8>,
-    /// Stride for deblock_flags (width / 4)
-    pub deblock_stride: u32,
-    /// QP map at 4x4 block granularity (for deblocking)
-    pub qp_map: Vec<i8>,
     /// Alpha plane (optional, from auxiliary alpha image)
     pub alpha_plane: Option<Vec<u16>>,
     /// Video full range flag (from SPS VUI). true = full \[0,255\], false = limited \[16,235\]
     pub full_range: bool,
     /// Matrix coefficients (from SPS VUI). 1=BT.709, 5/6=BT.601, 9=BT.2020, 2=unspecified
     pub matrix_coeffs: u8,
+    // -- Internal fields (not part of public API) --
+    /// Deblocking edge flags at 4x4 block granularity
+    pub(crate) deblock_flags: Vec<u8>,
+    /// Stride for deblock_flags (width / 4)
+    pub(crate) deblock_stride: u32,
+    /// QP map at 4x4 block granularity (for deblocking)
+    pub(crate) qp_map: Vec<i8>,
 }
 
 impl DecodedFrame {
-    /// Create a new frame buffer
-    ///
-    /// # Panics
-    /// Panics if width * height overflows u32.
-    pub fn new(width: u32, height: u32) -> Self {
-        let luma_size = width
-            .checked_mul(height)
-            .expect("frame dimensions overflow") as usize;
-        // Assume 4:2:0 chroma subsampling
-        let chroma_width = width.div_ceil(2);
-        let chroma_height = height.div_ceil(2);
-        let chroma_size = (chroma_width * chroma_height) as usize;
-        let deblock_stride = width.div_ceil(4);
-        let deblock_height = height.div_ceil(4);
-        let deblock_size = (deblock_stride * deblock_height) as usize;
-
-        Self {
-            width,
-            height,
-            y_plane: vec![UNINIT_SAMPLE; luma_size],
-            cb_plane: vec![UNINIT_SAMPLE; chroma_size],
-            cr_plane: vec![UNINIT_SAMPLE; chroma_size],
-            bit_depth: 8,
-            chroma_format: 1, // 4:2:0
-            crop_left: 0,
-            crop_right: 0,
-            crop_top: 0,
-            crop_bottom: 0,
-            deblock_flags: vec![0; deblock_size],
-            deblock_stride,
-            qp_map: vec![0; deblock_size],
-            alpha_plane: None,
-            full_range: false,
-            matrix_coeffs: 2,
-        }
-    }
-
     /// Create a frame with specific parameters
     ///
     /// # Panics
     /// Panics if width * height overflows u32.
-    pub fn with_params(width: u32, height: u32, bit_depth: u8, chroma_format: u8) -> Self {
+    pub(crate) fn with_params(width: u32, height: u32, bit_depth: u8, chroma_format: u8) -> Self {
         let luma_size = width
             .checked_mul(height)
             .expect("frame dimensions overflow") as usize;
@@ -138,7 +106,7 @@ impl DecodedFrame {
     }
 
     /// Mark a vertical TU/CU boundary at luma position (x, y) with given size
-    pub fn mark_tu_boundary(&mut self, x: u32, y: u32, size: u32) {
+    pub(crate) fn mark_tu_boundary(&mut self, x: u32, y: u32, size: u32) {
         let bx = x / 4;
         let by = y / 4;
         let bs = size / 4;
@@ -165,7 +133,7 @@ impl DecodedFrame {
     }
 
     /// Store QP for a block region at 4x4 granularity
-    pub fn store_block_qp(&mut self, x: u32, y: u32, size: u32, qp: i8) {
+    pub(crate) fn store_block_qp(&mut self, x: u32, y: u32, size: u32, qp: i8) {
         let bx = x / 4;
         let by = y / 4;
         let bs = size / 4;
@@ -180,7 +148,7 @@ impl DecodedFrame {
     }
 
     /// Set conformance window cropping
-    pub fn set_crop(&mut self, left: u32, right: u32, top: u32, bottom: u32) {
+    pub(crate) fn set_crop(&mut self, left: u32, right: u32, top: u32, bottom: u32) {
         self.crop_left = left;
         self.crop_right = right;
         self.crop_top = top;
@@ -656,35 +624,6 @@ impl DecodedFrame {
         }
     }
 
-    /// Set a luma sample
-    #[inline]
-    pub fn set_y(&mut self, x: u32, y: u32, value: u16) {
-        let idx = (y * self.width + x) as usize;
-        if idx < self.y_plane.len() {
-            self.y_plane[idx] = value;
-        }
-    }
-
-    /// Set a Cb chroma sample
-    #[inline]
-    pub fn set_cb(&mut self, x: u32, y: u32, value: u16) {
-        let stride = self.c_stride();
-        let idx = (y as usize) * stride + (x as usize);
-        if idx < self.cb_plane.len() {
-            self.cb_plane[idx] = value;
-        }
-    }
-
-    /// Set a Cr chroma sample
-    #[inline]
-    pub fn set_cr(&mut self, x: u32, y: u32, value: u16) {
-        let stride = self.c_stride();
-        let idx = (y as usize) * stride + (x as usize);
-        if idx < self.cr_plane.len() {
-            self.cr_plane[idx] = value;
-        }
-    }
-
     /// Get a luma sample
     #[inline]
     pub fn get_y(&self, x: u32, y: u32) -> u16 {
@@ -725,7 +664,7 @@ impl DecodedFrame {
     /// Returns `(plane, stride)` where `plane` is the raw pixel data
     /// and `stride` is the number of pixels per row.
     #[inline]
-    pub fn plane_mut(&mut self, c_idx: u8) -> (&mut [u16], usize) {
+    pub(crate) fn plane_mut(&mut self, c_idx: u8) -> (&mut [u16], usize) {
         match c_idx {
             0 => (&mut self.y_plane, self.width as usize),
             1 => {

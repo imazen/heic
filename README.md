@@ -46,12 +46,11 @@ println!("{}x{} image, {} bytes", output.width, output.height, output.data.len()
 ```rust
 use heic_decoder::{DecoderConfig, PixelLayout, Limits};
 
-let limits = Limits {
-    max_width: Some(8192),
-    max_height: Some(8192),
-    max_pixels: Some(64_000_000),
-    max_memory_bytes: Some(512 * 1024 * 1024),
-};
+let mut limits = Limits::default();
+limits.max_width = Some(8192);
+limits.max_height = Some(8192);
+limits.max_pixels = Some(64_000_000);
+limits.max_memory_bytes = Some(512 * 1024 * 1024);
 
 let output = DecoderConfig::new()
     .decode_request(&data)
@@ -74,7 +73,7 @@ println!("{}x{}, alpha={}, exif={}", info.width, info.height, info.has_alpha, in
 ```rust
 let info = ImageInfo::from_bytes(&data)?;
 let mut buf = vec![0u8; info.output_buffer_size(PixelLayout::Rgba8).unwrap()];
-DecoderConfig::new()
+let (w, h) = DecoderConfig::new()
     .decode_request(&data)
     .with_output_layout(PixelLayout::Rgba8)
     .decode_into(&mut buf)?;

@@ -53,10 +53,10 @@ let output = DecoderConfig::new()
 // Zero-copy into pre-allocated buffer
 let info = ImageInfo::from_bytes(&data)?;
 let mut buf = vec![0u8; info.output_buffer_size(PixelLayout::Rgba8).unwrap()];
-let info = DecoderConfig::new()
+let (w, h) = DecoderConfig::new()
     .decode_request(&data)
     .with_output_layout(PixelLayout::Rgba8)
-    .decode_into(&mut buf)?;
+    .decode_into(&mut buf)?; // returns (width, height)
 
 // Probe without decoding
 let info = ImageInfo::from_bytes(&data)?;

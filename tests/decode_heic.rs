@@ -1,51 +1,12 @@
 //! Integration tests for HEIC decoding
 
-use heic_decoder::{DecoderConfig, heif};
+use heic_decoder::DecoderConfig;
 
 const EXAMPLE_HEIC: &str = "/home/lilith/work/heic/libheif/examples/example.heic";
 
 #[test]
 fn test_get_info() {
     let data = std::fs::read(EXAMPLE_HEIC).expect("Failed to read test file");
-
-    // Debug: print container info
-    let container = heif::parse(&data).expect("Failed to parse container");
-    println!("Primary item ID: {}", container.primary_item_id);
-    println!("Item infos: {} items", container.item_infos.len());
-    for info in &container.item_infos {
-        println!(
-            "  Item {}: type={:?}, name={:?}",
-            info.item_id, info.item_type, info.item_name
-        );
-    }
-    println!(
-        "Property associations: {} entries",
-        container.property_associations.len()
-    );
-    for assoc in &container.property_associations {
-        println!("  Item {}: {:?}", assoc.item_id, assoc.properties);
-    }
-    println!("Image extents: {} entries", container.image_extents.len());
-    for (i, ext) in container.image_extents.iter().enumerate() {
-        println!("  Property {}: {}x{}", i, ext.width, ext.height);
-    }
-    println!("HEVC configs: {} entries", container.hevc_configs.len());
-
-    if let Some(item) = container.primary_item() {
-        println!("Primary item: {:?}", item.item_type);
-        println!("  ID: {}", item.id);
-        println!("  Name: {:?}", item.name);
-        println!("  Dimensions from ispe: {:?}", item.dimensions);
-        if let Some(ref config) = item.hevc_config {
-            println!(
-                "  HEVC config: {} NAL units, length_size={}",
-                config.nal_units.len(),
-                config.length_size_minus_one + 1
-            );
-        } else {
-            println!("  No HEVC config");
-        }
-    }
 
     let info = heic_decoder::ImageInfo::from_bytes(&data).expect("Failed to get info");
     println!("Decoded info: {}x{}", info.width, info.height);

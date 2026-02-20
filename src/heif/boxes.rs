@@ -1,5 +1,7 @@
 //! ISOBMFF box definitions and parsing
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 

@@ -6,12 +6,11 @@ use heic_decoder::{DecoderConfig, Limits, PixelLayout};
 /// Limits fuzzer: verify Limits enforcement under adversarial input.
 /// Decode with strict resource limits — should never exceed them.
 fuzz_target!(|data: &[u8]| {
-    let limits = Limits {
-        max_width: Some(4096),
-        max_height: Some(4096),
-        max_pixels: Some(4_000_000),
-        max_memory_bytes: Some(64 * 1024 * 1024), // 64 MB
-    };
+    let mut limits = Limits::default();
+    limits.max_width = Some(4096);
+    limits.max_height = Some(4096);
+    limits.max_pixels = Some(4_000_000);
+    limits.max_memory_bytes = Some(64 * 1024 * 1024); // 64 MB
 
     let result = DecoderConfig::new()
         .decode_request(data)

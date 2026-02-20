@@ -1,5 +1,7 @@
 //! HEIF container parser
 
+#![allow(dead_code)]
+
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::str;

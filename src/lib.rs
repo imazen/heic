@@ -16,15 +16,12 @@
 //! # Full Control
 //!
 //! ```ignore
-//! use heic_decoder::{DecoderConfig, DecodeRequest, PixelLayout, Limits};
-//! use enough::Unstoppable;
+//! use heic_decoder::{DecoderConfig, PixelLayout, Limits};
 //!
-//! let limits = Limits {
-//!     max_width: Some(8192),
-//!     max_height: Some(8192),
-//!     max_pixels: Some(64_000_000),
-//!     ..Limits::default()
-//! };
+//! let mut limits = Limits::default();
+//! limits.max_width = Some(8192);
+//! limits.max_height = Some(8192);
+//! limits.max_pixels = Some(64_000_000);
 //!
 //! let output = DecoderConfig::new()
 //!     .decode_request(&data)
@@ -42,10 +39,8 @@ extern crate alloc;
 use rayon::prelude::*;
 
 mod error;
-#[doc(hidden)]
-pub mod heif;
-#[doc(hidden)]
-pub mod hevc;
+pub(crate) mod heif;
+pub(crate) mod hevc;
 
 pub use error::{HeicError, HevcError, ProbeError, Result};
 pub use hevc::DecodedFrame;
@@ -104,14 +99,14 @@ impl PixelLayout {
 /// ```
 /// use heic_decoder::Limits;
 ///
-/// let limits = Limits {
-///     max_width: Some(8192),
-///     max_height: Some(8192),
-///     max_pixels: Some(64_000_000),
-///     max_memory_bytes: Some(512 * 1024 * 1024),
-/// };
+/// let mut limits = Limits::default();
+/// limits.max_width = Some(8192);
+/// limits.max_height = Some(8192);
+/// limits.max_pixels = Some(64_000_000);
+/// limits.max_memory_bytes = Some(512 * 1024 * 1024);
 /// ```
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct Limits {
     /// Maximum image width in pixels
     pub max_width: Option<u64>,
@@ -157,6 +152,7 @@ impl Limits {
 
 /// Decoded image output
 #[derive(Debug, Clone)]
+#[must_use]
 pub struct DecodeOutput {
     /// Raw pixel data in the requested layout
     pub data: Vec<u8>,
@@ -170,6 +166,7 @@ pub struct DecodeOutput {
 
 /// Image metadata without full decode
 #[derive(Debug, Clone, Copy)]
+#[must_use]
 pub struct ImageInfo {
     /// Image width in pixels
     pub width: u32,
@@ -337,6 +334,7 @@ impl ImageInfo {
 /// ```
 /// Where `headroom` comes from EXIF maker notes (tags 0x0021 and 0x0030).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct HdrGainMap {
     /// Gain map pixel data normalized to 0.0-1.0
     pub data: Vec<f32>,
@@ -400,7 +398,6 @@ impl DecoderConfig {
     ///
     /// The request defaults to `PixelLayout::Rgba8`. Use builder methods
     /// to set output layout, limits, and cancellation.
-    #[must_use]
     pub fn decode_request<'a>(&'a self, data: &'a [u8]) -> DecodeRequest<'a> {
         DecodeRequest {
             _config: self,
@@ -521,6 +518,7 @@ impl DecoderConfig {
 /// Created by [`DecoderConfig::decode_request`]. Use builder methods to
 /// configure, then call [`decode`](Self::decode) or
 /// [`decode_into`](Self::decode_into).
+#[must_use]
 pub struct DecodeRequest<'a> {
     _config: &'a DecoderConfig,
     data: &'a [u8],
@@ -533,7 +531,6 @@ impl<'a> DecodeRequest<'a> {
     /// Set the desired output pixel layout.
     ///
     /// Default is `PixelLayout::Rgba8`.
-    #[must_use]
     pub fn with_output_layout(mut self, layout: PixelLayout) -> Self {
         self.layout = layout;
         self
@@ -543,7 +540,6 @@ impl<'a> DecodeRequest<'a> {
     ///
     /// Limits are checked before allocations. Exceeding any limit
     /// returns [`HeicError::LimitExceeded`].
-    #[must_use]
     pub fn with_limits(mut self, limits: &'a Limits) -> Self {
         self.limits = Some(limits);
         self
@@ -553,7 +549,6 @@ impl<'a> DecodeRequest<'a> {
     ///
     /// The decoder will periodically check this token and return
     /// [`HeicError::Cancelled`] if the operation should stop.
-    #[must_use]
     pub fn with_stop(mut self, stop: &'a dyn Stop) -> Self {
         self.stop = Some(stop);
         self
@@ -600,13 +595,13 @@ impl<'a> DecodeRequest<'a> {
     /// The buffer must be at least `width * height * layout.bytes_per_pixel()` bytes.
     /// Use [`ImageInfo::from_bytes`] to determine the required size beforehand.
     ///
-    /// Returns the image info (width, height, etc.) on success.
+    /// Returns `(width, height)` on success.
     ///
     /// # Errors
     ///
     /// Returns [`HeicError::BufferTooSmall`] if the output buffer is too small,
     /// or other errors if decoding fails.
-    pub fn decode_into(self, output: &mut [u8]) -> Result<ImageInfo> {
+    pub fn decode_into(self, output: &mut [u8]) -> Result<(u32, u32)> {
         let stop: &dyn Stop = self.stop.unwrap_or(&Unstoppable);
         let frame = decode_to_frame_inner(self.data, self.limits, stop)?;
 
@@ -642,16 +637,7 @@ impl<'a> DecodeRequest<'a> {
             }
         }
 
-        Ok(ImageInfo {
-            width,
-            height,
-            has_alpha: frame.alpha_plane.is_some(),
-            bit_depth: frame.bit_depth,
-            chroma_format: frame.chroma_format,
-            has_exif: false, // Use ImageInfo::from_bytes() for metadata probing
-            has_xmp: false,
-            has_thumbnail: false,
-        })
+        Ok((width, height))
     }
 
     /// Decode to raw YCbCr frame (advanced use).
