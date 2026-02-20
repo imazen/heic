@@ -1018,13 +1018,9 @@ pub(crate) fn decode_gain_map(data: &[u8]) -> Result<HdrGainMap> {
     let gainmap_item = container
         .get_item(gainmap_id)
         .ok_or(HeicError::InvalidData("Missing gain map item"))?;
-    let gainmap_data = container.get_item_data(gainmap_id)?;
-    let gainmap_config = gainmap_item
-        .hevc_config
-        .as_ref()
-        .ok_or(HeicError::InvalidData("Missing gain map hvcC config"))?;
 
-    let frame = crate::hevc::decode_with_config(gainmap_config, &gainmap_data)?;
+    // Use decode_item to handle grids, iden, and plain HEVC gain maps
+    let frame = decode_item(&container, &gainmap_item, 0, &Limits::default(), &Unstoppable)?;
 
     let width = frame.cropped_width();
     let height = frame.cropped_height();
