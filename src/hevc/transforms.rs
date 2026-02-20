@@ -6,7 +6,10 @@ use alloc::vec::Vec;
 use super::DecodedFrame;
 
 impl DecodedFrame {
-    /// Rotate the frame 90° clockwise, returning a new frame
+    /// Rotate the frame 90° clockwise, returning a new frame.
+    ///
+    /// Output dimensions are swapped: `(width, height)` becomes `(height, width)`.
+    /// Crop offsets are transformed accordingly.
     pub fn rotate_90_cw(&self) -> Self {
         let ow = self.width;
         let oh = self.height;
@@ -76,7 +79,9 @@ impl DecodedFrame {
         }
     }
 
-    /// Rotate the frame 180°, returning a new frame
+    /// Rotate the frame 180°, returning a new frame.
+    ///
+    /// Dimensions remain the same. Crop offsets are swapped (left↔right, top↔bottom).
     pub fn rotate_180(&self) -> Self {
         let w = self.width;
         let h = self.height;
@@ -144,7 +149,10 @@ impl DecodedFrame {
         }
     }
 
-    /// Rotate the frame 270° clockwise (= 90° counter-clockwise), returning a new frame
+    /// Rotate the frame 270° clockwise (= 90° counter-clockwise), returning a new frame.
+    ///
+    /// Output dimensions are swapped: `(width, height)` becomes `(height, width)`.
+    /// Crop offsets are transformed accordingly.
     pub fn rotate_270_cw(&self) -> Self {
         let ow = self.width;
         let oh = self.height;
@@ -214,7 +222,9 @@ impl DecodedFrame {
         }
     }
 
-    /// Mirror the frame about the vertical axis (left-right flip)
+    /// Mirror the frame about the vertical axis (left-right flip), returning a new frame.
+    ///
+    /// Dimensions remain the same. Left and right crop offsets are swapped.
     pub fn mirror_horizontal(&self) -> Self {
         let w = self.width;
         let h = self.height;
@@ -277,7 +287,9 @@ impl DecodedFrame {
         }
     }
 
-    /// Mirror the frame about the horizontal axis (top-bottom flip)
+    /// Mirror the frame about the horizontal axis (top-bottom flip), returning a new frame.
+    ///
+    /// Dimensions remain the same. Top and bottom crop offsets are swapped.
     pub fn mirror_vertical(&self) -> Self {
         let w = self.width;
         let h = self.height;

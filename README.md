@@ -31,6 +31,13 @@ Decodes most HEIC files from iPhones and other cameras. 91% pixel-exact vs libhe
 ### Known limitations
 - I-slices only (sufficient for HEIC still images, no inter prediction)
 
+## Features
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `std` | yes | Standard library support. Disable for `no_std + alloc`. |
+| `parallel` | no | Parallel tile decoding via rayon. Implies `std`. |
+
 ## Usage
 
 ```rust
@@ -87,6 +94,26 @@ let exif: Option<&[u8]> = decoder.extract_exif(&data)?;   // raw TIFF bytes
 let xmp: Option<&[u8]> = decoder.extract_xmp(&data)?;     // raw XML bytes
 let thumb = decoder.decode_thumbnail(&data, PixelLayout::Rgb8)?; // smaller preview
 ```
+
+## Performance
+
+SIMD-accelerated on x86-64 (AVX2 for color conversion, IDCT 8/16/32; SSE4.1 for IDST 4). Scalar fallback on other architectures.
+
+| Image | Size | Time (release) |
+|-------|------|----------------|
+| example.heic | 1280x854 | ~57ms |
+| iPhone 12 Pro | 3024x4032 | ~470ms |
+| Probe (metadata only) | any | ~1µs |
+| Thumbnail decode | any | ~4ms |
+| EXIF extraction | any | ~4µs |
+
+With the `parallel` feature, grid-based images decode tiles concurrently via rayon.
+
+## Memory
+
+`decode_into()` uses a streaming path for grid-based images (most iPhone photos) that color-converts each tile directly into the output buffer. This avoids the intermediate full-frame YCbCr allocation, reducing peak memory by ~60% compared to `decode()`.
+
+Use `DecoderConfig::estimate_memory()` to check memory requirements before decoding.
 
 ## License
 

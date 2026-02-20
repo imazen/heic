@@ -1,23 +1,25 @@
 //! Pure Rust HEIC/HEIF image decoder
 //!
-//! This crate provides a safe, sandboxed HEIC image decoder without
-//! any C/C++ dependencies.
+//! This crate decodes HEIC/HEIF images (as used by iPhones and modern cameras)
+//! without any C/C++ dependencies. `#![forbid(unsafe_code)]`, `no_std + alloc`
+//! compatible, and SIMD-accelerated on x86-64 (AVX2).
 //!
 //! # Quick Start
 //!
-//! ```ignore
+//! ```no_run
 //! use heic_decoder::{DecoderConfig, PixelLayout};
 //!
-//! let data = std::fs::read("image.heic")?;
-//! let output = DecoderConfig::new().decode(&data, PixelLayout::Rgba8)?;
+//! let data = std::fs::read("image.heic").unwrap();
+//! let output = DecoderConfig::new().decode(&data, PixelLayout::Rgba8).unwrap();
 //! println!("Decoded {}x{} image", output.width, output.height);
 //! ```
 //!
-//! # Full Control
+//! # Decode with Limits and Cancellation
 //!
-//! ```ignore
+//! ```no_run
 //! use heic_decoder::{DecoderConfig, PixelLayout, Limits};
 //!
+//! let data = std::fs::read("image.heic").unwrap();
 //! let mut limits = Limits::default();
 //! limits.max_width = Some(8192);
 //! limits.max_height = Some(8192);
@@ -27,8 +29,69 @@
 //!     .decode_request(&data)
 //!     .with_output_layout(PixelLayout::Rgba8)
 //!     .with_limits(&limits)
-//!     .decode()?;
+//!     .decode()
+//!     .unwrap();
 //! ```
+//!
+//! # Zero-Copy into Pre-Allocated Buffer
+//!
+//! ```no_run
+//! use heic_decoder::{DecoderConfig, ImageInfo, PixelLayout};
+//!
+//! let data = std::fs::read("image.heic").unwrap();
+//! let info = ImageInfo::from_bytes(&data).unwrap();
+//! let mut buf = vec![0u8; info.output_buffer_size(PixelLayout::Rgb8).unwrap()];
+//! let (w, h) = DecoderConfig::new()
+//!     .decode_request(&data)
+//!     .with_output_layout(PixelLayout::Rgb8)
+//!     .decode_into(&mut buf)
+//!     .unwrap();
+//! ```
+//!
+//! For grid-based images (most iPhone photos), [`DecodeRequest::decode_into`]
+//! uses a streaming path that color-converts tiles directly into the output
+//! buffer, avoiding the intermediate full-frame YCbCr allocation.
+//!
+//! # Features
+//!
+//! | Feature | Default | Description |
+//! |---------|---------|-------------|
+//! | `std` | yes | Standard library support. Disable for `no_std + alloc`. |
+//! | `parallel` | no | Parallel tile decoding via rayon. Implies `std`. |
+//!
+//! # Error Handling
+//!
+//! Decode methods return [`Result<T>`], which is `core::result::Result<T, At<HeicError>>`.
+//! The [`At`] wrapper from the `whereat` crate attaches source location to errors
+//! for easier debugging. Use `.into_inner()` to unwrap the location and get the
+//! underlying [`HeicError`].
+//!
+//! For probing, [`ImageInfo::from_bytes`] returns a separate [`ProbeError`] enum
+//! that distinguishes "not enough data" from "not a HEIC file" from "corrupt header".
+//!
+//! # Advanced: Raw YCbCr Access
+//!
+//! ```no_run
+//! use heic_decoder::DecoderConfig;
+//!
+//! let data = std::fs::read("image.heic").unwrap();
+//! let frame = DecoderConfig::new().decode_to_frame(&data).unwrap();
+//! println!("{}x{}, bit_depth={}, chroma={}",
+//!     frame.cropped_width(), frame.cropped_height(),
+//!     frame.bit_depth, frame.chroma_format);
+//!
+//! // Access raw YCbCr planes
+//! let (y_plane, y_stride) = frame.plane(0);
+//! let (cb_plane, c_stride) = frame.plane(1);
+//! let (cr_plane, _) = frame.plane(2);
+//! ```
+//!
+//! # Memory
+//!
+//! Use [`DecoderConfig::estimate_memory`] to check memory requirements before
+//! decoding. For grid-based images, [`DecodeRequest::decode_into`] reduces peak
+//! memory by ~60% compared to [`DecodeRequest::decode`] by streaming tiles
+//! directly to the output buffer.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]

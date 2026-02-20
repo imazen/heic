@@ -158,22 +158,23 @@ impl DecodedFrame {
         self.crop_bottom = bottom;
     }
 
-    /// Get cropped width
+    /// Width after conformance window cropping. This is the visible image width.
     pub fn cropped_width(&self) -> u32 {
         self.width - self.crop_left - self.crop_right
     }
 
-    /// Get cropped height
+    /// Height after conformance window cropping. This is the visible image height.
     pub fn cropped_height(&self) -> u32 {
         self.height - self.crop_top - self.crop_bottom
     }
 
-    /// Get luma stride (width)
+    /// Luma plane stride in pixels (equal to the un-cropped `width`).
     pub fn y_stride(&self) -> usize {
         self.width as usize
     }
 
-    /// Get chroma stride
+    /// Chroma plane stride in pixels. Depends on chroma format:
+    /// `width/2` for 4:2:0 and 4:2:2, `width` for 4:4:4, 0 for monochrome.
     pub fn c_stride(&self) -> usize {
         match self.chroma_format {
             0 => 0,
@@ -231,7 +232,13 @@ impl DecodedFrame {
         }
     }
 
-    /// Convert YCbCr to RGB with conformance window cropping
+    /// Convert YCbCr to interleaved RGB bytes with conformance window cropping.
+    ///
+    /// Returns `cropped_width * cropped_height * 3` bytes in R, G, B order.
+    /// Selects the color matrix from [`matrix_coeffs`](Self::matrix_coeffs)
+    /// (BT.601, BT.709, or BT.2020) and range from [`full_range`](Self::full_range).
+    ///
+    /// Uses SIMD-accelerated conversion for 4:2:0 chroma (AVX2 on x86-64).
     pub fn to_rgb(&self) -> Vec<u8> {
         let out_width = self.cropped_width();
         let out_height = self.cropped_height();
@@ -283,9 +290,10 @@ impl DecodedFrame {
         rgb
     }
 
-    /// Convert YCbCr to BGRA with conformance window cropping.
-    /// Produces BGRA byte order (blue, green, red, alpha).
-    /// Uses real alpha values from `alpha_plane` if present, otherwise alpha=255.
+    /// Convert YCbCr to interleaved BGRA bytes with conformance window cropping.
+    ///
+    /// Returns `cropped_width * cropped_height * 4` bytes in B, G, R, A order.
+    /// Uses real alpha from [`alpha_plane`](Self::alpha_plane) if present, otherwise 255.
     pub fn to_bgra(&self) -> Vec<u8> {
         let out_width = self.cropped_width();
         let out_height = self.cropped_height();
@@ -328,7 +336,9 @@ impl DecodedFrame {
         bgra
     }
 
-    /// Convert YCbCr to BGR with conformance window cropping.
+    /// Convert YCbCr to interleaved BGR bytes with conformance window cropping.
+    ///
+    /// Returns `cropped_width * cropped_height * 3` bytes in B, G, R order.
     pub fn to_bgr(&self) -> Vec<u8> {
         let out_width = self.cropped_width();
         let out_height = self.cropped_height();
@@ -356,8 +366,10 @@ impl DecodedFrame {
         bgr
     }
 
-    /// Write pixels into a pre-allocated buffer in RGB format.
-    /// Returns the number of bytes written.
+    /// Write cropped pixels into a pre-allocated buffer in RGB format.
+    ///
+    /// The buffer must be at least `cropped_width * cropped_height * 3` bytes.
+    /// Returns the number of bytes written (always `cropped_width * cropped_height * 3`).
     pub fn write_rgb_into(&self, output: &mut [u8]) -> usize {
         let out_width = self.cropped_width();
         let out_height = self.cropped_height();
@@ -410,8 +422,10 @@ impl DecodedFrame {
         (out_width * out_height * 3) as usize
     }
 
-    /// Write pixels into a pre-allocated buffer in RGBA format.
-    /// Returns the number of bytes written.
+    /// Write cropped pixels into a pre-allocated buffer in RGBA format.
+    ///
+    /// The buffer must be at least `cropped_width * cropped_height * 4` bytes.
+    /// Returns the number of bytes written. Uses real alpha if present, otherwise 255.
     pub fn write_rgba_into(&self, output: &mut [u8]) -> usize {
         let out_width = self.cropped_width();
         let out_height = self.cropped_height();
@@ -452,8 +466,10 @@ impl DecodedFrame {
         (out_width * out_height * 4) as usize
     }
 
-    /// Write pixels into a pre-allocated buffer in BGRA format.
-    /// Returns the number of bytes written.
+    /// Write cropped pixels into a pre-allocated buffer in BGRA format.
+    ///
+    /// The buffer must be at least `cropped_width * cropped_height * 4` bytes.
+    /// Returns the number of bytes written. Uses real alpha if present, otherwise 255.
     pub fn write_bgra_into(&self, output: &mut [u8]) -> usize {
         let out_width = self.cropped_width();
         let out_height = self.cropped_height();
@@ -494,7 +510,9 @@ impl DecodedFrame {
         (out_width * out_height * 4) as usize
     }
 
-    /// Write pixels into a pre-allocated buffer in BGR format.
+    /// Write cropped pixels into a pre-allocated buffer in BGR format.
+    ///
+    /// The buffer must be at least `cropped_width * cropped_height * 3` bytes.
     /// Returns the number of bytes written.
     pub fn write_bgr_into(&self, output: &mut [u8]) -> usize {
         let out_width = self.cropped_width();
@@ -524,8 +542,10 @@ impl DecodedFrame {
         (out_width * out_height * 3) as usize
     }
 
-    /// Convert YCbCr to RGBA with conformance window cropping.
-    /// Uses real alpha values from `alpha_plane` if present, otherwise alpha=255.
+    /// Convert YCbCr to interleaved RGBA bytes with conformance window cropping.
+    ///
+    /// Returns `cropped_width * cropped_height * 4` bytes in R, G, B, A order.
+    /// Uses real alpha from [`alpha_plane`](Self::alpha_plane) if present, otherwise 255.
     pub fn to_rgba(&self) -> Vec<u8> {
         let out_width = self.cropped_width();
         let out_height = self.cropped_height();
@@ -627,7 +647,10 @@ impl DecodedFrame {
         }
     }
 
-    /// Get a luma sample
+    /// Get a luma (Y) sample at full-frame coordinates `(x, y)`.
+    ///
+    /// Coordinates are in the un-cropped frame. Returns 0 if out of bounds.
+    /// The returned value has `bit_depth` significant bits.
     #[inline]
     pub fn get_y(&self, x: u32, y: u32) -> u16 {
         let idx = (y * self.width + x) as usize;
@@ -638,7 +661,10 @@ impl DecodedFrame {
         }
     }
 
-    /// Get a Cb chroma sample
+    /// Get a Cb chroma sample at chroma-plane coordinates `(x, y)`.
+    ///
+    /// Coordinates are in the chroma plane's resolution (see [`c_stride`](Self::c_stride)).
+    /// Returns neutral chroma (128 << (bit_depth - 8)) if out of bounds.
     #[inline]
     pub fn get_cb(&self, x: u32, y: u32) -> u16 {
         let stride = self.c_stride();
@@ -650,7 +676,10 @@ impl DecodedFrame {
         }
     }
 
-    /// Get a Cr chroma sample
+    /// Get a Cr chroma sample at chroma-plane coordinates `(x, y)`.
+    ///
+    /// Coordinates are in the chroma plane's resolution (see [`c_stride`](Self::c_stride)).
+    /// Returns neutral chroma (128 << (bit_depth - 8)) if out of bounds.
     #[inline]
     pub fn get_cr(&self, x: u32, y: u32) -> u16 {
         let stride = self.c_stride();
@@ -682,7 +711,13 @@ impl DecodedFrame {
         }
     }
 
-    /// Get an immutable plane slice and stride for a given component.
+    /// Get an immutable plane slice and stride for a given component index.
+    ///
+    /// - `c_idx = 0`: luma (Y), stride = `width`
+    /// - `c_idx = 1`: Cb chroma, stride = `c_stride()`
+    /// - `c_idx = 2`: Cr chroma, stride = `c_stride()`
+    ///
+    /// Returns `(plane_data, stride_in_pixels)`.
     #[inline]
     pub fn plane(&self, c_idx: u8) -> (&[u16], usize) {
         match c_idx {
