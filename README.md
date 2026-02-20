@@ -30,7 +30,6 @@ Decodes most HEIC files from iPhones and other cameras. 91% pixel-exact vs libhe
 
 ### Known limitations
 - I-slices only (sufficient for HEIC still images, no inter prediction)
-- 4:4:4 chroma partially supported
 
 ## Usage
 

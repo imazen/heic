@@ -252,8 +252,11 @@ fn fill_border_samples(
     let (frame_w, frame_h) = if c_idx == 0 {
         (frame.width, frame.height)
     } else {
-        // Chroma is half resolution for 4:2:0
-        (frame.width / 2, frame.height / 2)
+        match frame.chroma_format {
+            3 => (frame.width, frame.height),         // 4:4:4
+            2 => (frame.width / 2, frame.height),     // 4:2:2
+            _ => (frame.width / 2, frame.height / 2), // 4:2:0
+        }
     };
 
     let avail_left = x > 0;

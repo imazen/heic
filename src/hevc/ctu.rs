@@ -1085,8 +1085,9 @@ impl<'a> SliceContext<'a> {
             )?;
 
             // For 4:2:0, if we split from 8x8 to 4x4, predict + decode chroma now
-            // (because 4x4 children can't have chroma TUs)
-            if log2_size == 3 {
+            // (because 4x4 children can't have chroma TUs in 4:2:0).
+            // For 4:4:4, each child handles its own chroma — skip this.
+            if log2_size == 3 && frame.chroma_format != 3 {
                 let sis = self.sps.strong_intra_smoothing_enabled_flag;
                 let scan_order = residual::get_scan_order(2, intra_chroma_mode.as_u8(), 1);
 
@@ -1206,26 +1207,33 @@ impl<'a> SliceContext<'a> {
             self.decode_and_apply_residual(x0, y0, log2_size, 0, scan_order, frame)?;
         }
 
-        // Decode chroma: predict + residual per component if not handled by parent
-        if log2_size >= 3 {
-            let chroma_log2_size = log2_size - 1;
+        // Decode chroma: predict + residual per component if not handled by parent.
+        // For 4:2:0: chroma TU is half the luma TU size, minimum 4x4 (log2=2),
+        //   so chroma is only decoded here when log2_size >= 3 (8x8+ luma → 4x4+ chroma).
+        //   When log2_size < 3, the parent 8x8 node handles chroma.
+        // For 4:4:4: chroma TU is the same size as luma, always decoded here.
+        let is_444 = frame.chroma_format == 3;
+        let chroma_here = if is_444 {
+            true // 4:4:4: chroma always at TU level
+        } else {
+            log2_size >= 3 // 4:2:0: only when luma TU >= 8x8
+        };
+
+        if chroma_here {
+            let (chroma_log2_size, cx, cy) = if is_444 {
+                (log2_size, x0, y0)
+            } else {
+                (log2_size - 1, x0 / 2, y0 / 2)
+            };
             let chroma_scan_order =
                 residual::get_scan_order(chroma_log2_size, intra_chroma_mode.as_u8(), 1);
 
             // Predict and apply Cb
-            intra::predict_intra(
-                frame,
-                x0 / 2,
-                y0 / 2,
-                chroma_log2_size,
-                intra_chroma_mode,
-                1,
-                sis,
-            );
+            intra::predict_intra(frame, cx, cy, chroma_log2_size, intra_chroma_mode, 1, sis);
             if cbf_cb {
                 self.decode_and_apply_residual(
-                    x0 / 2,
-                    y0 / 2,
+                    cx,
+                    cy,
                     chroma_log2_size,
                     1,
                     chroma_scan_order,
@@ -1234,19 +1242,11 @@ impl<'a> SliceContext<'a> {
             }
 
             // Predict and apply Cr
-            intra::predict_intra(
-                frame,
-                x0 / 2,
-                y0 / 2,
-                chroma_log2_size,
-                intra_chroma_mode,
-                2,
-                sis,
-            );
+            intra::predict_intra(frame, cx, cy, chroma_log2_size, intra_chroma_mode, 2, sis);
             if cbf_cr {
                 self.decode_and_apply_residual(
-                    x0 / 2,
-                    y0 / 2,
+                    cx,
+                    cy,
                     chroma_log2_size,
                     2,
                     chroma_scan_order,
@@ -1254,7 +1254,7 @@ impl<'a> SliceContext<'a> {
                 )?;
             }
         }
-        // Note: if log2_size < 3, chroma was predicted+decoded by parent when splitting from 8x8
+        // Note: for 4:2:0, if log2_size < 3, chroma was predicted+decoded by parent when splitting from 8x8
 
         Ok(())
     }

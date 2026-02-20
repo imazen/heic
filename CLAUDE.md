@@ -152,7 +152,7 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 - Tile-parallel grid decoding via rayon (optional `parallel` feature)
 
 ### Current Quality (RGB comparison vs libheif)
-- 104/162 test files decode successfully
+- 103/162 test files decode successfully
 - Best: example_q95 65.7dB (98% pixel-exact), classic-car 77.3dB (BT.709)
 - Nokia C001-C052: 50.5dB (77% pixel-exact)
 - Grid images: image1 50.4dB, classic-car 77.3dB
@@ -163,7 +163,7 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 - example.heic: 73.0% pixel-exact, SSIM2 91.86, avg diff 0.45, max diff 12
 
 ### Known Edge Cases
-- MIAF003 (4:4:4 chroma, RExt profile): 5.7dB — chroma format not fully supported
+- MIAF003 (4:4:4 chroma, RExt profile): 61.9dB (97.8% exact, max diff 4)
 - overlay_1000x680: 13.1dB — remaining diff from color conversion on fill regions
 - example_q10: 36.1dB RGB — low-QP amplifies color conversion rounding
 
@@ -191,7 +191,7 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 
 - Only I-slices supported (sufficient for HEIC still images)
 - No inter prediction (P/B slices)
-- 4:4:4 chroma format partially supported (SAO clamped, but decode artifacts remain)
+- 4:4:4 chroma: decodes correctly (61.9dB), but no SIMD color conversion path (uses scalar)
 
 ## Known Bugs
 
