@@ -67,9 +67,9 @@ let frame = DecoderConfig::new().decode_to_frame(&data)?;
 // HDR gain map
 let gainmap = DecoderConfig::new().decode_gain_map(&data)?;
 
-// EXIF/XMP extraction (zero-copy from input buffer)
-let exif: Option<&[u8]> = DecoderConfig::new().extract_exif(&data)?;
-let xmp: Option<&[u8]> = DecoderConfig::new().extract_xmp(&data)?;
+// EXIF/XMP extraction (zero-copy for single-extent, owned for multi-extent)
+let exif: Option<Cow<'_, [u8]>> = DecoderConfig::new().extract_exif(&data)?;
+let xmp: Option<Cow<'_, [u8]>> = DecoderConfig::new().extract_xmp(&data)?;
 
 // Thumbnail decode (smaller embedded preview image)
 let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, PixelLayout::Rgb8)?;
@@ -135,7 +135,9 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 - `no_std + alloc` support (compiles for wasm32-unknown-unknown)
 - Integer overflow protection for dimension calculations
 - Memory estimation before decode (DecoderConfig::estimate_memory)
-- Hardened parser: checked arithmetic throughout, 16M fuzz runs clean
+- Hardened parser: checked arithmetic, resource limits, fallible allocation, Stop cancellation
+- Multi-extent item support (get_item_data returns Cow: borrow single, concat multi)
+- Parser defensive validation (clap zero-denom, ispe bounds, hvcc length_size, string/NAL/ICC caps)
 - cargo-fuzz targets: decode, decode_limits, probe
 - whereat error location tracking (At<HeicError> Result type)
 - EXIF extraction (zero-copy, strips 4-byte HEIF prefix, returns raw TIFF)
