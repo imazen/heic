@@ -114,6 +114,7 @@ pub use enough::{Stop, StopReason, Unstoppable};
 // Re-export At for error location tracking
 pub use whereat::At;
 
+use alloc::borrow::Cow;
 use alloc::vec::Vec;
 use heif::{FourCC, ItemType};
 
@@ -277,7 +278,8 @@ impl ImageInfo {
             return Err(ProbeError::InvalidFormat);
         }
 
-        let container = heif::parse(data).map_err(|e| ProbeError::Corrupt(e.into_inner()))?;
+        let container =
+            heif::parse(data, &Unstoppable).map_err(|e: At<HeicError>| ProbeError::Corrupt(e.into_inner()))?;
 
         let primary_item = container
             .primary_item()
@@ -357,10 +359,10 @@ impl ImageInfo {
         // Fallback to reading image data
         let image_data = container
             .get_item_data(primary_item.id)
-            .ok_or(ProbeError::NeedMoreData)?;
+            .map_err(|e: At<HeicError>| ProbeError::Corrupt(e.into_inner()))?;
 
         let hevc_info =
-            hevc::get_info(image_data).map_err(|e| ProbeError::Corrupt(HeicError::from(e)))?;
+            hevc::get_info(&image_data).map_err(|e| ProbeError::Corrupt(HeicError::from(e)))?;
 
         Ok(ImageInfo {
             width: hevc_info.width,
@@ -533,12 +535,15 @@ impl DecoderConfig {
     /// with the HEIF 4-byte offset prefix stripped. Returns `None` if the file
     /// contains no EXIF metadata.
     ///
+    /// Returns `Cow::Borrowed` (zero-copy) for single-extent items,
+    /// `Cow::Owned` for multi-extent items.
+    ///
     /// The returned bytes can be passed to any EXIF parser (e.g., `exif` or `kamadak-exif` crate).
     ///
     /// # Errors
     ///
     /// Returns an error if the HEIF container is malformed.
-    pub fn extract_exif<'a>(&self, data: &'a [u8]) -> Result<Option<&'a [u8]>> {
+    pub fn extract_exif<'a>(&self, data: &'a [u8]) -> Result<Option<Cow<'a, [u8]>>> {
         decode::extract_exif(data)
     }
 
@@ -547,13 +552,16 @@ impl DecoderConfig {
     /// Returns the raw XML bytes of the XMP metadata. Returns `None` if the
     /// file contains no XMP metadata.
     ///
+    /// Returns `Cow::Borrowed` (zero-copy) for single-extent items,
+    /// `Cow::Owned` for multi-extent items.
+    ///
     /// XMP items are stored as `mime` type items with content type
     /// `application/rdf+xml` in the HEIF container.
     ///
     /// # Errors
     ///
     /// Returns an error if the HEIF container is malformed.
-    pub fn extract_xmp<'a>(&self, data: &'a [u8]) -> Result<Option<&'a [u8]>> {
+    pub fn extract_xmp<'a>(&self, data: &'a [u8]) -> Result<Option<Cow<'a, [u8]>>> {
         decode::extract_xmp(data)
     }
 

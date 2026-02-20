@@ -4,7 +4,8 @@ fn main() {
         .nth(1)
         .unwrap_or_else(|| "/home/lilith/work/heic/libheif/examples/example.heic".to_string());
     let data = std::fs::read(&path).expect("read");
-    let container = heic_decoder::heif::parse(&data).expect("parse");
+    let container =
+        heic_decoder::heif::parse(&data, &heic_decoder::Unstoppable).expect("parse");
 
     // Find primary image item
     let item = container.primary_item().expect("no primary item");

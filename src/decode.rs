@@ -1,6 +1,7 @@
 //! Internal decode pipeline: grid assembly, overlay compositing,
 //! alpha plane extraction, metadata extraction, and gain map decoding.
 
+use alloc::borrow::Cow;
 use alloc::vec::Vec;
 
 use enough::{Stop, Unstoppable};
@@ -33,7 +34,7 @@ pub(crate) fn decode_to_frame(
 
     check_stop(stop)?;
 
-    let container = heif::parse(data)?;
+    let container = heif::parse(data, stop)?;
     let primary_item = container.primary_item().ok_or(HeicError::NoPrimaryImage)?;
 
     // Check limits on primary item dimensions if available from ispe
@@ -93,14 +94,12 @@ fn decode_item(
         ItemType::Iden => decode_iden(container, item, depth, limits, stop)?,
         ItemType::Iovl => decode_iovl(container, item, depth, limits, stop)?,
         _ => {
-            let image_data = container
-                .get_item_data(item.id)
-                .ok_or(HeicError::InvalidData("Missing image data"))?;
+            let image_data = container.get_item_data(item.id)?;
 
             if let Some(ref config) = item.hevc_config {
-                crate::hevc::decode_with_config(config, image_data)?
+                crate::hevc::decode_with_config(config, &image_data)?
             } else {
-                crate::hevc::decode(image_data)?
+                crate::hevc::decode(&image_data)?
             }
         }
     };
@@ -171,9 +170,7 @@ fn decode_iovl(
     limits: &Limits,
     stop: &dyn Stop,
 ) -> Result<crate::hevc::DecodedFrame> {
-    let iovl_data = container
-        .get_item_data(iovl_item.id)
-        .ok_or(HeicError::InvalidData("Missing overlay descriptor"))?;
+    let iovl_data = container.get_item_data(iovl_item.id)?;
 
     // Parse iovl descriptor:
     // - version (1 byte) + flags (3 bytes)
@@ -394,9 +391,7 @@ fn decode_grid(
     stop: &dyn Stop,
 ) -> Result<crate::hevc::DecodedFrame> {
     // Parse grid descriptor
-    let grid_data = container
-        .get_item_data(grid_item.id)
-        .ok_or(HeicError::InvalidData("Missing grid descriptor"))?;
+    let grid_data = container.get_item_data(grid_item.id)?;
 
     if grid_data.len() < 8 {
         return Err(HeicError::InvalidData("Grid descriptor too short").into());
@@ -454,13 +449,9 @@ fn decode_grid(
     // (or row of tiles) before decoding the next. This keeps peak memory at
     // output + 1 tile (sequential) or output + 1 row of tiles (parallel).
     check_stop(stop)?;
-    let tile_data_list: Vec<&[u8]> = tile_ids
+    let tile_data_list: Vec<Cow<'_, [u8]>> = tile_ids
         .iter()
-        .map(|&tid| {
-            container
-                .get_item_data(tid)
-                .ok_or_else(|| whereat::At::from(HeicError::InvalidData("Missing tile data")))
-        })
+        .map(|&tid| container.get_item_data(tid))
         .collect::<core::result::Result<_, _>>()?;
 
     #[cfg(feature = "parallel")]
@@ -498,7 +489,7 @@ fn decode_grid(
         // Sequential: decode one tile, blit, drop — only 1 tile in memory at a time.
         for (tile_idx, tile_data) in tile_data_list.iter().enumerate() {
             check_stop(stop)?;
-            let tile_frame = crate::hevc::decode_with_config(tile_config, tile_data)?;
+            let tile_frame = crate::hevc::decode_with_config(tile_config, &**tile_data)?;
             if tile_idx == 0 {
                 output.full_range = tile_frame.full_range;
                 output.matrix_coeffs = tile_frame.matrix_coeffs;
@@ -615,7 +606,7 @@ pub(crate) fn try_decode_grid_streaming(
 
     check_stop(stop)?;
 
-    let container = heif::parse(data)?;
+    let container = heif::parse(data, stop)?;
     let primary_item = container.primary_item().ok_or(HeicError::NoPrimaryImage)?;
 
     // Eligibility: must be a grid with no transforms and no alpha
@@ -641,9 +632,7 @@ pub(crate) fn try_decode_grid_streaming(
     }
 
     // Parse grid descriptor
-    let grid_data = container
-        .get_item_data(primary_item.id)
-        .ok_or(HeicError::InvalidData("Missing grid descriptor"))?;
+    let grid_data = container.get_item_data(primary_item.id)?;
 
     if grid_data.len() < 8 {
         return Err(HeicError::InvalidData("Grid descriptor too short").into());
@@ -717,13 +706,9 @@ pub(crate) fn try_decode_grid_streaming(
 
     // Collect tile data
     check_stop(stop)?;
-    let tile_data_list: Vec<&[u8]> = tile_ids
+    let tile_data_list: Vec<Cow<'_, [u8]>> = tile_ids
         .iter()
-        .map(|&tid| {
-            container
-                .get_item_data(tid)
-                .ok_or_else(|| whereat::At::from(HeicError::InvalidData("Missing tile data")))
-        })
+        .map(|&tid| container.get_item_data(tid))
         .collect::<core::result::Result<_, _>>()?;
 
     // Stream tiles: decode, color-convert directly to output, drop
@@ -773,7 +758,7 @@ pub(crate) fn try_decode_grid_streaming(
     {
         for (tile_idx, tile_data) in tile_data_list.iter().enumerate() {
             check_stop(stop)?;
-            let mut tile_frame = crate::hevc::decode_with_config(tile_config, tile_data)?;
+            let mut tile_frame = crate::hevc::decode_with_config(tile_config, &**tile_data)?;
             if let Some((fr, mc)) = color_override {
                 tile_frame.full_range = fr;
                 tile_frame.matrix_coeffs = mc;
@@ -954,10 +939,10 @@ fn decode_alpha_plane(
     primary_frame: &crate::hevc::DecodedFrame,
 ) -> Option<Vec<u16>> {
     let alpha_item = container.get_item(alpha_id)?;
-    let alpha_data = container.get_item_data(alpha_id)?;
+    let alpha_data = container.get_item_data(alpha_id).ok()?;
     let alpha_config = alpha_item.hevc_config.as_ref()?;
 
-    let alpha_frame = crate::hevc::decode_with_config(alpha_config, alpha_data).ok()?;
+    let alpha_frame = crate::hevc::decode_with_config(alpha_config, &alpha_data).ok()?;
 
     let primary_w = primary_frame.cropped_width();
     let primary_h = primary_frame.cropped_height();
@@ -1020,7 +1005,7 @@ fn decode_alpha_plane(
 
 /// Decode gain map from Apple HDR HEIC
 pub(crate) fn decode_gain_map(data: &[u8]) -> Result<HdrGainMap> {
-    let container = heif::parse(data)?;
+    let container = heif::parse(data, &Unstoppable)?;
     let primary_item = container.primary_item().ok_or(HeicError::NoPrimaryImage)?;
 
     let gainmap_ids =
@@ -1033,15 +1018,13 @@ pub(crate) fn decode_gain_map(data: &[u8]) -> Result<HdrGainMap> {
     let gainmap_item = container
         .get_item(gainmap_id)
         .ok_or(HeicError::InvalidData("Missing gain map item"))?;
-    let gainmap_data = container
-        .get_item_data(gainmap_id)
-        .ok_or(HeicError::InvalidData("Missing gain map data"))?;
+    let gainmap_data = container.get_item_data(gainmap_id)?;
     let gainmap_config = gainmap_item
         .hevc_config
         .as_ref()
         .ok_or(HeicError::InvalidData("Missing gain map hvcC config"))?;
 
-    let frame = crate::hevc::decode_with_config(gainmap_config, gainmap_data)?;
+    let frame = crate::hevc::decode_with_config(gainmap_config, &gainmap_data)?;
 
     let width = frame.cropped_width();
     let height = frame.cropped_height();
@@ -1115,27 +1098,31 @@ fn apply_clean_aperture(frame: &mut crate::hevc::DecodedFrame, clap: &CleanApert
 }
 
 /// Extract EXIF TIFF data from HEIC container
-pub(crate) fn extract_exif(data: &[u8]) -> Result<Option<&[u8]>> {
-    let container = heif::parse(data)?;
+pub(crate) fn extract_exif<'a>(data: &'a [u8]) -> Result<Option<Cow<'a, [u8]>>> {
+    let container = heif::parse(data, &Unstoppable)?;
 
     // Find Exif item(s)
     for info in &container.item_infos {
-        if info.item_type == FourCC(*b"Exif")
-            && let Some(exif_data) = container.get_item_data(info.item_id)
-        {
-            // HEIF EXIF format: 4 bytes big-endian offset to TIFF header, then data.
-            // The offset is from byte 4 (after the 4-byte offset field itself).
-            // Typically 0, meaning TIFF data starts at byte 4.
-            if exif_data.len() < 4 {
-                continue;
-            }
-            let tiff_offset =
-                u32::from_be_bytes([exif_data[0], exif_data[1], exif_data[2], exif_data[3]])
-                    as usize;
-            let tiff_start = 4 + tiff_offset;
-            if tiff_start < exif_data.len() {
-                return Ok(Some(&exif_data[tiff_start..]));
-            }
+        if info.item_type != FourCC(*b"Exif") {
+            continue;
+        }
+        let Ok(exif_data) = container.get_item_data(info.item_id) else {
+            continue;
+        };
+        // HEIF EXIF format: 4 bytes big-endian offset to TIFF header, then data.
+        // The offset is from byte 4 (after the 4-byte offset field itself).
+        // Typically 0, meaning TIFF data starts at byte 4.
+        if exif_data.len() < 4 {
+            continue;
+        }
+        let tiff_offset =
+            u32::from_be_bytes([exif_data[0], exif_data[1], exif_data[2], exif_data[3]]) as usize;
+        let tiff_start = 4 + tiff_offset;
+        if tiff_start < exif_data.len() {
+            return Ok(Some(match exif_data {
+                Cow::Borrowed(b) => Cow::Borrowed(&b[tiff_start..]),
+                Cow::Owned(v) => Cow::Owned(v[tiff_start..].to_vec()),
+            }));
         }
     }
 
@@ -1144,7 +1131,7 @@ pub(crate) fn extract_exif(data: &[u8]) -> Result<Option<&[u8]>> {
 
 /// Decode thumbnail image from HEIC container
 pub(crate) fn decode_thumbnail(data: &[u8], layout: PixelLayout) -> Result<Option<DecodeOutput>> {
-    let container = heif::parse(data)?;
+    let container = heif::parse(data, &Unstoppable)?;
     let primary_item = container.primary_item().ok_or(HeicError::NoPrimaryImage)?;
 
     let thumb_ids = container.find_thumbnails(primary_item.id);
@@ -1178,8 +1165,8 @@ pub(crate) fn decode_thumbnail(data: &[u8], layout: PixelLayout) -> Result<Optio
 }
 
 /// Extract XMP XML data from HEIC container
-pub(crate) fn extract_xmp(data: &[u8]) -> Result<Option<&[u8]>> {
-    let container = heif::parse(data)?;
+pub(crate) fn extract_xmp<'a>(data: &'a [u8]) -> Result<Option<Cow<'a, [u8]>>> {
+    let container = heif::parse(data, &Unstoppable)?;
 
     // Find mime items with XMP content type
     for info in &container.item_infos {
@@ -1187,7 +1174,7 @@ pub(crate) fn extract_xmp(data: &[u8]) -> Result<Option<&[u8]>> {
             && (info.content_type.contains("xmp")
                 || info.content_type.contains("rdf+xml")
                 || info.content_type == "application/rdf+xml")
-            && let Some(xmp_data) = container.get_item_data(info.item_id)
+            && let Ok(xmp_data) = container.get_item_data(info.item_id)
         {
             return Ok(Some(xmp_data));
         }

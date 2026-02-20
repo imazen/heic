@@ -6,7 +6,8 @@ fn main() {
     let output = std::env::args().nth(2).expect("output .265 file path");
 
     let data = std::fs::read(&input).expect("read input");
-    let container = heic_decoder::heif::parse(&data).expect("parse container");
+    let container =
+        heic_decoder::heif::parse(&data, &heic_decoder::Unstoppable).expect("parse container");
 
     let primary_id = container.primary_item_id;
     let item = container.primary_item().expect("no primary item");

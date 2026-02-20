@@ -7,7 +7,8 @@ fn main() {
     let data = std::fs::read(&path).expect("Failed to read file");
     eprintln!("File: {} ({} bytes)", path, data.len());
 
-    let container = heic_decoder::heif::parse(&data).expect("parse failed");
+    let container =
+        heic_decoder::heif::parse(&data, &heic_decoder::Unstoppable).expect("parse failed");
     eprintln!("Brand: {}", container.brand);
     eprintln!("Primary item ID: {}", container.primary_item_id);
     eprintln!();
@@ -122,7 +123,7 @@ fn main() {
         eprintln!("  clean_aperture: {:?}", item.clean_aperture);
 
         if item.item_type == ItemType::Grid {
-            if let Some(grid_data) = container.get_item_data(item.id) {
+            if let Ok(grid_data) = container.get_item_data(item.id) {
                 eprintln!(
                     "  grid descriptor ({} bytes): {:02x?}",
                     grid_data.len(),
@@ -170,7 +171,7 @@ fn main() {
             eprintln!("  tile items (dimg): {:?}", tile_ids);
         }
 
-        if let Some(data) = container.get_item_data(item.id) {
+        if let Ok(data) = container.get_item_data(item.id) {
             eprintln!("  data length: {} bytes", data.len());
         } else {
             eprintln!("  data: NOT FOUND");
@@ -217,7 +218,7 @@ fn main() {
     eprintln!("=== EXIF Items ===");
     for info in &container.item_infos {
         if info.item_type == FourCC(*b"Exif")
-            && let Some(data) = container.get_item_data(info.item_id)
+            && let Ok(data) = container.get_item_data(info.item_id)
         {
             eprintln!("  Exif item #{}: {} bytes", info.item_id, data.len());
             // HEIF Exif: 4 bytes offset to TIFF header, then the TIFF data

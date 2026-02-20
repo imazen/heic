@@ -1,5 +1,6 @@
 //! Error types for HEIC decoding
 
+use alloc::collections::TryReserveError;
 use alloc::string::String;
 use core::fmt;
 use enough::StopReason;
@@ -34,6 +35,8 @@ pub enum HeicError {
     },
     /// A resource limit was exceeded (dimensions, pixel count, or memory)
     LimitExceeded(&'static str),
+    /// Memory allocation failed
+    OutOfMemory,
     /// Operation was cancelled via cooperative cancellation
     Cancelled(StopReason),
 }
@@ -50,6 +53,7 @@ impl fmt::Display for HeicError {
                 write!(f, "buffer too small: need {required}, got {actual}")
             }
             Self::LimitExceeded(msg) => write!(f, "limit exceeded: {msg}"),
+            Self::OutOfMemory => write!(f, "out of memory"),
             Self::Cancelled(reason) => write!(f, "{reason}"),
         }
     }
@@ -73,6 +77,12 @@ impl From<HevcError> for HeicError {
 impl From<StopReason> for HeicError {
     fn from(r: StopReason) -> Self {
         Self::Cancelled(r)
+    }
+}
+
+impl From<TryReserveError> for HeicError {
+    fn from(_: TryReserveError) -> Self {
+        Self::OutOfMemory
     }
 }
 
