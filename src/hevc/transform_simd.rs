@@ -952,3 +952,153 @@ pub(crate) fn idct32_scalar(
 ) {
     super::transform::idct32_inner(coeffs, output, bit_depth);
 }
+
+// =============================================================================
+// SIMD residual add: u16 prediction + i16 residual → clamped u16
+// =============================================================================
+
+/// Add i16 residual block to u16 prediction block with clamping to [0, max_val].
+/// Processes full block (multiple rows) with single arcane entry point.
+/// Plane rows are stride-separated; residual rows are contiguous (size*size).
+#[cfg(target_arch = "x86_64")]
+#[allow(clippy::too_many_arguments)]
+#[arcane]
+pub(crate) fn add_residual_block_v3(
+    _token: X64V3Token,
+    plane: &mut [u16],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    residual: &[i16],
+    size: usize,
+    max_val: i32,
+) {
+    let zero = _mm256_setzero_si256();
+    let max_v = _mm256_set1_epi16(max_val as i16);
+
+    for py in 0..size {
+        let row_start = (y0 + py) * stride + x0;
+        let row = &mut plane[row_start..row_start + size];
+        let res_row = &residual[py * size..(py + 1) * size];
+
+        let chunks = size / 16;
+        for c in 0..chunks {
+            let offset = c * 16;
+            let pred = _mm256_loadu_si256::<[u16; 16]>(
+                row[offset..offset + 16].try_into().unwrap()
+            );
+            let res = _mm256_loadu_si256::<[i16; 16]>(
+                res_row[offset..offset + 16].try_into().unwrap()
+            );
+            let sum = _mm256_add_epi16(pred, res);
+            let clamped = _mm256_min_epi16(_mm256_max_epi16(sum, zero), max_v);
+            _mm256_storeu_si256::<[u16; 16]>(
+                (&mut row[offset..offset + 16]).try_into().unwrap(),
+                clamped,
+            );
+        }
+        // Scalar remainder within same arcane context
+        for i in (chunks * 16)..size {
+            let pred = row[i] as i32;
+            let r = res_row[i] as i32;
+            row[i] = (pred + r).clamp(0, max_val) as u16;
+        }
+    }
+}
+
+/// Scalar fallback for residual block add
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn add_residual_block_scalar(
+    _token: ScalarToken,
+    plane: &mut [u16],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    residual: &[i16],
+    size: usize,
+    max_val: i32,
+) {
+    for py in 0..size {
+        let row_start = (y0 + py) * stride + x0;
+        let row = &mut plane[row_start..row_start + size];
+        let res_row = &residual[py * size..(py + 1) * size];
+        for (out, &r) in row.iter_mut().zip(res_row.iter()) {
+            let pred = *out as i32;
+            *out = (pred + r as i32).clamp(0, max_val) as u16;
+        }
+    }
+}
+
+// =============================================================================
+// SIMD dequantize: i16 × const → i16 with shift and clamp
+// =============================================================================
+
+/// Dequantize i16 coefficients: coeff * scale << qp_shift, then >> bd_shift with rounding.
+/// Processes 16 coefficients per AVX2 iteration.
+#[cfg(target_arch = "x86_64")]
+#[arcane]
+pub(crate) fn dequantize_v3(
+    _token: X64V3Token,
+    coeffs: &mut [i16],
+    combined_scale: i32,
+    shift: i32,
+    add: i32,
+) {
+    // combined_scale = level_scale * (1 << qp_per) — fits in i16 for most QPs
+    // Strategy: widen to i32, multiply, shift, pack back to i16
+    let scale_v = _mm256_set1_epi32(combined_scale);
+    let add_v = _mm256_set1_epi32(add);
+    let shift_v = _mm_cvtsi32_si128(shift);
+
+    let chunks = coeffs.len() / 16;
+    for c in 0..chunks {
+        let offset = c * 16;
+        let src = _mm256_loadu_si256::<[i16; 16]>(
+            coeffs[offset..offset + 16].try_into().unwrap()
+        );
+
+        // Widen low/high 8 i16 to i32
+        let lo_128 = _mm256_castsi256_si128(src);
+        let hi_128 = _mm256_extracti128_si256::<1>(src);
+        let lo_32 = _mm256_cvtepi16_epi32(lo_128);
+        let hi_32 = _mm256_cvtepi16_epi32(hi_128);
+
+        // Multiply by combined_scale
+        let prod_lo = _mm256_mullo_epi32(lo_32, scale_v);
+        let prod_hi = _mm256_mullo_epi32(hi_32, scale_v);
+
+        // Add rounding and shift right
+        let shifted_lo = _mm256_sra_epi32(_mm256_add_epi32(prod_lo, add_v), shift_v);
+        let shifted_hi = _mm256_sra_epi32(_mm256_add_epi32(prod_hi, add_v), shift_v);
+
+        // Pack back to i16 with saturation (provides the -32768..32767 clamp)
+        let packed = _mm256_packs_epi32(shifted_lo, shifted_hi);
+        // Fix AVX2 lane crossing: packs operates within 128-bit lanes
+        let result = _mm256_permute4x64_epi64::<0xD8>(packed);
+
+        _mm256_storeu_si256::<[i16; 16]>(
+            (&mut coeffs[offset..offset + 16]).try_into().unwrap(),
+            result,
+        );
+    }
+
+    // Scalar remainder
+    for coef in coeffs.iter_mut().skip(chunks * 16) {
+        let value = (*coef as i32 * combined_scale + add) >> shift;
+        *coef = value.clamp(-32768, 32767) as i16;
+    }
+}
+
+/// Scalar fallback for dequantize
+pub(crate) fn dequantize_scalar(
+    _token: ScalarToken,
+    coeffs: &mut [i16],
+    combined_scale: i32,
+    shift: i32,
+    add: i32,
+) {
+    for coef in coeffs.iter_mut() {
+        let value = (*coef as i32 * combined_scale + add) >> shift;
+        *coef = value.clamp(-32768, 32767) as i16;
+    }
+}

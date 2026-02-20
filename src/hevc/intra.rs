@@ -221,6 +221,8 @@ fn fill_border_samples(
     // Availability tracking: avail[] parallel array, same layout as border
     // avail[i] = true means the reference sample was read from a decoded block
     let mut avail = [false; 4 * MAX_INTRA_PRED_BLOCK_SIZE + 1];
+    let mut avail_count = 0u32;
+    let total_samples = 4 * size + 1;
 
     // Resolve plane once to avoid per-pixel match dispatch
     let (plane, stride) = frame.plane(c_idx);
@@ -240,30 +242,35 @@ fn fill_border_samples(
     let default_val = 1i32 << (frame.bit_depth - 1);
 
     // Top-left corner
+    let mut corner_avail = false;
     if avail_top_left {
         let raw = read_plane(plane, stride, x - 1, y - 1);
         if raw != UNINIT_SAMPLE {
             border[center] = raw as i32;
-            avail[center] = true;
+            corner_avail = true;
+            avail_count += 1;
         }
     }
-    if !avail[center] && avail_top {
+    if !corner_avail && avail_top {
         let raw = read_plane(plane, stride, x, y - 1);
         if raw != UNINIT_SAMPLE {
             border[center] = raw as i32;
-            avail[center] = true;
+            corner_avail = true;
+            avail_count += 1;
         }
     }
-    if !avail[center] && avail_left {
+    if !corner_avail && avail_left {
         let raw = read_plane(plane, stride, x - 1, y);
         if raw != UNINIT_SAMPLE {
             border[center] = raw as i32;
-            avail[center] = true;
+            corner_avail = true;
+            avail_count += 1;
         }
     }
-    if !avail[center] {
+    if !corner_avail {
         border[center] = default_val;
     }
+    avail[center] = corner_avail;
 
     // Top samples p[0][-1] .. p[2*nTbS-1][-1]
     // Merged loop for top and above-right (both read from row y-1)
@@ -281,6 +288,7 @@ fn fill_border_samples(
                     let idx = center + 1 + i;
                     border[idx] = raw as i32;
                     avail[idx] = true;
+                    avail_count += 1;
                 }
             }
         } else {
@@ -292,6 +300,7 @@ fn fill_border_samples(
                         let idx = center + 1 + i;
                         border[idx] = raw as i32;
                         avail[idx] = true;
+                        avail_count += 1;
                     }
                 }
             }
@@ -313,6 +322,7 @@ fn fill_border_samples(
                     let idx = center - 1 - i;
                     border[idx] = raw as i32;
                     avail[idx] = true;
+                    avail_count += 1;
                 }
             }
         } else {
@@ -324,6 +334,7 @@ fn fill_border_samples(
                         let idx = center - 1 - i;
                         border[idx] = raw as i32;
                         avail[idx] = true;
+                        avail_count += 1;
                     }
                 }
             }
@@ -331,9 +342,10 @@ fn fill_border_samples(
     }
 
     // Reference sample substitution (H.265 8.4.4.2.2)
-    // Uses forward propagation: scan from bottom-left to top-right,
-    // each unavailable sample gets the last seen available value.
-    reference_sample_substitution(border, &avail, center, size as usize, default_val);
+    // Skip entirely when all samples are available (O(1) check vs O(n) scan)
+    if avail_count < total_samples {
+        reference_sample_substitution(border, &avail, center, size as usize, default_val);
+    }
 }
 
 /// Substitute unavailable reference samples (H.265 8.4.4.2.2)
@@ -351,13 +363,7 @@ fn reference_sample_substitution(
 ) {
     // Total reference samples: 4*size + 1 (2*size left + corner + 2*size top)
     // Layout in border array: center-2*size .. center+2*size
-
-    // Fast path: check if all samples are available (common for interior blocks)
-    let range_start = center - 2 * size;
-    let range_end = center + 2 * size + 1;
-    if avail[range_start..range_end].iter().all(|&a| a) {
-        return;
-    }
+    // (Caller already skips this function when all samples are available)
 
     // Step 1: Find first available sample (scan from bottom-left to top-right)
     let mut first_avail_val = None;

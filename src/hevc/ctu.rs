@@ -32,6 +32,10 @@ use super::residual::{self, ScanOrder};
 use super::sao::SaoMap;
 use super::slice::{IntraPredMode, PartMode, PredMode, SliceHeader};
 use super::transform;
+use archmage::incant;
+#[cfg(target_arch = "x86_64")]
+use super::transform_simd::add_residual_block_v3;
+use super::transform_simd::add_residual_block_scalar;
 use crate::error::HevcError;
 
 type Result<T> = core::result::Result<T, HevcError>;
@@ -1390,20 +1394,12 @@ impl<'a> SliceContext<'a> {
             );
         }
 
-        // Add residual to prediction — resolve plane once to avoid per-pixel dispatch
+        // Add residual to prediction — single SIMD dispatch for entire block
         let max_val = (1i32 << bit_depth) - 1;
         let (plane, stride) = frame.plane_mut(c_idx);
         let last_row_end = (y0 as usize + size - 1) * stride + x0 as usize + size;
         if last_row_end <= plane.len() {
-            for py in 0..size {
-                let row_start = (y0 as usize + py) * stride + x0 as usize;
-                let row = &mut plane[row_start..row_start + size];
-                let res_row = &residual[py * size..(py + 1) * size];
-                for (out, &r) in row.iter_mut().zip(res_row.iter()) {
-                    let pred = *out as i32;
-                    *out = (pred + r as i32).clamp(0, max_val) as u16;
-                }
-            }
+            incant!(add_residual_block(plane, stride, x0 as usize, y0 as usize, residual, size, max_val), [v3]);
         } else {
             for py in 0..size {
                 let row_start = (y0 as usize + py) * stride + x0 as usize;

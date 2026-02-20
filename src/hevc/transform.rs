@@ -9,8 +9,8 @@
 // Transform and inverse quantization for HEVC
 use archmage::incant;
 #[cfg(target_arch = "x86_64")]
-use super::transform_simd::{idct8_v3, idct16_v3, idct32_v3};
-use super::transform_simd::{idct8_scalar, idct16_scalar, idct32_scalar};
+use super::transform_simd::{idct8_v3, idct16_v3, idct32_v3, dequantize_v3};
+use super::transform_simd::{idct8_scalar, idct16_scalar, idct32_scalar, dequantize_scalar};
 
 /// Maximum number of coefficients (32x32 transform)
 pub const MAX_COEFF: usize = 32 * 32;
@@ -549,20 +549,19 @@ pub fn dequantize(coeffs: &mut [i16], params: DequantParams) {
     let qp_per = params.qp / 6;
     let qp_rem = params.qp % 6;
     let scale = LEVEL_SCALE[qp_rem as usize];
+    let combined_scale = scale * (1 << qp_per);
 
     // When m[x][y]=16 (flat), absorb the factor into shift: bdShift - 4
     let shift = params.bit_depth as i32 - 9 + params.log2_tr_size as i32;
     let add = if shift > 0 { 1 << (shift - 1) } else { 0 };
 
     if shift >= 0 {
-        for coef in coeffs.iter_mut() {
-            let value = (*coef as i32 * scale * (1 << qp_per) + add) >> shift;
-            *coef = value.clamp(-32768, 32767) as i16;
-        }
+        incant!(dequantize(coeffs, combined_scale, shift, add), [v3]);
     } else {
+        // Negative shift (left shift) — rare, keep scalar
         let neg_shift = -shift;
         for coef in coeffs.iter_mut() {
-            let value = (*coef as i32 * scale * (1 << qp_per)) << neg_shift;
+            let value = (*coef as i32 * combined_scale) << neg_shift;
             *coef = value.clamp(-32768, 32767) as i16;
         }
     }
