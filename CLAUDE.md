@@ -201,7 +201,8 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 
 ```
 src/
-├── lib.rs           # Public API
+├── lib.rs           # Public API types (DecoderConfig, DecodeRequest, Limits, etc.)
+├── decode.rs        # Internal decode pipeline (grid, overlay, alpha, gain map, metadata)
 ├── error.rs         # Error types
 ├── heif/
 │   ├── mod.rs
@@ -221,7 +222,8 @@ src/
     ├── deblock.rs   # Deblocking filter (H.265 8.7.2)
     ├── sao.rs       # Sample Adaptive Offset (H.265 8.7.3)
     ├── debug.rs     # CABAC tracker, invariant checks
-    └── picture.rs   # Frame buffer (+ deblock metadata)
+    ├── picture.rs   # Frame buffer, YCbCr→RGB conversion, deblock metadata
+    └── transforms.rs # Spatial transforms: rotation (90/180/270) and mirror (H/V)
 ```
 
 ## FEEDBACK.md
