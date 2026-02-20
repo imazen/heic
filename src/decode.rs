@@ -486,72 +486,96 @@ fn decode_grid(
             output.matrix_coeffs = tile_frame.matrix_coeffs;
         }
 
-        let tile_row = tile_idx as u32 / cols;
-        let tile_col = tile_idx as u32 % cols;
-        let dst_x = tile_col * tile_width;
-        let dst_y = tile_row * tile_height;
+        blit_tile_to_grid(
+            &mut output,
+            tile_frame,
+            tile_idx,
+            cols,
+            tile_width,
+            tile_height,
+            output_width,
+            output_height,
+            chroma_format,
+        );
+    }
 
-        // Luma: copy visible portion (clamp to output dimensions)
-        let copy_w = tile_frame
-            .cropped_width()
-            .min(output_width.saturating_sub(dst_x));
-        let copy_h = tile_frame
-            .cropped_height()
-            .min(output_height.saturating_sub(dst_y));
+    Ok(output)
+}
 
-        let src_y_start = tile_frame.crop_top;
-        let src_x_start = tile_frame.crop_left;
+/// Copy a single decoded tile into the correct position in the output grid frame.
+#[allow(clippy::too_many_arguments)]
+fn blit_tile_to_grid(
+    output: &mut crate::hevc::DecodedFrame,
+    tile: &crate::hevc::DecodedFrame,
+    tile_idx: usize,
+    cols: u32,
+    tile_width: u32,
+    tile_height: u32,
+    output_width: u32,
+    output_height: u32,
+    chroma_format: u8,
+) {
+    let tile_row = tile_idx as u32 / cols;
+    let tile_col = tile_idx as u32 % cols;
+    let dst_x = tile_col * tile_width;
+    let dst_y = tile_row * tile_height;
 
-        for row in 0..copy_h {
-            let src_row = (src_y_start + row) as usize;
-            let dst_row = (dst_y + row) as usize;
-            for col in 0..copy_w {
-                let src_col = (src_x_start + col) as usize;
-                let dst_col = (dst_x + col) as usize;
+    // Luma: copy visible portion (clamp to output dimensions)
+    let copy_w = tile.cropped_width().min(output_width.saturating_sub(dst_x));
+    let copy_h = tile
+        .cropped_height()
+        .min(output_height.saturating_sub(dst_y));
 
-                let src_idx = src_row * tile_frame.y_stride() + src_col;
-                let dst_idx = dst_row * output.y_stride() + dst_col;
-                output.y_plane[dst_idx] = tile_frame.y_plane[src_idx];
-            }
+    let src_y_start = tile.crop_top;
+    let src_x_start = tile.crop_left;
+
+    for row in 0..copy_h {
+        let src_row = (src_y_start + row) as usize;
+        let dst_row = (dst_y + row) as usize;
+        for col in 0..copy_w {
+            let src_col = (src_x_start + col) as usize;
+            let dst_col = (dst_x + col) as usize;
+
+            let src_idx = src_row * tile.y_stride() + src_col;
+            let dst_idx = dst_row * output.y_stride() + dst_col;
+            output.y_plane[dst_idx] = tile.y_plane[src_idx];
         }
+    }
 
-        // Chroma: copy with subsampling
-        if chroma_format > 0 {
-            let (sub_x, sub_y) = match chroma_format {
-                1 => (2u32, 2u32), // 4:2:0
-                2 => (2, 1),       // 4:2:2
-                3 => (1, 1),       // 4:4:4
-                _ => (2, 2),
-            };
-            let c_copy_w = copy_w.div_ceil(sub_x);
-            let c_copy_h = copy_h.div_ceil(sub_y);
-            let c_dst_x = dst_x / sub_x;
-            let c_dst_y = dst_y / sub_y;
-            let c_src_x = src_x_start / sub_x;
-            let c_src_y = src_y_start / sub_y;
+    // Chroma: copy with subsampling
+    if chroma_format > 0 {
+        let (sub_x, sub_y) = match chroma_format {
+            1 => (2u32, 2u32), // 4:2:0
+            2 => (2, 1),       // 4:2:2
+            3 => (1, 1),       // 4:4:4
+            _ => (2, 2),
+        };
+        let c_copy_w = copy_w.div_ceil(sub_x);
+        let c_copy_h = copy_h.div_ceil(sub_y);
+        let c_dst_x = dst_x / sub_x;
+        let c_dst_y = dst_y / sub_y;
+        let c_src_x = src_x_start / sub_x;
+        let c_src_y = src_y_start / sub_y;
 
-            let src_c_stride = tile_frame.c_stride();
-            let dst_c_stride = output.c_stride();
+        let src_c_stride = tile.c_stride();
+        let dst_c_stride = output.c_stride();
 
-            for row in 0..c_copy_h {
-                let src_row = (c_src_y + row) as usize;
-                let dst_row = (c_dst_y + row) as usize;
-                for col in 0..c_copy_w {
-                    let src_col = (c_src_x + col) as usize;
-                    let dst_col = (c_dst_x + col) as usize;
+        for row in 0..c_copy_h {
+            let src_row = (c_src_y + row) as usize;
+            let dst_row = (c_dst_y + row) as usize;
+            for col in 0..c_copy_w {
+                let src_col = (c_src_x + col) as usize;
+                let dst_col = (c_dst_x + col) as usize;
 
-                    let src_idx = src_row * src_c_stride + src_col;
-                    let dst_idx = dst_row * dst_c_stride + dst_col;
-                    if src_idx < tile_frame.cb_plane.len() && dst_idx < output.cb_plane.len() {
-                        output.cb_plane[dst_idx] = tile_frame.cb_plane[src_idx];
-                        output.cr_plane[dst_idx] = tile_frame.cr_plane[src_idx];
-                    }
+                let src_idx = src_row * src_c_stride + src_col;
+                let dst_idx = dst_row * dst_c_stride + dst_col;
+                if src_idx < tile.cb_plane.len() && dst_idx < output.cb_plane.len() {
+                    output.cb_plane[dst_idx] = tile.cb_plane[src_idx];
+                    output.cr_plane[dst_idx] = tile.cr_plane[src_idx];
                 }
             }
         }
     }
-
-    Ok(output)
 }
 
 /// Decode an auxiliary alpha plane and return it sized to match the primary frame.
