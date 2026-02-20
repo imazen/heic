@@ -465,37 +465,31 @@ fn decode_grid(
 
     #[cfg(feature = "parallel")]
     {
-        // Parallel: decode each row's tiles concurrently, blit, then drop before next row.
-        let cols_usize = cols as usize;
-        for row in 0..rows {
-            let row_start = row as usize * cols_usize;
-            let row_end = row_start + cols_usize;
-            let row_tiles: Vec<crate::hevc::DecodedFrame> = tile_data_list[row_start..row_end]
-                .par_iter()
-                .map(|tile_data| {
-                    crate::hevc::decode_with_config(tile_config, tile_data).map_err(Into::into)
-                })
-                .collect::<Result<_>>()?;
+        // Parallel: decode ALL tiles concurrently, then blit into the output frame.
+        // Since each tile blits to a non-overlapping region, this is safe.
+        let all_tiles: Vec<crate::hevc::DecodedFrame> = tile_data_list
+            .par_iter()
+            .map(|tile_data| {
+                crate::hevc::decode_with_config(tile_config, tile_data).map_err(Into::into)
+            })
+            .collect::<Result<_>>()?;
 
-            for (col, tile_frame) in row_tiles.iter().enumerate() {
-                let tile_idx = row as usize * cols_usize + col;
-                if tile_idx == 0 {
-                    output.full_range = tile_frame.full_range;
-                    output.matrix_coeffs = tile_frame.matrix_coeffs;
-                }
-                blit_tile_to_grid(
-                    &mut output,
-                    tile_frame,
-                    tile_idx,
-                    cols,
-                    tile_width,
-                    tile_height,
-                    output_width,
-                    output_height,
-                    chroma_format,
-                );
+        for (tile_idx, tile_frame) in all_tiles.iter().enumerate() {
+            if tile_idx == 0 {
+                output.full_range = tile_frame.full_range;
+                output.matrix_coeffs = tile_frame.matrix_coeffs;
             }
-            // row_tiles dropped here — only 1 row in memory at a time
+            blit_tile_to_grid(
+                &mut output,
+                tile_frame,
+                tile_idx,
+                cols,
+                tile_width,
+                tile_height,
+                output_width,
+                output_height,
+                chroma_format,
+            );
         }
     }
 
