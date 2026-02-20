@@ -496,6 +496,402 @@ pub(crate) fn idct16_scalar(
 // 32x32 IDCT
 // =============================================================================
 
+/// 32-point 1D IDCT on 16 columns simultaneously.
+/// Input: 32 rows as __m256i (each row = 16 i16 values, one per column).
+/// Output: 32 transformed rows as __m256i (i16, clamped via saturating pack).
+///
+/// The structure has 5 levels of butterfly decomposition:
+/// - Odd part: 16 outputs from 16 odd-indexed rows (1,3,...,31)
+/// - Even part: 16-point butterfly on even rows (0,2,...,30)
+///   - Even-Odd: 8 outputs from rows 2,6,10,14,18,22,26,30
+///   - Even-Even: 8-point butterfly on rows 0,4,8,...,28
+///     - Reuses the 8-point structure from idct8
+#[cfg(target_arch = "x86_64")]
+#[rite]
+fn idct32_1d_columns(
+    _token: X64V3Token,
+    r: &[__m256i; 32],
+    shift: __m128i,
+    add: __m256i,
+) -> [__m256i; 32] {
+    // Helper: interleave two 256-bit rows and madd with coefficient pair
+    macro_rules! interleave_madd {
+        ($ra:expr, $rb:expr, $ca:expr, $cb:expr) => {{
+            let lo = _mm256_unpacklo_epi16($ra, $rb);
+            let hi = _mm256_unpackhi_epi16($ra, $rb);
+            let coeff = _mm256_set1_epi32(pack($ca, $cb));
+            (_mm256_madd_epi16(lo, coeff), _mm256_madd_epi16(hi, coeff))
+        }};
+    }
+
+    // Helper: accumulate 4 pairs of madd results into (lo, hi) sums
+    macro_rules! sum4_pairs {
+        (($ra1:expr, $rb1:expr, $ca1:expr, $cb1:expr),
+         ($ra2:expr, $rb2:expr, $ca2:expr, $cb2:expr),
+         ($ra3:expr, $rb3:expr, $ca3:expr, $cb3:expr),
+         ($ra4:expr, $rb4:expr, $ca4:expr, $cb4:expr)) => {{
+            let (l1, h1) = interleave_madd!($ra1, $rb1, $ca1, $cb1);
+            let (l2, h2) = interleave_madd!($ra2, $rb2, $ca2, $cb2);
+            let (l3, h3) = interleave_madd!($ra3, $rb3, $ca3, $cb3);
+            let (l4, h4) = interleave_madd!($ra4, $rb4, $ca4, $cb4);
+            (
+                _mm256_add_epi32(_mm256_add_epi32(l1, l2), _mm256_add_epi32(l3, l4)),
+                _mm256_add_epi32(_mm256_add_epi32(h1, h2), _mm256_add_epi32(h3, h4)),
+            )
+        }};
+    }
+
+    // Helper: accumulate 8 pairs into (lo, hi) sums — for the 32-point odd part
+    macro_rules! sum8_pairs {
+        (($ra1:expr, $rb1:expr, $ca1:expr, $cb1:expr),
+         ($ra2:expr, $rb2:expr, $ca2:expr, $cb2:expr),
+         ($ra3:expr, $rb3:expr, $ca3:expr, $cb3:expr),
+         ($ra4:expr, $rb4:expr, $ca4:expr, $cb4:expr),
+         ($ra5:expr, $rb5:expr, $ca5:expr, $cb5:expr),
+         ($ra6:expr, $rb6:expr, $ca6:expr, $cb6:expr),
+         ($ra7:expr, $rb7:expr, $ca7:expr, $cb7:expr),
+         ($ra8:expr, $rb8:expr, $ca8:expr, $cb8:expr)) => {{
+            let (l1, h1) = interleave_madd!($ra1, $rb1, $ca1, $cb1);
+            let (l2, h2) = interleave_madd!($ra2, $rb2, $ca2, $cb2);
+            let (l3, h3) = interleave_madd!($ra3, $rb3, $ca3, $cb3);
+            let (l4, h4) = interleave_madd!($ra4, $rb4, $ca4, $cb4);
+            let (l5, h5) = interleave_madd!($ra5, $rb5, $ca5, $cb5);
+            let (l6, h6) = interleave_madd!($ra6, $rb6, $ca6, $cb6);
+            let (l7, h7) = interleave_madd!($ra7, $rb7, $ca7, $cb7);
+            let (l8, h8) = interleave_madd!($ra8, $rb8, $ca8, $cb8);
+            let la = _mm256_add_epi32(_mm256_add_epi32(l1, l2), _mm256_add_epi32(l3, l4));
+            let lb = _mm256_add_epi32(_mm256_add_epi32(l5, l6), _mm256_add_epi32(l7, l8));
+            let ha = _mm256_add_epi32(_mm256_add_epi32(h1, h2), _mm256_add_epi32(h3, h4));
+            let hb = _mm256_add_epi32(_mm256_add_epi32(h5, h6), _mm256_add_epi32(h7, h8));
+            (_mm256_add_epi32(la, lb), _mm256_add_epi32(ha, hb))
+        }};
+    }
+
+    // =========================================================================
+    // Odd part: 16 outputs O[0..15] from odd rows (1,3,5,...,31)
+    // H.265 Table 8-5 coefficients
+    // =========================================================================
+    let (o0l, o0h) = sum8_pairs!(
+        (r[1], r[3], 90, 90), (r[5], r[7], 88, 85),
+        (r[9], r[11], 82, 78), (r[13], r[15], 73, 67),
+        (r[17], r[19], 61, 54), (r[21], r[23], 46, 38),
+        (r[25], r[27], 31, 22), (r[29], r[31], 13, 4)
+    );
+    let (o1l, o1h) = sum8_pairs!(
+        (r[1], r[3], 90, 82), (r[5], r[7], 67, 46),
+        (r[9], r[11], 22, -4), (r[13], r[15], -31, -54),
+        (r[17], r[19], -73, -85), (r[21], r[23], -90, -88),
+        (r[25], r[27], -78, -61), (r[29], r[31], -38, -13)
+    );
+    let (o2l, o2h) = sum8_pairs!(
+        (r[1], r[3], 88, 67), (r[5], r[7], 31, -13),
+        (r[9], r[11], -54, -82), (r[13], r[15], -90, -78),
+        (r[17], r[19], -46, -4), (r[21], r[23], 38, 73),
+        (r[25], r[27], 90, 85), (r[29], r[31], 61, 22)
+    );
+    let (o3l, o3h) = sum8_pairs!(
+        (r[1], r[3], 85, 46), (r[5], r[7], -13, -67),
+        (r[9], r[11], -90, -73), (r[13], r[15], -22, 38),
+        (r[17], r[19], 82, 88), (r[21], r[23], 54, -4),
+        (r[25], r[27], -61, -90), (r[29], r[31], -78, -31)
+    );
+    let (o4l, o4h) = sum8_pairs!(
+        (r[1], r[3], 82, 22), (r[5], r[7], -54, -90),
+        (r[9], r[11], -61, 13), (r[13], r[15], 78, 85),
+        (r[17], r[19], 31, -46), (r[21], r[23], -90, -67),
+        (r[25], r[27], 4, 73), (r[29], r[31], 88, 38)
+    );
+    let (o5l, o5h) = sum8_pairs!(
+        (r[1], r[3], 78, -4), (r[5], r[7], -82, -73),
+        (r[9], r[11], 13, 85), (r[13], r[15], 67, -22),
+        (r[17], r[19], -88, -61), (r[21], r[23], 31, 90),
+        (r[25], r[27], 54, -38), (r[29], r[31], -90, -46)
+    );
+    let (o6l, o6h) = sum8_pairs!(
+        (r[1], r[3], 73, -31), (r[5], r[7], -90, -22),
+        (r[9], r[11], 78, 67), (r[13], r[15], -38, -90),
+        (r[17], r[19], -13, 82), (r[21], r[23], 61, -46),
+        (r[25], r[27], -88, -4), (r[29], r[31], 85, 54)
+    );
+    let (o7l, o7h) = sum8_pairs!(
+        (r[1], r[3], 67, -54), (r[5], r[7], -78, 38),
+        (r[9], r[11], 85, -22), (r[13], r[15], -90, 4),
+        (r[17], r[19], 90, 13), (r[21], r[23], -88, -31),
+        (r[25], r[27], 82, 46), (r[29], r[31], -73, -61)
+    );
+    let (o8l, o8h) = sum8_pairs!(
+        (r[1], r[3], 61, -73), (r[5], r[7], -46, 82),
+        (r[9], r[11], 31, -88), (r[13], r[15], -13, 90),
+        (r[17], r[19], -4, -90), (r[21], r[23], 22, 85),
+        (r[25], r[27], -38, -78), (r[29], r[31], 54, 67)
+    );
+    let (o9l, o9h) = sum8_pairs!(
+        (r[1], r[3], 54, -85), (r[5], r[7], -4, 88),
+        (r[9], r[11], -46, -61), (r[13], r[15], 82, 13),
+        (r[17], r[19], -90, 38), (r[21], r[23], 67, -78),
+        (r[25], r[27], -22, 90), (r[29], r[31], -31, -73)
+    );
+    let (o10l, o10h) = sum8_pairs!(
+        (r[1], r[3], 46, -90), (r[5], r[7], 38, 54),
+        (r[9], r[11], -90, 31), (r[13], r[15], 61, -88),
+        (r[17], r[19], 22, 67), (r[21], r[23], -85, 13),
+        (r[25], r[27], 73, -82), (r[29], r[31], 4, 78)
+    );
+    let (o11l, o11h) = sum8_pairs!(
+        (r[1], r[3], 38, -88), (r[5], r[7], 73, -4),
+        (r[9], r[11], -67, 90), (r[13], r[15], -46, -31),
+        (r[17], r[19], 85, -78), (r[21], r[23], 13, 61),
+        (r[25], r[27], -90, 54), (r[29], r[31], 22, -82)
+    );
+    let (o12l, o12h) = sum8_pairs!(
+        (r[1], r[3], 31, -78), (r[5], r[7], 90, -61),
+        (r[9], r[11], 4, 54), (r[13], r[15], -88, 82),
+        (r[17], r[19], -38, -22), (r[21], r[23], 73, -90),
+        (r[25], r[27], 67, -13), (r[29], r[31], -46, 85)
+    );
+    let (o13l, o13h) = sum8_pairs!(
+        (r[1], r[3], 22, -61), (r[5], r[7], 85, -90),
+        (r[9], r[11], 73, -38), (r[13], r[15], -4, 46),
+        (r[17], r[19], -78, 90), (r[21], r[23], -82, 54),
+        (r[25], r[27], -13, -31), (r[29], r[31], 67, -88)
+    );
+    let (o14l, o14h) = sum8_pairs!(
+        (r[1], r[3], 13, -38), (r[5], r[7], 61, -78),
+        (r[9], r[11], 88, -90), (r[13], r[15], 85, -73),
+        (r[17], r[19], 54, -31), (r[21], r[23], 4, 22),
+        (r[25], r[27], -46, 67), (r[29], r[31], -82, 90)
+    );
+    let (o15l, o15h) = sum8_pairs!(
+        (r[1], r[3], 4, -13), (r[5], r[7], 22, -31),
+        (r[9], r[11], 38, -46), (r[13], r[15], 54, -61),
+        (r[17], r[19], 67, -73), (r[21], r[23], 78, -82),
+        (r[25], r[27], 85, -88), (r[29], r[31], 90, -90)
+    );
+
+    // =========================================================================
+    // Even part: 16-point butterfly on even rows (0,2,4,...,30)
+    // This reuses the 16-point structure with indices mapped: row k → r[2k]
+    // =========================================================================
+
+    // Even-Odd (EO): 8 outputs from rows 2,6,10,14,18,22,26,30
+    // Same 16-point odd coefficients as idct16
+    macro_rules! sum2_pairs {
+        (($ra1:expr, $rb1:expr, $ca1:expr, $cb1:expr),
+         ($ra2:expr, $rb2:expr, $ca2:expr, $cb2:expr)) => {{
+            let (l1, h1) = interleave_madd!($ra1, $rb1, $ca1, $cb1);
+            let (l2, h2) = interleave_madd!($ra2, $rb2, $ca2, $cb2);
+            (_mm256_add_epi32(l1, l2), _mm256_add_epi32(h1, h2))
+        }};
+    }
+
+    let (eo0l, eo0h) = sum4_pairs!(
+        (r[2], r[6], 90, 87), (r[10], r[14], 80, 70),
+        (r[18], r[22], 57, 43), (r[26], r[30], 25, 9)
+    );
+    let (eo1l, eo1h) = sum4_pairs!(
+        (r[2], r[6], 87, 57), (r[10], r[14], 9, -43),
+        (r[18], r[22], -80, -90), (r[26], r[30], -70, -25)
+    );
+    let (eo2l, eo2h) = sum4_pairs!(
+        (r[2], r[6], 80, 9), (r[10], r[14], -70, -87),
+        (r[18], r[22], -25, 57), (r[26], r[30], 90, 43)
+    );
+    let (eo3l, eo3h) = sum4_pairs!(
+        (r[2], r[6], 70, -43), (r[10], r[14], -87, 9),
+        (r[18], r[22], 90, 25), (r[26], r[30], -80, -57)
+    );
+    let (eo4l, eo4h) = sum4_pairs!(
+        (r[2], r[6], 57, -80), (r[10], r[14], -25, 90),
+        (r[18], r[22], -9, -87), (r[26], r[30], 43, 70)
+    );
+    let (eo5l, eo5h) = sum4_pairs!(
+        (r[2], r[6], 43, -90), (r[10], r[14], 57, 25),
+        (r[18], r[22], -87, 70), (r[26], r[30], 9, -80)
+    );
+    let (eo6l, eo6h) = sum4_pairs!(
+        (r[2], r[6], 25, -70), (r[10], r[14], 90, -80),
+        (r[18], r[22], 43, 9), (r[26], r[30], -57, 87)
+    );
+    let (eo7l, eo7h) = sum4_pairs!(
+        (r[2], r[6], 9, -25), (r[10], r[14], 43, -57),
+        (r[18], r[22], 70, -80), (r[26], r[30], 87, -90)
+    );
+
+    // Even-Even-Odd (EEO): 4 outputs from rows 4,12,20,28
+    let (eeo0l, eeo0h) = sum2_pairs!((r[4], r[12], 89, 75), (r[20], r[28], 50, 18));
+    let (eeo1l, eeo1h) = sum2_pairs!((r[4], r[12], 75, -18), (r[20], r[28], -89, -50));
+    let (eeo2l, eeo2h) = sum2_pairs!((r[4], r[12], 50, -89), (r[20], r[28], 18, 75));
+    let (eeo3l, eeo3h) = sum2_pairs!((r[4], r[12], 18, -50), (r[20], r[28], 75, -89));
+
+    // Even-Even-Even (EEE): from rows 0,8,16,24
+    let (eeee0l, eeee0h) = interleave_madd!(r[0], r[16], 64, 64);
+    let (eeee1l, eeee1h) = interleave_madd!(r[0], r[16], 64, -64);
+    let (eeeo0l, eeeo0h) = interleave_madd!(r[8], r[24], 83, 36);
+    let (eeeo1l, eeeo1h) = interleave_madd!(r[8], r[24], 36, -83);
+
+    // EEE[0..3]
+    let eee0l = _mm256_add_epi32(eeee0l, eeeo0l);
+    let eee0h = _mm256_add_epi32(eeee0h, eeeo0h);
+    let eee1l = _mm256_add_epi32(eeee1l, eeeo1l);
+    let eee1h = _mm256_add_epi32(eeee1h, eeeo1h);
+    let eee2l = _mm256_sub_epi32(eeee1l, eeeo1l);
+    let eee2h = _mm256_sub_epi32(eeee1h, eeeo1h);
+    let eee3l = _mm256_sub_epi32(eeee0l, eeeo0l);
+    let eee3h = _mm256_sub_epi32(eeee0h, eeeo0h);
+
+    // EE[0..7] = EEE ± EEO
+    let ee0l = _mm256_add_epi32(eee0l, eeo0l);
+    let ee0h = _mm256_add_epi32(eee0h, eeo0h);
+    let ee1l = _mm256_add_epi32(eee1l, eeo1l);
+    let ee1h = _mm256_add_epi32(eee1h, eeo1h);
+    let ee2l = _mm256_add_epi32(eee2l, eeo2l);
+    let ee2h = _mm256_add_epi32(eee2h, eeo2h);
+    let ee3l = _mm256_add_epi32(eee3l, eeo3l);
+    let ee3h = _mm256_add_epi32(eee3h, eeo3h);
+    let ee4l = _mm256_sub_epi32(eee3l, eeo3l);
+    let ee4h = _mm256_sub_epi32(eee3h, eeo3h);
+    let ee5l = _mm256_sub_epi32(eee2l, eeo2l);
+    let ee5h = _mm256_sub_epi32(eee2h, eeo2h);
+    let ee6l = _mm256_sub_epi32(eee1l, eeo1l);
+    let ee6h = _mm256_sub_epi32(eee1h, eeo1h);
+    let ee7l = _mm256_sub_epi32(eee0l, eeo0l);
+    let ee7h = _mm256_sub_epi32(eee0h, eeo0h);
+
+    // E[0..15] = EE ± EO
+    let e0l = _mm256_add_epi32(ee0l, eo0l);
+    let e0h = _mm256_add_epi32(ee0h, eo0h);
+    let e1l = _mm256_add_epi32(ee1l, eo1l);
+    let e1h = _mm256_add_epi32(ee1h, eo1h);
+    let e2l = _mm256_add_epi32(ee2l, eo2l);
+    let e2h = _mm256_add_epi32(ee2h, eo2h);
+    let e3l = _mm256_add_epi32(ee3l, eo3l);
+    let e3h = _mm256_add_epi32(ee3h, eo3h);
+    let e4l = _mm256_add_epi32(ee4l, eo4l);
+    let e4h = _mm256_add_epi32(ee4h, eo4h);
+    let e5l = _mm256_add_epi32(ee5l, eo5l);
+    let e5h = _mm256_add_epi32(ee5h, eo5h);
+    let e6l = _mm256_add_epi32(ee6l, eo6l);
+    let e6h = _mm256_add_epi32(ee6h, eo6h);
+    let e7l = _mm256_add_epi32(ee7l, eo7l);
+    let e7h = _mm256_add_epi32(ee7h, eo7h);
+    let e8l = _mm256_sub_epi32(ee7l, eo7l);
+    let e8h = _mm256_sub_epi32(ee7h, eo7h);
+    let e9l = _mm256_sub_epi32(ee6l, eo6l);
+    let e9h = _mm256_sub_epi32(ee6h, eo6h);
+    let e10l = _mm256_sub_epi32(ee5l, eo5l);
+    let e10h = _mm256_sub_epi32(ee5h, eo5h);
+    let e11l = _mm256_sub_epi32(ee4l, eo4l);
+    let e11h = _mm256_sub_epi32(ee4h, eo4h);
+    let e12l = _mm256_sub_epi32(ee3l, eo3l);
+    let e12h = _mm256_sub_epi32(ee3h, eo3h);
+    let e13l = _mm256_sub_epi32(ee2l, eo2l);
+    let e13h = _mm256_sub_epi32(ee2h, eo2h);
+    let e14l = _mm256_sub_epi32(ee1l, eo1l);
+    let e14h = _mm256_sub_epi32(ee1h, eo1h);
+    let e15l = _mm256_sub_epi32(ee0l, eo0l);
+    let e15h = _mm256_sub_epi32(ee0h, eo0h);
+
+    // =========================================================================
+    // Butterfly + round + shift + pack for all 32 output rows
+    // =========================================================================
+    macro_rules! butterfly_pack {
+        ($el:expr, $eh:expr, $ol:expr, $oh:expr, add) => {{
+            let dl = _mm256_sra_epi32(
+                _mm256_add_epi32(_mm256_add_epi32($el, $ol), add),
+                shift,
+            );
+            let dh = _mm256_sra_epi32(
+                _mm256_add_epi32(_mm256_add_epi32($eh, $oh), add),
+                shift,
+            );
+            _mm256_packs_epi32(dl, dh)
+        }};
+        ($el:expr, $eh:expr, $ol:expr, $oh:expr, sub) => {{
+            let dl = _mm256_sra_epi32(
+                _mm256_add_epi32(_mm256_sub_epi32($el, $ol), add),
+                shift,
+            );
+            let dh = _mm256_sra_epi32(
+                _mm256_add_epi32(_mm256_sub_epi32($eh, $oh), add),
+                shift,
+            );
+            _mm256_packs_epi32(dl, dh)
+        }};
+    }
+
+    [
+        butterfly_pack!(e0l, e0h, o0l, o0h, add),
+        butterfly_pack!(e1l, e1h, o1l, o1h, add),
+        butterfly_pack!(e2l, e2h, o2l, o2h, add),
+        butterfly_pack!(e3l, e3h, o3l, o3h, add),
+        butterfly_pack!(e4l, e4h, o4l, o4h, add),
+        butterfly_pack!(e5l, e5h, o5l, o5h, add),
+        butterfly_pack!(e6l, e6h, o6l, o6h, add),
+        butterfly_pack!(e7l, e7h, o7l, o7h, add),
+        butterfly_pack!(e8l, e8h, o8l, o8h, add),
+        butterfly_pack!(e9l, e9h, o9l, o9h, add),
+        butterfly_pack!(e10l, e10h, o10l, o10h, add),
+        butterfly_pack!(e11l, e11h, o11l, o11h, add),
+        butterfly_pack!(e12l, e12h, o12l, o12h, add),
+        butterfly_pack!(e13l, e13h, o13l, o13h, add),
+        butterfly_pack!(e14l, e14h, o14l, o14h, add),
+        butterfly_pack!(e15l, e15h, o15l, o15h, add),
+        butterfly_pack!(e15l, e15h, o15l, o15h, sub),
+        butterfly_pack!(e14l, e14h, o14l, o14h, sub),
+        butterfly_pack!(e13l, e13h, o13l, o13h, sub),
+        butterfly_pack!(e12l, e12h, o12l, o12h, sub),
+        butterfly_pack!(e11l, e11h, o11l, o11h, sub),
+        butterfly_pack!(e10l, e10h, o10l, o10h, sub),
+        butterfly_pack!(e9l, e9h, o9l, o9h, sub),
+        butterfly_pack!(e8l, e8h, o8l, o8h, sub),
+        butterfly_pack!(e7l, e7h, o7l, o7h, sub),
+        butterfly_pack!(e6l, e6h, o6l, o6h, sub),
+        butterfly_pack!(e5l, e5h, o5l, o5h, sub),
+        butterfly_pack!(e4l, e4h, o4l, o4h, sub),
+        butterfly_pack!(e3l, e3h, o3l, o3h, sub),
+        butterfly_pack!(e2l, e2h, o2l, o2h, sub),
+        butterfly_pack!(e1l, e1h, o1l, o1h, sub),
+        butterfly_pack!(e0l, e0h, o0l, o0h, sub),
+    ]
+}
+
+/// Transpose a 32x32 matrix of i16 stored as 32 pairs of __m256i (lo=cols 0-15, hi=cols 16-31).
+/// Uses four 16x16 sub-transposes with corner swaps.
+#[cfg(target_arch = "x86_64")]
+#[rite]
+fn transpose_32x32(
+    token: X64V3Token,
+    lo: &[__m256i; 32],
+    hi: &[__m256i; 32],
+) -> ([__m256i; 32], [__m256i; 32]) {
+    // Sub-matrices:
+    // TL = lo[0..16]  (rows 0-15, cols 0-15)
+    // TR = hi[0..16]  (rows 0-15, cols 16-31)
+    // BL = lo[16..32] (rows 16-31, cols 0-15)
+    // BR = hi[16..32] (rows 16-31, cols 16-31)
+
+    let tl_arr: [__m256i; 16] = lo[0..16].try_into().unwrap();
+    let tr_arr: [__m256i; 16] = hi[0..16].try_into().unwrap();
+    let bl_arr: [__m256i; 16] = lo[16..32].try_into().unwrap();
+    let br_arr: [__m256i; 16] = hi[16..32].try_into().unwrap();
+
+    let tl_t = transpose_16x16(token, &tl_arr);
+    let tr_t = transpose_16x16(token, &tr_arr);
+    let bl_t = transpose_16x16(token, &bl_arr);
+    let br_t = transpose_16x16(token, &br_arr);
+
+    // After transpose:
+    // out_lo[i] = tl_t[i] for i < 16, tr_t[i-16] for i >= 16
+    // out_hi[i] = bl_t[i] for i < 16, br_t[i-16] for i >= 16
+    let mut out_lo = [_mm256_setzero_si256(); 32];
+    let mut out_hi = [_mm256_setzero_si256(); 32];
+    out_lo[..16].copy_from_slice(&tl_t);
+    out_lo[16..].copy_from_slice(&tr_t);
+    out_hi[..16].copy_from_slice(&bl_t);
+    out_hi[16..].copy_from_slice(&br_t);
+    (out_lo, out_hi)
+}
+
 /// AVX2 32x32 IDCT entry point.
 /// Processes in two column groups (0-15 and 16-31), each fitting in __m256i.
 #[arcane]
@@ -505,17 +901,46 @@ pub(crate) fn idct32_v3(
     output: &mut [i16; 1024],
     bit_depth: u8,
 ) {
-    // For 32x32, each row is 32 i16 = two __m256i. Process each half separately.
-    // Both halves share the same butterfly structure but operate on different columns.
+    // Load 32 rows, each as two __m256i (cols 0-15 and cols 16-31)
+    let mut lo = [_mm256_setzero_si256(); 32];
+    let mut hi = [_mm256_setzero_si256(); 32];
+    for i in 0..32 {
+        let base = i * 32;
+        lo[i] = _mm256_loadu_si256::<[i16; 16]>(coeffs[base..base + 16].try_into().unwrap());
+        hi[i] = _mm256_loadu_si256::<[i16; 16]>(coeffs[base + 16..base + 32].try_into().unwrap());
+    }
 
-    let shift1 = 7i32;
+    // Pass 1: vertical (column transform), shift = 7
+    let shift1 = _mm_cvtsi32_si128(7);
+    let add1 = _mm256_set1_epi32(1 << 6);
+    let d_lo = idct32_1d_columns(_token, &lo, shift1, add1);
+    let d_hi = idct32_1d_columns(_token, &hi, shift1, add1);
+
+    // Transpose 32x32
+    let (t_lo, t_hi) = transpose_32x32(_token, &d_lo, &d_hi);
+
+    // Pass 2: horizontal (row transform), shift = 20 - bit_depth
     let shift2 = 20 - bit_depth as i32;
+    let shift2_v = _mm_cvtsi32_si128(shift2);
+    let add2 = _mm256_set1_epi32(1 << (shift2 - 1));
+    let e_lo = idct32_1d_columns(_token, &t_lo, shift2_v, add2);
+    let e_hi = idct32_1d_columns(_token, &t_hi, shift2_v, add2);
 
-    // Use the scalar implementation for 32x32 for now — the 8x8 and 16x16
-    // SIMD paths cover the majority of transform blocks in typical HEIC content.
-    // TODO: Implement full 32x32 SIMD when profiling shows it's a bottleneck.
-    super::transform::idct32_inner(coeffs, output, bit_depth);
-    let _ = (shift1, shift2);
+    // Transpose back
+    let (f_lo, f_hi) = transpose_32x32(_token, &e_lo, &e_hi);
+
+    // Store 32 output rows
+    for i in 0..32 {
+        let base = i * 32;
+        _mm256_storeu_si256::<[i16; 16]>(
+            (&mut output[base..base + 16]).try_into().unwrap(),
+            f_lo[i],
+        );
+        _mm256_storeu_si256::<[i16; 16]>(
+            (&mut output[base + 16..base + 32]).try_into().unwrap(),
+            f_hi[i],
+        );
+    }
 }
 
 /// Scalar fallback for 32x32 IDCT
