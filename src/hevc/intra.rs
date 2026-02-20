@@ -8,8 +8,8 @@
 use super::picture::{DecodedFrame, UNINIT_SAMPLE};
 use super::slice::IntraPredMode;
 
-/// Maximum block size for intra prediction
-pub const MAX_INTRA_PRED_BLOCK_SIZE: usize = 64;
+/// Maximum block size for intra prediction (HEVC max intra TU = 32)
+const MAX_INTRA_PRED_BLOCK_SIZE: usize = 32;
 
 /// Intra prediction angle table (H.265 Table 8-4)
 /// Index 0-1 are placeholders, modes 2-34 have actual angles
@@ -269,14 +269,27 @@ fn fill_border_samples(
     // Merged loop for top and above-right (both read from row y-1)
     if avail_top {
         let top_row_start = (y - 1) as usize * stride;
-        for i in 0..(2 * size) {
-            let sx = x + i;
-            if sx < frame_w {
-                let plane_idx = top_row_start + sx as usize;
+        // Hoist bounds: compute how many valid top samples exist
+        let top_count = (2 * size).min(frame_w.saturating_sub(x)) as usize;
+        let top_row_end = top_row_start + x as usize + top_count;
+        if top_row_end <= plane.len() {
+            // Fast path: all valid top samples are in-bounds
+            let row_base = top_row_start + x as usize;
+            for i in 0..top_count {
+                let raw = plane[row_base + i];
+                if raw != UNINIT_SAMPLE {
+                    let idx = center + 1 + i;
+                    border[idx] = raw as i32;
+                    avail[idx] = true;
+                }
+            }
+        } else {
+            for i in 0..top_count {
+                let plane_idx = top_row_start + x as usize + i;
                 if plane_idx < plane.len() {
                     let raw = plane[plane_idx];
                     if raw != UNINIT_SAMPLE {
-                        let idx = center + 1 + i as usize;
+                        let idx = center + 1 + i;
                         border[idx] = raw as i32;
                         avail[idx] = true;
                     }
@@ -289,14 +302,26 @@ fn fill_border_samples(
     // All read from column x-1, merged into one loop
     if avail_left {
         let left_x = (x - 1) as usize;
-        for i in 0..(2 * size) {
-            let sy = y + i;
-            if sy < frame_h {
-                let plane_idx = sy as usize * stride + left_x;
+        // Hoist bounds: compute how many valid left samples exist
+        let left_count = (2 * size).min(frame_h.saturating_sub(y)) as usize;
+        let last_left_idx = (y as usize + left_count.saturating_sub(1)) * stride + left_x;
+        if last_left_idx < plane.len() {
+            // Fast path: all valid left samples are in-bounds
+            for i in 0..left_count {
+                let raw = plane[(y as usize + i) * stride + left_x];
+                if raw != UNINIT_SAMPLE {
+                    let idx = center - 1 - i;
+                    border[idx] = raw as i32;
+                    avail[idx] = true;
+                }
+            }
+        } else {
+            for i in 0..left_count {
+                let plane_idx = (y as usize + i) * stride + left_x;
                 if plane_idx < plane.len() {
                     let raw = plane[plane_idx];
                     if raw != UNINIT_SAMPLE {
-                        let idx = center - 1 - i as usize;
+                        let idx = center - 1 - i;
                         border[idx] = raw as i32;
                         avail[idx] = true;
                     }
@@ -326,6 +351,13 @@ fn reference_sample_substitution(
 ) {
     // Total reference samples: 4*size + 1 (2*size left + corner + 2*size top)
     // Layout in border array: center-2*size .. center+2*size
+
+    // Fast path: check if all samples are available (common for interior blocks)
+    let range_start = center - 2 * size;
+    let range_end = center + 2 * size + 1;
+    if avail[range_start..range_end].iter().all(|&a| a) {
+        return;
+    }
 
     // Step 1: Find first available sample (scan from bottom-left to top-right)
     let mut first_avail_val = None;
@@ -576,29 +608,31 @@ fn predict_angular(
             let i_idx = ((py + 1) * intra_pred_angle) >> 5;
             let i_fact = ((py + 1) * intra_pred_angle) & 31;
             let row_start = (y as i32 + py) as usize * stride + x as usize;
+            // Hoist row-constant base index
+            let base_idx = (ref_center as i32 + i_idx + 1) as usize;
 
             if block_fits {
                 let row = &mut plane[row_start..row_start + n_u];
                 if i_fact != 0 {
+                    let w0 = 32 - i_fact;
                     for (px, out) in row.iter_mut().enumerate() {
-                        let idx = (ref_center as i32 + px as i32 + i_idx + 1) as usize;
-                        let pred =
-                            ((32 - i_fact) * ref_arr[idx] + i_fact * ref_arr[idx + 1] + 16) >> 5;
+                        let idx = base_idx + px;
+                        let pred = (w0 * ref_arr[idx] + i_fact * ref_arr[idx + 1] + 16) >> 5;
                         *out = pred.clamp(0, max_val) as u16;
                     }
                 } else {
                     for (px, out) in row.iter_mut().enumerate() {
-                        let idx = (ref_center as i32 + px as i32 + i_idx + 1) as usize;
-                        *out = ref_arr[idx].clamp(0, max_val) as u16;
+                        *out = ref_arr[base_idx + px].clamp(0, max_val) as u16;
                     }
                 }
             } else {
+                let w0 = 32 - i_fact;
                 for px in 0..n_u {
                     let out_idx = row_start + px;
                     if out_idx < plane.len() {
-                        let idx = (ref_center as i32 + px as i32 + i_idx + 1) as usize;
+                        let idx = base_idx + px;
                         let pred = if i_fact != 0 {
-                            ((32 - i_fact) * ref_arr[idx] + i_fact * ref_arr[idx + 1] + 16) >> 5
+                            (w0 * ref_arr[idx] + i_fact * ref_arr[idx + 1] + 16) >> 5
                         } else {
                             ref_arr[idx]
                         };
@@ -649,17 +683,18 @@ fn predict_angular(
         // Generate prediction (transposed compared to mode >= 18)
         for py in 0..n {
             let row_start = (y as i32 + py) as usize * stride + x as usize;
+            // Hoist row-constant base index
+            let row_base = (ref_center as i32 + py + 1) as usize;
 
             if block_fits {
                 let row = &mut plane[row_start..row_start + n_u];
                 for (px, out) in row.iter_mut().enumerate() {
                     let i_idx = ((px as i32 + 1) * intra_pred_angle) >> 5;
                     let i_fact = ((px as i32 + 1) * intra_pred_angle) & 31;
+                    let idx = (row_base as i32 + i_idx) as usize;
                     let pred = if i_fact != 0 {
-                        let idx = (ref_center as i32 + py + i_idx + 1) as usize;
                         ((32 - i_fact) * ref_arr[idx] + i_fact * ref_arr[idx + 1] + 16) >> 5
                     } else {
-                        let idx = (ref_center as i32 + py + i_idx + 1) as usize;
                         ref_arr[idx]
                     };
                     *out = pred.clamp(0, max_val) as u16;
@@ -670,11 +705,10 @@ fn predict_angular(
                     if out_idx < plane.len() {
                         let i_idx = ((px as i32 + 1) * intra_pred_angle) >> 5;
                         let i_fact = ((px as i32 + 1) * intra_pred_angle) & 31;
+                        let idx = (row_base as i32 + i_idx) as usize;
                         let pred = if i_fact != 0 {
-                            let idx = (ref_center as i32 + py + i_idx + 1) as usize;
                             ((32 - i_fact) * ref_arr[idx] + i_fact * ref_arr[idx + 1] + 16) >> 5
                         } else {
-                            let idx = (ref_center as i32 + py + i_idx + 1) as usize;
                             ref_arr[idx]
                         };
                         plane[out_idx] = pred.clamp(0, max_val) as u16;
