@@ -596,12 +596,25 @@ impl<'a> DecodeRequest<'a> {
     ///
     /// Returns `(width, height)` on success.
     ///
+    /// For grid-based images (most iPhone photos) without transforms or alpha,
+    /// this uses a streaming path that color-converts each tile directly into
+    /// the output buffer, avoiding the intermediate full-frame YCbCr allocation.
+    ///
     /// # Errors
     ///
     /// Returns [`HeicError::BufferTooSmall`] if the output buffer is too small,
     /// or other errors if decoding fails.
     pub fn decode_into(self, output: &mut [u8]) -> Result<(u32, u32)> {
         let stop: &dyn Stop = self.stop.unwrap_or(&Unstoppable);
+
+        // Try streaming path for eligible grid images (no full-frame YCbCr allocation)
+        if let Some(result) =
+            decode::try_decode_grid_streaming(self.data, self.limits, stop, self.layout, output)?
+        {
+            return Ok(result);
+        }
+
+        // Fallback: full-frame decode then color convert
         let frame = decode::decode_to_frame(self.data, self.limits, stop)?;
 
         let width = frame.cropped_width();

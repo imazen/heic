@@ -603,6 +603,353 @@ fn blit_tile_to_grid(
     }
 }
 
+/// Try to decode a grid image directly into an RGB output buffer,
+/// bypassing intermediate full-frame YCbCr assembly.
+///
+/// Returns `Ok(None)` if the image is not eligible for streaming
+/// (not a grid, has transforms, has alpha). Returns `Ok(Some((w, h)))`
+/// on success with the streaming path.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_decode_grid_streaming(
+    data: &[u8],
+    limits: Option<&Limits>,
+    stop: &dyn Stop,
+    layout: PixelLayout,
+    output: &mut [u8],
+) -> Result<Option<(u32, u32)>> {
+    let limits = limits.unwrap_or(&NO_LIMITS);
+
+    check_stop(stop)?;
+
+    let container = heif::parse(data)?;
+    let primary_item = container.primary_item().ok_or(HeicError::NoPrimaryImage)?;
+
+    // Eligibility: must be a grid with no transforms and no alpha
+    if primary_item.item_type != ItemType::Grid {
+        return Ok(None);
+    }
+    if !primary_item.transforms.is_empty() {
+        return Ok(None);
+    }
+
+    // Check for alpha auxiliary image
+    let has_alpha = !container
+        .find_auxiliary_items(primary_item.id, "urn:mpeg:hevc:2015:auxid:1")
+        .is_empty()
+        || !container
+            .find_auxiliary_items(
+                primary_item.id,
+                "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha",
+            )
+            .is_empty();
+    if has_alpha {
+        return Ok(None);
+    }
+
+    // Parse grid descriptor
+    let grid_data = container
+        .get_item_data(primary_item.id)
+        .ok_or(HeicError::InvalidData("Missing grid descriptor"))?;
+
+    if grid_data.len() < 8 {
+        return Err(HeicError::InvalidData("Grid descriptor too short").into());
+    }
+
+    let flags = grid_data[1];
+    let rows = grid_data[2] as u32 + 1;
+    let cols = grid_data[3] as u32 + 1;
+    let (output_width, output_height) = if (flags & 1) != 0 {
+        if grid_data.len() < 12 {
+            return Err(
+                HeicError::InvalidData("Grid descriptor too short for 32-bit dims").into(),
+            );
+        }
+        (
+            u32::from_be_bytes([grid_data[4], grid_data[5], grid_data[6], grid_data[7]]),
+            u32::from_be_bytes([grid_data[8], grid_data[9], grid_data[10], grid_data[11]]),
+        )
+    } else {
+        (
+            u16::from_be_bytes([grid_data[4], grid_data[5]]) as u32,
+            u16::from_be_bytes([grid_data[6], grid_data[7]]) as u32,
+        )
+    };
+
+    limits.check_dimensions(output_width, output_height)?;
+
+    // Check output buffer size
+    let bpp = layout.bytes_per_pixel();
+    let required = (output_width as usize)
+        .checked_mul(output_height as usize)
+        .and_then(|n| n.checked_mul(bpp))
+        .ok_or(HeicError::LimitExceeded(
+            "output buffer size overflows usize",
+        ))?;
+    if output.len() < required {
+        return Err(HeicError::BufferTooSmall {
+            required,
+            actual: output.len(),
+        }
+        .into());
+    }
+
+    // Get tile info
+    let tile_ids = container.get_item_references(primary_item.id, FourCC::DIMG);
+    let expected_tiles = (rows * cols) as usize;
+    if tile_ids.len() != expected_tiles {
+        return Err(HeicError::InvalidData("Grid tile count mismatch").into());
+    }
+
+    let first_tile = container
+        .get_item(tile_ids[0])
+        .ok_or(HeicError::InvalidData("Missing tile item"))?;
+    let tile_config = first_tile
+        .hevc_config
+        .as_ref()
+        .ok_or(HeicError::InvalidData("Missing tile hvcC config"))?;
+    let (tile_width, tile_height) = first_tile
+        .dimensions
+        .ok_or(HeicError::InvalidData("Missing tile dimensions"))?;
+
+    // Determine color conversion overrides from grid item's colr nclx
+    let color_override = match &primary_item.color_info {
+        Some(ColorInfo::Nclx {
+            full_range,
+            matrix_coefficients,
+            ..
+        }) => Some((*full_range, *matrix_coefficients as u8)),
+        _ => None,
+    };
+
+    // Collect tile data
+    check_stop(stop)?;
+    let tile_data_list: Vec<&[u8]> = tile_ids
+        .iter()
+        .map(|&tid| {
+            container
+                .get_item_data(tid)
+                .ok_or_else(|| whereat::At::from(HeicError::InvalidData("Missing tile data")))
+        })
+        .collect::<core::result::Result<_, _>>()?;
+
+    // Stream tiles: decode, color-convert directly to output, drop
+    #[cfg(feature = "parallel")]
+    {
+        let cols_usize = cols as usize;
+        for row in 0..rows {
+            let row_start = row as usize * cols_usize;
+            let row_end = row_start + cols_usize;
+            let row_tiles: Vec<crate::hevc::DecodedFrame> = tile_data_list[row_start..row_end]
+                .par_iter()
+                .map(|tile_data| {
+                    crate::hevc::decode_with_config(tile_config, tile_data).map_err(Into::into)
+                })
+                .collect::<Result<_>>()?;
+
+            for (col, mut tile_frame) in row_tiles.into_iter().enumerate() {
+                let tile_idx = row as usize * cols_usize + col;
+                if let Some((fr, mc)) = color_override {
+                    tile_frame.full_range = fr;
+                    tile_frame.matrix_coeffs = mc;
+                }
+                let dst_x = col as u32 * tile_width;
+                let dst_y = row * tile_height;
+                let copy_w = tile_frame
+                    .cropped_width()
+                    .min(output_width.saturating_sub(dst_x));
+                let copy_h = tile_frame
+                    .cropped_height()
+                    .min(output_height.saturating_sub(dst_y));
+                convert_tile_to_output(
+                    &tile_frame,
+                    output,
+                    layout,
+                    dst_x,
+                    dst_y,
+                    copy_w,
+                    copy_h,
+                    output_width,
+                );
+                let _ = tile_idx; // suppress unused warning
+            }
+        }
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        for (tile_idx, tile_data) in tile_data_list.iter().enumerate() {
+            check_stop(stop)?;
+            let mut tile_frame = crate::hevc::decode_with_config(tile_config, tile_data)?;
+            if let Some((fr, mc)) = color_override {
+                tile_frame.full_range = fr;
+                tile_frame.matrix_coeffs = mc;
+            }
+            let tile_col = tile_idx as u32 % cols;
+            let tile_row = tile_idx as u32 / cols;
+            let dst_x = tile_col * tile_width;
+            let dst_y = tile_row * tile_height;
+            let copy_w = tile_frame
+                .cropped_width()
+                .min(output_width.saturating_sub(dst_x));
+            let copy_h = tile_frame
+                .cropped_height()
+                .min(output_height.saturating_sub(dst_y));
+            convert_tile_to_output(
+                &tile_frame,
+                output,
+                layout,
+                dst_x,
+                dst_y,
+                copy_w,
+                copy_h,
+                output_width,
+            );
+        }
+    }
+
+    Ok(Some((output_width, output_height)))
+}
+
+/// Color-convert a single decoded tile directly into the correct region
+/// of the output RGB/RGBA/BGR/BGRA buffer.
+#[allow(clippy::too_many_arguments)]
+fn convert_tile_to_output(
+    tile: &crate::hevc::DecodedFrame,
+    output: &mut [u8],
+    layout: PixelLayout,
+    dst_x: u32,
+    dst_y: u32,
+    copy_w: u32,
+    copy_h: u32,
+    output_width: u32,
+) {
+    let bpp = layout.bytes_per_pixel();
+    let shift = tile.bit_depth - 8;
+    let src_x_start = tile.crop_left;
+    let src_y_start = tile.crop_top;
+
+    // Fast path: 4:2:0 + Rgb8 uses SIMD-accelerated conversion
+    if tile.chroma_format == 1 && layout == PixelLayout::Rgb8 {
+        let y_stride = tile.y_stride();
+        let c_stride = tile.c_stride();
+
+        for r in 0..copy_h {
+            let src_row = src_y_start + r;
+            let out_offset =
+                ((dst_y + r) as usize * output_width as usize + dst_x as usize) * 3;
+            let row_bytes = copy_w as usize * 3;
+            crate::hevc::color_convert::convert_420_to_rgb(
+                &tile.y_plane,
+                &tile.cb_plane,
+                &tile.cr_plane,
+                y_stride,
+                c_stride,
+                src_row,
+                src_row + 1,
+                src_x_start,
+                src_x_start + copy_w,
+                shift as u32,
+                tile.full_range,
+                tile.matrix_coeffs,
+                &mut output[out_offset..out_offset + row_bytes],
+            );
+        }
+        return;
+    }
+
+    // Scalar fallback for other layouts and chroma formats
+    let (cr_r, cb_g, cr_g, cb_b, y_bias, y_scale, rnd, shr) = if tile.full_range {
+        let (cr_r, cb_g, cr_g, cb_b) = match tile.matrix_coeffs {
+            1 => (403i32, -48, -120, 475),   // BT.709
+            9 => (377, -42, -146, 482),       // BT.2020
+            _ => (359i32, -88, -183, 454),    // BT.601
+        };
+        (cr_r, cb_g, cr_g, cb_b, 0i32, 256i32, 128i32, 8i32)
+    } else {
+        let (cr_r, cb_g, cr_g, cb_b) = match tile.matrix_coeffs {
+            1 => (14744i32, -1754, -4383, 17373), // BT.709
+            9 => (13806, -1541, -5349, 17615),     // BT.2020
+            _ => (13126i32, -3222, -6686, 16591),  // BT.601
+        };
+        (cr_r, cb_g, cr_g, cb_b, 16i32, 9576i32, 4096i32, 13i32)
+    };
+
+    let y_stride = tile.y_stride();
+    let c_stride = tile.c_stride();
+
+    for r in 0..copy_h {
+        let src_y = src_y_start + r;
+        let out_row_start =
+            ((dst_y + r) as usize * output_width as usize + dst_x as usize) * bpp;
+
+        for c in 0..copy_w {
+            let src_x = src_x_start + c;
+            let y_idx = src_y as usize * y_stride + src_x as usize;
+            let y_val = (tile.y_plane[y_idx] >> shift) as i32;
+
+            // Get chroma values based on chroma format
+            let (cb_val, cr_val) = match tile.chroma_format {
+                0 => (128i32, 128i32),
+                1 => {
+                    let c_idx = (src_y / 2) as usize * c_stride + (src_x / 2) as usize;
+                    (
+                        (tile.cb_plane[c_idx] >> shift) as i32,
+                        (tile.cr_plane[c_idx] >> shift) as i32,
+                    )
+                }
+                2 => {
+                    let c_idx = src_y as usize * c_stride + (src_x / 2) as usize;
+                    (
+                        (tile.cb_plane[c_idx] >> shift) as i32,
+                        (tile.cr_plane[c_idx] >> shift) as i32,
+                    )
+                }
+                3 => {
+                    let c_idx = src_y as usize * c_stride + src_x as usize;
+                    (
+                        (tile.cb_plane[c_idx] >> shift) as i32,
+                        (tile.cr_plane[c_idx] >> shift) as i32,
+                    )
+                }
+                _ => (128, 128),
+            };
+
+            let cb = cb_val - 128;
+            let cr = cr_val - 128;
+            let yv = (y_val - y_bias) * y_scale;
+            let red = ((yv + cr_r * cr + rnd) >> shr).clamp(0, 255) as u8;
+            let green = ((yv + cb_g * cb + cr_g * cr + rnd) >> shr).clamp(0, 255) as u8;
+            let blue = ((yv + cb_b * cb + rnd) >> shr).clamp(0, 255) as u8;
+
+            let out_offset = out_row_start + c as usize * bpp;
+            match layout {
+                PixelLayout::Rgb8 => {
+                    output[out_offset] = red;
+                    output[out_offset + 1] = green;
+                    output[out_offset + 2] = blue;
+                }
+                PixelLayout::Rgba8 => {
+                    output[out_offset] = red;
+                    output[out_offset + 1] = green;
+                    output[out_offset + 2] = blue;
+                    output[out_offset + 3] = 255;
+                }
+                PixelLayout::Bgr8 => {
+                    output[out_offset] = blue;
+                    output[out_offset + 1] = green;
+                    output[out_offset + 2] = red;
+                }
+                PixelLayout::Bgra8 => {
+                    output[out_offset] = blue;
+                    output[out_offset + 1] = green;
+                    output[out_offset + 2] = red;
+                    output[out_offset + 3] = 255;
+                }
+            }
+        }
+    }
+}
+
 /// Decode an auxiliary alpha plane and return it sized to match the primary frame.
 ///
 /// Returns the alpha plane as a Vec<u16> with one value per cropped pixel,

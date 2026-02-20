@@ -5,7 +5,7 @@
 
 pub(crate) mod bitstream;
 mod cabac;
-mod color_convert;
+pub(crate) mod color_convert;
 mod ctu;
 mod deblock;
 pub(crate) mod debug;
