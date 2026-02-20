@@ -135,6 +135,10 @@ pub struct SliceContext<'a> {
     current_qg_y: i32,
     /// SAO parameters per CTB
     pub sao_map: SaoMap,
+    /// Reusable residual buffer (inverse transform writes all elements, no re-zeroing needed)
+    residual_buf: [i16; 1024],
+    /// Reusable scaling matrix buffer
+    scaling_buf: [u8; 1024],
 }
 
 impl<'a> SliceContext<'a> {
@@ -263,6 +267,8 @@ impl<'a> SliceContext<'a> {
             current_qg_x: -1,
             current_qg_y: -1,
             sao_map: SaoMap::new(sps.pic_width_in_ctbs(), sps.pic_height_in_ctbs()),
+            residual_buf: [0i16; 1024],
+            scaling_buf: [16u8; 1024],
         })
     }
 
@@ -1337,8 +1343,8 @@ impl<'a> SliceContext<'a> {
         if let Some(sl) = scaling_list {
             // matrixId: intra Y=0, Cb=1, Cr=2 (all HEIC is intra)
             let matrix_id = c_idx;
-            // Build scaling matrix in raster order for this TU
-            let mut scaling_matrix = [16u8; 1024];
+            // Build scaling matrix in raster order for this TU (reuse persistent buffer)
+            let scaling_matrix = &mut self.scaling_buf;
             for py in 0..size {
                 for px in 0..size {
                     scaling_matrix[py * size + px] =
@@ -1355,7 +1361,8 @@ impl<'a> SliceContext<'a> {
         }
 
         // Apply inverse transform (or skip for transform_skip mode)
-        let mut residual = [0i16; 1024];
+        // Reuse persistent buffer — transform writes all size*size elements, no zeroing needed
+        let residual = &mut self.residual_buf;
         if transform_skip {
             // Per H.265 8.6.4.1 / libde265 transform_skip_residual_fallback():
             // tsShift = 5 + Log2(nTbS)
@@ -1376,7 +1383,7 @@ impl<'a> SliceContext<'a> {
             let is_intra_4x4_luma = log2_size == 2 && c_idx == 0;
             transform::inverse_transform(
                 coeffs,
-                &mut residual,
+                residual,
                 size,
                 bit_depth,
                 is_intra_4x4_luma,
