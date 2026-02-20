@@ -9,6 +9,7 @@ use crate::error::HevcError;
 type Result<T> = core::result::Result<T, HevcError>;
 
 /// Video Parameter Set
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Vps {
     /// VPS ID
@@ -28,6 +29,7 @@ pub struct Vps {
 }
 
 /// Sequence Parameter Set
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Sps {
     /// SPS ID
@@ -157,6 +159,7 @@ impl Sps {
 }
 
 /// PCM parameters
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct PcmParams {
     /// PCM sample bit depth luma minus 1
@@ -176,6 +179,7 @@ pub struct PcmParams {
 /// Stores per-coefficient scaling factors for dequantization.
 /// sizeId: 0=4x4, 1=8x8, 2=16x16, 3=32x32
 /// matrixId: 0-2=intra(Y,Cb,Cr), 3-5=inter(Y,Cb,Cr)
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ScalingListData {
     /// ScalingList coefficients in diagonal scan order.
@@ -234,6 +238,7 @@ impl ScalingListData {
     }
 
     /// Create flat scaling list (all 16s) — equivalent to scaling_list_enabled_flag=0
+    #[allow(dead_code)]
     pub fn new_flat() -> Self {
         Self {
             lists: [[[16; 64]; 6]; 4],
@@ -310,6 +315,7 @@ static DIAG_SCAN_8X8_INV: [[usize; 8]; 8] = [
 ];
 
 /// Picture Parameter Set
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Pps {
     /// PPS ID
@@ -383,6 +389,7 @@ pub struct Pps {
 }
 
 /// Tile configuration
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct TileInfo {
     /// Number of tile columns minus 1
@@ -400,6 +407,7 @@ pub struct TileInfo {
 }
 
 /// Profile tier level information
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct ProfileTierLevel {
     /// General profile space

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Debug utilities for HEVC decoder
 //!
 //! This module provides invariant checking, logging, and comparison tools

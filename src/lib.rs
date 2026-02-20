@@ -36,16 +36,16 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
-// Allow dead code during development - will be removed when decoder is complete
-#![allow(dead_code)]
-
 extern crate alloc;
 
 mod error;
+#[doc(hidden)]
 pub mod heif;
+#[doc(hidden)]
 pub mod hevc;
 
 pub use error::{HeicError, HevcError, ProbeError, Result};
+pub use hevc::DecodedFrame;
 
 // Re-export Stop and Unstoppable for ergonomics
 pub use enough::{Stop, StopReason, Unstoppable};

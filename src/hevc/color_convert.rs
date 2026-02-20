@@ -273,6 +273,7 @@ fn convert_420_to_rgb_v3(
 /// Convert a single 4:2:0 pixel (shared between SIMD prefix/tail and scalar path)
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // only used from #[arcane] AVX2 path
 fn scalar_pixel(
     y_plane: &[u16],
     cb_plane: &[u16],

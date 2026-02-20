@@ -168,6 +168,7 @@ impl CoeffBuffer {
     }
 
     /// Get coefficient at position
+    #[allow(dead_code)]
     #[inline]
     pub fn get(&self, x: usize, y: usize) -> i16 {
         let stride = self.size();
@@ -752,6 +753,7 @@ fn get_scan_sub_block(log2_size: u8, order: ScanOrder) -> &'static [(u8, u8)] {
     static SCAN_2X2_HORIZ: [(u8, u8); 4] = [(0, 0), (1, 0), (0, 1), (1, 1)];
     // Per libde265 init_scan_v: (0,0),(0,1),(1,0),(1,1) — column by column
     // Note: 2x2 diagonal and vertical are identical
+    #[allow(dead_code)]
     static SCAN_2X2_VERT: [(u8, u8); 4] = [(0, 0), (0, 1), (1, 0), (1, 1)];
     // Per libde265 init_scan_d(blkSize=4): verified against C++ trace
     static SCAN_4X4_DIAG: [(u8, u8); 16] = [

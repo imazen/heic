@@ -76,6 +76,7 @@ static LPS_TABLE: [[u8; 4]; 64] = [
 ];
 
 /// Renormalization table
+#[allow(dead_code)]
 static RENORM_TABLE: [u8; 32] = [
     6, 5, 4, 4, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
 ];
@@ -103,6 +104,7 @@ pub struct ContextModel {
     mps: u8,
 }
 
+#[allow(dead_code)]
 impl ContextModel {
     /// Create a new context model with initial values
     pub fn new(init_value: u8) -> Self {
@@ -166,6 +168,7 @@ pub struct CabacDecoder<'a> {
     bin_counter: u32,
 }
 
+#[allow(dead_code)]
 impl<'a> CabacDecoder<'a> {
     /// Get current CABAC state (range, offset) for debugging
     /// Note: returns (range, value >> 7) for compatibility with old debugging
@@ -387,6 +390,7 @@ impl<'a> CabacDecoder<'a> {
 }
 
 /// Context indices for various syntax elements
+#[allow(dead_code)]
 pub mod context {
     /// Split CU flag contexts
     pub const SPLIT_CU_FLAG: usize = 0;

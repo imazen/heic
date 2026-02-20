@@ -5,44 +5,91 @@
 [![Documentation](https://docs.rs/heic-decoder/badge.svg)](https://docs.rs/heic-decoder)
 [![License](https://img.shields.io/crates/l/heic-decoder.svg)](LICENSE)
 
-Pure Rust HEIC/HEIF image decoder. No C/C++ dependencies.
+Pure Rust HEIC/HEIF image decoder. No C/C++ dependencies, no unsafe code.
+
+- `#![forbid(unsafe_code)]` — zero unsafe blocks
+- `no_std + alloc` compatible (works on wasm32)
+- AVX2 SIMD acceleration with automatic scalar fallback
+- Decodes 1280x854 in ~57ms on x86-64
 
 ## Status
 
-**Work in Progress** - Not yet ready for production use.
+**Work in Progress** — decodes most HEIC files, but not yet production-ready.
 
-### Completed
-- HEIF container parsing (ISOBMFF boxes)
-- NAL unit parsing
-- VPS/SPS/PPS parameter set parsing
-- Slice header parsing
-- CTU/CU quad-tree decoding
-- Intra prediction (35 modes)
-- Inverse DCT/DST transforms
-- CABAC decoder with adaptive Golomb-Rice
-- Frame buffer with YCbCr→RGB conversion
+104 of 162 test files decode successfully. SSIM scores range from 50-77 dB against libheif reference output.
 
-### In Progress
-- Chroma plane accuracy improvements
-- Sub-block scan tables for 16x16 and 32x32 TUs
-- Conformance window cropping
+### What works
+- HEIF container parsing (ISOBMFF boxes, grid images, overlays)
+- Full HEVC I-frame decoding (VPS/SPS/PPS, CABAC, intra prediction, transforms)
+- Deblocking filter and SAO (Sample Adaptive Offset)
+- YCbCr→RGB with BT.601/BT.709/BT.2020 matrices (full + limited range)
+- 10-bit HEVC (transparent downconvert to 8-bit output)
+- Alpha plane decoding, HDR gain map extraction
+- EXIF/XMP metadata extraction (zero-copy)
+- Thumbnail decode, image rotation/mirror transforms
+- HEVC scaling lists (custom dequantization matrices)
+- AVX2 SIMD for color conversion and IDCT 8x8/16x16
 
-### Not Yet Implemented
-- Deblocking filter
-- SAO (Sample Adaptive Offset)
-- Inter prediction (P/B slices) - only I-slices needed for HEIC
-- SIMD optimization
+### Known limitations
+- I-slices only (sufficient for HEIC still images, no inter prediction)
+- 4:4:4 chroma partially supported
 
 ## Usage
 
 ```rust
-use heic_decoder::decode;
+use heic_decoder::{DecoderConfig, PixelLayout};
 
-let heic_data = std::fs::read("image.heic")?;
-let image = decode(&heic_data)?;
+let data = std::fs::read("image.heic")?;
+let output = DecoderConfig::new().decode(&data, PixelLayout::Rgba8)?;
+println!("{}x{} image, {} bytes", output.width, output.height, output.data.len());
+```
 
-println!("{}x{}", image.width, image.height);
-// Access RGB pixel data via image.data
+### Full control with limits and cancellation
+
+```rust
+use heic_decoder::{DecoderConfig, PixelLayout, Limits};
+
+let limits = Limits {
+    max_width: Some(8192),
+    max_height: Some(8192),
+    max_pixels: Some(64_000_000),
+    max_memory_bytes: Some(512 * 1024 * 1024),
+};
+
+let output = DecoderConfig::new()
+    .decode_request(&data)
+    .with_output_layout(PixelLayout::Rgba8)
+    .with_limits(&limits)
+    .decode()?;
+```
+
+### Probe without decoding
+
+```rust
+use heic_decoder::ImageInfo;
+
+let info = ImageInfo::from_bytes(&data)?;
+println!("{}x{}, alpha={}, exif={}", info.width, info.height, info.has_alpha, info.has_exif);
+```
+
+### Zero-copy into pre-allocated buffer
+
+```rust
+let info = ImageInfo::from_bytes(&data)?;
+let mut buf = vec![0u8; info.output_buffer_size(PixelLayout::Rgba8).unwrap()];
+DecoderConfig::new()
+    .decode_request(&data)
+    .with_output_layout(PixelLayout::Rgba8)
+    .decode_into(&mut buf)?;
+```
+
+### Metadata extraction
+
+```rust
+let decoder = DecoderConfig::new();
+let exif: Option<&[u8]> = decoder.extract_exif(&data)?;   // raw TIFF bytes
+let xmp: Option<&[u8]> = decoder.extract_xmp(&data)?;     // raw XML bytes
+let thumb = decoder.decode_thumbnail(&data, PixelLayout::Rgb8)?; // smaller preview
 ```
 
 ## License

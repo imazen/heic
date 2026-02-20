@@ -81,6 +81,7 @@ impl core::fmt::Display for FourCC {
 }
 
 /// Raw box header
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct BoxHeader {
     /// Box type
@@ -107,6 +108,7 @@ impl<'a> Box<'a> {
     }
 
     /// Get full box version and flags (for full boxes)
+    #[allow(dead_code)]
     pub fn version_flags(&self) -> Option<(u8, u32)> {
         if self.content.len() >= 4 {
             let version = self.content[0];

@@ -39,6 +39,7 @@ impl SliceType {
 }
 
 /// Partition mode for coding units
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PartMode {
@@ -61,6 +62,7 @@ pub enum PartMode {
 }
 
 /// Prediction mode
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PredMode {
     /// Intra prediction
@@ -166,6 +168,7 @@ impl IntraPredMode {
 }
 
 /// Slice segment header
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SliceHeader {
     /// First slice segment in picture flag

@@ -155,11 +155,13 @@ impl NalType {
     }
 
     /// Check if this is a RASL picture
+    #[allow(dead_code)]
     pub fn is_rasl(self) -> bool {
         matches!(self, Self::RaslN | Self::RaslR)
     }
 
     /// Check if this is a RADL picture
+    #[allow(dead_code)]
     pub fn is_radl(self) -> bool {
         matches!(self, Self::RadlN | Self::RadlR)
     }
@@ -181,6 +183,7 @@ impl NalType {
 }
 
 /// Parsed NAL unit
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct NalUnit<'a> {
     /// NAL unit type
@@ -366,6 +369,7 @@ fn remove_emulation_prevention(data: &[u8]) -> Vec<u8> {
 }
 
 /// Bitstream reader for parsing RBSP data
+#[allow(dead_code)]
 pub struct BitstreamReader<'a> {
     data: &'a [u8],
     byte_offset: usize,
@@ -383,6 +387,7 @@ impl<'a> BitstreamReader<'a> {
     }
 
     /// Check if at byte boundary
+    #[allow(dead_code)]
     pub fn is_byte_aligned(&self) -> bool {
         self.bit_offset == 0
     }
@@ -450,6 +455,7 @@ impl<'a> BitstreamReader<'a> {
     }
 
     /// Check if more RBSP data is available
+    #[allow(dead_code)]
     pub fn more_rbsp_data(&self) -> bool {
         if self.byte_offset >= self.data.len() {
             return false;
@@ -467,6 +473,7 @@ impl<'a> BitstreamReader<'a> {
     }
 
     /// Remaining bytes
+    #[allow(dead_code)]
     pub fn remaining(&self) -> usize {
         if self.byte_offset >= self.data.len() {
             0

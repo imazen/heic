@@ -104,6 +104,7 @@ pub struct SliceContext<'a> {
     /// Debug flag for current CTU
     debug_ctu: bool,
     /// Debug: track chroma prediction calls
+    #[allow(dead_code)]
     chroma_pred_count: u32,
     /// CT depth map for split_cu_flag context derivation (indexed by min_cb_size grid)
     ct_depth_map: Vec<u8>,
@@ -1611,6 +1612,7 @@ impl<'a> SliceContext<'a> {
     }
 
     /// Get intra chroma prediction mode at a sample position
+    #[allow(dead_code)]
     fn get_intra_chroma_mode_at(&self, x: u32, y: u32) -> IntraPredMode {
         let min_pu = self.min_pu_size();
         let stride = self.intra_mode_map_stride;
@@ -1839,87 +1841,3 @@ impl<'a> SliceContext<'a> {
     }
 }
 
-/// Information about a coding block
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CbInfo {
-    /// Log2 of coding block size (only valid at top-left of CB)
-    pub log2_cb_size: u8,
-    /// Partition mode (only valid at top-left of CB)
-    pub part_mode: u8,
-    /// Prediction mode (INTRA/INTER/SKIP)
-    pub pred_mode: u8,
-    /// PCM flag
-    pub pcm_flag: bool,
-    /// Transquant bypass flag
-    pub transquant_bypass: bool,
-}
-
-/// Information about a prediction unit
-#[derive(Debug, Clone, Copy, Default)]
-pub struct PuInfo {
-    /// Intra prediction mode for luma
-    pub intra_pred_mode_y: u8,
-    /// Intra prediction mode for chroma
-    pub intra_pred_mode_c: u8,
-}
-
-/// Metadata array for frame decoding
-#[derive(Debug)]
-pub struct MetaArray<T> {
-    data: Vec<T>,
-    width: u32,
-    height: u32,
-    log2_unit_size: u8,
-}
-
-impl<T: Default + Clone> MetaArray<T> {
-    /// Create a new metadata array
-    pub fn new(pic_width: u32, pic_height: u32, log2_unit_size: u8) -> Self {
-        let unit_size = 1u32 << log2_unit_size;
-        let width = pic_width.div_ceil(unit_size);
-        let height = pic_height.div_ceil(unit_size);
-        let size = (width * height) as usize;
-
-        Self {
-            data: vec![T::default(); size],
-            width,
-            height,
-            log2_unit_size,
-        }
-    }
-
-    /// Get value at pixel position
-    pub fn get(&self, x: u32, y: u32) -> &T {
-        let unit_x = x >> self.log2_unit_size;
-        let unit_y = y >> self.log2_unit_size;
-        let idx = (unit_y * self.width + unit_x) as usize;
-        &self.data[idx]
-    }
-
-    /// Get mutable value at pixel position
-    pub fn get_mut(&mut self, x: u32, y: u32) -> &mut T {
-        let unit_x = x >> self.log2_unit_size;
-        let unit_y = y >> self.log2_unit_size;
-        let idx = (unit_y * self.width + unit_x) as usize;
-        &mut self.data[idx]
-    }
-
-    /// Set value for a block at pixel position
-    pub fn set_block(&mut self, x: u32, y: u32, log2_blk_size: u8, value: T) {
-        let blk_size = 1u32 << log2_blk_size;
-        let unit_size = 1u32 << self.log2_unit_size;
-
-        let start_x = x >> self.log2_unit_size;
-        let start_y = y >> self.log2_unit_size;
-        let units = blk_size / unit_size;
-
-        for dy in 0..units {
-            for dx in 0..units {
-                let idx = ((start_y + dy) * self.width + (start_x + dx)) as usize;
-                if idx < self.data.len() {
-                    self.data[idx] = value.clone();
-                }
-            }
-        }
-    }
-}
