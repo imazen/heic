@@ -17,6 +17,7 @@ mod sao;
 mod slice;
 mod transform;
 mod transform_simd;
+mod transforms;
 
 pub use picture::DecodedFrame;
 
