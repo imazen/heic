@@ -8,6 +8,7 @@ description = "Pure Rust HEIC/HEIF image decoder with SIMD acceleration"
 repository = "https://github.com/imazen/heic-decoder-rs"
 keywords = ["heic", "heif", "hevc", "image", "decoder"]
 categories = ["multimedia::images", "multimedia::encoding"]
+exclude = ["CLAUDE.md", "FEEDBACK.md", "CABAC-DEBUG-HANDOFF.md", "heaptrack.*"]
 
 [features]
 default = ["std"]

@@ -49,7 +49,7 @@ pub struct DecodedFrame {
     pub qp_map: Vec<i8>,
     /// Alpha plane (optional, from auxiliary alpha image)
     pub alpha_plane: Option<Vec<u16>>,
-    /// Video full range flag (from SPS VUI). true = full [0,255], false = limited [16,235]
+    /// Video full range flag (from SPS VUI). true = full \[0,255\], false = limited \[16,235\]
     pub full_range: bool,
     /// Matrix coefficients (from SPS VUI). 1=BT.709, 5/6=BT.601, 9=BT.2020, 2=unspecified
     pub matrix_coeffs: u8,

@@ -94,7 +94,7 @@ pub struct Sps {
     pub strong_intra_smoothing_enabled_flag: bool,
     /// VUI parameters present flag
     pub vui_parameters_present_flag: bool,
-    /// Video full range flag (from VUI). true = full [0,255], false = limited [16,235]
+    /// Video full range flag (from VUI). true = full \[0,255\], false = limited \[16,235\]
     pub video_full_range_flag: bool,
     /// Matrix coefficients (from VUI). 1=BT.709, 5/6=BT.601, 9=BT.2020
     pub matrix_coeffs: u8,
@@ -179,7 +179,7 @@ pub struct PcmParams {
 #[derive(Debug, Clone)]
 pub struct ScalingListData {
     /// ScalingList coefficients in diagonal scan order.
-    /// [sizeId][matrixId][coef_index]
+    /// \[sizeId\]\[matrixId\]\[coef_index\]
     /// sizeId 0: 16 coefficients, sizeId 1-3: 64 coefficients
     pub lists: [[[u8; 64]; 6]; 4],
     /// DC coefficients for 16x16 (sizeId=2) and 32x32 (sizeId=3)
@@ -241,7 +241,7 @@ impl ScalingListData {
         }
     }
 
-    /// Get the scaling factor m[x][y] for a given transform block.
+    /// Get the scaling factor m\[x\]\[y\] for a given transform block.
     ///
     /// `log2_size`: log2 of transform block size (2=4x4, 3=8x8, 4=16x16, 5=32x32)
     /// `matrix_id`: from Table 7-4 (intra Y=0, intra Cb=1, intra Cr=2, inter Y=3, etc.)
