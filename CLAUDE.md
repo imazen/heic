@@ -147,6 +147,8 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 - 10-bit HEVC support (u16 planes, transparent downconvert to 8-bit output)
 - SIMD-accelerated color conversion via archmage (AVX2 with scalar fallback)
 - SIMD-accelerated IDCT 8x8/16x16/32x32 via archmage AVX2 (madd_epi16 butterfly)
+- SIMD-accelerated IDST 4x4 via archmage SSE4.1 (3.77x vs scalar)
+- SIMD residual add (u16+i16→clamped u16) and dequantize via archmage AVX2
 - Tile-parallel grid decoding via rayon (optional `parallel` feature)
 
 ### Current Quality (RGB comparison vs libheif)
@@ -177,10 +179,13 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
   - Row-slice bounds-check elimination in intra prediction and residual add
   - SIMD color conversion via archmage AVX2 (81M → 9.2M, -88%)
   - SIMD IDCT 8x8/16x16/32x32 via archmage AVX2 (madd_epi16 butterfly)
+  - SIMD IDST 4x4 via archmage SSE4.1 (14.1M → 3.7M, -73%)
+  - SIMD residual add via archmage AVX2 (u16+i16→clamped u16)
+  - SIMD dequantize via archmage AVX2 (flat scale only; scaled uses scalar)
   - Intra prediction: early-exit substitution, hoisted bounds, halved arrays
   - Deblocking: direct plane access with step_along/step_across
   - Residual buffer reuse across TU decode calls
-- Remaining hotspots: decode_and_apply_residual (35%), predict_intra (14%), CABAC (11%), memcpy/memset (6%)
+- Remaining hotspots: decode_and_apply_residual (32%), predict_intra (17%), CABAC (10%), memcpy/memset (7%)
 
 ## Known Limitations
 
@@ -212,7 +217,7 @@ src/
     ├── cabac.rs     # CABAC decoder, context tables
     ├── residual.rs  # Transform coefficient parsing
     ├── transform.rs # Inverse DCT/DST (scalar + incant! dispatch)
-    ├── transform_simd.rs # AVX2 SIMD IDCT 8x8/16x16
+    ├── transform_simd.rs # SIMD transforms: IDST 4x4, IDCT 8/16/32, residual add, dequantize
     ├── deblock.rs   # Deblocking filter (H.265 8.7.2)
     ├── sao.rs       # Sample Adaptive Offset (H.265 8.7.3)
     ├── debug.rs     # CABAC tracker, invariant checks

@@ -1140,7 +1140,6 @@ pub(crate) fn idst4_v3(
 }
 
 /// Scalar fallback for IDST 4x4
-#[cold]
 pub(crate) fn idst4_scalar(
     _token: ScalarToken,
     coeffs: &[i16; 16],
