@@ -116,10 +116,12 @@ pub fn apply_deblocking_filter(
     }
 }
 
-/// Filter a single luma edge (4 samples wide)
+/// Filter a single luma edge (4 samples along the edge)
 ///
 /// For vertical edges: x is the boundary position, filtering samples at x-1..x-4 and x..x+3
 /// For horizontal edges: y is the boundary position, filtering samples at y-1..y-4 and y..y+3
+///
+/// Uses direct plane access with stride-based indexing to avoid per-sample bounds checks.
 #[allow(clippy::too_many_arguments)]
 fn filter_edge_luma(
     frame: &mut DecodedFrame,
@@ -148,41 +150,59 @@ fn filter_edge_luma(
         return;
     }
 
-    let stride = frame.y_stride() as i32;
+    let stride = frame.y_stride();
+    let plane = &mut frame.y_plane;
 
-    // Process 4 samples (k=0..3) along the edge
-    // Read p[0..3] and q[0..3] for the edge decision
-    let mut p = [[0i32; 4]; 4]; // p[i][k]: i=distance from edge, k=position along edge
-    let mut q = [[0i32; 4]; 4];
+    // Compute stride-based addressing:
+    // - step_along: stride between adjacent samples along the edge (k direction)
+    // - step_across: stride between adjacent samples perpendicular to edge (p/q direction)
+    // - base_q: offset of q[0][0] in plane
+    let (step_along, step_across, base_q) = if vertical {
+        // Vertical edge: k steps in y (stride), p/q steps in x (1)
+        (stride, 1usize, y as usize * stride + x as usize)
+    } else {
+        // Horizontal edge: k steps in x (1), p/q steps in y (stride)
+        (1usize, stride, y as usize * stride + x as usize)
+    };
+    // base_p = one step before the boundary on the p side
+    let base_p = base_q - step_across;
 
-    for k in 0..4i32 {
-        for i in 0..4i32 {
-            let (px, py, qx, qy) = if vertical {
-                (x as i32 - 1 - i, y as i32 + k, x as i32 + i, y as i32 + k)
-            } else {
-                (x as i32 + k, y as i32 - 1 - i, x as i32 + k, y as i32 + i)
-            };
-
-            if px >= 0
-                && px < frame.width as i32
-                && py >= 0
-                && py < frame.height as i32
-                && qx >= 0
-                && qx < frame.width as i32
-                && qy >= 0
-                && qy < frame.height as i32
-            {
-                p[i as usize][k as usize] = frame.y_plane[(py * stride + px) as usize] as i32;
-                q[i as usize][k as usize] = frame.y_plane[(qy * stride + qx) as usize] as i32;
-            }
-        }
+    // Bounds check: ensure all 4 samples on both sides are in-bounds
+    // q side extends 3 steps across from base_q, plus 3 steps along
+    // p side extends 3 steps across back from base_p (= base_q - step_across)
+    if base_p < 3 * step_across {
+        return;
+    }
+    let last_q = base_q + 3 * step_along + 3 * step_across;
+    if last_q >= plane.len() {
+        return;
     }
 
+    // Read samples for edge decision at k=0 and k=3
+    let k3 = 3 * step_along;
+    let p0_0 = plane[base_p] as i32;
+    let p1_0 = plane[base_p - step_across] as i32;
+    let p2_0 = plane[base_p - 2 * step_across] as i32;
+    let p3_0 = plane[base_p - 3 * step_across] as i32;
+    let q0_0 = plane[base_q] as i32;
+    let q1_0 = plane[base_q + step_across] as i32;
+    let q2_0 = plane[base_q + 2 * step_across] as i32;
+    let q3_0 = plane[base_q + 3 * step_across] as i32;
+
+    let p0_3 = plane[base_p + k3] as i32;
+    let p1_3 = plane[base_p + k3 - step_across] as i32;
+    let p2_3 = plane[base_p + k3 - 2 * step_across] as i32;
+    let p3_3 = plane[base_p + k3 - 3 * step_across] as i32;
+    let q0_3 = plane[base_q + k3] as i32;
+    let q1_3 = plane[base_q + k3 + step_across] as i32;
+    let q2_3 = plane[base_q + k3 + 2 * step_across] as i32;
+    let q3_3 = plane[base_q + k3 + 3 * step_across] as i32;
+
     // Edge decision (H.265 8.7.2.5.3)
-    let dp0 = (p[2][0] - 2 * p[1][0] + p[0][0]).abs();
-    let dp3 = (p[2][3] - 2 * p[1][3] + p[0][3]).abs();
-    let dq0 = (q[2][0] - 2 * q[1][0] + q[0][0]).abs();
-    let dq3 = (q[2][3] - 2 * q[1][3] + q[0][3]).abs();
+    let dp0 = (p2_0 - 2 * p1_0 + p0_0).abs();
+    let dp3 = (p2_3 - 2 * p1_3 + p0_3).abs();
+    let dq0 = (q2_0 - 2 * q1_0 + q0_0).abs();
+    let dq3 = (q2_3 - 2 * q1_3 + q0_3).abs();
 
     let dpq0 = dp0 + dq0;
     let dpq3 = dp3 + dq3;
@@ -191,190 +211,89 @@ fn filter_edge_luma(
     let d = dpq0 + dpq3;
 
     if d >= beta {
-        return; // No filtering
+        return;
     }
 
     // Determine filter strength
     let d_sam0 = 2 * dpq0 < (beta >> 2)
-        && (p[3][0] - p[0][0]).abs() + (q[0][0] - q[3][0]).abs() < (beta >> 3)
-        && (p[0][0] - q[0][0]).abs() < ((5 * tc + 1) >> 1);
+        && (p3_0 - p0_0).abs() + (q0_0 - q3_0).abs() < (beta >> 3)
+        && (p0_0 - q0_0).abs() < ((5 * tc + 1) >> 1);
 
     let d_sam3 = 2 * dpq3 < (beta >> 2)
-        && (p[3][3] - p[0][3]).abs() + (q[0][3] - q[3][3]).abs() < (beta >> 3)
-        && (p[0][3] - q[0][3]).abs() < ((5 * tc + 1) >> 1);
+        && (p3_3 - p0_3).abs() + (q0_3 - q3_3).abs() < (beta >> 3)
+        && (p0_3 - q0_3).abs() < ((5 * tc + 1) >> 1);
 
-    let d_e = if d_sam0 && d_sam3 { 2 } else { 1 };
+    let strong = d_sam0 && d_sam3;
+    let d_ep = dp < ((beta + (beta >> 1)) >> 3);
+    let d_eq = dq < ((beta + (beta >> 1)) >> 3);
 
-    let d_ep = if dp < ((beta + (beta >> 1)) >> 3) {
-        1
-    } else {
-        0
-    };
-    let d_eq = if dq < ((beta + (beta >> 1)) >> 3) {
-        1
-    } else {
-        0
-    };
+    // Apply filter for all 4 samples along the edge
+    for k in 0..4usize {
+        let k_off = k * step_along;
 
-    // Apply filter
-    for k in 0..4 {
-        if d_e == 2 {
-            // Strong filter (H.265 8.7.2.5.7) - modify 3 samples on each side
+        // Read p[0..3] and q[0..3] for this sample
+        let p0 = plane[base_p + k_off] as i32;
+        let p1 = plane[base_p + k_off - step_across] as i32;
+        let p2 = plane[base_p + k_off - 2 * step_across] as i32;
+        let q0 = plane[base_q + k_off] as i32;
+        let q1 = plane[base_q + k_off + step_across] as i32;
+        let q2 = plane[base_q + k_off + 2 * step_across] as i32;
+
+        if strong {
+            let p3 = plane[base_p + k_off - 3 * step_across] as i32;
+            let q3 = plane[base_q + k_off + 3 * step_across] as i32;
             let tc2 = 2 * tc;
-            let p0_f = (p[2][k] + 2 * p[1][k] + 2 * p[0][k] + 2 * q[0][k] + q[1][k] + 4) >> 3;
-            let p1_f = (p[2][k] + p[1][k] + p[0][k] + q[0][k] + 2) >> 2;
-            let p2_f = (2 * p[3][k] + 3 * p[2][k] + p[1][k] + p[0][k] + q[0][k] + 4) >> 3;
-            let q0_f = (p[1][k] + 2 * p[0][k] + 2 * q[0][k] + 2 * q[1][k] + q[2][k] + 4) >> 3;
-            let q1_f = (p[0][k] + q[0][k] + q[1][k] + q[2][k] + 2) >> 2;
-            let q2_f = (p[0][k] + q[0][k] + q[1][k] + 3 * q[2][k] + 2 * q[3][k] + 4) >> 3;
 
-            write_sample(
-                frame,
-                x,
-                y,
-                k,
-                vertical,
-                -1,
-                p0_f.clamp(p[0][k] - tc2, p[0][k] + tc2),
-                max_val,
-            );
-            write_sample(
-                frame,
-                x,
-                y,
-                k,
-                vertical,
-                -2,
-                p1_f.clamp(p[1][k] - tc2, p[1][k] + tc2),
-                max_val,
-            );
-            write_sample(
-                frame,
-                x,
-                y,
-                k,
-                vertical,
-                -3,
-                p2_f.clamp(p[2][k] - tc2, p[2][k] + tc2),
-                max_val,
-            );
-            write_sample(
-                frame,
-                x,
-                y,
-                k,
-                vertical,
-                0,
-                q0_f.clamp(q[0][k] - tc2, q[0][k] + tc2),
-                max_val,
-            );
-            write_sample(
-                frame,
-                x,
-                y,
-                k,
-                vertical,
-                1,
-                q1_f.clamp(q[1][k] - tc2, q[1][k] + tc2),
-                max_val,
-            );
-            write_sample(
-                frame,
-                x,
-                y,
-                k,
-                vertical,
-                2,
-                q2_f.clamp(q[2][k] - tc2, q[2][k] + tc2),
-                max_val,
-            );
+            // Strong filter (H.265 8.7.2.5.7)
+            let p0_f = ((p2 + 2 * p1 + 2 * p0 + 2 * q0 + q1 + 4) >> 3)
+                .clamp(p0 - tc2, p0 + tc2)
+                .clamp(0, max_val);
+            let p1_f = ((p2 + p1 + p0 + q0 + 2) >> 2)
+                .clamp(p1 - tc2, p1 + tc2)
+                .clamp(0, max_val);
+            let p2_f = ((2 * p3 + 3 * p2 + p1 + p0 + q0 + 4) >> 3)
+                .clamp(p2 - tc2, p2 + tc2)
+                .clamp(0, max_val);
+            let q0_f = ((p1 + 2 * p0 + 2 * q0 + 2 * q1 + q2 + 4) >> 3)
+                .clamp(q0 - tc2, q0 + tc2)
+                .clamp(0, max_val);
+            let q1_f = ((p0 + q0 + q1 + q2 + 2) >> 2)
+                .clamp(q1 - tc2, q1 + tc2)
+                .clamp(0, max_val);
+            let q2_f = ((p0 + q0 + q1 + 3 * q2 + 2 * q3 + 4) >> 3)
+                .clamp(q2 - tc2, q2 + tc2)
+                .clamp(0, max_val);
+
+            plane[base_p + k_off] = p0_f as u16;
+            plane[base_p + k_off - step_across] = p1_f as u16;
+            plane[base_p + k_off - 2 * step_across] = p2_f as u16;
+            plane[base_q + k_off] = q0_f as u16;
+            plane[base_q + k_off + step_across] = q1_f as u16;
+            plane[base_q + k_off + 2 * step_across] = q2_f as u16;
         } else {
-            // Weak filter - modify 1-2 samples on each side
-            let delta = (9 * (q[0][k] - p[0][k]) - 3 * (q[1][k] - p[1][k]) + 8) >> 4;
+            // Weak filter
+            let delta = (9 * (q0 - p0) - 3 * (q1 - p1) + 8) >> 4;
 
             if delta.abs() < 10 * tc {
                 let delta = delta.clamp(-tc, tc);
 
-                write_sample(
-                    frame,
-                    x,
-                    y,
-                    k,
-                    vertical,
-                    -1,
-                    (p[0][k] + delta).clamp(0, max_val),
-                    max_val,
-                );
-                write_sample(
-                    frame,
-                    x,
-                    y,
-                    k,
-                    vertical,
-                    0,
-                    (q[0][k] - delta).clamp(0, max_val),
-                    max_val,
-                );
+                plane[base_p + k_off] = (p0 + delta).clamp(0, max_val) as u16;
+                plane[base_q + k_off] = (q0 - delta).clamp(0, max_val) as u16;
 
-                if d_ep == 1 {
-                    let delta_p = ((((p[2][k] + p[0][k] + 1) >> 1) - p[1][k] + delta) >> 1)
+                if d_ep {
+                    let delta_p = ((((p2 + p0 + 1) >> 1) - p1 + delta) >> 1)
                         .clamp(-(tc >> 1), tc >> 1);
-                    write_sample(
-                        frame,
-                        x,
-                        y,
-                        k,
-                        vertical,
-                        -2,
-                        (p[1][k] + delta_p).clamp(0, max_val),
-                        max_val,
-                    );
+                    plane[base_p + k_off - step_across] =
+                        (p1 + delta_p).clamp(0, max_val) as u16;
                 }
-                if d_eq == 1 {
-                    let delta_q = ((((q[2][k] + q[0][k] + 1) >> 1) - q[1][k] - delta) >> 1)
+                if d_eq {
+                    let delta_q = ((((q2 + q0 + 1) >> 1) - q1 - delta) >> 1)
                         .clamp(-(tc >> 1), tc >> 1);
-                    write_sample(
-                        frame,
-                        x,
-                        y,
-                        k,
-                        vertical,
-                        1,
-                        (q[1][k] + delta_q).clamp(0, max_val),
-                        max_val,
-                    );
+                    plane[base_q + k_off + step_across] =
+                        (q1 + delta_q).clamp(0, max_val) as u16;
                 }
             }
         }
-    }
-}
-
-/// Write a filtered sample back to the frame
-#[inline]
-#[allow(clippy::too_many_arguments)]
-fn write_sample(
-    frame: &mut DecodedFrame,
-    edge_x: u32,
-    edge_y: u32,
-    k: usize,
-    vertical: bool,
-    offset: i32, // negative = p side, positive/0 = q side
-    value: i32,
-    max_val: i32,
-) {
-    let value = value.clamp(0, max_val) as u16;
-    let stride = frame.y_stride();
-
-    let (px, py) = if vertical {
-        // Vertical edge: offset is in x direction, k is in y
-        ((edge_x as i32 + offset) as usize, edge_y as usize + k)
-    } else {
-        // Horizontal edge: k is in x, offset is in y direction
-        (edge_x as usize + k, (edge_y as i32 + offset) as usize)
-    };
-
-    if px < frame.width as usize && py < frame.height as usize {
-        frame.y_plane[py * stride + px] = value;
     }
 }
 
