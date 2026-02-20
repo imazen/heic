@@ -169,7 +169,7 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 
 ### Performance
 - Release profile: thin LTO + codegen-units=1
-- Criterion benchmarks: 54ms example.heic (1280x854), 469ms iPhone (3024x4032)
+- Criterion benchmarks: 54ms example.heic (1280x854), 451ms iPhone sequential (3024x4032), 180ms parallel
 - Callgrind (iPhone, scalar under valgrind): 5090M instructions
 - Key optimizations applied:
   - Plane-direct writes, in-place dequant, border fill inlining (731M→653M)
@@ -185,6 +185,8 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
   - Intra prediction: early-exit substitution, hoisted bounds, halved arrays
   - Deblocking: direct plane access with step_along/step_across
   - Residual buffer reuse across TU decode calls
+  - Tile-parallel grid decode via rayon: 451ms → 180ms (2.5x) for 48-tile iPhone image
+  - Streaming decode_into for grids: bypasses full-frame YCbCr, color-converts tiles directly to output
 - Remaining hotspots: decode_and_apply_residual (32%), predict_intra (17%), CABAC (10%), memcpy/memset (7%)
 
 ## Known Limitations
