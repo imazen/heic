@@ -13,12 +13,14 @@ exclude = ["CLAUDE.md", "FEEDBACK.md", "CABAC-DEBUG-HANDOFF.md", "heaptrack.*"]
 [features]
 default = ["std"]
 std = ["archmage/std"]
+parallel = ["std", "dep:rayon"]
 
 [dependencies]
 enough = "0.3"
 whereat = "0.1.3"
 archmage = { version = "0.8", default-features = false, features = ["macros", "safe_unaligned_simd"] }
 safe_unaligned_simd = "0.2"
+rayon = { version = "1.10", optional = true }
 
 [dev-dependencies]
 criterion = "0.6"

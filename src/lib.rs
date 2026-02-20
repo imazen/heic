@@ -38,6 +38,9 @@
 #![warn(missing_docs)]
 extern crate alloc;
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 mod error;
 #[doc(hidden)]
 pub mod heif;
@@ -1123,27 +1126,44 @@ fn decode_grid(
     let mut output =
         hevc::DecodedFrame::with_params(output_width, output_height, bit_depth, chroma_format);
 
-    // Decode each tile and copy into the output frame
-    for (tile_idx, &tile_id) in tile_ids.iter().enumerate() {
-        check_stop(stop)?;
+    // Decode tiles — parallel when rayon is available, sequential otherwise.
+    // Each tile is an independent HEVC stream, so they can be decoded concurrently.
+    check_stop(stop)?;
+    let tile_data_list: Vec<&[u8]> = tile_ids
+        .iter()
+        .map(|&tid| {
+            container
+                .get_item_data(tid)
+                .ok_or_else(|| At::from(HeicError::InvalidData("Missing tile data")))
+        })
+        .collect::<core::result::Result<_, _>>()?;
 
-        let tile_row = tile_idx as u32 / cols;
-        let tile_col = tile_idx as u32 % cols;
+    #[cfg(feature = "parallel")]
+    let decoded_tiles: Vec<hevc::DecodedFrame> = tile_data_list
+        .par_iter()
+        .map(|tile_data| hevc::decode_with_config(tile_config, tile_data).map_err(Into::into))
+        .collect::<Result<_>>()?;
 
-        let tile_data = container
-            .get_item_data(tile_id)
-            .ok_or(HeicError::InvalidData("Missing tile data"))?;
+    #[cfg(not(feature = "parallel"))]
+    let decoded_tiles: Vec<hevc::DecodedFrame> = {
+        let mut tiles = Vec::with_capacity(tile_data_list.len());
+        for tile_data in &tile_data_list {
+            check_stop(stop)?;
+            tiles.push(hevc::decode_with_config(tile_config, tile_data)?);
+        }
+        tiles
+    };
 
-        // Decode tile
-        let tile_frame = hevc::decode_with_config(tile_config, tile_data)?;
-
+    // Copy decoded tiles into the output frame
+    for (tile_idx, tile_frame) in decoded_tiles.iter().enumerate() {
         // Propagate color conversion settings from first tile
         if tile_idx == 0 {
             output.full_range = tile_frame.full_range;
             output.matrix_coeffs = tile_frame.matrix_coeffs;
         }
 
-        // Copy tile into output frame
+        let tile_row = tile_idx as u32 / cols;
+        let tile_col = tile_idx as u32 % cols;
         let dst_x = tile_col * tile_width;
         let dst_y = tile_row * tile_height;
 
