@@ -450,8 +450,9 @@ fn decode_grid(
     let mut output =
         crate::hevc::DecodedFrame::with_params(output_width, output_height, bit_depth, chroma_format);
 
-    // Decode tiles — parallel when rayon is available, sequential otherwise.
-    // Each tile is an independent HEVC stream, so they can be decoded concurrently.
+    // Streaming decode: decode tiles and blit immediately, dropping each tile
+    // (or row of tiles) before decoding the next. This keeps peak memory at
+    // output + 1 tile (sequential) or output + 1 row of tiles (parallel).
     check_stop(stop)?;
     let tile_data_list: Vec<&[u8]> = tile_ids
         .iter()
@@ -463,40 +464,64 @@ fn decode_grid(
         .collect::<core::result::Result<_, _>>()?;
 
     #[cfg(feature = "parallel")]
-    let decoded_tiles: Vec<crate::hevc::DecodedFrame> = tile_data_list
-        .par_iter()
-        .map(|tile_data| crate::hevc::decode_with_config(tile_config, tile_data).map_err(Into::into))
-        .collect::<Result<_>>()?;
+    {
+        // Parallel: decode each row's tiles concurrently, blit, then drop before next row.
+        let cols_usize = cols as usize;
+        for row in 0..rows {
+            let row_start = row as usize * cols_usize;
+            let row_end = row_start + cols_usize;
+            let row_tiles: Vec<crate::hevc::DecodedFrame> = tile_data_list[row_start..row_end]
+                .par_iter()
+                .map(|tile_data| {
+                    crate::hevc::decode_with_config(tile_config, tile_data).map_err(Into::into)
+                })
+                .collect::<Result<_>>()?;
+
+            for (col, tile_frame) in row_tiles.iter().enumerate() {
+                let tile_idx = row as usize * cols_usize + col;
+                if tile_idx == 0 {
+                    output.full_range = tile_frame.full_range;
+                    output.matrix_coeffs = tile_frame.matrix_coeffs;
+                }
+                blit_tile_to_grid(
+                    &mut output,
+                    tile_frame,
+                    tile_idx,
+                    cols,
+                    tile_width,
+                    tile_height,
+                    output_width,
+                    output_height,
+                    chroma_format,
+                );
+            }
+            // row_tiles dropped here — only 1 row in memory at a time
+        }
+    }
 
     #[cfg(not(feature = "parallel"))]
-    let decoded_tiles: Vec<crate::hevc::DecodedFrame> = {
-        let mut tiles = Vec::with_capacity(tile_data_list.len());
-        for tile_data in &tile_data_list {
+    {
+        // Sequential: decode one tile, blit, drop — only 1 tile in memory at a time.
+        for (tile_idx, tile_data) in tile_data_list.iter().enumerate() {
             check_stop(stop)?;
-            tiles.push(crate::hevc::decode_with_config(tile_config, tile_data)?);
+            let tile_frame = crate::hevc::decode_with_config(tile_config, tile_data)?;
+            if tile_idx == 0 {
+                output.full_range = tile_frame.full_range;
+                output.matrix_coeffs = tile_frame.matrix_coeffs;
+            }
+            blit_tile_to_grid(
+                &mut output,
+                &tile_frame,
+                tile_idx,
+                cols,
+                tile_width,
+                tile_height,
+                output_width,
+                output_height,
+                chroma_format,
+            );
+            // tile_frame dropped here
         }
-        tiles
-    };
-
-    // Copy decoded tiles into the output frame
-    for (tile_idx, tile_frame) in decoded_tiles.iter().enumerate() {
-        // Propagate color conversion settings from first tile
-        if tile_idx == 0 {
-            output.full_range = tile_frame.full_range;
-            output.matrix_coeffs = tile_frame.matrix_coeffs;
-        }
-
-        blit_tile_to_grid(
-            &mut output,
-            tile_frame,
-            tile_idx,
-            cols,
-            tile_width,
-            tile_height,
-            output_width,
-            output_height,
-            chroma_format,
-        );
     }
 
     Ok(output)
