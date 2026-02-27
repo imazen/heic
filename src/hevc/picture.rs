@@ -744,4 +744,236 @@ impl DecodedFrame {
             _ => (self.width.div_ceil(2), self.height.div_ceil(2)),
         }
     }
+
+    // ── 16-bit output methods ────────────────────────────────────────────
+
+    /// Convert YCbCr to interleaved RGB u16 with conformance window cropping.
+    ///
+    /// Preserves native bit depth precision. Output samples are scaled to
+    /// full u16 range: `val * 65535 / ((1 << bit_depth) - 1)`.
+    ///
+    /// For 8-bit sources, this is equivalent to `to_rgb()` with values upscaled.
+    /// For 10-bit sources (iPhone HEIC), this preserves the full 10-bit precision
+    /// instead of truncating to 8-bit.
+    pub fn to_rgb16(&self) -> Vec<u16> {
+        let out_width = self.cropped_width();
+        let out_height = self.cropped_height();
+        let total = (out_width * out_height) as usize;
+        let mut rgb = vec![0u16; total * 3];
+
+        let y_start = self.crop_top;
+        let y_end = self.height - self.crop_bottom;
+        let x_start = self.crop_left;
+        let x_end = self.width - self.crop_right;
+        let w = self.width as usize;
+
+        let max_val = ((1u32 << self.bit_depth) - 1) as i32;
+        let neutral = 1i32 << (self.bit_depth - 1);
+
+        let mut out_idx = 0;
+
+        for y in y_start..y_end {
+            for x in x_start..x_end {
+                let y_idx = y as usize * w + x as usize;
+                let y_val = self.y_plane[y_idx] as i32;
+                let (cb_val, cr_val) = self.get_chroma_native(x, y);
+                let (r, g, b) = self.ycbcr_to_rgb_native(y_val, cb_val, cr_val, max_val, neutral);
+                rgb[out_idx] = scale_to_u16(r, max_val);
+                rgb[out_idx + 1] = scale_to_u16(g, max_val);
+                rgb[out_idx + 2] = scale_to_u16(b, max_val);
+                out_idx += 3;
+            }
+        }
+
+        rgb
+    }
+
+    /// Convert YCbCr to interleaved RGBA u16 with conformance window cropping.
+    ///
+    /// Same precision preservation as [`to_rgb16`](Self::to_rgb16), with alpha
+    /// from [`alpha_plane`](Self::alpha_plane) (or max value if absent).
+    pub fn to_rgba16(&self) -> Vec<u16> {
+        let out_width = self.cropped_width();
+        let out_height = self.cropped_height();
+        let total = (out_width * out_height) as usize;
+        let mut rgba = Vec::with_capacity(total * 4);
+
+        let y_start = self.crop_top;
+        let y_end = self.height - self.crop_bottom;
+        let x_start = self.crop_left;
+        let x_end = self.width - self.crop_right;
+
+        let max_val = ((1u32 << self.bit_depth) - 1) as i32;
+        let neutral = 1i32 << (self.bit_depth - 1);
+
+        let mut pixel_idx = 0usize;
+        for y in y_start..y_end {
+            for x in x_start..x_end {
+                let y_idx = (y * self.width + x) as usize;
+                let y_val = self.y_plane[y_idx] as i32;
+                let (cb_val, cr_val) = self.get_chroma_native(x, y);
+                let (r, g, b) = self.ycbcr_to_rgb_native(y_val, cb_val, cr_val, max_val, neutral);
+                rgba.push(scale_to_u16(r, max_val));
+                rgba.push(scale_to_u16(g, max_val));
+                rgba.push(scale_to_u16(b, max_val));
+
+                let alpha = if let Some(ref alpha) = self.alpha_plane {
+                    if pixel_idx < alpha.len() {
+                        scale_to_u16(alpha[pixel_idx] as i32, max_val)
+                    } else {
+                        u16::MAX
+                    }
+                } else {
+                    u16::MAX
+                };
+                rgba.push(alpha);
+
+                pixel_idx += 1;
+            }
+        }
+
+        rgba
+    }
+
+    /// Get chroma values at native bit depth (no shift).
+    fn get_chroma_native(&self, x: u32, y: u32) -> (i32, i32) {
+        let neutral = 1i32 << (self.bit_depth - 1);
+        match self.chroma_format {
+            0 => (neutral, neutral), // Monochrome
+            1 => {
+                let cx = x / 2;
+                let cy = y / 2;
+                let c_stride = self.c_stride();
+                let c_idx = (cy as usize) * c_stride + (cx as usize);
+                let cb = if c_idx < self.cb_plane.len() {
+                    self.cb_plane[c_idx] as i32
+                } else {
+                    neutral
+                };
+                let cr = if c_idx < self.cr_plane.len() {
+                    self.cr_plane[c_idx] as i32
+                } else {
+                    neutral
+                };
+                (cb, cr)
+            }
+            2 => {
+                let cx = x / 2;
+                let c_stride = self.c_stride();
+                let c_idx = (y as usize) * c_stride + (cx as usize);
+                let cb = if c_idx < self.cb_plane.len() {
+                    self.cb_plane[c_idx] as i32
+                } else {
+                    neutral
+                };
+                let cr = if c_idx < self.cr_plane.len() {
+                    self.cr_plane[c_idx] as i32
+                } else {
+                    neutral
+                };
+                (cb, cr)
+            }
+            3 => {
+                let c_idx = (y * self.width + x) as usize;
+                let cb = if c_idx < self.cb_plane.len() {
+                    self.cb_plane[c_idx] as i32
+                } else {
+                    neutral
+                };
+                let cr = if c_idx < self.cr_plane.len() {
+                    self.cr_plane[c_idx] as i32
+                } else {
+                    neutral
+                };
+                (cb, cr)
+            }
+            _ => (neutral, neutral),
+        }
+    }
+
+    /// YCbCr to RGB at native bit depth. Returns clamped [0, max_val] values.
+    ///
+    /// Works at any bit depth by using the neutral chroma point and max value
+    /// as parameters. Same matrix coefficients as `ycbcr_to_rgb`, but arithmetic
+    /// is scaled for the native bit depth.
+    fn ycbcr_to_rgb_native(
+        &self,
+        y_val: i32,
+        cb_val: i32,
+        cr_val: i32,
+        max_val: i32,
+        neutral: i32,
+    ) -> (i32, i32, i32) {
+        let cb = cb_val - neutral;
+        let cr = cr_val - neutral;
+
+        if self.full_range {
+            // Full-range: same coefficients as 8-bit, but scaled for bit depth.
+            // Coefficients are ×256 fixed-point of the matrix values.
+            // For N-bit input, we shift by 8 + (bit_depth - 8) = bit_depth.
+            // But the coefficients are designed for 8-bit neutral=128 range,
+            // so we need to adjust: coefficients work on cb/cr centered at 0
+            // with magnitude ±128 (8-bit) or ±512 (10-bit), etc.
+            // The key: coefficient * cb_native / neutral * 128 = coefficient * cb_8bit
+            // So: result = y_val + (coeff * cr + neutral) >> 8
+            // But cr is at native scale, not 8-bit. The coefficients assume 8-bit
+            // cb/cr range. Since neutral = 1 << (bit_depth-1), and for 8-bit
+            // neutral = 128, the cb/cr values are already 4x larger for 10-bit.
+            // The fixed-point coefficients need no change — the shift compensates.
+            let shift = self.bit_depth as i32;
+            let half = 1 << (shift - 1);
+            let (cr_r, cb_g, cr_g, cb_b) = match self.matrix_coeffs {
+                1 => (403, -48, -120, 475), // BT.709
+                9 => (377, -42, -146, 482), // BT.2020
+                _ => (359, -88, -183, 454), // BT.601 (default/unspecified)
+            };
+            let r = y_val + ((cr_r * cr + half) >> shift);
+            let g = y_val + ((cb_g * cb + cr_g * cr + half) >> shift);
+            let b = y_val + ((cb_b * cb + half) >> shift);
+            (r.clamp(0, max_val), g.clamp(0, max_val), b.clamp(0, max_val))
+        } else {
+            // Limited-range at native bit depth.
+            // The limited range for N-bit is [16 << (N-8), 235 << (N-8)] for Y,
+            // [16 << (N-8), 240 << (N-8)] for Cb/Cr.
+            let scale = 1 << (self.bit_depth - 8);
+            let y_offset = 16 * scale;
+            // Y_scale = max_val / (219 * scale), C_scale = max_val / (224 * scale)
+            // Using ×8192 fixed-point like the 8-bit version, but with bit_depth shift.
+            let shift = 13 + (self.bit_depth as i32 - 8);
+            let half = 1 << (shift - 1);
+            let (cr_r, cb_g, cr_g, cb_b) = match self.matrix_coeffs {
+                1 => (14744, -1754, -4383, 17373), // BT.709
+                9 => (13806, -1541, -5349, 17615), // BT.2020
+                _ => (13126, -3222, -6686, 16591), // BT.601 (default/unspecified)
+            };
+            let yv = (y_val - y_offset) * 9576;
+            let r = (yv + cr_r * cr + half) >> shift;
+            let g = (yv + cb_g * cb + cr_g * cr + half) >> shift;
+            let b = (yv + cb_b * cb + half) >> shift;
+            (r.clamp(0, max_val), g.clamp(0, max_val), b.clamp(0, max_val))
+        }
+    }
+}
+
+/// Scale a value from [0, max_native] to [0, 65535].
+#[inline]
+fn scale_to_u16(val: i32, max_native: i32) -> u16 {
+    if max_native == 255 {
+        // 8-bit: fast path, shift left by 8 and OR
+        let v = val.clamp(0, 255) as u16;
+        (v << 8) | v
+    } else if max_native == 1023 {
+        // 10-bit: multiply by 65535/1023 ≈ 64.06...
+        // Use: (val * 65535 + 512) / 1023 for proper rounding
+        let v = val.clamp(0, 1023) as u32;
+        ((v * 65535 + 512) / 1023) as u16
+    } else if max_native == 4095 {
+        // 12-bit: multiply by 65535/4095 ≈ 16.003...
+        let v = val.clamp(0, 4095) as u32;
+        ((v * 65535 + 2048) / 4095) as u16
+    } else {
+        // Generic path
+        let v = val.clamp(0, max_native) as u64;
+        ((v * 65535 + (max_native as u64 / 2)) / max_native as u64) as u16
+    }
 }
