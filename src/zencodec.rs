@@ -25,7 +25,7 @@
 
 use rgb::{Rgb, Rgba};
 use zencodec_types::{
-    ChannelType, DecodeFrame, DecodeOutput, ImageFormat, ImageInfo, PixelData, PixelDescriptor,
+    ChannelType, DecodeFrame, DecodeOutput, ImageFormat, ImageInfo, PixelBuffer, PixelDescriptor,
     ResourceLimits, Stop,
 };
 
@@ -207,7 +207,7 @@ impl zencodec_types::Decode for HeicDecoder<'_> {
         // (or caller has no preference and source is >8-bit).
         let use_16bit = should_use_16bit(preferred, bit_depth);
 
-        let pixels = if use_16bit {
+        let (buf, width, height, has_alpha): (PixelBuffer, u32, u32, bool) = if use_16bit {
             // 16-bit path: decode to YCbCr frame, then convert at full precision.
             let mut req = self.config.inner.decode_request(data);
             if let Some(ref limits) = self.limits {
@@ -219,8 +219,8 @@ impl zencodec_types::Decode for HeicDecoder<'_> {
             let frame = req.decode_yuv().map_err(|e| e.into_inner())?;
 
             let has_alpha = frame.alpha_plane.is_some();
-            let w = frame.cropped_width() as usize;
-            let h = frame.cropped_height() as usize;
+            let w = frame.cropped_width();
+            let h = frame.cropped_height();
 
             if has_alpha || wants_alpha_16(preferred) {
                 let rgba_data = frame.to_rgba16();
@@ -233,7 +233,10 @@ impl zencodec_types::Decode for HeicDecoder<'_> {
                         a: c[3],
                     })
                     .collect();
-                (PixelData::Rgba16(imgref::ImgVec::new(pixels, w, h)), w as u32, h as u32, true)
+                let pb = PixelBuffer::from_pixels(pixels, w, h)
+                    .map_err(|_| HeicError::InvalidData("pixel count mismatch"))?
+                    .with_descriptor(PixelDescriptor::RGBA16_SRGB);
+                (pb.into(), w, h, true)
             } else {
                 let rgb_data = frame.to_rgb16();
                 let pixels: alloc::vec::Vec<Rgb<u16>> = rgb_data
@@ -244,7 +247,10 @@ impl zencodec_types::Decode for HeicDecoder<'_> {
                         b: c[2],
                     })
                     .collect();
-                (PixelData::Rgb16(imgref::ImgVec::new(pixels, w, h)), w as u32, h as u32, false)
+                let pb = PixelBuffer::from_pixels(pixels, w, h)
+                    .map_err(|_| HeicError::InvalidData("pixel count mismatch"))?
+                    .with_descriptor(PixelDescriptor::RGB16_SRGB);
+                (pb.into(), w, h, false)
             }
         } else {
             // 8-bit path: use the existing layout-based decode.
@@ -265,16 +271,14 @@ impl zencodec_types::Decode for HeicDecoder<'_> {
                 || layout == crate::PixelLayout::Bgra8;
             let w = native_output.width;
             let h = native_output.height;
-            let pd = raw_to_pixel_data(
+            let pb = raw_to_pixel_buffer(
                 native_output.data,
-                w as usize,
-                h as usize,
+                w,
+                h,
                 native_output.layout,
-            );
-            (pd, w, h, has_alpha)
+            )?;
+            (pb, w, h, has_alpha)
         };
-
-        let (pixel_data, width, height, has_alpha) = pixels;
 
         // Probe for metadata (EXIF/XMP) — best-effort, don't fail the decode.
         let exif = self
@@ -307,7 +311,7 @@ impl zencodec_types::Decode for HeicDecoder<'_> {
             info = info.with_xmp(xmp_data);
         }
 
-        Ok(DecodeOutput::new(pixel_data, info))
+        Ok(DecodeOutput::new(buf, info))
     }
 }
 
@@ -331,13 +335,14 @@ impl zencodec_types::FrameDecode for HeicFrameDecoder {
 
 // ── Pixel conversion helpers ───────────────────────────────────────────────
 
-/// Convert raw `Vec<u8>` pixel data from the native decoder into `PixelData`.
-fn raw_to_pixel_data(
+/// Convert raw `Vec<u8>` pixel data from the native decoder into a [`PixelBuffer`].
+fn raw_to_pixel_buffer(
     raw: alloc::vec::Vec<u8>,
-    w: usize,
-    h: usize,
+    w: u32,
+    h: u32,
     layout: crate::PixelLayout,
-) -> PixelData {
+) -> Result<PixelBuffer, HeicError> {
+    let err = |_| HeicError::InvalidData("pixel count mismatch");
     match layout {
         crate::PixelLayout::Rgb8 => {
             let pixels: alloc::vec::Vec<Rgb<u8>> = raw
@@ -348,7 +353,10 @@ fn raw_to_pixel_data(
                     b: c[2],
                 })
                 .collect();
-            PixelData::Rgb8(imgref::ImgVec::new(pixels, w, h))
+            Ok(PixelBuffer::from_pixels(pixels, w, h)
+                .map_err(err)?
+                .with_descriptor(PixelDescriptor::RGB8_SRGB)
+                .into())
         }
         crate::PixelLayout::Rgba8 => {
             let pixels: alloc::vec::Vec<Rgba<u8>> = raw
@@ -360,7 +368,10 @@ fn raw_to_pixel_data(
                     a: c[3],
                 })
                 .collect();
-            PixelData::Rgba8(imgref::ImgVec::new(pixels, w, h))
+            Ok(PixelBuffer::from_pixels(pixels, w, h)
+                .map_err(err)?
+                .with_descriptor(PixelDescriptor::RGBA8_SRGB)
+                .into())
         }
         crate::PixelLayout::Bgr8 => {
             // Convert BGR to RGB.
@@ -372,10 +383,13 @@ fn raw_to_pixel_data(
                     b: c[0],
                 })
                 .collect();
-            PixelData::Rgb8(imgref::ImgVec::new(pixels, w, h))
+            Ok(PixelBuffer::from_pixels(pixels, w, h)
+                .map_err(err)?
+                .with_descriptor(PixelDescriptor::RGB8_SRGB)
+                .into())
         }
         crate::PixelLayout::Bgra8 => {
-            // Keep as BGRA — PixelData has a Bgra8 variant.
+            // Keep as BGRA.
             let pixels: alloc::vec::Vec<rgb::alt::BGRA<u8>> = raw
                 .chunks_exact(4)
                 .map(|c| rgb::alt::BGRA {
@@ -385,7 +399,10 @@ fn raw_to_pixel_data(
                     a: c[3],
                 })
                 .collect();
-            PixelData::Bgra8(imgref::ImgVec::new(pixels, w, h))
+            Ok(PixelBuffer::from_pixels(pixels, w, h)
+                .map_err(err)?
+                .with_descriptor(PixelDescriptor::BGRA8_SRGB)
+                .into())
         }
     }
 }
@@ -566,90 +583,46 @@ mod tests {
     }
 
     #[test]
-    fn raw_to_pixel_data_rgb8() {
+    fn raw_to_pixel_buffer_rgb8() {
         let raw = alloc::vec![10, 20, 30, 40, 50, 60];
-        let pixels = raw_to_pixel_data(raw, 2, 1, crate::PixelLayout::Rgb8);
-        match pixels {
-            PixelData::Rgb8(img) => {
-                assert_eq!(img.width(), 2);
-                assert_eq!(img.height(), 1);
-                assert_eq!(
-                    img.buf()[0],
-                    Rgb {
-                        r: 10,
-                        g: 20,
-                        b: 30
-                    }
-                );
-                assert_eq!(
-                    img.buf()[1],
-                    Rgb {
-                        r: 40,
-                        g: 50,
-                        b: 60
-                    }
-                );
-            }
-            _ => panic!("expected Rgb8"),
-        }
+        let buf = raw_to_pixel_buffer(raw, 2, 1, crate::PixelLayout::Rgb8).unwrap();
+        assert_eq!(buf.width(), 2);
+        assert_eq!(buf.height(), 1);
+        let img: imgref::ImgRef<'_, Rgb<u8>> = buf.try_as_imgref().expect("expected RGB8");
+        assert_eq!(img.buf()[0], Rgb { r: 10, g: 20, b: 30 });
+        assert_eq!(img.buf()[1], Rgb { r: 40, g: 50, b: 60 });
     }
 
     #[test]
-    fn raw_to_pixel_data_rgba8() {
+    fn raw_to_pixel_buffer_rgba8() {
         let raw = alloc::vec![10, 20, 30, 255, 40, 50, 60, 128];
-        let pixels = raw_to_pixel_data(raw, 2, 1, crate::PixelLayout::Rgba8);
-        match pixels {
-            PixelData::Rgba8(img) => {
-                assert_eq!(img.width(), 2);
-                assert_eq!(img.height(), 1);
-                assert_eq!(
-                    img.buf()[0],
-                    Rgba {
-                        r: 10,
-                        g: 20,
-                        b: 30,
-                        a: 255
-                    }
-                );
-            }
-            _ => panic!("expected Rgba8"),
-        }
+        let buf = raw_to_pixel_buffer(raw, 2, 1, crate::PixelLayout::Rgba8).unwrap();
+        assert_eq!(buf.width(), 2);
+        assert_eq!(buf.height(), 1);
+        let img: imgref::ImgRef<'_, Rgba<u8>> = buf.try_as_imgref().expect("expected RGBA8");
+        assert_eq!(img.buf()[0], Rgba { r: 10, g: 20, b: 30, a: 255 });
     }
 
     #[test]
-    fn raw_to_pixel_data_bgr8() {
+    fn raw_to_pixel_buffer_bgr8() {
         // BGR input should be converted to RGB.
         let raw = alloc::vec![30, 20, 10];
-        let pixels = raw_to_pixel_data(raw, 1, 1, crate::PixelLayout::Bgr8);
-        match pixels {
-            PixelData::Rgb8(img) => {
-                assert_eq!(
-                    img.buf()[0],
-                    Rgb {
-                        r: 10,
-                        g: 20,
-                        b: 30
-                    }
-                );
-            }
-            _ => panic!("expected Rgb8 from BGR conversion"),
-        }
+        let buf = raw_to_pixel_buffer(raw, 1, 1, crate::PixelLayout::Bgr8).unwrap();
+        let img: imgref::ImgRef<'_, Rgb<u8>> = buf.try_as_imgref().expect("expected RGB8");
+        assert_eq!(img.buf()[0], Rgb { r: 10, g: 20, b: 30 });
     }
 
     #[test]
-    fn raw_to_pixel_data_bgra8() {
+    fn raw_to_pixel_buffer_bgra8() {
         let raw = alloc::vec![30, 20, 10, 255];
-        let pixels = raw_to_pixel_data(raw, 1, 1, crate::PixelLayout::Bgra8);
-        match pixels {
-            PixelData::Bgra8(img) => {
-                let px = &img.buf()[0];
-                assert_eq!(px.b, 30);
-                assert_eq!(px.g, 20);
-                assert_eq!(px.r, 10);
-                assert_eq!(px.a, 255);
-            }
-            _ => panic!("expected Bgra8"),
-        }
+        let buf = raw_to_pixel_buffer(raw, 1, 1, crate::PixelLayout::Bgra8).unwrap();
+        let img: imgref::ImgRef<'_, rgb::alt::BGRA<u8>> =
+            buf.try_as_imgref().expect("expected BGRA8");
+        let px = &img.buf()[0];
+        assert_eq!(px.b, 30);
+        assert_eq!(px.g, 20);
+        assert_eq!(px.r, 10);
+        assert_eq!(px.a, 255);
     }
 
     #[test]
