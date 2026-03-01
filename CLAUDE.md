@@ -127,9 +127,12 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 - HDR gain map extraction (Apple HDR aux format)
 - Identity-derived (iden) and overlay (iovl) image types
 - Image mirror (imir) with ordered transform application (ipma order)
-- VUI color info parsing (video_full_range_flag, matrix_coefficients)
+- VUI color info parsing (video_full_range_flag, matrix_coefficients, color_primaries, transfer_characteristics)
 - YCbCr→RGB with BT.601, BT.709, BT.2020 matrices (full + limited range)
-- colr nclx box color info override from HEIF container
+- colr nclx box color info override from HEIF container (all 4 CICP fields)
+- CICP propagation through zencodec adapter (TF/primaries on PixelDescriptor, with_cicp on ImageInfo)
+- ICC profile extraction (extract_icc API)
+- RowSink streaming decode (decode_rows API, grid-to-sink streaming)
 - HEVC scaling list support (custom dequantization matrices from SPS/PPS)
 - `#![forbid(unsafe_code)]` — zero unsafe blocks in codebase
 - `no_std + alloc` support (compiles for wasm32-unknown-unknown)
