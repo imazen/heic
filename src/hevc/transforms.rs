@@ -76,6 +76,8 @@ impl DecodedFrame {
             alpha_plane,
             full_range: self.full_range,
             matrix_coeffs: self.matrix_coeffs,
+            color_primaries: self.color_primaries,
+            transfer_characteristics: self.transfer_characteristics,
         }
     }
 
@@ -146,6 +148,8 @@ impl DecodedFrame {
             alpha_plane,
             full_range: self.full_range,
             matrix_coeffs: self.matrix_coeffs,
+            color_primaries: self.color_primaries,
+            transfer_characteristics: self.transfer_characteristics,
         }
     }
 
@@ -219,6 +223,8 @@ impl DecodedFrame {
             alpha_plane,
             full_range: self.full_range,
             matrix_coeffs: self.matrix_coeffs,
+            color_primaries: self.color_primaries,
+            transfer_characteristics: self.transfer_characteristics,
         }
     }
 
@@ -284,6 +290,8 @@ impl DecodedFrame {
             alpha_plane,
             full_range: self.full_range,
             matrix_coeffs: self.matrix_coeffs,
+            color_primaries: self.color_primaries,
+            transfer_characteristics: self.transfer_characteristics,
         }
     }
 
@@ -349,6 +357,8 @@ impl DecodedFrame {
             alpha_plane,
             full_range: self.full_range,
             matrix_coeffs: self.matrix_coeffs,
+            color_primaries: self.color_primaries,
+            transfer_characteristics: self.transfer_characteristics,
         }
     }
 }

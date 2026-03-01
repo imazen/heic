@@ -25,8 +25,8 @@
 
 use rgb::{Rgb, Rgba};
 use zencodec_types::{
-    ChannelType, DecodeFrame, DecodeOutput, ImageFormat, ImageInfo, PixelBuffer, PixelDescriptor,
-    ResourceLimits, Stop,
+    ChannelType, Cicp, ColorPrimaries, DecodeFrame, DecodeOutput, ImageFormat, ImageInfo,
+    PixelBuffer, PixelDescriptor, ResourceLimits, Stop, TransferFunction,
 };
 
 use crate::error::HeicError;
@@ -153,7 +153,7 @@ impl<'a> zencodec_types::DecodeJob<'a> for HeicDecodeJob<'a> {
 
     fn output_info(&self, data: &[u8]) -> Result<zencodec_types::OutputInfo, HeicError> {
         let native = crate::ImageInfo::from_bytes(data).map_err(probe_error_to_heic)?;
-        let desc = if native.bit_depth > 8 {
+        let base_desc = if native.bit_depth > 8 {
             if native.has_alpha {
                 PixelDescriptor::RGBA16_SRGB
             } else {
@@ -164,6 +164,11 @@ impl<'a> zencodec_types::DecodeJob<'a> for HeicDecodeJob<'a> {
         } else {
             PixelDescriptor::RGB8_SRGB
         };
+        let desc = cicp_descriptor(
+            base_desc,
+            native.color_primaries,
+            native.transfer_characteristics,
+        );
         Ok(zencodec_types::OutputInfo::full_decode(
             native.width,
             native.height,
@@ -223,6 +228,11 @@ impl zencodec_types::Decode for HeicDecoder<'_> {
             let h = frame.cropped_height();
 
             if has_alpha || wants_alpha_16(preferred) {
+                let desc = cicp_descriptor(
+                    PixelDescriptor::RGBA16_SRGB,
+                    frame.color_primaries as u16,
+                    frame.transfer_characteristics as u16,
+                );
                 let rgba_data = frame.to_rgba16();
                 let pixels: alloc::vec::Vec<Rgba<u16>> = rgba_data
                     .chunks_exact(4)
@@ -235,9 +245,14 @@ impl zencodec_types::Decode for HeicDecoder<'_> {
                     .collect();
                 let pb = PixelBuffer::from_pixels(pixels, w, h)
                     .map_err(|_| HeicError::InvalidData("pixel count mismatch"))?
-                    .with_descriptor(PixelDescriptor::RGBA16_SRGB);
+                    .with_descriptor(desc);
                 (pb.into(), w, h, true)
             } else {
+                let desc = cicp_descriptor(
+                    PixelDescriptor::RGB16_SRGB,
+                    frame.color_primaries as u16,
+                    frame.transfer_characteristics as u16,
+                );
                 let rgb_data = frame.to_rgb16();
                 let pixels: alloc::vec::Vec<Rgb<u16>> = rgb_data
                     .chunks_exact(3)
@@ -249,7 +264,7 @@ impl zencodec_types::Decode for HeicDecoder<'_> {
                     .collect();
                 let pb = PixelBuffer::from_pixels(pixels, w, h)
                     .map_err(|_| HeicError::InvalidData("pixel count mismatch"))?
-                    .with_descriptor(PixelDescriptor::RGB16_SRGB);
+                    .with_descriptor(desc);
                 (pb.into(), w, h, false)
             }
         } else {
@@ -271,12 +286,21 @@ impl zencodec_types::Decode for HeicDecoder<'_> {
                 || layout == crate::PixelLayout::Bgra8;
             let w = native_output.width;
             let h = native_output.height;
-            let pb = raw_to_pixel_buffer(
+            let mut pb = raw_to_pixel_buffer(
                 native_output.data,
                 w,
                 h,
                 native_output.layout,
             )?;
+            // Apply CICP from probe to the 8-bit output descriptor
+            if let Some(ref pi) = probe_info {
+                let desc = cicp_descriptor(
+                    pb.descriptor(),
+                    pi.color_primaries,
+                    pi.transfer_characteristics,
+                );
+                pb = pb.with_descriptor(desc);
+            }
             (pb, w, h, has_alpha)
         };
 
@@ -300,6 +324,18 @@ impl zencodec_types::Decode for HeicDecoder<'_> {
 
         if let Some(pi) = &probe_info {
             info = info.with_alpha(pi.has_alpha).with_bit_depth(pi.bit_depth);
+            // Set CICP from container nclx
+            if pi.color_primaries != 2
+                || pi.transfer_characteristics != 2
+                || pi.matrix_coefficients != 2
+            {
+                info = info.with_cicp(Cicp::new(
+                    pi.color_primaries as u8,
+                    pi.transfer_characteristics as u8,
+                    pi.matrix_coefficients as u8,
+                    pi.video_full_range,
+                ));
+            }
         } else {
             info = info.with_alpha(has_alpha);
         }
@@ -487,10 +523,38 @@ fn choose_layout(preferred: &[PixelDescriptor], data: &[u8]) -> crate::PixelLayo
 fn convert_info(native: &crate::ImageInfo) -> ImageInfo {
     let channels: u8 = if native.has_alpha { 4 } else { 3 };
 
-    ImageInfo::new(native.width, native.height, ImageFormat::Heic)
+    let mut info = ImageInfo::new(native.width, native.height, ImageFormat::Heic)
         .with_alpha(native.has_alpha)
         .with_bit_depth(native.bit_depth)
-        .with_channel_count(channels)
+        .with_channel_count(channels);
+
+    // Set CICP if we have non-default values
+    if native.color_primaries != 2
+        || native.transfer_characteristics != 2
+        || native.matrix_coefficients != 2
+    {
+        info = info.with_cicp(Cicp::new(
+            native.color_primaries as u8,
+            native.transfer_characteristics as u8,
+            native.matrix_coefficients as u8,
+            native.video_full_range,
+        ));
+    }
+
+    info
+}
+
+/// Derive TransferFunction and ColorPrimaries from native CICP values.
+fn cicp_descriptor(
+    base: PixelDescriptor,
+    color_primaries: u16,
+    transfer_characteristics: u16,
+) -> PixelDescriptor {
+    let tf = TransferFunction::from_cicp(transfer_characteristics as u8)
+        .unwrap_or(base.transfer);
+    let primaries = ColorPrimaries::from_cicp(color_primaries as u8)
+        .unwrap_or(base.primaries);
+    base.with_transfer(tf).with_primaries(primaries)
 }
 
 /// Convert `ProbeError` to `HeicError` for trait compatibility.

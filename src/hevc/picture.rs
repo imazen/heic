@@ -51,6 +51,10 @@ pub struct DecodedFrame {
     pub full_range: bool,
     /// Matrix coefficients (from SPS VUI). 1=BT.709, 5/6=BT.601, 9=BT.2020, 2=unspecified
     pub matrix_coeffs: u8,
+    /// Color primaries (CICP). 1=BT.709, 9=BT.2020, 12=Display P3, 2=unspecified
+    pub color_primaries: u8,
+    /// Transfer characteristics (CICP). 1=BT.709, 13=sRGB, 16=PQ, 18=HLG, 2=unspecified
+    pub transfer_characteristics: u8,
     // -- Internal fields (not part of public API) --
     /// Deblocking edge flags at 4x4 block granularity
     #[doc(hidden)]
@@ -105,6 +109,8 @@ impl DecodedFrame {
             alpha_plane: None,
             full_range: false,
             matrix_coeffs: 2,
+            color_primaries: 2,
+            transfer_characteristics: 2,
         }
     }
 

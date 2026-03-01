@@ -280,6 +280,16 @@ pub struct ImageInfo {
     pub has_xmp: bool,
     /// Whether the file contains a thumbnail image
     pub has_thumbnail: bool,
+    /// Color primaries (CICP). 1=BT.709, 9=BT.2020, 12=Display P3, 2=unspecified
+    pub color_primaries: u16,
+    /// Transfer characteristics (CICP). 1=BT.709, 13=sRGB, 16=PQ, 18=HLG, 2=unspecified
+    pub transfer_characteristics: u16,
+    /// Matrix coefficients (CICP). 1=BT.709, 5/6=BT.601, 9=BT.2020, 2=unspecified
+    pub matrix_coefficients: u16,
+    /// Full range flag (CICP). true = full [0,255], false = limited [16,235]
+    pub video_full_range: bool,
+    /// Whether the file contains an ICC profile (in colr box)
+    pub has_icc_profile: bool,
 }
 
 impl ImageInfo {
@@ -340,6 +350,24 @@ impl ImageInfo {
         });
         let has_thumbnail = !container.find_thumbnails(primary_item.id).is_empty();
 
+        // Extract CICP from colr nclx box on the primary item
+        let (color_primaries, transfer_characteristics, matrix_coefficients, video_full_range) =
+            match &primary_item.color_info {
+                Some(heif::ColorInfo::Nclx {
+                    color_primaries,
+                    transfer_characteristics,
+                    matrix_coefficients,
+                    full_range,
+                }) => (
+                    *color_primaries,
+                    *transfer_characteristics,
+                    *matrix_coefficients,
+                    *full_range,
+                ),
+                _ => (2, 2, 2, false), // unspecified defaults
+            };
+        let has_icc_profile = matches!(&primary_item.color_info, Some(heif::ColorInfo::IccProfile(_)));
+
         // Try to get info from HEVC config (fast path for direct HEVC items)
         if let Some(ref config) = primary_item.hevc_config
             && let Ok(hevc_info) = hevc::get_info_from_config(config)
@@ -355,6 +383,11 @@ impl ImageInfo {
                 has_exif,
                 has_xmp,
                 has_thumbnail,
+                color_primaries,
+                transfer_characteristics,
+                matrix_coefficients,
+                video_full_range,
+                has_icc_profile,
             });
         }
 
@@ -386,6 +419,11 @@ impl ImageInfo {
                 has_exif,
                 has_xmp,
                 has_thumbnail,
+                color_primaries,
+                transfer_characteristics,
+                matrix_coefficients,
+                video_full_range,
+                has_icc_profile,
             });
         }
 
@@ -406,6 +444,11 @@ impl ImageInfo {
             has_exif,
             has_xmp,
             has_thumbnail,
+            color_primaries,
+            transfer_characteristics,
+            matrix_coefficients,
+            video_full_range,
+            has_icc_profile,
         })
     }
 
@@ -596,6 +639,23 @@ impl DecoderConfig {
     /// Returns an error if the HEIF container is malformed.
     pub fn extract_xmp<'a>(&self, data: &'a [u8]) -> Result<Option<Cow<'a, [u8]>>> {
         decode::extract_xmp(data)
+    }
+
+    /// Extract ICC profile data from a HEIC file.
+    ///
+    /// Returns the raw ICC profile bytes from the colr box, or `None` if the
+    /// file uses nclx color parameters instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HEIF container is malformed.
+    pub fn extract_icc(&self, data: &[u8]) -> Result<Option<Vec<u8>>> {
+        let container = heif::parse(data, &Unstoppable)?;
+        let primary_item = container.primary_item().ok_or(HeicError::NoPrimaryImage)?;
+        match &primary_item.color_info {
+            Some(heif::ColorInfo::IccProfile(icc)) => Ok(Some(icc.clone())),
+            _ => Ok(None),
+        }
     }
 
     /// Decode the thumbnail image from a HEIC file.

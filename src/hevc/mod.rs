@@ -120,6 +120,8 @@ fn decode_nal_units(nal_units: &[bitstream::NalUnit<'_>]) -> Result<DecodedFrame
     );
     frame.full_range = sps.video_full_range_flag;
     frame.matrix_coeffs = sps.matrix_coeffs;
+    frame.color_primaries = sps.color_primaries;
+    frame.transfer_characteristics = sps.transfer_characteristics;
 
     // Set conformance window cropping from SPS
     // Offsets are in units of SubWidthC/SubHeightC, need to convert to luma samples

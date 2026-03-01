@@ -100,6 +100,10 @@ pub struct Sps {
     pub video_full_range_flag: bool,
     /// Matrix coefficients (from VUI). 1=BT.709, 5/6=BT.601, 9=BT.2020
     pub matrix_coeffs: u8,
+    /// Color primaries (from VUI). 1=BT.709, 9=BT.2020, 12=Display P3, 2=unspecified
+    pub color_primaries: u8,
+    /// Transfer characteristics (from VUI). 1=BT.709, 13=sRGB, 16=PQ, 18=HLG, 2=unspecified
+    pub transfer_characteristics: u8,
 }
 
 impl Sps {
@@ -579,6 +583,8 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
     // Parse VUI color parameters if present
     let mut video_full_range_flag = false; // default: limited range
     let mut matrix_coeffs = 2u8; // default: unspecified
+    let mut colour_primaries = 2u8; // default: unspecified
+    let mut transfer_chars = 2u8; // default: unspecified
     if vui_parameters_present_flag {
         let aspect_ratio_info_present = reader.read_bit()? != 0;
         if aspect_ratio_info_present {
@@ -599,8 +605,8 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
             video_full_range_flag = reader.read_bit()? != 0;
             let colour_description_present = reader.read_bit()? != 0;
             if colour_description_present {
-                let _colour_primaries = reader.read_bits(8)?;
-                let _transfer_characteristics = reader.read_bits(8)?;
+                colour_primaries = reader.read_bits(8)? as u8;
+                transfer_chars = reader.read_bits(8)? as u8;
                 matrix_coeffs = reader.read_bits(8)? as u8;
             }
         }
@@ -642,6 +648,8 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
         vui_parameters_present_flag,
         video_full_range_flag,
         matrix_coeffs,
+        color_primaries: colour_primaries,
+        transfer_characteristics: transfer_chars,
     })
 }
 
