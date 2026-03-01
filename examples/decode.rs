@@ -12,7 +12,10 @@ use heic_decoder::{DecoderConfig, ImageInfo, Limits, PixelLayout};
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: {} <image.heic> [output.ppm] [--info] [--thumbnail] [--into]", args[0]);
+        eprintln!(
+            "Usage: {} <image.heic> [output.ppm] [--info] [--thumbnail] [--into]",
+            args[0]
+        );
         std::process::exit(1);
     }
 
@@ -48,7 +51,11 @@ fn main() {
             println!("  xmp:            {}", info.has_xmp);
             println!("  thumbnail:      {}", info.has_thumbnail);
             let rgb_size = info.output_buffer_size(PixelLayout::Rgb8).unwrap_or(0);
-            println!("  rgb buffer:     {} bytes ({:.1} MB)", rgb_size, rgb_size as f64 / 1e6);
+            println!(
+                "  rgb buffer:     {} bytes ({:.1} MB)",
+                rgb_size,
+                rgb_size as f64 / 1e6
+            );
         }
         Err(e) => {
             eprintln!("Probe failed: {}", e);
@@ -78,7 +85,12 @@ fn main() {
     if thumbnail {
         match decoder.decode_thumbnail(&data, PixelLayout::Rgb8) {
             Ok(Some(thumb)) => {
-                println!("\nThumbnail: {}x{} ({} bytes)", thumb.width, thumb.height, thumb.data.len());
+                println!(
+                    "\nThumbnail: {}x{} ({} bytes)",
+                    thumb.width,
+                    thumb.height,
+                    thumb.data.len()
+                );
                 if let Some(path) = output_path {
                     write_ppm(path, &thumb.data, thumb.width, thumb.height);
                     println!("Wrote thumbnail to {}", path);
@@ -114,7 +126,12 @@ fn main() {
                 std::process::exit(1);
             });
         let elapsed = start.elapsed();
-        println!("\nDecoded {}x{} in {:.1}ms (decode_into)", w, h, elapsed.as_secs_f64() * 1000.0);
+        println!(
+            "\nDecoded {}x{} in {:.1}ms (decode_into)",
+            w,
+            h,
+            elapsed.as_secs_f64() * 1000.0
+        );
 
         if let Some(path) = output_path {
             write_ppm(path, &buf, w, h);

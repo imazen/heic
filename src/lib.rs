@@ -105,6 +105,12 @@ pub mod heif;
 #[doc(hidden)]
 pub mod hevc;
 
+#[cfg(feature = "zencodec")]
+mod zencodec;
+
+#[cfg(feature = "zencodec")]
+pub use zencodec::{HeicDecodeJob, HeicDecoder as HeicZenDecoder, HeicDecoderConfig};
+
 pub use error::{HeicError, HevcError, ProbeError, Result};
 pub use hevc::DecodedFrame;
 
@@ -213,6 +219,33 @@ impl Limits {
     }
 }
 
+/// Sink for receiving decoded pixel rows during streaming decode.
+///
+/// The decoder calls [`demand()`](RowSink::demand) for each strip of rows,
+/// writes decoded pixels into the returned buffer, then calls `demand()`
+/// again for the next strip.
+///
+/// This enables streaming decode: the caller owns the output memory and
+/// the decoder writes directly into it, one tile-row at a time for grid
+/// images.
+///
+/// # Contract
+///
+/// - The codec calls `demand()` once per strip, in top-to-bottom order
+///   (`y` increases monotonically).
+/// - The returned buffer must be at least `min_bytes` bytes.
+/// - Pixels are written tightly packed: `width × bpp` bytes per row,
+///   `height` rows, no padding between rows.
+/// - When `demand()` is called again, the previous buffer has been fully
+///   written. When `decode_rows()` returns, the last buffer has been written.
+pub trait RowSink {
+    /// Provide a mutable buffer for decoded rows `y .. y + height`.
+    ///
+    /// `min_bytes` is the minimum buffer size needed. The returned slice
+    /// must be at least `min_bytes` bytes long.
+    fn demand(&mut self, y: u32, height: u32, min_bytes: usize) -> &mut [u8];
+}
+
 /// Decoded image output
 #[derive(Debug, Clone)]
 #[must_use]
@@ -278,8 +311,8 @@ impl ImageInfo {
             return Err(ProbeError::InvalidFormat);
         }
 
-        let container =
-            heif::parse(data, &Unstoppable).map_err(|e: At<HeicError>| ProbeError::Corrupt(e.into_inner()))?;
+        let container = heif::parse(data, &Unstoppable)
+            .map_err(|e: At<HeicError>| ProbeError::Corrupt(e.into_inner()))?;
 
         let primary_item = container
             .primary_item()
@@ -719,6 +752,64 @@ impl<'a> DecodeRequest<'a> {
                 frame.write_bgra_into(output);
             }
         }
+
+        Ok((width, height))
+    }
+
+    /// Decode with row-level streaming into a caller-managed sink.
+    ///
+    /// The decoder calls [`RowSink::demand()`] for each strip of rows and
+    /// writes decoded pixels directly into the returned buffer.
+    ///
+    /// For grid-based images (most iPhone photos) without transforms or alpha,
+    /// this streams one tile-row at a time — peak memory is proportional to
+    /// one row of tiles instead of the full image.
+    ///
+    /// For other images, falls back to full-frame decode then writes strips
+    /// to the sink.
+    ///
+    /// Returns `(width, height)` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if decoding fails, limits are exceeded,
+    /// or the operation is cancelled.
+    pub fn decode_rows(self, sink: &mut dyn RowSink) -> Result<(u32, u32)> {
+        let stop: &dyn Stop = self.stop.unwrap_or(&Unstoppable);
+
+        // Try streaming path for eligible grid images
+        if let Some(result) =
+            decode::try_decode_grid_to_sink(self.data, self.limits, stop, self.layout, sink)?
+        {
+            return Ok(result);
+        }
+
+        // Fallback: full-frame decode then write to sink as one strip
+        let frame = decode::decode_to_frame(self.data, self.limits, stop)?;
+
+        let width = frame.cropped_width();
+        let height = frame.cropped_height();
+
+        // Check limits on final output dimensions
+        if let Some(limits) = self.limits {
+            limits.check_dimensions(width, height)?;
+            let output_bytes =
+                u64::from(width) * u64::from(height) * self.layout.bytes_per_pixel() as u64;
+            limits.check_memory(output_bytes)?;
+        }
+
+        let data = match self.layout {
+            PixelLayout::Rgb8 => frame.to_rgb(),
+            PixelLayout::Rgba8 => frame.to_rgba(),
+            PixelLayout::Bgr8 => frame.to_bgr(),
+            PixelLayout::Bgra8 => frame.to_bgra(),
+        };
+
+        let bpp = self.layout.bytes_per_pixel();
+        let row_bytes = width as usize * bpp;
+        let min_bytes = row_bytes * height as usize;
+        let buf = sink.demand(0, height, min_bytes);
+        buf[..data.len()].copy_from_slice(&data);
 
         Ok((width, height))
     }

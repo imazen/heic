@@ -9,8 +9,8 @@ use enough::{Stop, Unstoppable};
 use crate::error::check_stop;
 use crate::heif::{self, CleanAperture, ColorInfo, FourCC, ItemType, Transform};
 use crate::{
-    DecodeOutput, DecoderConfig, HeicError, HdrGainMap, Limits, PixelLayout, Result,
-    floor_f64, round_f64,
+    DecodeOutput, DecoderConfig, HdrGainMap, HeicError, Limits, PixelLayout, Result, floor_f64,
+    round_f64,
 };
 
 #[cfg(feature = "parallel")]
@@ -285,8 +285,12 @@ fn decode_iovl(
     let bit_depth = first_tile_config.bit_depth_luma_minus8 + 8;
     let chroma_format = first_tile_config.chroma_format;
 
-    let mut output =
-        crate::hevc::DecodedFrame::with_params(canvas_width, canvas_height, bit_depth, chroma_format);
+    let mut output = crate::hevc::DecodedFrame::with_params(
+        canvas_width,
+        canvas_height,
+        bit_depth,
+        chroma_format,
+    );
 
     // Apply canvas fill values (16-bit values scaled to bit depth)
     let fill_shift = 16u32.saturating_sub(bit_depth as u32);
@@ -442,8 +446,12 @@ fn decode_grid(
     // Create output frame at the grid's output dimensions
     let bit_depth = tile_config.bit_depth_luma_minus8 + 8;
     let chroma_format = tile_config.chroma_format;
-    let mut output =
-        crate::hevc::DecodedFrame::with_params(output_width, output_height, bit_depth, chroma_format);
+    let mut output = crate::hevc::DecodedFrame::with_params(
+        output_width,
+        output_height,
+        bit_depth,
+        chroma_format,
+    );
 
     // Streaming decode: decode tiles and blit immediately, dropping each tile
     // (or row of tiles) before decoding the next. This keeps peak memory at
@@ -643,9 +651,7 @@ pub(crate) fn try_decode_grid_streaming(
     let cols = grid_data[3] as u32 + 1;
     let (output_width, output_height) = if (flags & 1) != 0 {
         if grid_data.len() < 12 {
-            return Err(
-                HeicError::InvalidData("Grid descriptor too short for 32-bit dims").into(),
-            );
+            return Err(HeicError::InvalidData("Grid descriptor too short for 32-bit dims").into());
         }
         (
             u32::from_be_bytes([grid_data[4], grid_data[5], grid_data[6], grid_data[7]]),
@@ -789,6 +795,175 @@ pub(crate) fn try_decode_grid_streaming(
     Ok(Some((output_width, output_height)))
 }
 
+/// Try to decode a grid image with row-level streaming to a sink.
+///
+/// Calls [`RowSink::demand()`](crate::RowSink::demand) for each tile-row and
+/// writes color-converted pixels directly. Returns `Ok(None)` if the image
+/// is not eligible for streaming (not a grid, has transforms, has alpha).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_decode_grid_to_sink(
+    data: &[u8],
+    limits: Option<&Limits>,
+    stop: &dyn Stop,
+    layout: PixelLayout,
+    sink: &mut dyn crate::RowSink,
+) -> Result<Option<(u32, u32)>> {
+    let limits = limits.unwrap_or(&NO_LIMITS);
+
+    check_stop(stop)?;
+
+    let container = heif::parse(data, stop)?;
+    let primary_item = container.primary_item().ok_or(HeicError::NoPrimaryImage)?;
+
+    // Eligibility: must be a grid with no transforms and no alpha
+    if primary_item.item_type != ItemType::Grid {
+        return Ok(None);
+    }
+    if !primary_item.transforms.is_empty() {
+        return Ok(None);
+    }
+
+    // Check for alpha auxiliary image
+    let has_alpha = !container
+        .find_auxiliary_items(primary_item.id, "urn:mpeg:hevc:2015:auxid:1")
+        .is_empty()
+        || !container
+            .find_auxiliary_items(
+                primary_item.id,
+                "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha",
+            )
+            .is_empty();
+    if has_alpha {
+        return Ok(None);
+    }
+
+    // Parse grid descriptor
+    let grid_data = container.get_item_data(primary_item.id)?;
+
+    if grid_data.len() < 8 {
+        return Err(HeicError::InvalidData("Grid descriptor too short").into());
+    }
+
+    let flags = grid_data[1];
+    let rows = grid_data[2] as u32 + 1;
+    let cols = grid_data[3] as u32 + 1;
+    let (output_width, output_height) = if (flags & 1) != 0 {
+        if grid_data.len() < 12 {
+            return Err(HeicError::InvalidData("Grid descriptor too short for 32-bit dims").into());
+        }
+        (
+            u32::from_be_bytes([grid_data[4], grid_data[5], grid_data[6], grid_data[7]]),
+            u32::from_be_bytes([grid_data[8], grid_data[9], grid_data[10], grid_data[11]]),
+        )
+    } else {
+        (
+            u16::from_be_bytes([grid_data[4], grid_data[5]]) as u32,
+            u16::from_be_bytes([grid_data[6], grid_data[7]]) as u32,
+        )
+    };
+
+    limits.check_dimensions(output_width, output_height)?;
+
+    // Get tile info
+    let tile_ids = container.get_item_references(primary_item.id, FourCC::DIMG);
+    let expected_tiles = (rows * cols) as usize;
+    if tile_ids.len() != expected_tiles {
+        return Err(HeicError::InvalidData("Grid tile count mismatch").into());
+    }
+
+    let first_tile = container
+        .get_item(tile_ids[0])
+        .ok_or(HeicError::InvalidData("Missing tile item"))?;
+    let tile_config = first_tile
+        .hevc_config
+        .as_ref()
+        .ok_or(HeicError::InvalidData("Missing tile hvcC config"))?;
+    let (tile_width, tile_height) = first_tile
+        .dimensions
+        .ok_or(HeicError::InvalidData("Missing tile dimensions"))?;
+
+    // Determine color conversion overrides from grid item's colr nclx
+    let color_override = match &primary_item.color_info {
+        Some(ColorInfo::Nclx {
+            full_range,
+            matrix_coefficients,
+            ..
+        }) => Some((*full_range, *matrix_coefficients as u8)),
+        _ => None,
+    };
+
+    // Collect tile data
+    check_stop(stop)?;
+    let tile_data_list: Vec<Cow<'_, [u8]>> = tile_ids
+        .iter()
+        .map(|&tid| container.get_item_data(tid))
+        .collect::<core::result::Result<_, _>>()?;
+
+    let bpp = layout.bytes_per_pixel();
+
+    // Stream tile-rows: decode one row at a time, write to sink, drop
+    for row in 0..rows {
+        check_stop(stop)?;
+
+        let row_start = row as usize * cols as usize;
+        let row_end = row_start + cols as usize;
+
+        // Calculate strip height (last row may be clipped)
+        let strip_h = tile_height.min(output_height.saturating_sub(row * tile_height));
+        if strip_h == 0 {
+            break;
+        }
+
+        let y_offset = row * tile_height;
+        let min_bytes = output_width as usize * strip_h as usize * bpp;
+        let strip_buf = sink.demand(y_offset, strip_h, min_bytes);
+
+        // Decode tiles for this row
+        #[cfg(feature = "parallel")]
+        let row_tiles: Vec<crate::hevc::DecodedFrame> = tile_data_list[row_start..row_end]
+            .par_iter()
+            .map(|tile_data| {
+                crate::hevc::decode_with_config(tile_config, tile_data).map_err(Into::into)
+            })
+            .collect::<Result<_>>()?;
+
+        #[cfg(not(feature = "parallel"))]
+        let row_tiles: Vec<crate::hevc::DecodedFrame> = tile_data_list[row_start..row_end]
+            .iter()
+            .map(|tile_data| {
+                crate::hevc::decode_with_config(tile_config, tile_data).map_err(Into::into)
+            })
+            .collect::<Result<_>>()?;
+
+        // Color-convert each tile directly into the strip buffer
+        for (col, mut tile_frame) in row_tiles.into_iter().enumerate() {
+            if let Some((fr, mc)) = color_override {
+                tile_frame.full_range = fr;
+                tile_frame.matrix_coeffs = mc;
+            }
+            let dst_x = col as u32 * tile_width;
+            let copy_w = tile_frame
+                .cropped_width()
+                .min(output_width.saturating_sub(dst_x));
+            let copy_h = tile_frame.cropped_height().min(strip_h);
+
+            // Write into the strip buffer (y=0 within the strip)
+            convert_tile_to_output(
+                &tile_frame,
+                strip_buf,
+                layout,
+                dst_x,
+                0, // relative to strip, not to full image
+                copy_w,
+                copy_h,
+                output_width,
+            );
+        }
+    }
+
+    Ok(Some((output_width, output_height)))
+}
+
 /// Color-convert a single decoded tile directly into the correct region
 /// of the output RGB/RGBA/BGR/BGRA buffer.
 #[allow(clippy::too_many_arguments)]
@@ -814,8 +989,7 @@ fn convert_tile_to_output(
 
         for r in 0..copy_h {
             let src_row = src_y_start + r;
-            let out_offset =
-                ((dst_y + r) as usize * output_width as usize + dst_x as usize) * 3;
+            let out_offset = ((dst_y + r) as usize * output_width as usize + dst_x as usize) * 3;
             let row_bytes = copy_w as usize * 3;
             crate::hevc::color_convert::convert_420_to_rgb(
                 &tile.y_plane,
@@ -839,16 +1013,16 @@ fn convert_tile_to_output(
     // Scalar fallback for other layouts and chroma formats
     let (cr_r, cb_g, cr_g, cb_b, y_bias, y_scale, rnd, shr) = if tile.full_range {
         let (cr_r, cb_g, cr_g, cb_b) = match tile.matrix_coeffs {
-            1 => (403i32, -48, -120, 475),   // BT.709
-            9 => (377, -42, -146, 482),       // BT.2020
-            _ => (359i32, -88, -183, 454),    // BT.601
+            1 => (403i32, -48, -120, 475), // BT.709
+            9 => (377, -42, -146, 482),    // BT.2020
+            _ => (359i32, -88, -183, 454), // BT.601
         };
         (cr_r, cb_g, cr_g, cb_b, 0i32, 256i32, 128i32, 8i32)
     } else {
         let (cr_r, cb_g, cr_g, cb_b) = match tile.matrix_coeffs {
             1 => (14744i32, -1754, -4383, 17373), // BT.709
-            9 => (13806, -1541, -5349, 17615),     // BT.2020
-            _ => (13126i32, -3222, -6686, 16591),  // BT.601
+            9 => (13806, -1541, -5349, 17615),    // BT.2020
+            _ => (13126i32, -3222, -6686, 16591), // BT.601
         };
         (cr_r, cb_g, cr_g, cb_b, 16i32, 9576i32, 4096i32, 13i32)
     };
@@ -858,8 +1032,7 @@ fn convert_tile_to_output(
 
     for r in 0..copy_h {
         let src_y = src_y_start + r;
-        let out_row_start =
-            ((dst_y + r) as usize * output_width as usize + dst_x as usize) * bpp;
+        let out_row_start = ((dst_y + r) as usize * output_width as usize + dst_x as usize) * bpp;
 
         for c in 0..copy_w {
             let src_x = src_x_start + c;
@@ -1020,7 +1193,13 @@ pub(crate) fn decode_gain_map(data: &[u8]) -> Result<HdrGainMap> {
         .ok_or(HeicError::InvalidData("Missing gain map item"))?;
 
     // Use decode_item to handle grids, iden, and plain HEVC gain maps
-    let frame = decode_item(&container, &gainmap_item, 0, &Limits::default(), &Unstoppable)?;
+    let frame = decode_item(
+        &container,
+        &gainmap_item,
+        0,
+        &Limits::default(),
+        &Unstoppable,
+    )?;
 
     let width = frame.cropped_width();
     let height = frame.cropped_height();

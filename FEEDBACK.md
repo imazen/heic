@@ -11,3 +11,6 @@ User asked to investigate why this file has low PSNR (32.8dB, max diff 33) vs li
 
 ## 2026-02-19: Update test files to new API
 User requested updating all test files in tests/ to use new DecoderConfig API (replacing HeicDecoder).
+
+## 2026-02-26: Implement zencodec-types trait hierarchy
+User requested creating zencodec.rs implementing DecoderConfig, DecodeJob, Decode, and FrameDecode traits from zencodec-types. Decode-only, feature-gated behind `zencodec`.

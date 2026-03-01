@@ -727,11 +727,7 @@ fn parse_infe(infe: &Box<'_>) -> Result<ItemInfo> {
     })
 }
 
-fn parse_iprp(
-    iprp: &Box<'_>,
-    container: &mut HeifContainer<'_>,
-    stop: &dyn Stop,
-) -> Result<()> {
+fn parse_iprp(iprp: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop) -> Result<()> {
     for child in BoxIterator::new(iprp.content) {
         check_stop(stop)?;
         match child.box_type() {
@@ -743,11 +739,7 @@ fn parse_iprp(
     Ok(())
 }
 
-fn parse_ipco(
-    ipco: &Box<'_>,
-    container: &mut HeifContainer<'_>,
-    stop: &dyn Stop,
-) -> Result<()> {
+fn parse_ipco(ipco: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop) -> Result<()> {
     // Properties are stored in order - index is implicit (1-based in ipma, 0-based here)
     for (prop_count, child) in BoxIterator::new(ipco.content).enumerate() {
         check_stop(stop)?;
@@ -1032,11 +1024,7 @@ fn parse_colr(colr: &Box<'_>) -> Result<ColorInfo> {
     }
 }
 
-fn parse_iref(
-    iref: &Box<'_>,
-    container: &mut HeifContainer<'_>,
-    stop: &dyn Stop,
-) -> Result<()> {
+fn parse_iref(iref: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop) -> Result<()> {
     let content = iref.content;
     if content.len() < 4 {
         return Err(HeicError::InvalidContainer("iref too short").into());
@@ -1085,9 +1073,7 @@ fn parse_iref(
             pos += 2;
 
             if u32::from(ref_count) > MAX_REFS_PER_ENTRY {
-                return Err(
-                    HeicError::LimitExceeded("refs per entry exceeds limit").into(),
-                );
+                return Err(HeicError::LimitExceeded("refs per entry exceeds limit").into());
             }
 
             let mut to_ids = Vec::new();
@@ -1119,11 +1105,7 @@ fn parse_iref(
     Ok(())
 }
 
-fn parse_ipma(
-    ipma: &Box<'_>,
-    container: &mut HeifContainer<'_>,
-    stop: &dyn Stop,
-) -> Result<()> {
+fn parse_ipma(ipma: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop) -> Result<()> {
     let content = ipma.content;
     if content.len() < 8 {
         return Err(HeicError::InvalidContainer("ipma too short").into());
