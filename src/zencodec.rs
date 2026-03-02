@@ -454,7 +454,7 @@ fn should_use_16bit(preferred: &[PixelDescriptor], bit_depth: u8) -> bool {
     }
     // Find the first descriptor we can produce
     for desc in preferred {
-        match desc.channel_type {
+        match desc.channel_type() {
             ChannelType::U16 => {
                 // Caller's top preference is 16-bit — honor it
                 if matches!(
@@ -551,7 +551,7 @@ fn cicp_descriptor(
     transfer_characteristics: u16,
 ) -> PixelDescriptor {
     let tf = TransferFunction::from_cicp(transfer_characteristics as u8)
-        .unwrap_or(base.transfer);
+        .unwrap_or(base.transfer());
     let primaries = ColorPrimaries::from_cicp(color_primaries as u8)
         .unwrap_or(base.primaries);
     base.with_transfer(tf).with_primaries(primaries)

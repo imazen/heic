@@ -190,7 +190,7 @@ fn native_libheif_exif(data: &[u8]) -> Option<Vec<u8>> {
         let err = ffi::heif_context_get_primary_image_handle(ctx, &mut handle);
         assert_eq!(err.code, 0);
 
-        let exif_filter = b"Exif\0".as_ptr() as *const std::ffi::c_char;
+        let exif_filter = c"Exif".as_ptr();
         let count = ffi::heif_image_handle_get_number_of_metadata_blocks(handle, exif_filter);
 
         let result = if count > 0 {
