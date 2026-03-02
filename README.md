@@ -4,32 +4,36 @@
 [![Documentation](https://docs.rs/heic-decoder/badge.svg)](https://docs.rs/heic-decoder)
 [![License](https://img.shields.io/crates/l/heic-decoder.svg)](LICENSE)
 
-Pure Rust HEIC/HEIF image decoder. No C/C++ dependencies, no unsafe code.
+Pure Rust HEIC/HEIF image decoder. No C/C++ dependencies, no unsafe code, 5 runtime crates.
 
-- `#![forbid(unsafe_code)]` — zero unsafe blocks
-- `no_std + alloc` compatible (works on wasm32)
-- AVX2 SIMD acceleration with automatic scalar fallback
-- Decodes 1280x854 in ~57ms on x86-64
+- `#![forbid(unsafe_code)]` — zero unsafe blocks in the entire codebase
+- `no_std + alloc` compatible (compiles for wasm32-unknown-unknown)
+- AVX2/SSE4.1 SIMD acceleration with automatic scalar fallback
+- Optional tile-parallel decoding via rayon
 
 ## Status
 
-Decodes most HEIC files from iPhones and other cameras. 91% pixel-exact vs libheif, 55 dB PSNR across remaining differences.
+Decodes most HEIC files from iPhones and cameras. 103/162 test files decode successfully. Best quality: 77.3 dB PSNR (BT.709), 73% pixel-exact on example.heic.
 
 ### What works
-- HEIF container parsing (ISOBMFF boxes, grid images, overlays)
+- HEIF container parsing (ISOBMFF boxes, grid images, overlays, identity-derived items)
 - Full HEVC I-frame decoding (VPS/SPS/PPS, CABAC, intra prediction, transforms)
 - Deblocking filter and SAO (Sample Adaptive Offset)
 - YCbCr→RGB with BT.601/BT.709/BT.2020 matrices (full + limited range)
-- 10-bit HEVC (transparent downconvert to 8-bit output)
-- Alpha plane decoding, HDR gain map extraction
-- EXIF/XMP metadata extraction (zero-copy)
-- Thumbnail decode, image rotation/mirror transforms
+- CICP color info from HEVC VUI and HEIF colr nclx (container overrides codec)
+- 10-bit HEVC with transparent 8-bit downconvert or 16-bit output preservation
+- Alpha plane decoding from auxiliary images
+- HDR gain map extraction (Apple `urn:com:apple:photo:2020:aux:hdrgainmap`)
+- EXIF, XMP, and ICC profile extraction (zero-copy where possible)
+- Thumbnail decode, image rotation/mirror transforms (ipma ordering)
 - HEVC scaling lists (custom dequantization matrices)
-- AVX2/SSE4.1 SIMD for color conversion, IDCT 8/16/32, IDST 4, residual add, dequantize
-- Optional tile-parallel decoding via rayon (`parallel` feature)
+- AVX2 SIMD: color conversion, IDCT 8/16/32, residual add, dequantize
+- SSE4.1 SIMD: IDST 4x4
+- Tile-parallel grid decoding via rayon (`parallel` feature)
 
 ### Known limitations
-- I-slices only (sufficient for HEIC still images, no inter prediction)
+- I-slices only (sufficient for HEIC still images; no inter prediction for video)
+- PQ/HLG transfer functions: parsed and exposed via `ImageInfo`, but no EOTF applied — callers handle tone-mapping
 
 ## Features
 
@@ -48,7 +52,7 @@ let output = DecoderConfig::new().decode(&data, PixelLayout::Rgba8)?;
 println!("{}x{} image, {} bytes", output.width, output.height, output.data.len());
 ```
 
-### Full control with limits and cancellation
+### Limits and cancellation
 
 ```rust
 use heic_decoder::{DecoderConfig, PixelLayout, Limits};
@@ -72,7 +76,10 @@ let output = DecoderConfig::new()
 use heic_decoder::ImageInfo;
 
 let info = ImageInfo::from_bytes(&data)?;
-println!("{}x{}, alpha={}, exif={}", info.width, info.height, info.has_alpha, info.has_exif);
+println!("{}x{}, bit_depth={}, alpha={}, exif={}",
+    info.width, info.height, info.bit_depth, info.has_alpha, info.has_exif);
+// CICP color info also available:
+// info.color_primaries, info.transfer_characteristics, info.matrix_coefficients, info.video_full_range
 ```
 
 ### Zero-copy into pre-allocated buffer
@@ -86,34 +93,65 @@ let (w, h) = DecoderConfig::new()
     .decode_into(&mut buf)?;
 ```
 
+For grid images (most iPhone photos), `decode_into` streams tile color conversion directly into the output buffer, avoiding the intermediate full-frame YCbCr allocation.
+
 ### Metadata extraction
 
 ```rust
+use std::borrow::Cow;
+
 let decoder = DecoderConfig::new();
-let exif: Option<&[u8]> = decoder.extract_exif(&data)?;   // raw TIFF bytes
-let xmp: Option<&[u8]> = decoder.extract_xmp(&data)?;     // raw XML bytes
-let thumb = decoder.decode_thumbnail(&data, PixelLayout::Rgb8)?; // smaller preview
+// Zero-copy for single-extent items, owned for multi-extent
+let exif: Option<Cow<'_, [u8]>> = decoder.extract_exif(&data)?;  // raw TIFF bytes
+let xmp: Option<Cow<'_, [u8]>> = decoder.extract_xmp(&data)?;    // raw XML bytes
+let icc: Option<Vec<u8>> = decoder.extract_icc(&data)?;           // ICC profile bytes
+let thumb = decoder.decode_thumbnail(&data, PixelLayout::Rgb8)?;  // smaller preview
+```
+
+### HDR gain map
+
+```rust
+let gainmap = DecoderConfig::new().decode_gain_map(&data)?;
+// gainmap.data: Vec<f32> (normalized 0.0–1.0), gainmap.width, gainmap.height
+// Apply Apple HDR reconstruction:
+//   sdr_linear = sRGB_EOTF(sdr_pixel)
+//   gain_linear = sRGB_EOTF(gainmap_pixel)
+//   scale = 1.0 + (headroom - 1.0) * gain_linear
+//   hdr_linear = sdr_linear * scale
 ```
 
 ## Performance
 
-SIMD-accelerated on x86-64 (AVX2 for color conversion, IDCT 8/16/32; SSE4.1 for IDST 4). Scalar fallback on other architectures.
+Benchmarked on AMD Ryzen 9 7950X, WSL2, Rust 1.93, release profile (thin LTO, codegen-units=1). See `benchmarks/comparison_2026-03-01.md` for full methodology and comparison against native libheif.
 
-| Image | Size | Time (release) |
-|-------|------|----------------|
-| example.heic | 1280x854 | ~57ms |
-| iPhone 12 Pro | 3024x4032 | ~470ms |
-| Probe (metadata only) | any | ~1µs |
-| Thumbnail decode | any | ~4ms |
-| EXIF extraction | any | ~4µs |
+| Image | Time | vs native libheif (SSE) |
+|-------|------|------------------------|
+| 1280x854 (single tile) | 48 ms | 1.2x faster |
+| 3024x4032 (48-tile, sequential) | 429 ms | 2.3x slower |
+| 3024x4032 (48-tile, `parallel`) | 151 ms | 1.3x faster |
+| Probe (metadata only) | 1.2 µs | 24x faster |
+| EXIF extraction | 4.3 µs | 54x faster |
 
-With the `parallel` feature, grid-based images decode tiles concurrently via rayon.
+SIMD-accelerated on x86-64 (AVX2 for color conversion, IDCT 8/16/32, residual add, dequantize; SSE4.1 for IDST 4x4). Scalar fallback on other architectures.
+
+## Dependencies
+
+5 runtime crates (default features), none with C/FFI:
+
+```
+heic-decoder
+├── archmage          — SIMD dispatch via CPU feature tokens
+│   └── safe_unaligned_simd  — safe wrappers over std::arch intrinsics
+├── enough            — cooperative cancellation (0 unsafe)
+├── safe_unaligned_simd
+└── whereat           — error location tracking (deny(unsafe_code))
+```
+
+With `parallel`: adds rayon + crossbeam (6 more crates, all pure Rust).
 
 ## Memory
 
-`decode_into()` uses a streaming path for grid-based images (most iPhone photos) that color-converts each tile directly into the output buffer. This avoids the intermediate full-frame YCbCr allocation, reducing peak memory by ~60% compared to `decode()`.
-
-Use `DecoderConfig::estimate_memory()` to check memory requirements before decoding.
+Use `DecoderConfig::estimate_memory()` to check memory requirements before decoding. `decode_into()` uses a streaming path for grid images that reduces peak memory by ~60% compared to `decode()`.
 
 ## License
 
