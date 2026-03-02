@@ -55,3 +55,7 @@ codegen-units = 1
 [[bench]]
 name = "decode"
 harness = false
+
+[[bench]]
+name = "compare"
+harness = false
