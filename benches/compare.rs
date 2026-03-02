@@ -260,13 +260,35 @@ fn bench_decode_large(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(data.len() as u64));
     group.sample_size(10);
 
-    // Pure Rust
-    let rust_dec = heic_decoder::DecoderConfig::new();
-    group.bench_function("rust", |b| {
-        b.iter(|| rust_dec.decode(&data, heic_decoder::PixelLayout::Rgb8).unwrap());
-    });
+    // Pure Rust (sequential — force 1 thread even if parallel feature is on)
+    #[cfg(feature = "parallel")]
+    {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let rust_dec = heic_decoder::DecoderConfig::new();
+        group.bench_function("rust_1thread", |b| {
+            b.iter(|| {
+                pool.install(|| rust_dec.decode(&data, heic_decoder::PixelLayout::Rgb8).unwrap())
+            });
+        });
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        let rust_dec = heic_decoder::DecoderConfig::new();
+        group.bench_function("rust", |b| {
+            b.iter(|| rust_dec.decode(&data, heic_decoder::PixelLayout::Rgb8).unwrap());
+        });
+    }
 
-    // Native libheif
+    // Pure Rust (parallel — use all cores)
+    #[cfg(feature = "parallel")]
+    {
+        let rust_dec = heic_decoder::DecoderConfig::new();
+        group.bench_function("rust_parallel", |b| {
+            b.iter(|| rust_dec.decode(&data, heic_decoder::PixelLayout::Rgb8).unwrap());
+        });
+    }
+
+    // Native libheif (single-threaded — libheif 1.12 has no threading)
     group.bench_function("native_libheif", |b| {
         b.iter(|| native_libheif_decode(&data));
     });
