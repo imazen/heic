@@ -2,7 +2,7 @@
 name = "heic-decoder"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 description = "Pure Rust HEIC/HEIF image decoder with SIMD acceleration"
 repository = "https://github.com/imazen/heic-decoder-rs"
