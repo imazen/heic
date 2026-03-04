@@ -5,8 +5,17 @@
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use std::path::Path;
 
-const EXAMPLE_HEIC: &str = "/home/lilith/work/heic/libheif/examples/example.heic";
-const IPHONE_HEIC: &str = "/home/lilith/work/heic/test-images/classic-car-iphone12pro.heic";
+fn heic_base_dir() -> String {
+    std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into())
+}
+
+fn example_heic() -> String {
+    format!("{}/libheif/examples/example.heic", heic_base_dir())
+}
+
+fn iphone_heic() -> String {
+    format!("{}/test-images/classic-car-iphone12pro.heic", heic_base_dir())
+}
 
 fn wasm_path() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -217,7 +226,7 @@ fn native_libheif_exif(data: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn bench_decode_small(c: &mut Criterion) {
-    let data = std::fs::read(EXAMPLE_HEIC).expect("read example.heic");
+    let data = std::fs::read(&example_heic()).expect("read example.heic");
     let wasm = wasm_path();
 
     let mut group = c.benchmark_group("decode_1280x854");
@@ -248,7 +257,8 @@ fn bench_decode_small(c: &mut Criterion) {
 }
 
 fn bench_decode_large(c: &mut Criterion) {
-    let path = Path::new(IPHONE_HEIC);
+    let iphone = iphone_heic();
+    let path = Path::new(&iphone);
     if !path.exists() {
         eprintln!("iPhone test image not found, skipping decode_3024x4032");
         return;
@@ -305,7 +315,7 @@ fn bench_decode_large(c: &mut Criterion) {
 }
 
 fn bench_probe(c: &mut Criterion) {
-    let data = std::fs::read(EXAMPLE_HEIC).expect("read example.heic");
+    let data = std::fs::read(&example_heic()).expect("read example.heic");
     let wasm = wasm_path();
 
     let mut group = c.benchmark_group("probe_1280x854");
@@ -333,7 +343,8 @@ fn bench_probe(c: &mut Criterion) {
 }
 
 fn bench_exif(c: &mut Criterion) {
-    let path = Path::new(IPHONE_HEIC);
+    let iphone = iphone_heic();
+    let path = Path::new(&iphone);
     if !path.exists() {
         eprintln!("iPhone test image not found, skipping exif_extract");
         return;

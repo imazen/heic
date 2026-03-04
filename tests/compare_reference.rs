@@ -5,22 +5,31 @@ use heic_decoder::DecoderConfig;
 use imgref::ImgVec;
 use std::path::Path;
 
-const WASM_MODULE: &str = "/home/lilith/work/heic/wasm-module/heic_decoder.wasm";
+fn heic_base_dir() -> String {
+    std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into())
+}
 
-/// Test images to compare
-const TEST_IMAGES: &[&str] = &[
-    "/home/lilith/work/heic/libheif/examples/example.heic",
-    "/home/lilith/work/heic/test-images/image1.heic",
-    // iPhone image is large, skip for now
-    // "/home/lilith/work/heic/test-images/classic-car-iphone12pro.heic",
-];
+fn wasm_module() -> String {
+    format!("{}/wasm-module/heic_decoder.wasm", heic_base_dir())
+}
+
+fn test_images() -> Vec<String> {
+    let base = heic_base_dir();
+    vec![
+        format!("{}/libheif/examples/example.heic", base),
+        format!("{}/test-images/image1.heic", base),
+        // iPhone image is large, skip for now
+        // format!("{}/test-images/classic-car-iphone12pro.heic", base),
+    ]
+}
 
 /// Minimum acceptable SSIM2 score (higher is better, 100 = identical)
 /// Reference: >90 is excellent, >70 is good, <50 is poor
 const MIN_SSIM2_SCORE: f64 = 50.0;
 
 fn load_reference_decoder() -> heic_wasm_rs::HeicDecoder {
-    heic_wasm_rs::HeicDecoder::from_file(Path::new(WASM_MODULE))
+    let path = wasm_module();
+    heic_wasm_rs::HeicDecoder::from_file(Path::new(&path))
         .expect("Failed to load WASM decoder")
 }
 
@@ -41,7 +50,7 @@ fn test_ssim2_against_reference() {
     let ref_decoder = load_reference_decoder();
     let our_decoder = DecoderConfig::new();
 
-    for image_path in TEST_IMAGES {
+    for image_path in &test_images() {
         if !Path::new(image_path).exists() {
             eprintln!("Skipping {}: file not found", image_path);
             continue;
@@ -107,7 +116,7 @@ fn test_pixel_difference_stats() {
     let ref_decoder = load_reference_decoder();
     let our_decoder = DecoderConfig::new();
 
-    for image_path in TEST_IMAGES {
+    for image_path in &test_images() {
         if !Path::new(image_path).exists() {
             continue;
         }
@@ -177,7 +186,8 @@ fn write_comparison_images() {
     let ref_decoder = load_reference_decoder();
     let our_decoder = DecoderConfig::new();
 
-    let image_path = TEST_IMAGES[0];
+    let images = test_images();
+    let image_path = &images[0];
     let data = std::fs::read(image_path).expect("Failed to read test file");
 
     let ref_image = ref_decoder.decode(&data).expect("Reference decode failed");
@@ -218,13 +228,14 @@ fn write_comparison_images() {
 fn list_heic_corpus() {
     println!("\n=== Available HEIC test files ===\n");
 
+    let base = heic_base_dir();
     let dirs = [
-        "/home/lilith/work/heic/test-images",
-        "/home/lilith/work/heic/libheif/examples",
-        "/home/lilith/work/heic/libheif/fuzzing/data/corpus",
+        format!("{}/test-images", base),
+        format!("{}/libheif/examples", base),
+        format!("{}/libheif/fuzzing/data/corpus", base),
     ];
 
-    for dir in dirs {
+    for dir in &dirs {
         if let Ok(entries) = std::fs::read_dir(dir) {
             println!("{}:", dir);
             for entry in entries.flatten() {

@@ -1,7 +1,11 @@
+fn heic_base_dir() -> String {
+    std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into())
+}
+
 fn main() {
     let path = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "/home/lilith/work/heic/test-images/example_q10.heic".to_string());
+        .unwrap_or_else(|| format!("{}/test-images/example_q10.heic", heic_base_dir()));
     let data = std::fs::read(&path).expect("read");
     let decoder = heic_decoder::DecoderConfig::new();
     let frame = decoder.decode_to_frame(&data).expect("decode");

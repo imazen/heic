@@ -1,9 +1,13 @@
 use heic_decoder::heif::{FourCC, ItemProperty, ItemType};
 
+fn heic_base_dir() -> String {
+    std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into())
+}
+
 fn main() {
     let path = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "/home/lilith/work/heic/libheif/examples/example.heic".to_string());
+        .unwrap_or_else(|| format!("{}/libheif/examples/example.heic", heic_base_dir()));
     let data = std::fs::read(&path).expect("Failed to read file");
     eprintln!("File: {} ({} bytes)", path, data.len());
 

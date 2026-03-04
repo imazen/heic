@@ -2,6 +2,10 @@
 
 use std::path::PathBuf;
 
+fn heic_base_dir() -> String {
+    std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into())
+}
+
 fn find_heic_files(dir: &std::path::Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
@@ -127,7 +131,7 @@ fn compare_pixels(
 fn main() {
     let base_dir = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "/home/lilith/work/heic/test-images".to_string());
+        .unwrap_or_else(|| format!("{}/test-images", heic_base_dir()));
 
     let mut files = find_heic_files(std::path::Path::new(&base_dir));
     files.sort();
@@ -140,10 +144,9 @@ fn main() {
 
     // Load decoders
     let our_decoder = heic_decoder::DecoderConfig::new();
-    let wasm_decoder = heic_wasm_rs::HeicDecoder::from_file(std::path::Path::new(
-        "/home/lilith/work/heic/wasm-module/heic_decoder.wasm",
-    ))
-    .expect("Failed to load WASM decoder");
+    let wasm_path = format!("{}/wasm-module/heic_decoder.wasm", heic_base_dir());
+    let wasm_decoder = heic_wasm_rs::HeicDecoder::from_file(std::path::Path::new(&wasm_path))
+        .expect("Failed to load WASM decoder");
 
     let strip_prefix = base_dir.clone();
 

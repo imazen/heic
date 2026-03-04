@@ -3,13 +3,19 @@
 
 use heic_decoder::heif;
 
-const EXAMPLE_HEIC: &str = "/home/lilith/work/heic/libheif/examples/example.heic";
+fn heic_base_dir() -> String {
+    std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into())
+}
+
+fn example_heic() -> String {
+    format!("{}/libheif/examples/example.heic", heic_base_dir())
+}
 const OUTPUT_H265: &str = "/tmp/example.h265";
 
 #[test]
 #[ignore]
 fn extract_annexb() {
-    let data = std::fs::read(EXAMPLE_HEIC).expect("Failed to read HEIC");
+    let data = std::fs::read(&example_heic()).expect("Failed to read HEIC");
     let container =
         heif::parse(&data, &heic_decoder::Unstoppable).expect("Failed to parse container");
 

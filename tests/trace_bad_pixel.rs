@@ -6,8 +6,17 @@
 use heic_decoder::DecoderConfig;
 use std::path::Path;
 
-const WASM_MODULE: &str = "/home/lilith/work/heic/wasm-module/heic_decoder.wasm";
-const TEST_IMAGE: &str = "/home/lilith/work/heic/libheif/examples/example.heic";
+fn heic_base_dir() -> String {
+    std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into())
+}
+
+fn wasm_module() -> String {
+    format!("{}/wasm-module/heic_decoder.wasm", heic_base_dir())
+}
+
+fn test_image() -> String {
+    format!("{}/libheif/examples/example.heic", heic_base_dir())
+}
 
 /// Threshold for "bad" pixel - RGB component difference
 const BAD_PIXEL_THRESHOLD: i32 = 50;
@@ -45,7 +54,8 @@ struct PixelProvenance {
 }
 
 fn load_reference_decoder() -> heic_wasm_rs::HeicDecoder {
-    heic_wasm_rs::HeicDecoder::from_file(Path::new(WASM_MODULE))
+    let path = wasm_module();
+    heic_wasm_rs::HeicDecoder::from_file(Path::new(&path))
         .expect("Failed to load WASM decoder")
 }
 
@@ -114,7 +124,7 @@ fn find_first_bad_pixel() {
     let ref_decoder = load_reference_decoder();
     let our_decoder = DecoderConfig::new();
 
-    let data = std::fs::read(TEST_IMAGE).expect("Failed to read test file");
+    let data = std::fs::read(&test_image()).expect("Failed to read test file");
 
     let ref_image = ref_decoder.decode(&data).expect("Reference decode failed");
     let our_image = our_decoder
@@ -228,7 +238,7 @@ fn find_first_bad_pixel() {
 fn examine_ycbcr_at_bad_pixel() {
     let our_decoder = DecoderConfig::new();
 
-    let data = std::fs::read(TEST_IMAGE).expect("Failed to read test file");
+    let data = std::fs::read(&test_image()).expect("Failed to read test file");
 
     // Get the raw YCbCr frame
     let frame = our_decoder
@@ -312,7 +322,7 @@ fn compare_y_plane_approximation() {
     let ref_decoder = load_reference_decoder();
     let our_decoder = DecoderConfig::new();
 
-    let data = std::fs::read(TEST_IMAGE).expect("Failed to read test file");
+    let data = std::fs::read(&test_image()).expect("Failed to read test file");
 
     let ref_image = ref_decoder.decode(&data).expect("Reference decode failed");
     let frame = our_decoder

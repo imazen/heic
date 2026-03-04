@@ -6,6 +6,10 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
+fn heic_base_dir() -> String {
+    std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into())
+}
+
 fn find_heic_files(dir: &std::path::Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
@@ -27,7 +31,7 @@ fn find_heic_files(dir: &std::path::Path) -> Vec<PathBuf> {
 fn main() {
     let base_dir = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "/home/lilith/work/heic/test-images".to_string());
+        .unwrap_or_else(|| format!("{}/test-images", heic_base_dir()));
 
     let mut files = find_heic_files(std::path::Path::new(&base_dir));
     files.sort();
