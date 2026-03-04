@@ -193,12 +193,10 @@ impl<'a> zencodec_types::DecodeJob<'a> for HeicDecodeJob<'a> {
 
     fn streaming_decoder(
         self,
-        _data: &'a [u8],
-        _preferred: &[PixelDescriptor],
+        data: &'a [u8],
+        preferred: &[PixelDescriptor],
     ) -> Result<HeicStreamDecoder, HeicError> {
-        Err(HeicError::Unsupported(
-            "HEIC does not support streaming decode",
-        ))
+        HeicStreamDecoder::new(data, preferred, self.native_limits().as_ref(), self.stop)
     }
 
     fn frame_decoder(
@@ -391,10 +389,399 @@ impl zencodec_types::FrameDecode for HeicFrameDecoder {
     }
 }
 
-// ── Streaming Decoder (unsupported) ────────────────────────────────────
+// ── Streaming Decoder ──────────────────────────────────────────────────
 
-/// Stub streaming decoder for HEIC (streaming decode not supported).
-pub struct HeicStreamDecoder;
+/// Grid image state for tile-row streaming.
+struct GridState {
+    tile_data: alloc::vec::Vec<alloc::vec::Vec<u8>>,
+    tile_config: crate::heif::HevcDecoderConfig,
+    rows: u32,
+    cols: u32,
+    tile_width: u32,
+    tile_height: u32,
+    output_width: u32,
+    output_height: u32,
+    color_override: Option<(bool, u8)>,
+    layout: crate::PixelLayout,
+}
+
+/// HEIC streaming decoder: emits one tile-row per `next_batch()` for grid
+/// images (real streaming with memory savings), or the full image as a
+/// single strip for non-grid images.
+pub struct HeicStreamDecoder {
+    info: ImageInfo,
+    descriptor: PixelDescriptor,
+    y_offset: u32,
+    /// Grid path: decode tiles row-by-row into this buffer.
+    grid: Option<GridState>,
+    current_grid_row: u32,
+    strip_buffer: alloc::vec::Vec<u8>,
+    /// Non-grid fallback: full decoded image, emit strips.
+    full_pixels: Option<PixelBuffer>,
+}
+
+impl HeicStreamDecoder {
+    /// Default strip height for non-grid fallback.
+    const FALLBACK_STRIP_HEIGHT: u32 = 64;
+
+    /// Construct a streaming decoder for the given HEIC data.
+    fn new(
+        data: &[u8],
+        preferred: &[PixelDescriptor],
+        limits: Option<&crate::Limits>,
+        stop: Option<&dyn zencodec_types::Stop>,
+    ) -> Result<Self, HeicError> {
+        let stop_ref: &dyn enough::Stop = stop.unwrap_or(&enough::Unstoppable);
+
+        // Probe for metadata
+        let probe_info = crate::ImageInfo::from_bytes(data).ok();
+
+        // Build ImageInfo for the trait
+        let mut info = if let Some(ref pi) = probe_info {
+            let mut zi = ImageInfo::new(pi.width, pi.height, ImageFormat::Heic)
+                .with_alpha(pi.has_alpha)
+                .with_bit_depth(pi.bit_depth);
+            if pi.color_primaries != 2
+                || pi.transfer_characteristics != 2
+                || pi.matrix_coefficients != 2
+            {
+                zi = zi.with_cicp(Cicp::new(
+                    pi.color_primaries as u8,
+                    pi.transfer_characteristics as u8,
+                    pi.matrix_coefficients as u8,
+                    pi.video_full_range,
+                ));
+            }
+            zi
+        } else {
+            return Err(HeicError::InvalidData("cannot probe HEIC header"));
+        };
+
+        // Extract metadata (best-effort)
+        let config = crate::DecoderConfig::new();
+        if let Ok(Some(exif)) = config.extract_exif(data) {
+            info = info.with_exif(exif.into_owned());
+        }
+        if let Ok(Some(xmp)) = config.extract_xmp(data) {
+            info = info.with_xmp(xmp.into_owned());
+        }
+
+        let pi = probe_info.as_ref().unwrap();
+
+        // Try grid path for 8-bit, no-alpha images
+        if pi.bit_depth <= 8 && !pi.has_alpha {
+            if let Some(grid_state) =
+                Self::try_init_grid(data, preferred, limits, stop_ref, pi)?
+            {
+                let descriptor = cicp_descriptor(
+                    layout_to_descriptor(grid_state.layout),
+                    pi.color_primaries,
+                    pi.transfer_characteristics,
+                );
+                return Ok(Self {
+                    info,
+                    descriptor,
+                    y_offset: 0,
+                    grid: Some(grid_state),
+                    current_grid_row: 0,
+                    strip_buffer: alloc::vec::Vec::new(),
+                    full_pixels: None,
+                });
+            }
+        }
+
+        // Non-grid fallback: full decode upfront
+        let layout = choose_layout(preferred, data);
+        let bit_depth = pi.bit_depth;
+        let use_16bit = should_use_16bit(preferred, bit_depth);
+
+        let pixels: PixelBuffer = if use_16bit {
+            let mut req = config.decode_request(data);
+            if let Some(lim) = limits {
+                req = req.with_limits(lim);
+            }
+            if let Some(s) = stop {
+                req = req.with_stop(s);
+            }
+            let frame = req.decode_yuv().map_err(|e| e.into_inner())?;
+            let has_alpha = frame.alpha_plane.is_some();
+
+            if has_alpha || wants_alpha_16(preferred) {
+                let desc = cicp_descriptor(
+                    PixelDescriptor::RGBA16_SRGB,
+                    frame.color_primaries as u16,
+                    frame.transfer_characteristics as u16,
+                );
+                let rgba_data = frame.to_rgba16();
+                let pixels: alloc::vec::Vec<Rgba<u16>> = rgba_data
+                    .chunks_exact(4)
+                    .map(|c| Rgba { r: c[0], g: c[1], b: c[2], a: c[3] })
+                    .collect();
+                let w = frame.cropped_width();
+                let h = frame.cropped_height();
+                PixelBuffer::from_pixels(pixels, w, h)
+                    .map_err(|_| HeicError::InvalidData("pixel count mismatch"))?
+                    .with_descriptor(desc)
+                    .into()
+            } else {
+                let desc = cicp_descriptor(
+                    PixelDescriptor::RGB16_SRGB,
+                    frame.color_primaries as u16,
+                    frame.transfer_characteristics as u16,
+                );
+                let rgb_data = frame.to_rgb16();
+                let pixels: alloc::vec::Vec<Rgb<u16>> = rgb_data
+                    .chunks_exact(3)
+                    .map(|c| Rgb { r: c[0], g: c[1], b: c[2] })
+                    .collect();
+                let w = frame.cropped_width();
+                let h = frame.cropped_height();
+                PixelBuffer::from_pixels(pixels, w, h)
+                    .map_err(|_| HeicError::InvalidData("pixel count mismatch"))?
+                    .with_descriptor(desc)
+                    .into()
+            }
+        } else {
+            let mut req = config
+                .decode_request(data)
+                .with_output_layout(layout);
+            if let Some(lim) = limits {
+                req = req.with_limits(lim);
+            }
+            if let Some(s) = stop {
+                req = req.with_stop(s);
+            }
+            let native_output = req.decode().map_err(|e| e.into_inner())?;
+            let mut pb = raw_to_pixel_buffer(
+                native_output.data,
+                native_output.width,
+                native_output.height,
+                native_output.layout,
+            )?;
+            let desc = cicp_descriptor(
+                pb.descriptor(),
+                pi.color_primaries,
+                pi.transfer_characteristics,
+            );
+            pb = pb.with_descriptor(desc);
+            pb
+        };
+
+        let descriptor = pixels.descriptor();
+        Ok(Self {
+            info,
+            descriptor,
+            y_offset: 0,
+            grid: None,
+            current_grid_row: 0,
+            strip_buffer: alloc::vec::Vec::new(),
+            full_pixels: Some(pixels),
+        })
+    }
+
+    /// Try to initialize grid streaming state. Returns None if not eligible.
+    fn try_init_grid(
+        data: &[u8],
+        preferred: &[PixelDescriptor],
+        limits: Option<&crate::Limits>,
+        stop: &dyn enough::Stop,
+        _probe_info: &crate::ImageInfo,
+    ) -> Result<Option<GridState>, HeicError> {
+        use crate::heif::{self, ColorInfo, FourCC, ItemType};
+
+        stop.check().map_err(|e| HeicError::Cancelled(e))?;
+
+        let container = heif::parse(data, stop).map_err(|e| e.into_inner())?;
+        let primary_item = container
+            .primary_item()
+            .ok_or(HeicError::NoPrimaryImage)?;
+
+        // Must be a grid with no transforms and no alpha
+        if primary_item.item_type != ItemType::Grid {
+            return Ok(None);
+        }
+        if !primary_item.transforms.is_empty() {
+            return Ok(None);
+        }
+        let has_alpha = !container
+            .find_auxiliary_items(primary_item.id, "urn:mpeg:hevc:2015:auxid:1")
+            .is_empty()
+            || !container
+                .find_auxiliary_items(
+                    primary_item.id,
+                    "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha",
+                )
+                .is_empty();
+        if has_alpha {
+            return Ok(None);
+        }
+
+        // Parse grid descriptor
+        let grid_data = container
+            .get_item_data(primary_item.id)
+            .map_err(|e| e.into_inner())?;
+        if grid_data.len() < 8 {
+            return Err(HeicError::InvalidData("Grid descriptor too short"));
+        }
+
+        let flags = grid_data[1];
+        let rows = grid_data[2] as u32 + 1;
+        let cols = grid_data[3] as u32 + 1;
+        let (output_width, output_height) = if (flags & 1) != 0 {
+            if grid_data.len() < 12 {
+                return Err(HeicError::InvalidData(
+                    "Grid descriptor too short for 32-bit dims",
+                ));
+            }
+            (
+                u32::from_be_bytes([
+                    grid_data[4],
+                    grid_data[5],
+                    grid_data[6],
+                    grid_data[7],
+                ]),
+                u32::from_be_bytes([
+                    grid_data[8],
+                    grid_data[9],
+                    grid_data[10],
+                    grid_data[11],
+                ]),
+            )
+        } else {
+            (
+                u16::from_be_bytes([grid_data[4], grid_data[5]]) as u32,
+                u16::from_be_bytes([grid_data[6], grid_data[7]]) as u32,
+            )
+        };
+
+        if let Some(lim) = limits {
+            lim.check_dimensions(output_width, output_height)
+                .map_err(|e| e.into_inner())?;
+        }
+
+        // Get tile info
+        let tile_ids =
+            container.get_item_references(primary_item.id, FourCC::DIMG);
+        let expected_tiles = (rows * cols) as usize;
+        if tile_ids.len() != expected_tiles {
+            return Err(HeicError::InvalidData("Grid tile count mismatch"));
+        }
+
+        let first_tile = container
+            .get_item(tile_ids[0])
+            .ok_or(HeicError::InvalidData("Missing tile item"))?;
+        let tile_config = first_tile
+            .hevc_config
+            .as_ref()
+            .ok_or(HeicError::InvalidData("Missing tile hvcC config"))?
+            .clone();
+        let (tile_width, tile_height) = first_tile
+            .dimensions
+            .ok_or(HeicError::InvalidData("Missing tile dimensions"))?;
+
+        // Color override from grid item's colr nclx
+        let color_override = match &primary_item.color_info {
+            Some(ColorInfo::Nclx {
+                full_range,
+                matrix_coefficients,
+                ..
+            }) => Some((*full_range, *matrix_coefficients as u8)),
+            _ => None,
+        };
+
+        // Extract tile data into owned Vecs
+        let tile_data: alloc::vec::Vec<alloc::vec::Vec<u8>> = tile_ids
+            .iter()
+            .map(|&tid| {
+                container
+                    .get_item_data(tid)
+                    .map(|cow| cow.into_owned())
+                    .map_err(|e| e.into_inner())
+            })
+            .collect::<Result<_, _>>()?;
+
+        let layout = choose_layout(preferred, data);
+
+        Ok(Some(GridState {
+            tile_data,
+            tile_config,
+            rows,
+            cols,
+            tile_width,
+            tile_height,
+            output_width,
+            output_height,
+            color_override,
+            layout,
+        }))
+    }
+
+    /// Decode one grid tile-row into `self.strip_buffer`.
+    fn decode_grid_row(&mut self) -> Result<Option<(u32, u32, u32)>, HeicError> {
+        let grid = self.grid.as_ref().unwrap();
+        let row = self.current_grid_row;
+        if row >= grid.rows {
+            return Ok(None);
+        }
+
+        let strip_h = grid
+            .tile_height
+            .min(grid.output_height.saturating_sub(row * grid.tile_height));
+        if strip_h == 0 {
+            return Ok(None);
+        }
+
+        let y_offset = row * grid.tile_height;
+        let bpp = grid.layout.bytes_per_pixel();
+        let strip_bytes = grid.output_width as usize * strip_h as usize * bpp;
+
+        // Resize strip buffer
+        self.strip_buffer.resize(strip_bytes, 0);
+
+        let cols = grid.cols as usize;
+        let row_start = row as usize * cols;
+        let row_end = row_start + cols;
+
+        // Decode each tile in this row and color-convert into the strip buffer
+        for col in 0..cols {
+            let tile_idx = row_start + col;
+            if tile_idx >= grid.tile_data.len() {
+                break;
+            }
+            let mut tile_frame = crate::hevc::decode_with_config(
+                &grid.tile_config,
+                &grid.tile_data[tile_idx],
+            )
+            .map_err(|e| HeicError::from(e))?;
+
+            if let Some((fr, mc)) = grid.color_override {
+                tile_frame.full_range = fr;
+                tile_frame.matrix_coeffs = mc;
+            }
+
+            let dst_x = col as u32 * grid.tile_width;
+            let copy_w = tile_frame
+                .cropped_width()
+                .min(grid.output_width.saturating_sub(dst_x));
+            let copy_h = tile_frame.cropped_height().min(strip_h);
+
+            crate::decode::convert_tile_to_output(
+                &tile_frame,
+                &mut self.strip_buffer,
+                grid.layout,
+                dst_x,
+                0, // relative to strip
+                copy_w,
+                copy_h,
+                grid.output_width,
+            );
+        }
+
+        self.current_grid_row += 1;
+        let _ = row_end; // suppress warning
+        Ok(Some((y_offset, grid.output_width, strip_h)))
+    }
+}
 
 impl zencodec_types::StreamingDecode for HeicStreamDecoder {
     type Error = HeicError;
@@ -402,13 +789,45 @@ impl zencodec_types::StreamingDecode for HeicStreamDecoder {
     fn next_batch(
         &mut self,
     ) -> Result<Option<(u32, zenpixels::PixelSlice<'_>)>, HeicError> {
-        Err(HeicError::Unsupported(
-            "HEIC does not support streaming decode",
-        ))
+        if self.grid.is_some() {
+            // Grid path: decode one tile-row
+            let result = self.decode_grid_row()?;
+            match result {
+                None => Ok(None),
+                Some((y, width, height)) => {
+                    let bpp = self.descriptor.bytes_per_pixel();
+                    let stride = width as usize * bpp;
+                    let slice = zenpixels::PixelSlice::new(
+                        &self.strip_buffer,
+                        width,
+                        height,
+                        stride,
+                        self.descriptor,
+                    )
+                    .map_err(|_| {
+                        HeicError::InvalidData("failed to create pixel slice")
+                    })?;
+                    Ok(Some((y, slice)))
+                }
+            }
+        } else if let Some(ref pixels) = self.full_pixels {
+            // Non-grid fallback: emit strips from full decoded buffer
+            let height = pixels.height();
+            if self.y_offset >= height {
+                return Ok(None);
+            }
+            let h = Self::FALLBACK_STRIP_HEIGHT.min(height - self.y_offset);
+            let slice = pixels.rows(self.y_offset, h).erase();
+            let y = self.y_offset;
+            self.y_offset += h;
+            Ok(Some((y, slice)))
+        } else {
+            Ok(None)
+        }
     }
 
     fn info(&self) -> &ImageInfo {
-        panic!("HeicStreamDecoder::info() called on unsupported streaming decoder")
+        &self.info
     }
 }
 
@@ -598,6 +1017,16 @@ fn cicp_descriptor(
     let primaries = ColorPrimaries::from_cicp(color_primaries as u8)
         .unwrap_or(base.primaries);
     base.with_transfer(tf).with_primaries(primaries)
+}
+
+/// Map a native `PixelLayout` to a `PixelDescriptor`.
+fn layout_to_descriptor(layout: crate::PixelLayout) -> PixelDescriptor {
+    match layout {
+        crate::PixelLayout::Rgb8 => PixelDescriptor::RGB8_SRGB,
+        crate::PixelLayout::Rgba8 => PixelDescriptor::RGBA8_SRGB,
+        crate::PixelLayout::Bgr8 => PixelDescriptor::RGB8_SRGB, // BGR → RGB descriptor
+        crate::PixelLayout::Bgra8 => PixelDescriptor::BGRA8_SRGB,
+    }
 }
 
 /// Convert `ProbeError` to `HeicError` for trait compatibility.

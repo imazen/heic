@@ -970,7 +970,7 @@ pub(crate) fn try_decode_grid_to_sink(
 /// Color-convert a single decoded tile directly into the correct region
 /// of the output RGB/RGBA/BGR/BGRA buffer.
 #[allow(clippy::too_many_arguments)]
-fn convert_tile_to_output(
+pub(crate) fn convert_tile_to_output(
     tile: &crate::hevc::DecodedFrame,
     output: &mut [u8],
     layout: PixelLayout,
