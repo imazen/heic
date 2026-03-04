@@ -25,9 +25,9 @@
 
 use rgb::{Rgb, Rgba};
 use zencodec_types::{
-    ChannelType, Cicp, ColorPrimaries, DecodeFrame, DecodeOutput, ImageFormat, ImageInfo,
-    PixelBuffer, PixelDescriptor, ResourceLimits, Stop, TransferFunction,
+    Cicp, DecodeFrame, DecodeOutput, ImageFormat, ImageInfo, ResourceLimits, Stop,
 };
+use zenpixels::{ChannelType, ColorPrimaries, PixelBuffer, PixelDescriptor, TransferFunction};
 
 use crate::error::HeicError;
 
@@ -70,7 +70,7 @@ impl HeicDecoderConfig {
     /// Convenience: decode image with this config.
     pub fn decode(&self, data: &[u8]) -> Result<DecodeOutput, HeicError> {
         use zencodec_types::{Decode as _, DecodeJob as _, DecoderConfig as _};
-        self.job().decoder()?.decode(data, &[])
+        self.job().decoder(data, &[])?.decode()
     }
 
     /// Convenience: probe image header with this config.
@@ -134,6 +134,7 @@ impl<'a> HeicDecodeJob<'a> {
 impl<'a> zencodec_types::DecodeJob<'a> for HeicDecodeJob<'a> {
     type Error = HeicError;
     type Dec = HeicDecoder<'a>;
+    type StreamDec = HeicStreamDecoder;
     type FrameDec = HeicFrameDecoder;
 
     fn with_stop(mut self, stop: &'a dyn Stop) -> Self {
@@ -176,15 +177,35 @@ impl<'a> zencodec_types::DecodeJob<'a> for HeicDecodeJob<'a> {
         ))
     }
 
-    fn decoder(self) -> Result<HeicDecoder<'a>, HeicError> {
+    fn decoder(
+        self,
+        data: &'a [u8],
+        preferred: &[PixelDescriptor],
+    ) -> Result<HeicDecoder<'a>, HeicError> {
         Ok(HeicDecoder {
             config: self.config,
+            data,
+            preferred: preferred.to_vec(),
             stop: self.stop,
             limits: self.native_limits(),
         })
     }
 
-    fn frame_decoder(self, _data: &'a [u8]) -> Result<HeicFrameDecoder, HeicError> {
+    fn streaming_decoder(
+        self,
+        _data: &'a [u8],
+        _preferred: &[PixelDescriptor],
+    ) -> Result<HeicStreamDecoder, HeicError> {
+        Err(HeicError::Unsupported(
+            "HEIC does not support streaming decode",
+        ))
+    }
+
+    fn frame_decoder(
+        self,
+        _data: &'a [u8],
+        _preferred: &[PixelDescriptor],
+    ) -> Result<HeicFrameDecoder, HeicError> {
         Err(HeicError::Unsupported(
             "HEIC does not support animation decoding",
         ))
@@ -196,6 +217,8 @@ impl<'a> zencodec_types::DecodeJob<'a> for HeicDecodeJob<'a> {
 /// Single-image HEIC decoder.
 pub struct HeicDecoder<'a> {
     config: &'a HeicDecoderConfig,
+    data: &'a [u8],
+    preferred: alloc::vec::Vec<PixelDescriptor>,
     stop: Option<&'a dyn Stop>,
     limits: Option<crate::Limits>,
 }
@@ -203,7 +226,9 @@ pub struct HeicDecoder<'a> {
 impl zencodec_types::Decode for HeicDecoder<'_> {
     type Error = HeicError;
 
-    fn decode(self, data: &[u8], preferred: &[PixelDescriptor]) -> Result<DecodeOutput, HeicError> {
+    fn decode(self) -> Result<DecodeOutput, HeicError> {
+        let data = self.data;
+        let preferred = &self.preferred;
         // Probe for image info (bit depth, alpha) — best-effort.
         let probe_info = crate::ImageInfo::from_bytes(data).ok();
         let bit_depth = probe_info.as_ref().map_or(8, |pi| pi.bit_depth);
@@ -359,13 +384,31 @@ pub struct HeicFrameDecoder;
 impl zencodec_types::FrameDecode for HeicFrameDecoder {
     type Error = HeicError;
 
-    fn next_frame(
-        &mut self,
-        _preferred: &[PixelDescriptor],
-    ) -> Result<Option<DecodeFrame>, HeicError> {
+    fn next_frame(&mut self) -> Result<Option<DecodeFrame>, HeicError> {
         Err(HeicError::Unsupported(
             "HEIC does not support animation decoding",
         ))
+    }
+}
+
+// ── Streaming Decoder (unsupported) ────────────────────────────────────
+
+/// Stub streaming decoder for HEIC (streaming decode not supported).
+pub struct HeicStreamDecoder;
+
+impl zencodec_types::StreamingDecode for HeicStreamDecoder {
+    type Error = HeicError;
+
+    fn next_batch(
+        &mut self,
+    ) -> Result<Option<(u32, zenpixels::PixelSlice<'_>)>, HeicError> {
+        Err(HeicError::Unsupported(
+            "HEIC does not support streaming decode",
+        ))
+    }
+
+    fn info(&self) -> &ImageInfo {
+        panic!("HeicStreamDecoder::info() called on unsupported streaming decoder")
     }
 }
 
@@ -609,7 +652,7 @@ mod tests {
     fn frame_decoder_returns_unsupported() {
         use zencodec_types::{DecodeJob as _, DecoderConfig as _};
         let config = HeicDecoderConfig::new();
-        let result = config.job().frame_decoder(&[]);
+        let result = config.job().frame_decoder(&[], &[]);
         assert!(result.is_err());
     }
 
