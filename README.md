@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/heic-decoder.svg)](https://crates.io/crates/heic-decoder)
 [![Documentation](https://docs.rs/heic-decoder/badge.svg)](https://docs.rs/heic-decoder)
-[![License](https://img.shields.io/crates/l/heic-decoder.svg)](LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 
 Pure Rust HEIC/HEIF image decoder. No C/C++ dependencies, no unsafe code, 5 runtime crates.
 
@@ -155,12 +155,9 @@ Use `DecoderConfig::estimate_memory()` to check memory requirements before decod
 
 ## License
 
-Licensed under either of:
+Sustainable, large-scale open source work requires a funding model, and I have been doing this full-time for 15 years. If you are using this for closed-source development AND make over $1 million per year, you'll need to buy a commercial license at https://www.imazen.io/pricing
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
-
-at your option.
+Commercial licenses are similar to the Apache 2 license but company-specific, and on a sliding scale. You can also use this under the AGPL v3.
 
 ## AI-Generated Code Notice
 
