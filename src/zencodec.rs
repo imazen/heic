@@ -305,16 +305,11 @@ impl zencodec_types::Decode for HeicDecoder<'_> {
                 req = req.with_stop(stop);
             }
             let native_output = req.decode().map_err(|e| e.into_inner())?;
-            let has_alpha = layout == crate::PixelLayout::Rgba8
-                || layout == crate::PixelLayout::Bgra8;
+            let has_alpha =
+                layout == crate::PixelLayout::Rgba8 || layout == crate::PixelLayout::Bgra8;
             let w = native_output.width;
             let h = native_output.height;
-            let mut pb = raw_to_pixel_buffer(
-                native_output.data,
-                w,
-                h,
-                native_output.layout,
-            )?;
+            let mut pb = raw_to_pixel_buffer(native_output.data, w, h, native_output.layout)?;
             // Apply CICP from probe to the 8-bit output descriptor
             if let Some(ref pi) = probe_info {
                 let desc = cicp_descriptor(
@@ -470,9 +465,7 @@ impl HeicStreamDecoder {
 
         // Try grid path for 8-bit, no-alpha images
         if pi.bit_depth <= 8 && !pi.has_alpha {
-            if let Some(grid_state) =
-                Self::try_init_grid(data, preferred, limits, stop_ref, pi)?
-            {
+            if let Some(grid_state) = Self::try_init_grid(data, preferred, limits, stop_ref, pi)? {
                 let descriptor = cicp_descriptor(
                     layout_to_descriptor(grid_state.layout),
                     pi.color_primaries,
@@ -515,7 +508,12 @@ impl HeicStreamDecoder {
                 let rgba_data = frame.to_rgba16();
                 let pixels: alloc::vec::Vec<Rgba<u16>> = rgba_data
                     .chunks_exact(4)
-                    .map(|c| Rgba { r: c[0], g: c[1], b: c[2], a: c[3] })
+                    .map(|c| Rgba {
+                        r: c[0],
+                        g: c[1],
+                        b: c[2],
+                        a: c[3],
+                    })
                     .collect();
                 let w = frame.cropped_width();
                 let h = frame.cropped_height();
@@ -532,7 +530,11 @@ impl HeicStreamDecoder {
                 let rgb_data = frame.to_rgb16();
                 let pixels: alloc::vec::Vec<Rgb<u16>> = rgb_data
                     .chunks_exact(3)
-                    .map(|c| Rgb { r: c[0], g: c[1], b: c[2] })
+                    .map(|c| Rgb {
+                        r: c[0],
+                        g: c[1],
+                        b: c[2],
+                    })
                     .collect();
                 let w = frame.cropped_width();
                 let h = frame.cropped_height();
@@ -542,9 +544,7 @@ impl HeicStreamDecoder {
                     .into()
             }
         } else {
-            let mut req = config
-                .decode_request(data)
-                .with_output_layout(layout);
+            let mut req = config.decode_request(data).with_output_layout(layout);
             if let Some(lim) = limits {
                 req = req.with_limits(lim);
             }
@@ -592,9 +592,7 @@ impl HeicStreamDecoder {
         stop.check().map_err(|e| HeicError::Cancelled(e))?;
 
         let container = heif::parse(data, stop).map_err(|e| e.into_inner())?;
-        let primary_item = container
-            .primary_item()
-            .ok_or(HeicError::NoPrimaryImage)?;
+        let primary_item = container.primary_item().ok_or(HeicError::NoPrimaryImage)?;
 
         // Must be a grid with no transforms and no alpha
         if primary_item.item_type != ItemType::Grid {
@@ -634,18 +632,8 @@ impl HeicStreamDecoder {
                 ));
             }
             (
-                u32::from_be_bytes([
-                    grid_data[4],
-                    grid_data[5],
-                    grid_data[6],
-                    grid_data[7],
-                ]),
-                u32::from_be_bytes([
-                    grid_data[8],
-                    grid_data[9],
-                    grid_data[10],
-                    grid_data[11],
-                ]),
+                u32::from_be_bytes([grid_data[4], grid_data[5], grid_data[6], grid_data[7]]),
+                u32::from_be_bytes([grid_data[8], grid_data[9], grid_data[10], grid_data[11]]),
             )
         } else {
             (
@@ -660,8 +648,7 @@ impl HeicStreamDecoder {
         }
 
         // Get tile info
-        let tile_ids =
-            container.get_item_references(primary_item.id, FourCC::DIMG);
+        let tile_ids = container.get_item_references(primary_item.id, FourCC::DIMG);
         let expected_tiles = (rows * cols) as usize;
         if tile_ids.len() != expected_tiles {
             return Err(HeicError::InvalidData("Grid tile count mismatch"));
@@ -748,11 +735,9 @@ impl HeicStreamDecoder {
             if tile_idx >= grid.tile_data.len() {
                 break;
             }
-            let mut tile_frame = crate::hevc::decode_with_config(
-                &grid.tile_config,
-                &grid.tile_data[tile_idx],
-            )
-            .map_err(|e| HeicError::from(e))?;
+            let mut tile_frame =
+                crate::hevc::decode_with_config(&grid.tile_config, &grid.tile_data[tile_idx])
+                    .map_err(|e| HeicError::from(e))?;
 
             if let Some((fr, mc)) = grid.color_override {
                 tile_frame.full_range = fr;
@@ -786,9 +771,7 @@ impl HeicStreamDecoder {
 impl zencodec_types::StreamingDecode for HeicStreamDecoder {
     type Error = HeicError;
 
-    fn next_batch(
-        &mut self,
-    ) -> Result<Option<(u32, zenpixels::PixelSlice<'_>)>, HeicError> {
+    fn next_batch(&mut self) -> Result<Option<(u32, zenpixels::PixelSlice<'_>)>, HeicError> {
         if self.grid.is_some() {
             // Grid path: decode one tile-row
             let result = self.decode_grid_row()?;
@@ -804,9 +787,7 @@ impl zencodec_types::StreamingDecode for HeicStreamDecoder {
                         stride,
                         self.descriptor,
                     )
-                    .map_err(|_| {
-                        HeicError::InvalidData("failed to create pixel slice")
-                    })?;
+                    .map_err(|_| HeicError::InvalidData("failed to create pixel slice"))?;
                     Ok(Some((y, slice)))
                 }
             }
@@ -1012,10 +993,8 @@ fn cicp_descriptor(
     color_primaries: u16,
     transfer_characteristics: u16,
 ) -> PixelDescriptor {
-    let tf = TransferFunction::from_cicp(transfer_characteristics as u8)
-        .unwrap_or(base.transfer());
-    let primaries = ColorPrimaries::from_cicp(color_primaries as u8)
-        .unwrap_or(base.primaries);
+    let tf = TransferFunction::from_cicp(transfer_characteristics as u8).unwrap_or(base.transfer());
+    let primaries = ColorPrimaries::from_cicp(color_primaries as u8).unwrap_or(base.primaries);
     base.with_transfer(tf).with_primaries(primaries)
 }
 
@@ -1125,8 +1104,22 @@ mod tests {
         assert_eq!(buf.width(), 2);
         assert_eq!(buf.height(), 1);
         let img: imgref::ImgRef<'_, Rgb<u8>> = buf.try_as_imgref().expect("expected RGB8");
-        assert_eq!(img.buf()[0], Rgb { r: 10, g: 20, b: 30 });
-        assert_eq!(img.buf()[1], Rgb { r: 40, g: 50, b: 60 });
+        assert_eq!(
+            img.buf()[0],
+            Rgb {
+                r: 10,
+                g: 20,
+                b: 30
+            }
+        );
+        assert_eq!(
+            img.buf()[1],
+            Rgb {
+                r: 40,
+                g: 50,
+                b: 60
+            }
+        );
     }
 
     #[test]
@@ -1136,7 +1129,15 @@ mod tests {
         assert_eq!(buf.width(), 2);
         assert_eq!(buf.height(), 1);
         let img: imgref::ImgRef<'_, Rgba<u8>> = buf.try_as_imgref().expect("expected RGBA8");
-        assert_eq!(img.buf()[0], Rgba { r: 10, g: 20, b: 30, a: 255 });
+        assert_eq!(
+            img.buf()[0],
+            Rgba {
+                r: 10,
+                g: 20,
+                b: 30,
+                a: 255
+            }
+        );
     }
 
     #[test]
@@ -1145,7 +1146,14 @@ mod tests {
         let raw = alloc::vec![30, 20, 10];
         let buf = raw_to_pixel_buffer(raw, 1, 1, crate::PixelLayout::Bgr8).unwrap();
         let img: imgref::ImgRef<'_, Rgb<u8>> = buf.try_as_imgref().expect("expected RGB8");
-        assert_eq!(img.buf()[0], Rgb { r: 10, g: 20, b: 30 });
+        assert_eq!(
+            img.buf()[0],
+            Rgb {
+                r: 10,
+                g: 20,
+                b: 30
+            }
+        );
     }
 
     #[test]

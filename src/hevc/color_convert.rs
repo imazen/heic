@@ -3,6 +3,10 @@
 //! Uses archmage for safe runtime dispatch across x86 (AVX2) with
 //! scalar fallback on other platforms.
 
+// The `#[arcane]` macro generates multiple function variants for SIMD dispatch;
+// the allow attribute on individual functions does not propagate to generated code.
+#![allow(clippy::too_many_arguments)]
+
 use archmage::incant;
 use archmage::prelude::*;
 

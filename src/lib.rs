@@ -366,7 +366,10 @@ impl ImageInfo {
                 ),
                 _ => (2, 2, 2, false), // unspecified defaults
             };
-        let has_icc_profile = matches!(&primary_item.color_info, Some(heif::ColorInfo::IccProfile(_)));
+        let has_icc_profile = matches!(
+            &primary_item.color_info,
+            Some(heif::ColorInfo::IccProfile(_))
+        );
 
         // Try to get info from HEVC config (fast path for direct HEVC items)
         if let Some(ref config) = primary_item.hevc_config

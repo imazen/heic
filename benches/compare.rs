@@ -14,7 +14,10 @@ fn example_heic() -> String {
 }
 
 fn iphone_heic() -> String {
-    format!("{}/test-images/classic-car-iphone12pro.heic", heic_base_dir())
+    format!(
+        "{}/test-images/classic-car-iphone12pro.heic",
+        heic_base_dir()
+    )
 }
 
 fn wasm_path() -> std::path::PathBuf {
@@ -134,11 +137,8 @@ fn native_libheif_decode(data: &[u8]) -> Vec<u8> {
         assert_eq!(err.code, 0, "decode_image failed");
 
         let mut stride: i32 = 0;
-        let plane = ffi::heif_image_get_plane_readonly(
-            img,
-            ffi::HEIF_CHANNEL_INTERLEAVED,
-            &mut stride,
-        );
+        let plane =
+            ffi::heif_image_get_plane_readonly(img, ffi::HEIF_CHANNEL_INTERLEAVED, &mut stride);
         assert!(!plane.is_null());
         let stride = stride as usize;
 
@@ -226,7 +226,7 @@ fn native_libheif_exif(data: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn bench_decode_small(c: &mut Criterion) {
-    let data = std::fs::read(&example_heic()).expect("read example.heic");
+    let data = std::fs::read(example_heic()).expect("read example.heic");
     let wasm = wasm_path();
 
     let mut group = c.benchmark_group("decode_1280x854");
@@ -235,7 +235,11 @@ fn bench_decode_small(c: &mut Criterion) {
     // Pure Rust
     let rust_dec = heic_decoder::DecoderConfig::new();
     group.bench_function("rust", |b| {
-        b.iter(|| rust_dec.decode(&data, heic_decoder::PixelLayout::Rgb8).unwrap());
+        b.iter(|| {
+            rust_dec
+                .decode(&data, heic_decoder::PixelLayout::Rgb8)
+                .unwrap()
+        });
     });
 
     // Native libheif (system, with SSE)
@@ -273,11 +277,18 @@ fn bench_decode_large(c: &mut Criterion) {
     // Pure Rust (sequential — force 1 thread even if parallel feature is on)
     #[cfg(feature = "parallel")]
     {
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
         let rust_dec = heic_decoder::DecoderConfig::new();
         group.bench_function("rust_1thread", |b| {
             b.iter(|| {
-                pool.install(|| rust_dec.decode(&data, heic_decoder::PixelLayout::Rgb8).unwrap())
+                pool.install(|| {
+                    rust_dec
+                        .decode(&data, heic_decoder::PixelLayout::Rgb8)
+                        .unwrap()
+                })
             });
         });
     }
@@ -285,7 +296,11 @@ fn bench_decode_large(c: &mut Criterion) {
     {
         let rust_dec = heic_decoder::DecoderConfig::new();
         group.bench_function("rust", |b| {
-            b.iter(|| rust_dec.decode(&data, heic_decoder::PixelLayout::Rgb8).unwrap());
+            b.iter(|| {
+                rust_dec
+                    .decode(&data, heic_decoder::PixelLayout::Rgb8)
+                    .unwrap()
+            });
         });
     }
 
@@ -294,7 +309,11 @@ fn bench_decode_large(c: &mut Criterion) {
     {
         let rust_dec = heic_decoder::DecoderConfig::new();
         group.bench_function("rust_parallel", |b| {
-            b.iter(|| rust_dec.decode(&data, heic_decoder::PixelLayout::Rgb8).unwrap());
+            b.iter(|| {
+                rust_dec
+                    .decode(&data, heic_decoder::PixelLayout::Rgb8)
+                    .unwrap()
+            });
         });
     }
 
@@ -315,7 +334,7 @@ fn bench_decode_large(c: &mut Criterion) {
 }
 
 fn bench_probe(c: &mut Criterion) {
-    let data = std::fs::read(&example_heic()).expect("read example.heic");
+    let data = std::fs::read(example_heic()).expect("read example.heic");
     let wasm = wasm_path();
 
     let mut group = c.benchmark_group("probe_1280x854");

@@ -55,8 +55,7 @@ struct PixelProvenance {
 
 fn load_reference_decoder() -> heic_wasm_rs::HeicDecoder {
     let path = wasm_module();
-    heic_wasm_rs::HeicDecoder::from_file(Path::new(&path))
-        .expect("Failed to load WASM decoder")
+    heic_wasm_rs::HeicDecoder::from_file(Path::new(&path)).expect("Failed to load WASM decoder")
 }
 
 /// Find all pixels with large differences
@@ -124,7 +123,7 @@ fn find_first_bad_pixel() {
     let ref_decoder = load_reference_decoder();
     let our_decoder = DecoderConfig::new();
 
-    let data = std::fs::read(&test_image()).expect("Failed to read test file");
+    let data = std::fs::read(test_image()).expect("Failed to read test file");
 
     let ref_image = ref_decoder.decode(&data).expect("Reference decode failed");
     let our_image = our_decoder
@@ -238,7 +237,7 @@ fn find_first_bad_pixel() {
 fn examine_ycbcr_at_bad_pixel() {
     let our_decoder = DecoderConfig::new();
 
-    let data = std::fs::read(&test_image()).expect("Failed to read test file");
+    let data = std::fs::read(test_image()).expect("Failed to read test file");
 
     // Get the raw YCbCr frame
     let frame = our_decoder
@@ -322,7 +321,7 @@ fn compare_y_plane_approximation() {
     let ref_decoder = load_reference_decoder();
     let our_decoder = DecoderConfig::new();
 
-    let data = std::fs::read(&test_image()).expect("Failed to read test file");
+    let data = std::fs::read(test_image()).expect("Failed to read test file");
 
     let ref_image = ref_decoder.decode(&data).expect("Reference decode failed");
     let frame = our_decoder

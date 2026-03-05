@@ -936,7 +936,11 @@ impl DecodedFrame {
             let r = y_val + ((cr_r * cr + half) >> shift);
             let g = y_val + ((cb_g * cb + cr_g * cr + half) >> shift);
             let b = y_val + ((cb_b * cb + half) >> shift);
-            (r.clamp(0, max_val), g.clamp(0, max_val), b.clamp(0, max_val))
+            (
+                r.clamp(0, max_val),
+                g.clamp(0, max_val),
+                b.clamp(0, max_val),
+            )
         } else {
             // Limited-range at native bit depth.
             // The limited range for N-bit is [16 << (N-8), 235 << (N-8)] for Y,
@@ -956,7 +960,11 @@ impl DecodedFrame {
             let r = (yv + cr_r * cr + half) >> shift;
             let g = (yv + cb_g * cb + cr_g * cr + half) >> shift;
             let b = (yv + cb_b * cb + half) >> shift;
-            (r.clamp(0, max_val), g.clamp(0, max_val), b.clamp(0, max_val))
+            (
+                r.clamp(0, max_val),
+                g.clamp(0, max_val),
+                b.clamp(0, max_val),
+            )
         }
     }
 }

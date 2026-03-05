@@ -11,12 +11,15 @@ fn example_heic() -> String {
 }
 
 fn iphone_heic() -> String {
-    format!("{}/test-images/classic-car-iphone12pro.heic", heic_base_dir())
+    format!(
+        "{}/test-images/classic-car-iphone12pro.heic",
+        heic_base_dir()
+    )
 }
 
 #[test]
 fn test_get_info() {
-    let data = std::fs::read(&example_heic()).expect("Failed to read test file");
+    let data = std::fs::read(example_heic()).expect("Failed to read test file");
 
     let info = heic_decoder::ImageInfo::from_bytes(&data).expect("Failed to get info");
     println!("Decoded info: {}x{}", info.width, info.height);
@@ -29,7 +32,7 @@ fn test_get_info() {
 #[test]
 #[ignore] // Ignore until coefficient decoding is fully implemented
 fn test_decode() {
-    let data = std::fs::read(&example_heic()).expect("Failed to read test file");
+    let data = std::fs::read(example_heic()).expect("Failed to read test file");
     let decoder = DecoderConfig::new();
 
     let image = decoder
@@ -84,7 +87,7 @@ fn test_decode() {
 #[test]
 #[ignore]
 fn test_raw_yuv_values() {
-    let data = std::fs::read(&example_heic()).expect("Failed to read test file");
+    let data = std::fs::read(example_heic()).expect("Failed to read test file");
     let decoder = DecoderConfig::new();
 
     // Decode and examine raw YCbCr
@@ -319,7 +322,7 @@ fn test_raw_yuv_values() {
 
 #[test]
 fn test_extract_exif() {
-    let data = std::fs::read(&iphone_heic()).expect("read");
+    let data = std::fs::read(iphone_heic()).expect("read");
     let decoder = DecoderConfig::new();
 
     let exif = decoder.extract_exif(&data).expect("extract_exif");
@@ -346,7 +349,7 @@ fn test_extract_exif() {
 #[test]
 fn test_extract_exif_none() {
     // example.heic has no EXIF
-    let data = std::fs::read(&example_heic()).expect("read");
+    let data = std::fs::read(example_heic()).expect("read");
     let decoder = DecoderConfig::new();
     let exif = decoder.extract_exif(&data).expect("extract_exif");
     assert!(exif.is_none(), "example.heic should not have EXIF");
@@ -355,7 +358,7 @@ fn test_extract_exif_none() {
 #[test]
 fn test_image_info_no_exif() {
     // example.heic: no EXIF, non-grid — probe should work
-    let data = std::fs::read(&example_heic()).expect("read");
+    let data = std::fs::read(example_heic()).expect("read");
     let info = heic_decoder::ImageInfo::from_bytes(&data).expect("probe");
     assert!(!info.has_exif, "example.heic should not have EXIF");
     assert!(!info.has_xmp, "example.heic should not have XMP");
@@ -368,7 +371,7 @@ fn test_image_info_no_exif() {
 #[test]
 fn test_image_info_grid_with_exif() {
     // iPhone HEIC: grid image with EXIF + XMP
-    let data = std::fs::read(&iphone_heic()).expect("read");
+    let data = std::fs::read(iphone_heic()).expect("read");
     let info = heic_decoder::ImageInfo::from_bytes(&data).expect("probe grid image");
     assert!(info.has_exif, "iPhone HEIC should have EXIF");
     assert!(info.has_xmp, "iPhone HEIC should have XMP");
@@ -382,7 +385,7 @@ fn test_image_info_grid_with_exif() {
 
 #[test]
 fn test_extract_xmp() {
-    let data = std::fs::read(&iphone_heic()).expect("read");
+    let data = std::fs::read(iphone_heic()).expect("read");
     let decoder = DecoderConfig::new();
     let xmp = decoder.extract_xmp(&data).expect("extract_xmp");
     // XMP may or may not be present; just ensure no crash
@@ -398,7 +401,7 @@ fn test_extract_xmp() {
 
 #[test]
 fn test_decode_thumbnail() {
-    let data = std::fs::read(&example_heic()).expect("read");
+    let data = std::fs::read(example_heic()).expect("read");
     let decoder = DecoderConfig::new();
     let thumb = decoder
         .decode_thumbnail(&data, heic_decoder::PixelLayout::Rgb8)
@@ -418,7 +421,7 @@ fn test_decode_thumbnail() {
 
 #[test]
 fn test_image_info_has_thumbnail() {
-    let data = std::fs::read(&example_heic()).expect("read");
+    let data = std::fs::read(example_heic()).expect("read");
     let info = heic_decoder::ImageInfo::from_bytes(&data).expect("probe");
     assert!(
         info.has_thumbnail,

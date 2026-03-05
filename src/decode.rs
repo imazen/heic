@@ -500,7 +500,7 @@ fn decode_grid(
         // Sequential: decode one tile, blit, drop — only 1 tile in memory at a time.
         for (tile_idx, tile_data) in tile_data_list.iter().enumerate() {
             check_stop(stop)?;
-            let tile_frame = crate::hevc::decode_with_config(tile_config, &**tile_data)?;
+            let tile_frame = crate::hevc::decode_with_config(tile_config, tile_data)?;
             if tile_idx == 0 {
                 output.full_range = tile_frame.full_range;
                 output.matrix_coeffs = tile_frame.matrix_coeffs;
@@ -767,7 +767,7 @@ pub(crate) fn try_decode_grid_streaming(
     {
         for (tile_idx, tile_data) in tile_data_list.iter().enumerate() {
             check_stop(stop)?;
-            let mut tile_frame = crate::hevc::decode_with_config(tile_config, &**tile_data)?;
+            let mut tile_frame = crate::hevc::decode_with_config(tile_config, tile_data)?;
             if let Some((fr, mc)) = color_override {
                 tile_frame.full_range = fr;
                 tile_frame.matrix_coeffs = mc;

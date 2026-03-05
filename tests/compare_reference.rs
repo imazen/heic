@@ -29,8 +29,7 @@ const MIN_SSIM2_SCORE: f64 = 50.0;
 
 fn load_reference_decoder() -> heic_wasm_rs::HeicDecoder {
     let path = wasm_module();
-    heic_wasm_rs::HeicDecoder::from_file(Path::new(&path))
-        .expect("Failed to load WASM decoder")
+    heic_wasm_rs::HeicDecoder::from_file(Path::new(&path)).expect("Failed to load WASM decoder")
 }
 
 /// Convert RGB bytes to ImgVec<[u8; 3]>

@@ -4,6 +4,10 @@
 //! The key operation is `_mm256_madd_epi16`: multiply 16 pairs of i16, sum adjacent
 //! pairs → 8 i32. This perfectly matches the DCT butterfly's multiply-accumulate pattern.
 
+// The `#[arcane]` macro generates multiple function variants for SIMD dispatch;
+// the allow attribute on individual functions does not propagate to generated code.
+#![allow(clippy::too_many_arguments)]
+
 use archmage::prelude::*;
 
 #[cfg(target_arch = "x86_64")]
