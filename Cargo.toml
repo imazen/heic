@@ -34,7 +34,7 @@ zencodec = ["dep:zencodec-types", "dep:zenpixels", "dep:rgb", "dep:imgref"]
 [dependencies]
 enough = "0.4"
 whereat = "0.1.3"
-archmage = { version = "0.9", default-features = false, features = ["macros", "safe_unaligned_simd"] }
+archmage = { version = "0.9", default-features = false, features = ["macros"] }
 safe_unaligned_simd = "0.2.5"
 rayon = { version = "1.10", optional = true }
 zencodec-types = { path = "../zencodec-types", optional = true }
