@@ -247,10 +247,15 @@ impl<'a> zc::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
             let desc = ps.descriptor();
             let w = ps.width();
             let h = ps.rows();
-            let mut dst = sink.demand(0, h, w, desc);
+            sink.begin(w, h, desc).map_err(HeicError::Sink)?;
+            let mut dst = sink
+                .provide_next_buffer(0, h, w, desc)
+                .map_err(HeicError::Sink)?;
             for row in 0..h {
                 dst.row_mut(row).copy_from_slice(ps.row(row));
             }
+            drop(dst);
+            sink.finish().map_err(HeicError::Sink)?;
             let info = output.info();
             return Ok(OutputInfo::full_decode(info.width, info.height, desc));
         }
@@ -276,6 +281,7 @@ impl<'a> zc::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
             strip_buf: alloc::vec::Vec::new(),
             pending_y: None,
             pending_height: 0,
+            deferred_error: None,
         };
 
         let native_limits = self.native_limits();
@@ -291,9 +297,19 @@ impl<'a> zc::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
             req = req.with_stop(stop);
         }
 
+        // Call begin with probe dimensions if available
+        let probe_height = probe_info.as_ref().map_or(0, |pi| pi.height);
+        adapter
+            .inner
+            .begin(probe_width, probe_height, desc)
+            .map_err(HeicError::Sink)?;
+
         let (w, h) = req.decode_rows(&mut adapter).map_err(|e| e.into_inner())?;
+        // Check for deferred sink errors from demand() calls
+        adapter.take_deferred_error()?;
         // Flush the last strip that was written by the native decoder
-        adapter.flush_pending();
+        adapter.flush_pending()?;
+        adapter.inner.finish().map_err(HeicError::Sink)?;
         Ok(OutputInfo::full_decode(w, h, desc))
     }
 
@@ -332,22 +348,42 @@ struct RowSinkAdapter<'a> {
     /// flushed to the zencodec sink.
     pending_y: Option<u32>,
     pending_height: u32,
+    /// Deferred sink error from within `demand()` (which can't return Result).
+    deferred_error: Option<HeicError>,
 }
 
 impl RowSinkAdapter<'_> {
     /// Flush any pending strip data to the zencodec sink.
-    fn flush_pending(&mut self) {
+    fn flush_pending(&mut self) -> Result<(), HeicError> {
         if let Some(y) = self.pending_y.take() {
             let bpp = self.descriptor.bytes_per_pixel();
             let row_bytes = self.width as usize * bpp;
             let mut dst = self
                 .inner
-                .demand(y, self.pending_height, self.width, self.descriptor);
+                .provide_next_buffer(y, self.pending_height, self.width, self.descriptor)
+                .map_err(HeicError::Sink)?;
             for row in 0..self.pending_height {
                 let src_start = row as usize * row_bytes;
                 dst.row_mut(row)
                     .copy_from_slice(&self.strip_buf[src_start..src_start + row_bytes]);
             }
+        }
+        Ok(())
+    }
+
+    /// Flush pending strip, storing any error for later propagation.
+    /// Used inside `demand()` which cannot return `Result`.
+    fn flush_pending_deferred(&mut self) {
+        if let Err(e) = self.flush_pending() {
+            self.deferred_error = Some(e);
+        }
+    }
+
+    /// Take any deferred error from a prior `demand()` call.
+    fn take_deferred_error(&mut self) -> Result<(), HeicError> {
+        match self.deferred_error.take() {
+            Some(e) => Err(e),
+            None => Ok(()),
         }
     }
 }
@@ -363,7 +399,7 @@ impl crate::RowSink for RowSinkAdapter<'_> {
         }
 
         // Flush the previous strip to the zencodec sink
-        self.flush_pending();
+        self.flush_pending_deferred();
 
         // Record this strip as pending
         self.pending_y = Some(y);

@@ -39,6 +39,8 @@ pub enum HeicError {
     OutOfMemory,
     /// Operation was cancelled via cooperative cancellation
     Cancelled(StopReason),
+    /// A decode sink reported an error
+    Sink(alloc::boxed::Box<dyn core::error::Error + Send + Sync>),
 }
 
 impl fmt::Display for HeicError {
@@ -55,6 +57,7 @@ impl fmt::Display for HeicError {
             Self::LimitExceeded(msg) => write!(f, "limit exceeded: {msg}"),
             Self::OutOfMemory => write!(f, "out of memory"),
             Self::Cancelled(reason) => write!(f, "{reason}"),
+            Self::Sink(e) => write!(f, "decode sink error: {e}"),
         }
     }
 }
@@ -63,6 +66,7 @@ impl core::error::Error for HeicError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::HevcDecode(e) => Some(e),
+            Self::Sink(e) => Some(e.as_ref()),
             _ => None,
         }
     }
