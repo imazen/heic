@@ -109,7 +109,9 @@ pub mod hevc;
 mod zencodec;
 
 #[cfg(feature = "zencodec")]
-pub use zencodec::{HeicDecodeJob, HeicDecoder as HeicZenDecoder, HeicDecoderConfig};
+pub use zencodec::{
+    HeicDecodeJob, HeicDecoder as HeicZenDecoder, HeicDecoderConfig, HeicStreamDecoder,
+};
 
 pub use error::{HeicError, HevcError, ProbeError, Result};
 pub use hevc::DecodedFrame;

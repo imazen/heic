@@ -10,26 +10,36 @@
 //! | `DecoderConfig` | [`HeicDecoderConfig`] |
 //! | `DecodeJob<'a>` | [`HeicDecodeJob`] |
 //! | `Decode` | [`HeicDecoder`] |
-//! | `FrameDecode` | [`HeicFrameDecoder`] (stub, HEIC has no animation) |
-//!
-//! # Examples
-//!
-//! ```rust,ignore
-//! use zencodec_types::{Decode, DecodeJob, DecoderConfig};
-//! use heic_decoder::HeicDecoderConfig;
-//!
-//! let config = HeicDecoderConfig::new();
-//! let output = config.decode(&heic_bytes)?;
-//! println!("{}x{}", output.width(), output.height());
-//! ```
+//! | `StreamingDecode` | [`HeicStreamDecoder`] |
+//! | `FrameDecode` | `Unsupported<HeicError>` (HEIC has no animation) |
+
+use alloc::borrow::Cow;
 
 use rgb::{Rgb, Rgba};
-use zencodec_types::{
-    Cicp, DecodeFrame, DecodeOutput, ImageFormat, ImageInfo, ResourceLimits, Stop,
+use zc::decode::{
+    DecodeCapabilities, DecodeJob, DecodeRowSink, DecoderConfig, OutputInfo, negotiate_pixel_format,
 };
+use zc::{Cicp, ImageFormat, ImageInfo, Orientation, ResourceLimits, Unsupported};
 use zenpixels::{ChannelType, ColorPrimaries, PixelBuffer, PixelDescriptor, TransferFunction};
 
 use crate::error::HeicError;
+
+// ── Capabilities ─────────────────────────────────────────────────────────
+
+static HEIC_DECODE_CAPS: DecodeCapabilities = DecodeCapabilities::new()
+    .with_icc(true)
+    .with_exif(true)
+    .with_xmp(true)
+    .with_cicp(true)
+    .with_cancel(true)
+    .with_cheap_probe(true)
+    .with_decode_into(true)
+    .with_row_level(true)
+    .with_hdr(true)
+    .with_native_16bit(true)
+    .with_native_alpha(true)
+    .with_enforces_max_pixels(true)
+    .with_enforces_max_memory(true);
 
 // ── Supported descriptors ──────────────────────────────────────────────────
 
@@ -43,7 +53,7 @@ static DECODE_DESCRIPTORS: &[PixelDescriptor] = &[
 
 // ── Decoder Config ─────────────────────────────────────────────────────────
 
-/// HEIC decoder configuration implementing [`zencodec_types::DecoderConfig`].
+/// HEIC decoder configuration implementing [`zc::decode::DecoderConfig`].
 ///
 /// Wraps [`crate::DecoderConfig`] for use with the zencodec-types trait system.
 /// HEIC decoding has no tunable parameters, so this is a thin wrapper.
@@ -66,18 +76,6 @@ impl HeicDecoderConfig {
     pub fn inner(&self) -> &crate::DecoderConfig {
         &self.inner
     }
-
-    /// Convenience: decode image with this config.
-    pub fn decode(&self, data: &[u8]) -> Result<DecodeOutput, HeicError> {
-        use zencodec_types::{Decode as _, DecodeJob as _, DecoderConfig as _};
-        self.job().decoder(data, &[])?.decode()
-    }
-
-    /// Convenience: probe image header with this config.
-    pub fn probe_header(&self, data: &[u8]) -> Result<ImageInfo, HeicError> {
-        use zencodec_types::{DecodeJob as _, DecoderConfig as _};
-        self.job().probe(data)
-    }
 }
 
 impl Default for HeicDecoderConfig {
@@ -86,7 +84,7 @@ impl Default for HeicDecoderConfig {
     }
 }
 
-impl zencodec_types::DecoderConfig for HeicDecoderConfig {
+impl DecoderConfig for HeicDecoderConfig {
     type Error = HeicError;
     type Job<'a> = HeicDecodeJob<'a>;
 
@@ -96,6 +94,10 @@ impl zencodec_types::DecoderConfig for HeicDecoderConfig {
 
     fn supported_descriptors() -> &'static [PixelDescriptor] {
         DECODE_DESCRIPTORS
+    }
+
+    fn capabilities() -> &'static DecodeCapabilities {
+        &HEIC_DECODE_CAPS
     }
 
     fn job(&self) -> HeicDecodeJob<'_> {
@@ -112,7 +114,7 @@ impl zencodec_types::DecoderConfig for HeicDecoderConfig {
 /// Per-operation HEIC decode job.
 pub struct HeicDecodeJob<'a> {
     config: &'a HeicDecoderConfig,
-    stop: Option<&'a dyn Stop>,
+    stop: Option<&'a dyn zc::enough::Stop>,
     limits: ResourceLimits,
 }
 
@@ -129,15 +131,64 @@ impl<'a> HeicDecodeJob<'a> {
         limits.max_memory_bytes = self.limits.max_memory_bytes;
         Some(limits)
     }
+
+    /// Build zencodec ImageInfo from native probe info and optional ICC/metadata.
+    fn build_image_info(&self, data: &[u8]) -> Result<ImageInfo, HeicError> {
+        let native = crate::ImageInfo::from_bytes(data).map_err(probe_error_to_heic)?;
+        let channels: u8 = if native.has_alpha { 4 } else { 3 };
+
+        let mut info = ImageInfo::new(native.width, native.height, ImageFormat::Heic)
+            .with_alpha(native.has_alpha)
+            .with_bit_depth(native.bit_depth)
+            .with_channel_count(channels)
+            .with_frame_count(1)
+            // Decoder applies all HEIF transforms (imir, irot), so orientation is Normal
+            .with_orientation(Orientation::Normal);
+
+        // CICP
+        if native.color_primaries != 2
+            || native.transfer_characteristics != 2
+            || native.matrix_coefficients != 2
+        {
+            info = info.with_cicp(Cicp::new(
+                native.color_primaries as u8,
+                native.transfer_characteristics as u8,
+                native.matrix_coefficients as u8,
+                native.video_full_range,
+            ));
+        }
+
+        // ICC profile
+        if native.has_icc_profile
+            && let Ok(Some(icc_data)) = self.config.inner.extract_icc(data)
+        {
+            info = info.with_icc_profile(icc_data);
+        }
+
+        // EXIF & XMP metadata (best-effort)
+        if let Ok(Some(exif)) = self.config.inner.extract_exif(data) {
+            info = info.with_exif(exif.into_owned());
+        }
+        if let Ok(Some(xmp)) = self.config.inner.extract_xmp(data) {
+            info = info.with_xmp(xmp.into_owned());
+        }
+
+        // HDR gain map detection
+        if self.config.inner.decode_gain_map(data).is_ok() {
+            info = info.with_gain_map(true);
+        }
+
+        Ok(info)
+    }
 }
 
-impl<'a> zencodec_types::DecodeJob<'a> for HeicDecodeJob<'a> {
+impl<'a> DecodeJob<'a> for HeicDecodeJob<'a> {
     type Error = HeicError;
     type Dec = HeicDecoder<'a>;
     type StreamDec = HeicStreamDecoder;
-    type FrameDec = HeicFrameDecoder;
+    type FrameDec = Unsupported<HeicError>;
 
-    fn with_stop(mut self, stop: &'a dyn Stop) -> Self {
+    fn with_stop(mut self, stop: &'a dyn zc::enough::Stop) -> Self {
         self.stop = Some(stop);
         self
     }
@@ -148,11 +199,10 @@ impl<'a> zencodec_types::DecodeJob<'a> for HeicDecodeJob<'a> {
     }
 
     fn probe(&self, data: &[u8]) -> Result<ImageInfo, HeicError> {
-        let native = crate::ImageInfo::from_bytes(data).map_err(probe_error_to_heic)?;
-        Ok(convert_info(&native))
+        self.build_image_info(data)
     }
 
-    fn output_info(&self, data: &[u8]) -> Result<zencodec_types::OutputInfo, HeicError> {
+    fn output_info(&self, data: &[u8]) -> Result<OutputInfo, HeicError> {
         let native = crate::ImageInfo::from_bytes(data).map_err(probe_error_to_heic)?;
         let base_desc = if native.bit_depth > 8 {
             if native.has_alpha {
@@ -170,16 +220,12 @@ impl<'a> zencodec_types::DecodeJob<'a> for HeicDecodeJob<'a> {
             native.color_primaries,
             native.transfer_characteristics,
         );
-        Ok(zencodec_types::OutputInfo::full_decode(
-            native.width,
-            native.height,
-            desc,
-        ))
+        Ok(OutputInfo::full_decode(native.width, native.height, desc))
     }
 
     fn decoder(
         self,
-        data: &'a [u8],
+        data: Cow<'a, [u8]>,
         preferred: &[PixelDescriptor],
     ) -> Result<HeicDecoder<'a>, HeicError> {
         Ok(HeicDecoder {
@@ -191,22 +237,155 @@ impl<'a> zencodec_types::DecodeJob<'a> for HeicDecodeJob<'a> {
         })
     }
 
+    fn push_decoder(
+        self,
+        data: Cow<'a, [u8]>,
+        sink: &mut dyn DecodeRowSink,
+        preferred: &[PixelDescriptor],
+    ) -> Result<OutputInfo, HeicError> {
+        let data_ref: &[u8] = &data;
+
+        // Determine output format
+        let probe_info = crate::ImageInfo::from_bytes(data_ref).ok();
+        let bit_depth = probe_info.as_ref().map_or(8, |pi| pi.bit_depth);
+        // For 8-bit: use native decode_rows streaming
+        if bit_depth <= 8 {
+            let layout = descriptor_to_layout(preferred, data_ref);
+            let native_limits = self.native_limits();
+
+            let width;
+            let height;
+            {
+                // Use RowSinkAdapter to bridge native RowSink → zencodec DecodeRowSink
+                let desc = layout_to_descriptor(layout);
+                let cicp_desc = if let Some(ref pi) = probe_info {
+                    cicp_descriptor(desc, pi.color_primaries, pi.transfer_characteristics)
+                } else {
+                    desc
+                };
+
+                let mut adapter = RowSinkAdapter::new(sink, cicp_desc);
+                let mut req = self
+                    .config
+                    .inner
+                    .decode_request(data_ref)
+                    .with_output_layout(layout);
+                if let Some(ref lim) = native_limits {
+                    req = req.with_limits(lim);
+                }
+                if let Some(stop) = self.stop {
+                    req = req.with_stop(stop);
+                }
+                let (w, h) = req.decode_rows(&mut adapter).map_err(|e| e.into_inner())?;
+                adapter.flush();
+                width = w;
+                height = h;
+            }
+
+            let out_desc = layout_to_descriptor(layout);
+            let out_desc = if let Some(ref pi) = probe_info {
+                cicp_descriptor(out_desc, pi.color_primaries, pi.transfer_characteristics)
+            } else {
+                out_desc
+            };
+            return Ok(OutputInfo::full_decode(width, height, out_desc));
+        }
+
+        // 16-bit or complex: fall back to default push_decoder (full decode + copy)
+        let dec = self.decoder(data, preferred)?;
+        let output = zc::decode::Decode::decode(dec)?;
+        let ps = output.pixels();
+        let desc = ps.descriptor();
+        let w = ps.width();
+        let h = ps.rows();
+        let mut dst = sink.demand(0, h, w, desc);
+        for row in 0..h {
+            dst.row_mut(row).copy_from_slice(ps.row(row));
+        }
+        let info = output.info();
+        Ok(OutputInfo::full_decode(info.width, info.height, desc))
+    }
+
     fn streaming_decoder(
         self,
-        data: &'a [u8],
+        data: Cow<'a, [u8]>,
         preferred: &[PixelDescriptor],
     ) -> Result<HeicStreamDecoder, HeicError> {
-        HeicStreamDecoder::new(data, preferred, self.native_limits().as_ref(), self.stop)
+        HeicStreamDecoder::new(&data, preferred, self.native_limits().as_ref(), self.stop)
     }
 
     fn frame_decoder(
         self,
-        _data: &'a [u8],
+        _data: Cow<'a, [u8]>,
         _preferred: &[PixelDescriptor],
-    ) -> Result<HeicFrameDecoder, HeicError> {
+    ) -> Result<Unsupported<HeicError>, HeicError> {
         Err(HeicError::Unsupported(
             "HEIC does not support animation decoding",
         ))
+    }
+}
+
+// ── RowSinkAdapter ───────────────────────────────────────────────────────
+
+/// Bridges native [`crate::RowSink`] → [`DecodeRowSink`].
+///
+/// Uses a flush-on-next-demand pattern: when the native sink writes a strip,
+/// we buffer it. When the next demand comes (or flush is called), we push
+/// the buffered strip to the zencodec sink.
+struct RowSinkAdapter<'s> {
+    sink: &'s mut dyn DecodeRowSink,
+    descriptor: PixelDescriptor,
+    strip_buf: alloc::vec::Vec<u8>,
+    pending_y: Option<u32>,
+    pending_height: u32,
+    pending_width: u32,
+}
+
+impl<'s> RowSinkAdapter<'s> {
+    fn new(sink: &'s mut dyn DecodeRowSink, descriptor: PixelDescriptor) -> Self {
+        Self {
+            sink,
+            descriptor,
+            strip_buf: alloc::vec::Vec::new(),
+            pending_y: None,
+            pending_height: 0,
+            pending_width: 0,
+        }
+    }
+
+    /// Flush the pending strip to the zencodec sink.
+    fn flush(&mut self) {
+        if let Some(y) = self.pending_y.take() {
+            let mut dst =
+                self.sink
+                    .demand(y, self.pending_height, self.pending_width, self.descriptor);
+            let bpp = self.descriptor.bytes_per_pixel();
+            let row_bytes = self.pending_width as usize * bpp;
+            for row in 0..self.pending_height {
+                let src_start = row as usize * row_bytes;
+                let src_end = src_start + row_bytes;
+                dst.row_mut(row)
+                    .copy_from_slice(&self.strip_buf[src_start..src_end]);
+            }
+        }
+    }
+}
+
+impl crate::RowSink for RowSinkAdapter<'_> {
+    fn demand(&mut self, y: u32, height: u32, min_bytes: usize) -> &mut [u8] {
+        // Flush any pending strip before providing the next buffer
+        self.flush();
+        self.strip_buf.resize(min_bytes, 0);
+        self.pending_y = Some(y);
+        self.pending_height = height;
+        // Derive width from min_bytes and bpp
+        let bpp = self.descriptor.bytes_per_pixel();
+        self.pending_width = if bpp > 0 && height > 0 {
+            (min_bytes / height as usize / bpp) as u32
+        } else {
+            0
+        };
+        &mut self.strip_buf
     }
 }
 
@@ -215,134 +394,116 @@ impl<'a> zencodec_types::DecodeJob<'a> for HeicDecodeJob<'a> {
 /// Single-image HEIC decoder.
 pub struct HeicDecoder<'a> {
     config: &'a HeicDecoderConfig,
-    data: &'a [u8],
+    data: Cow<'a, [u8]>,
     preferred: alloc::vec::Vec<PixelDescriptor>,
-    stop: Option<&'a dyn Stop>,
+    stop: Option<&'a dyn zc::enough::Stop>,
     limits: Option<crate::Limits>,
 }
 
-impl zencodec_types::Decode for HeicDecoder<'_> {
+impl zc::decode::Decode for HeicDecoder<'_> {
     type Error = HeicError;
 
-    fn decode(self) -> Result<DecodeOutput, HeicError> {
-        let data = self.data;
+    fn decode(self) -> Result<zc::decode::DecodeOutput, HeicError> {
+        let data = &*self.data;
         let preferred = &self.preferred;
-        // Probe for image info (bit depth, alpha) — best-effort.
         let probe_info = crate::ImageInfo::from_bytes(data).ok();
         let bit_depth = probe_info.as_ref().map_or(8, |pi| pi.bit_depth);
 
-        // Choose output format: 16-bit if source is >8-bit and caller wants it
-        // (or caller has no preference and source is >8-bit).
-        let use_16bit = should_use_16bit(preferred, bit_depth);
+        // Use negotiate_pixel_format to pick output format
+        let available = available_descriptors_for_image(bit_depth, probe_info.as_ref());
+        let negotiated = negotiate_pixel_format(preferred, &available);
 
-        let (buf, width, height, has_alpha): (PixelBuffer, u32, u32, bool) = if use_16bit {
-            // 16-bit path: decode to YCbCr frame, then convert at full precision.
-            let mut req = self.config.inner.decode_request(data);
-            if let Some(ref limits) = self.limits {
-                req = req.with_limits(limits);
-            }
-            if let Some(stop) = self.stop {
-                req = req.with_stop(stop);
-            }
-            let frame = req.decode_yuv().map_err(|e| e.into_inner())?;
+        let (buf, width, height, has_alpha): (PixelBuffer, u32, u32, bool) =
+            if negotiated.channel_type() == ChannelType::U16 {
+                // 16-bit path
+                let mut req = self.config.inner.decode_request(data);
+                if let Some(ref limits) = self.limits {
+                    req = req.with_limits(limits);
+                }
+                if let Some(stop) = self.stop {
+                    req = req.with_stop(stop);
+                }
+                let frame = req.decode_yuv().map_err(|e| e.into_inner())?;
 
-            let has_alpha = frame.alpha_plane.is_some();
-            let w = frame.cropped_width();
-            let h = frame.cropped_height();
+                let has_alpha = frame.alpha_plane.is_some();
+                let w = frame.cropped_width();
+                let h = frame.cropped_height();
 
-            if has_alpha || wants_alpha_16(preferred) {
                 let desc = cicp_descriptor(
-                    PixelDescriptor::RGBA16_SRGB,
+                    negotiated,
                     frame.color_primaries as u16,
                     frame.transfer_characteristics as u16,
                 );
-                let rgba_data = frame.to_rgba16();
-                let pixels: alloc::vec::Vec<Rgba<u16>> = rgba_data
-                    .chunks_exact(4)
-                    .map(|c| Rgba {
-                        r: c[0],
-                        g: c[1],
-                        b: c[2],
-                        a: c[3],
-                    })
-                    .collect();
-                let pb = PixelBuffer::from_pixels(pixels, w, h)
-                    .map_err(|_| HeicError::InvalidData("pixel count mismatch"))?
-                    .with_descriptor(desc);
-                (pb.into(), w, h, true)
+
+                if has_alpha || negotiated.has_alpha() {
+                    let rgba_data = frame.to_rgba16();
+                    let pixels: alloc::vec::Vec<Rgba<u16>> = rgba_data
+                        .chunks_exact(4)
+                        .map(|c| Rgba {
+                            r: c[0],
+                            g: c[1],
+                            b: c[2],
+                            a: c[3],
+                        })
+                        .collect();
+                    let pb = PixelBuffer::from_pixels(pixels, w, h)
+                        .map_err(|_| HeicError::InvalidData("pixel count mismatch"))?
+                        .with_descriptor(desc);
+                    (pb.into(), w, h, true)
+                } else {
+                    let rgb_data = frame.to_rgb16();
+                    let pixels: alloc::vec::Vec<Rgb<u16>> = rgb_data
+                        .chunks_exact(3)
+                        .map(|c| Rgb {
+                            r: c[0],
+                            g: c[1],
+                            b: c[2],
+                        })
+                        .collect();
+                    let pb = PixelBuffer::from_pixels(pixels, w, h)
+                        .map_err(|_| HeicError::InvalidData("pixel count mismatch"))?
+                        .with_descriptor(desc);
+                    (pb.into(), w, h, false)
+                }
             } else {
-                let desc = cicp_descriptor(
-                    PixelDescriptor::RGB16_SRGB,
-                    frame.color_primaries as u16,
-                    frame.transfer_characteristics as u16,
-                );
-                let rgb_data = frame.to_rgb16();
-                let pixels: alloc::vec::Vec<Rgb<u16>> = rgb_data
-                    .chunks_exact(3)
-                    .map(|c| Rgb {
-                        r: c[0],
-                        g: c[1],
-                        b: c[2],
-                    })
-                    .collect();
-                let pb = PixelBuffer::from_pixels(pixels, w, h)
-                    .map_err(|_| HeicError::InvalidData("pixel count mismatch"))?
-                    .with_descriptor(desc);
-                (pb.into(), w, h, false)
-            }
-        } else {
-            // 8-bit path: use the existing layout-based decode.
-            let layout = choose_layout(preferred, data);
-            let mut req = self
-                .config
-                .inner
-                .decode_request(data)
-                .with_output_layout(layout);
-            if let Some(ref limits) = self.limits {
-                req = req.with_limits(limits);
-            }
-            if let Some(stop) = self.stop {
-                req = req.with_stop(stop);
-            }
-            let native_output = req.decode().map_err(|e| e.into_inner())?;
-            let has_alpha =
-                layout == crate::PixelLayout::Rgba8 || layout == crate::PixelLayout::Bgra8;
-            let w = native_output.width;
-            let h = native_output.height;
-            let mut pb = raw_to_pixel_buffer(native_output.data, w, h, native_output.layout)?;
-            // Apply CICP from probe to the 8-bit output descriptor
-            if let Some(ref pi) = probe_info {
-                let desc = cicp_descriptor(
-                    pb.descriptor(),
-                    pi.color_primaries,
-                    pi.transfer_characteristics,
-                );
-                pb = pb.with_descriptor(desc);
-            }
-            (pb, w, h, has_alpha)
-        };
+                // 8-bit path: use negotiate result to pick layout
+                let layout = negotiated_to_layout(negotiated);
+                let mut req = self
+                    .config
+                    .inner
+                    .decode_request(data)
+                    .with_output_layout(layout);
+                if let Some(ref limits) = self.limits {
+                    req = req.with_limits(limits);
+                }
+                if let Some(stop) = self.stop {
+                    req = req.with_stop(stop);
+                }
+                let native_output = req.decode().map_err(|e| e.into_inner())?;
+                let has_alpha =
+                    layout == crate::PixelLayout::Rgba8 || layout == crate::PixelLayout::Bgra8;
+                let w = native_output.width;
+                let h = native_output.height;
+                let mut pb = raw_to_pixel_buffer(native_output.data, w, h, native_output.layout)?;
+                // Apply CICP from probe
+                if let Some(ref pi) = probe_info {
+                    let desc = cicp_descriptor(
+                        pb.descriptor(),
+                        pi.color_primaries,
+                        pi.transfer_characteristics,
+                    );
+                    pb = pb.with_descriptor(desc);
+                }
+                (pb, w, h, has_alpha)
+            };
 
-        // Probe for metadata (EXIF/XMP) — best-effort, don't fail the decode.
-        let exif = self
-            .config
-            .inner
-            .extract_exif(data)
-            .ok()
-            .flatten()
-            .map(|c| c.into_owned());
-        let xmp = self
-            .config
-            .inner
-            .extract_xmp(data)
-            .ok()
-            .flatten()
-            .map(|c| c.into_owned());
-
-        let mut info = ImageInfo::new(width, height, ImageFormat::Heic);
+        // Build ImageInfo
+        let mut info = ImageInfo::new(width, height, ImageFormat::Heic)
+            .with_frame_count(1)
+            .with_orientation(Orientation::Normal);
 
         if let Some(pi) = &probe_info {
             info = info.with_alpha(pi.has_alpha).with_bit_depth(pi.bit_depth);
-            // Set CICP from container nclx
             if pi.color_primaries != 2
                 || pi.transfer_characteristics != 2
                 || pi.matrix_coefficients != 2
@@ -354,33 +515,29 @@ impl zencodec_types::Decode for HeicDecoder<'_> {
                     pi.video_full_range,
                 ));
             }
+            if pi.has_icc_profile
+                && let Ok(Some(icc_data)) = self.config.inner.extract_icc(data)
+            {
+                info = info.with_icc_profile(icc_data);
+            }
         } else {
             info = info.with_alpha(has_alpha);
         }
 
-        if let Some(exif_data) = exif {
-            info = info.with_exif(exif_data);
+        // EXIF/XMP metadata (best-effort)
+        if let Ok(Some(exif)) = self.config.inner.extract_exif(data) {
+            info = info.with_exif(exif.into_owned());
         }
-        if let Some(xmp_data) = xmp {
-            info = info.with_xmp(xmp_data);
+        if let Ok(Some(xmp)) = self.config.inner.extract_xmp(data) {
+            info = info.with_xmp(xmp.into_owned());
         }
 
-        Ok(DecodeOutput::new(buf, info))
-    }
-}
+        // HDR gain map
+        if self.config.inner.decode_gain_map(data).is_ok() {
+            info = info.with_gain_map(true);
+        }
 
-// ── Frame Decoder (stub) ───────────────────────────────────────────────────
-
-/// Stub frame decoder for HEIC (animation not supported).
-pub struct HeicFrameDecoder;
-
-impl zencodec_types::FrameDecode for HeicFrameDecoder {
-    type Error = HeicError;
-
-    fn next_frame(&mut self) -> Result<Option<DecodeFrame>, HeicError> {
-        Err(HeicError::Unsupported(
-            "HEIC does not support animation decoding",
-        ))
+        Ok(zc::decode::DecodeOutput::new(buf, info))
     }
 }
 
@@ -407,11 +564,9 @@ pub struct HeicStreamDecoder {
     info: ImageInfo,
     descriptor: PixelDescriptor,
     y_offset: u32,
-    /// Grid path: decode tiles row-by-row into this buffer.
     grid: Option<GridState>,
     current_grid_row: u32,
     strip_buffer: alloc::vec::Vec<u8>,
-    /// Non-grid fallback: full decoded image, emit strips.
     full_pixels: Option<PixelBuffer>,
 }
 
@@ -424,33 +579,36 @@ impl HeicStreamDecoder {
         data: &[u8],
         preferred: &[PixelDescriptor],
         limits: Option<&crate::Limits>,
-        stop: Option<&dyn zencodec_types::Stop>,
+        stop: Option<&dyn zc::enough::Stop>,
     ) -> Result<Self, HeicError> {
         let stop_ref: &dyn enough::Stop = stop.unwrap_or(&enough::Unstoppable);
 
-        // Probe for metadata
         let probe_info = crate::ImageInfo::from_bytes(data).ok();
 
-        // Build ImageInfo for the trait
-        let mut info = if let Some(ref pi) = probe_info {
-            let mut zi = ImageInfo::new(pi.width, pi.height, ImageFormat::Heic)
-                .with_alpha(pi.has_alpha)
-                .with_bit_depth(pi.bit_depth);
-            if pi.color_primaries != 2
-                || pi.transfer_characteristics != 2
-                || pi.matrix_coefficients != 2
-            {
-                zi = zi.with_cicp(Cicp::new(
-                    pi.color_primaries as u8,
-                    pi.transfer_characteristics as u8,
-                    pi.matrix_coefficients as u8,
-                    pi.video_full_range,
-                ));
-            }
-            zi
-        } else {
-            return Err(HeicError::InvalidData("cannot probe HEIC header"));
-        };
+        let pi = probe_info
+            .as_ref()
+            .ok_or(HeicError::InvalidData("cannot probe HEIC header"))?;
+
+        // Build ImageInfo
+        let channels: u8 = if pi.has_alpha { 4 } else { 3 };
+        let mut info = ImageInfo::new(pi.width, pi.height, ImageFormat::Heic)
+            .with_alpha(pi.has_alpha)
+            .with_bit_depth(pi.bit_depth)
+            .with_channel_count(channels)
+            .with_frame_count(1)
+            .with_orientation(Orientation::Normal);
+
+        if pi.color_primaries != 2
+            || pi.transfer_characteristics != 2
+            || pi.matrix_coefficients != 2
+        {
+            info = info.with_cicp(Cicp::new(
+                pi.color_primaries as u8,
+                pi.transfer_characteristics as u8,
+                pi.matrix_coefficients as u8,
+                pi.video_full_range,
+            ));
+        }
 
         // Extract metadata (best-effort)
         let config = crate::DecoderConfig::new();
@@ -460,35 +618,42 @@ impl HeicStreamDecoder {
         if let Ok(Some(xmp)) = config.extract_xmp(data) {
             info = info.with_xmp(xmp.into_owned());
         }
-
-        let pi = probe_info.as_ref().unwrap();
-
-        // Try grid path for 8-bit, no-alpha images
-        if pi.bit_depth <= 8 && !pi.has_alpha {
-            if let Some(grid_state) = Self::try_init_grid(data, preferred, limits, stop_ref, pi)? {
-                let descriptor = cicp_descriptor(
-                    layout_to_descriptor(grid_state.layout),
-                    pi.color_primaries,
-                    pi.transfer_characteristics,
-                );
-                return Ok(Self {
-                    info,
-                    descriptor,
-                    y_offset: 0,
-                    grid: Some(grid_state),
-                    current_grid_row: 0,
-                    strip_buffer: alloc::vec::Vec::new(),
-                    full_pixels: None,
-                });
-            }
+        if pi.has_icc_profile
+            && let Ok(Some(icc_data)) = config.extract_icc(data)
+        {
+            info = info.with_icc_profile(icc_data);
+        }
+        if config.decode_gain_map(data).is_ok() {
+            info = info.with_gain_map(true);
         }
 
-        // Non-grid fallback: full decode upfront
-        let layout = choose_layout(preferred, data);
-        let bit_depth = pi.bit_depth;
-        let use_16bit = should_use_16bit(preferred, bit_depth);
+        // Try grid path for 8-bit, no-alpha images
+        if pi.bit_depth <= 8
+            && !pi.has_alpha
+            && let Some(grid_state) = Self::try_init_grid(data, preferred, limits, stop_ref, pi)?
+        {
+            let descriptor = cicp_descriptor(
+                layout_to_descriptor(grid_state.layout),
+                pi.color_primaries,
+                pi.transfer_characteristics,
+            );
+            return Ok(Self {
+                info,
+                descriptor,
+                y_offset: 0,
+                grid: Some(grid_state),
+                current_grid_row: 0,
+                strip_buffer: alloc::vec::Vec::new(),
+                full_pixels: None,
+            });
+        }
 
-        let pixels: PixelBuffer = if use_16bit {
+        // Non-grid fallback: full decode
+        let bit_depth = pi.bit_depth;
+        let available = available_descriptors_for_image(bit_depth, Some(pi));
+        let negotiated = negotiate_pixel_format(preferred, &available);
+
+        let pixels: PixelBuffer = if negotiated.channel_type() == ChannelType::U16 {
             let mut req = config.decode_request(data);
             if let Some(lim) = limits {
                 req = req.with_limits(lim);
@@ -498,13 +663,13 @@ impl HeicStreamDecoder {
             }
             let frame = req.decode_yuv().map_err(|e| e.into_inner())?;
             let has_alpha = frame.alpha_plane.is_some();
+            let desc = cicp_descriptor(
+                negotiated,
+                frame.color_primaries as u16,
+                frame.transfer_characteristics as u16,
+            );
 
-            if has_alpha || wants_alpha_16(preferred) {
-                let desc = cicp_descriptor(
-                    PixelDescriptor::RGBA16_SRGB,
-                    frame.color_primaries as u16,
-                    frame.transfer_characteristics as u16,
-                );
+            if has_alpha || negotiated.has_alpha() {
                 let rgba_data = frame.to_rgba16();
                 let pixels: alloc::vec::Vec<Rgba<u16>> = rgba_data
                     .chunks_exact(4)
@@ -522,11 +687,6 @@ impl HeicStreamDecoder {
                     .with_descriptor(desc)
                     .into()
             } else {
-                let desc = cicp_descriptor(
-                    PixelDescriptor::RGB16_SRGB,
-                    frame.color_primaries as u16,
-                    frame.transfer_characteristics as u16,
-                );
                 let rgb_data = frame.to_rgb16();
                 let pixels: alloc::vec::Vec<Rgb<u16>> = rgb_data
                     .chunks_exact(3)
@@ -544,6 +704,7 @@ impl HeicStreamDecoder {
                     .into()
             }
         } else {
+            let layout = negotiated_to_layout(negotiated);
             let mut req = config.decode_request(data).with_output_layout(layout);
             if let Some(lim) = limits {
                 req = req.with_limits(lim);
@@ -589,7 +750,7 @@ impl HeicStreamDecoder {
     ) -> Result<Option<GridState>, HeicError> {
         use crate::heif::{self, ColorInfo, FourCC, ItemType};
 
-        stop.check().map_err(|e| HeicError::Cancelled(e))?;
+        stop.check().map_err(HeicError::Cancelled)?;
 
         let container = heif::parse(data, stop).map_err(|e| e.into_inner())?;
         let primary_item = container.primary_item().ok_or(HeicError::NoPrimaryImage)?;
@@ -676,7 +837,7 @@ impl HeicStreamDecoder {
             _ => None,
         };
 
-        // Extract tile data into owned Vecs
+        // Extract tile data
         let tile_data: alloc::vec::Vec<alloc::vec::Vec<u8>> = tile_ids
             .iter()
             .map(|&tid| {
@@ -687,7 +848,7 @@ impl HeicStreamDecoder {
             })
             .collect::<Result<_, _>>()?;
 
-        let layout = choose_layout(preferred, data);
+        let layout = descriptor_to_layout(preferred, data);
 
         Ok(Some(GridState {
             tile_data,
@@ -722,14 +883,11 @@ impl HeicStreamDecoder {
         let bpp = grid.layout.bytes_per_pixel();
         let strip_bytes = grid.output_width as usize * strip_h as usize * bpp;
 
-        // Resize strip buffer
         self.strip_buffer.resize(strip_bytes, 0);
 
         let cols = grid.cols as usize;
         let row_start = row as usize * cols;
-        let row_end = row_start + cols;
 
-        // Decode each tile in this row and color-convert into the strip buffer
         for col in 0..cols {
             let tile_idx = row_start + col;
             if tile_idx >= grid.tile_data.len() {
@@ -737,7 +895,7 @@ impl HeicStreamDecoder {
             }
             let mut tile_frame =
                 crate::hevc::decode_with_config(&grid.tile_config, &grid.tile_data[tile_idx])
-                    .map_err(|e| HeicError::from(e))?;
+                    .map_err(HeicError::from)?;
 
             if let Some((fr, mc)) = grid.color_override {
                 tile_frame.full_range = fr;
@@ -755,7 +913,7 @@ impl HeicStreamDecoder {
                 &mut self.strip_buffer,
                 grid.layout,
                 dst_x,
-                0, // relative to strip
+                0,
                 copy_w,
                 copy_h,
                 grid.output_width,
@@ -763,17 +921,15 @@ impl HeicStreamDecoder {
         }
 
         self.current_grid_row += 1;
-        let _ = row_end; // suppress warning
         Ok(Some((y_offset, grid.output_width, strip_h)))
     }
 }
 
-impl zencodec_types::StreamingDecode for HeicStreamDecoder {
+impl zc::decode::StreamingDecode for HeicStreamDecoder {
     type Error = HeicError;
 
     fn next_batch(&mut self) -> Result<Option<(u32, zenpixels::PixelSlice<'_>)>, HeicError> {
         if self.grid.is_some() {
-            // Grid path: decode one tile-row
             let result = self.decode_grid_row()?;
             match result {
                 None => Ok(None),
@@ -792,7 +948,6 @@ impl zencodec_types::StreamingDecode for HeicStreamDecoder {
                 }
             }
         } else if let Some(ref pixels) = self.full_pixels {
-            // Non-grid fallback: emit strips from full decoded buffer
             let height = pixels.height();
             if self.y_offset >= height {
                 return Ok(None);
@@ -814,136 +969,90 @@ impl zencodec_types::StreamingDecode for HeicStreamDecoder {
 
 // ── Pixel conversion helpers ───────────────────────────────────────────────
 
-/// Convert raw `Vec<u8>` pixel data from the native decoder into a [`PixelBuffer`].
+/// Convert raw `Vec<u8>` pixel data into a [`PixelBuffer`], zero-copy where possible.
+///
+/// Uses `PixelBuffer::from_vec()` for RGB8/RGBA8/BGRA8 (zero-copy).
+/// For BGR8, swizzles in-place via garb then wraps as RGB8 (one pass, no alloc).
 fn raw_to_pixel_buffer(
-    raw: alloc::vec::Vec<u8>,
+    mut raw: alloc::vec::Vec<u8>,
     w: u32,
     h: u32,
     layout: crate::PixelLayout,
 ) -> Result<PixelBuffer, HeicError> {
-    let err = |_| HeicError::InvalidData("pixel count mismatch");
+    let err = |_| HeicError::InvalidData("pixel buffer creation failed");
     match layout {
         crate::PixelLayout::Rgb8 => {
-            let pixels: alloc::vec::Vec<Rgb<u8>> = raw
-                .chunks_exact(3)
-                .map(|c| Rgb {
-                    r: c[0],
-                    g: c[1],
-                    b: c[2],
-                })
-                .collect();
-            Ok(PixelBuffer::from_pixels(pixels, w, h)
-                .map_err(err)?
-                .with_descriptor(PixelDescriptor::RGB8_SRGB)
-                .into())
+            PixelBuffer::from_vec(raw, w, h, PixelDescriptor::RGB8_SRGB).map_err(err)
         }
         crate::PixelLayout::Rgba8 => {
-            let pixels: alloc::vec::Vec<Rgba<u8>> = raw
-                .chunks_exact(4)
-                .map(|c| Rgba {
-                    r: c[0],
-                    g: c[1],
-                    b: c[2],
-                    a: c[3],
-                })
-                .collect();
-            Ok(PixelBuffer::from_pixels(pixels, w, h)
-                .map_err(err)?
-                .with_descriptor(PixelDescriptor::RGBA8_SRGB)
-                .into())
+            PixelBuffer::from_vec(raw, w, h, PixelDescriptor::RGBA8_SRGB).map_err(err)
         }
         crate::PixelLayout::Bgr8 => {
-            // Convert BGR to RGB.
-            let pixels: alloc::vec::Vec<Rgb<u8>> = raw
-                .chunks_exact(3)
-                .map(|c| Rgb {
-                    r: c[2],
-                    g: c[1],
-                    b: c[0],
-                })
-                .collect();
-            Ok(PixelBuffer::from_pixels(pixels, w, h)
-                .map_err(err)?
-                .with_descriptor(PixelDescriptor::RGB8_SRGB)
-                .into())
+            // Swizzle BGR→RGB in-place via garb (SIMD-accelerated), then wrap as RGB8
+            garb::bytes::bgr_to_rgb_inplace(&mut raw)
+                .map_err(|_| HeicError::InvalidData("BGR swizzle failed"))?;
+            PixelBuffer::from_vec(raw, w, h, PixelDescriptor::RGB8_SRGB).map_err(err)
         }
         crate::PixelLayout::Bgra8 => {
-            // Keep as BGRA.
-            let pixels: alloc::vec::Vec<rgb::alt::BGRA<u8>> = raw
-                .chunks_exact(4)
-                .map(|c| rgb::alt::BGRA {
-                    b: c[0],
-                    g: c[1],
-                    r: c[2],
-                    a: c[3],
-                })
-                .collect();
-            Ok(PixelBuffer::from_pixels(pixels, w, h)
-                .map_err(err)?
-                .with_descriptor(PixelDescriptor::BGRA8_SRGB)
-                .into())
+            PixelBuffer::from_vec(raw, w, h, PixelDescriptor::BGRA8_SRGB).map_err(err)
         }
     }
 }
 
-/// Decide whether to use the 16-bit output path.
-///
-/// Returns true if:
-/// - `preferred` is empty and `bit_depth > 8` (native format is lossless)
-/// - `preferred` contains a 16-bit descriptor before any 8-bit descriptor
-fn should_use_16bit(preferred: &[PixelDescriptor], bit_depth: u8) -> bool {
-    if preferred.is_empty() {
-        return bit_depth > 8;
-    }
-    // Find the first descriptor we can produce
-    for desc in preferred {
-        match desc.channel_type() {
-            ChannelType::U16 => {
-                // Caller's top preference is 16-bit — honor it
-                if matches!(
-                    *desc,
-                    d if d == PixelDescriptor::RGB16_SRGB || d == PixelDescriptor::RGBA16_SRGB
-                ) {
-                    return true;
-                }
-            }
-            ChannelType::U8 => {
-                // Caller prefers 8-bit — use 8-bit path
-                if matches!(
-                    *desc,
-                    d if d == PixelDescriptor::RGB8_SRGB
-                        || d == PixelDescriptor::RGBA8_SRGB
-                        || d == PixelDescriptor::BGRA8_SRGB
-                ) {
-                    return false;
-                }
-            }
-            _ => continue,
+/// Build the available descriptor list for format negotiation based on image properties.
+fn available_descriptors_for_image(
+    bit_depth: u8,
+    probe: Option<&crate::ImageInfo>,
+) -> alloc::vec::Vec<PixelDescriptor> {
+    let has_alpha = probe.is_some_and(|p| p.has_alpha);
+    if bit_depth > 8 {
+        if has_alpha {
+            alloc::vec![
+                PixelDescriptor::RGBA16_SRGB,
+                PixelDescriptor::RGBA8_SRGB,
+                PixelDescriptor::BGRA8_SRGB
+            ]
+        } else {
+            alloc::vec![
+                PixelDescriptor::RGB16_SRGB,
+                PixelDescriptor::RGBA16_SRGB,
+                PixelDescriptor::RGB8_SRGB,
+                PixelDescriptor::RGBA8_SRGB,
+                PixelDescriptor::BGRA8_SRGB
+            ]
         }
+    } else if has_alpha {
+        alloc::vec![PixelDescriptor::RGBA8_SRGB, PixelDescriptor::BGRA8_SRGB]
+    } else {
+        alloc::vec![
+            PixelDescriptor::RGB8_SRGB,
+            PixelDescriptor::RGBA8_SRGB,
+            PixelDescriptor::BGRA8_SRGB
+        ]
     }
-    // No matching preference found — fall back to native
-    bit_depth > 8
 }
 
-/// Check if the preferred list contains a 16-bit RGBA descriptor.
-fn wants_alpha_16(preferred: &[PixelDescriptor]) -> bool {
-    preferred.contains(&PixelDescriptor::RGBA16_SRGB)
+/// Map negotiated PixelDescriptor → native PixelLayout for 8-bit output.
+fn negotiated_to_layout(desc: PixelDescriptor) -> crate::PixelLayout {
+    if desc.pixel_format() == PixelDescriptor::BGRA8_SRGB.pixel_format() {
+        crate::PixelLayout::Bgra8
+    } else if desc.has_alpha() {
+        crate::PixelLayout::Rgba8
+    } else {
+        crate::PixelLayout::Rgb8
+    }
 }
 
-/// Choose the best native pixel layout based on caller's preferred descriptors.
-///
-/// If the caller has no preference (empty slice), we auto-detect: use RGBA8 if
-/// the image has alpha, RGB8 otherwise. When preferences are given, we pick the
-/// first one we can produce without lossy conversion.
-fn choose_layout(preferred: &[PixelDescriptor], data: &[u8]) -> crate::PixelLayout {
+/// Choose native PixelLayout from preferred descriptors (for grid streaming path).
+fn descriptor_to_layout(preferred: &[PixelDescriptor], data: &[u8]) -> crate::PixelLayout {
     for desc in preferred {
-        if *desc == PixelDescriptor::RGBA8_SRGB {
+        if desc.pixel_format() == PixelDescriptor::RGBA8_SRGB.pixel_format() {
             return crate::PixelLayout::Rgba8;
         }
-        if *desc == PixelDescriptor::RGB8_SRGB {
+        if desc.pixel_format() == PixelDescriptor::RGB8_SRGB.pixel_format() {
             return crate::PixelLayout::Rgb8;
         }
-        if *desc == PixelDescriptor::BGRA8_SRGB {
+        if desc.pixel_format() == PixelDescriptor::BGRA8_SRGB.pixel_format() {
             return crate::PixelLayout::Bgra8;
         }
     }
@@ -962,31 +1071,6 @@ fn choose_layout(preferred: &[PixelDescriptor], data: &[u8]) -> crate::PixelLayo
 
 // ── Native → trait metadata conversion ─────────────────────────────────────
 
-/// Convert `crate::ImageInfo` to `zencodec_types::ImageInfo`.
-fn convert_info(native: &crate::ImageInfo) -> ImageInfo {
-    let channels: u8 = if native.has_alpha { 4 } else { 3 };
-
-    let mut info = ImageInfo::new(native.width, native.height, ImageFormat::Heic)
-        .with_alpha(native.has_alpha)
-        .with_bit_depth(native.bit_depth)
-        .with_channel_count(channels);
-
-    // Set CICP if we have non-default values
-    if native.color_primaries != 2
-        || native.transfer_characteristics != 2
-        || native.matrix_coefficients != 2
-    {
-        info = info.with_cicp(Cicp::new(
-            native.color_primaries as u8,
-            native.transfer_characteristics as u8,
-            native.matrix_coefficients as u8,
-            native.video_full_range,
-        ));
-    }
-
-    info
-}
-
 /// Derive TransferFunction and ColorPrimaries from native CICP values.
 fn cicp_descriptor(
     base: PixelDescriptor,
@@ -1003,7 +1087,7 @@ fn layout_to_descriptor(layout: crate::PixelLayout) -> PixelDescriptor {
     match layout {
         crate::PixelLayout::Rgb8 => PixelDescriptor::RGB8_SRGB,
         crate::PixelLayout::Rgba8 => PixelDescriptor::RGBA8_SRGB,
-        crate::PixelLayout::Bgr8 => PixelDescriptor::RGB8_SRGB, // BGR → RGB descriptor
+        crate::PixelLayout::Bgr8 => PixelDescriptor::RGB8_SRGB,
         crate::PixelLayout::Bgra8 => PixelDescriptor::BGRA8_SRGB,
     }
 }
@@ -1027,73 +1111,70 @@ mod tests {
     fn config_creation() {
         let config = HeicDecoderConfig::new();
         assert_eq!(
-            <HeicDecoderConfig as zencodec_types::DecoderConfig>::formats(),
+            <HeicDecoderConfig as DecoderConfig>::formats(),
             &[ImageFormat::Heic]
         );
-        let descriptors =
-            <HeicDecoderConfig as zencodec_types::DecoderConfig>::supported_descriptors();
+        let descriptors = <HeicDecoderConfig as DecoderConfig>::supported_descriptors();
         assert!(!descriptors.is_empty());
         assert!(descriptors.contains(&PixelDescriptor::RGB8_SRGB));
         assert!(descriptors.contains(&PixelDescriptor::RGBA8_SRGB));
         assert!(descriptors.contains(&PixelDescriptor::BGRA8_SRGB));
-        let _ = config; // use it
+        let _ = config;
     }
 
     #[test]
     fn default_config() {
         let config = HeicDecoderConfig::default();
         assert_eq!(
-            <HeicDecoderConfig as zencodec_types::DecoderConfig>::formats(),
+            <HeicDecoderConfig as DecoderConfig>::formats(),
             &[ImageFormat::Heic]
         );
         let _ = config;
     }
 
     #[test]
+    fn capabilities_reported() {
+        let caps = <HeicDecoderConfig as DecoderConfig>::capabilities();
+        assert!(caps.icc());
+        assert!(caps.exif());
+        assert!(caps.xmp());
+        assert!(caps.cicp());
+        assert!(caps.cancel());
+        assert!(caps.cheap_probe());
+        assert!(caps.native_16bit());
+        assert!(caps.native_alpha());
+        assert!(caps.hdr());
+    }
+
+    #[test]
     fn job_creation() {
-        use zencodec_types::DecoderConfig as _;
         let config = HeicDecoderConfig::new();
         let _job = config.job();
     }
 
     #[test]
     fn frame_decoder_returns_unsupported() {
-        use zencodec_types::{DecodeJob as _, DecoderConfig as _};
         let config = HeicDecoderConfig::new();
-        let result = config.job().frame_decoder(&[], &[]);
+        let result = config.job().frame_decoder(Cow::Borrowed(&[]), &[]);
         assert!(result.is_err());
     }
 
     #[test]
     fn probe_invalid_data() {
-        use zencodec_types::{DecodeJob as _, DecoderConfig as _};
         let config = HeicDecoderConfig::new();
         let result = config.job().probe(b"not a heic file");
         assert!(result.is_err());
     }
 
     #[test]
-    fn choose_layout_empty_preference_no_alpha() {
-        // With no preference and no parseable alpha, default to RGB8.
-        let layout = choose_layout(&[], b"garbage data");
-        assert_eq!(layout, crate::PixelLayout::Rgb8);
-    }
-
-    #[test]
-    fn choose_layout_rgba_preference() {
-        let layout = choose_layout(&[PixelDescriptor::RGBA8_SRGB], b"");
+    fn descriptor_to_layout_preferences() {
+        let layout = descriptor_to_layout(&[PixelDescriptor::RGBA8_SRGB], b"");
         assert_eq!(layout, crate::PixelLayout::Rgba8);
-    }
 
-    #[test]
-    fn choose_layout_bgra_preference() {
-        let layout = choose_layout(&[PixelDescriptor::BGRA8_SRGB], b"");
+        let layout = descriptor_to_layout(&[PixelDescriptor::BGRA8_SRGB], b"");
         assert_eq!(layout, crate::PixelLayout::Bgra8);
-    }
 
-    #[test]
-    fn choose_layout_rgb_preference() {
-        let layout = choose_layout(&[PixelDescriptor::RGB8_SRGB], b"");
+        let layout = descriptor_to_layout(&[PixelDescriptor::RGB8_SRGB], b"");
         assert_eq!(layout, crate::PixelLayout::Rgb8);
     }
 
@@ -1103,23 +1184,7 @@ mod tests {
         let buf = raw_to_pixel_buffer(raw, 2, 1, crate::PixelLayout::Rgb8).unwrap();
         assert_eq!(buf.width(), 2);
         assert_eq!(buf.height(), 1);
-        let img: imgref::ImgRef<'_, Rgb<u8>> = buf.try_as_imgref().expect("expected RGB8");
-        assert_eq!(
-            img.buf()[0],
-            Rgb {
-                r: 10,
-                g: 20,
-                b: 30
-            }
-        );
-        assert_eq!(
-            img.buf()[1],
-            Rgb {
-                r: 40,
-                g: 50,
-                b: 60
-            }
-        );
+        assert_eq!(buf.descriptor(), PixelDescriptor::RGB8_SRGB);
     }
 
     #[test]
@@ -1128,45 +1193,22 @@ mod tests {
         let buf = raw_to_pixel_buffer(raw, 2, 1, crate::PixelLayout::Rgba8).unwrap();
         assert_eq!(buf.width(), 2);
         assert_eq!(buf.height(), 1);
-        let img: imgref::ImgRef<'_, Rgba<u8>> = buf.try_as_imgref().expect("expected RGBA8");
-        assert_eq!(
-            img.buf()[0],
-            Rgba {
-                r: 10,
-                g: 20,
-                b: 30,
-                a: 255
-            }
-        );
+        assert_eq!(buf.descriptor(), PixelDescriptor::RGBA8_SRGB);
     }
 
     #[test]
     fn raw_to_pixel_buffer_bgr8() {
-        // BGR input should be converted to RGB.
+        // BGR input should be swizzled to RGB via garb
         let raw = alloc::vec![30, 20, 10];
         let buf = raw_to_pixel_buffer(raw, 1, 1, crate::PixelLayout::Bgr8).unwrap();
-        let img: imgref::ImgRef<'_, Rgb<u8>> = buf.try_as_imgref().expect("expected RGB8");
-        assert_eq!(
-            img.buf()[0],
-            Rgb {
-                r: 10,
-                g: 20,
-                b: 30
-            }
-        );
+        assert_eq!(buf.descriptor(), PixelDescriptor::RGB8_SRGB);
     }
 
     #[test]
     fn raw_to_pixel_buffer_bgra8() {
         let raw = alloc::vec![30, 20, 10, 255];
         let buf = raw_to_pixel_buffer(raw, 1, 1, crate::PixelLayout::Bgra8).unwrap();
-        let img: imgref::ImgRef<'_, rgb::alt::BGRA<u8>> =
-            buf.try_as_imgref().expect("expected BGRA8");
-        let px = &img.buf()[0];
-        assert_eq!(px.b, 30);
-        assert_eq!(px.g, 20);
-        assert_eq!(px.r, 10);
-        assert_eq!(px.a, 255);
+        assert_eq!(buf.descriptor(), PixelDescriptor::BGRA8_SRGB);
     }
 
     #[test]
@@ -1179,5 +1221,12 @@ mod tests {
 
         let e = probe_error_to_heic(crate::ProbeError::Corrupt(HeicError::NoPrimaryImage));
         assert!(matches!(e, HeicError::NoPrimaryImage));
+    }
+
+    #[test]
+    fn negotiation_prefers_rgb8_for_no_alpha() {
+        let available = available_descriptors_for_image(8, None);
+        let result = negotiate_pixel_format(&[], &available);
+        assert_eq!(result, PixelDescriptor::RGB8_SRGB);
     }
 }
