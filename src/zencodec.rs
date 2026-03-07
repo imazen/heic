@@ -90,8 +90,8 @@ impl zencodec_types::DecoderConfig for HeicDecoderConfig {
     type Error = HeicError;
     type Job<'a> = HeicDecodeJob<'a>;
 
-    fn format() -> ImageFormat {
-        ImageFormat::Heic
+    fn formats() -> &'static [ImageFormat] {
+        &[ImageFormat::Heic]
     }
 
     fn supported_descriptors() -> &'static [PixelDescriptor] {
@@ -1027,8 +1027,8 @@ mod tests {
     fn config_creation() {
         let config = HeicDecoderConfig::new();
         assert_eq!(
-            <HeicDecoderConfig as zencodec_types::DecoderConfig>::format(),
-            ImageFormat::Heic
+            <HeicDecoderConfig as zencodec_types::DecoderConfig>::formats(),
+            &[ImageFormat::Heic]
         );
         let descriptors =
             <HeicDecoderConfig as zencodec_types::DecoderConfig>::supported_descriptors();
@@ -1043,8 +1043,8 @@ mod tests {
     fn default_config() {
         let config = HeicDecoderConfig::default();
         assert_eq!(
-            <HeicDecoderConfig as zencodec_types::DecoderConfig>::format(),
-            ImageFormat::Heic
+            <HeicDecoderConfig as zencodec_types::DecoderConfig>::formats(),
+            &[ImageFormat::Heic]
         );
         let _ = config;
     }
