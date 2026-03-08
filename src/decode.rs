@@ -16,6 +16,55 @@ use crate::{
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+/// Decode a collection of tile data in parallel or sequentially depending on
+/// `max_threads` and the `parallel` feature.
+///
+/// When `parallel` is enabled and `max_threads != Some(1)`, uses rayon
+/// parallelism scoped to the requested thread count. Otherwise falls back
+/// to sequential iteration.
+#[cfg(feature = "parallel")]
+fn decode_tiles_parallel(
+    tile_data_list: &[Cow<'_, [u8]>],
+    tile_config: &crate::heif::HevcDecoderConfig,
+    max_threads: Option<usize>,
+) -> Result<Vec<crate::hevc::DecodedFrame>> {
+    match max_threads {
+        Some(1) => {
+            // Forced single-threaded
+            tile_data_list
+                .iter()
+                .map(|tile_data| {
+                    crate::hevc::decode_with_config(tile_config, tile_data).map_err(Into::into)
+                })
+                .collect::<Result<_>>()
+        }
+        Some(n) if n > 1 => {
+            // Limited thread pool
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(n)
+                .build()
+                .map_err(|e| HeicError::InvalidData("failed to create thread pool"))?;
+            pool.install(|| {
+                tile_data_list
+                    .par_iter()
+                    .map(|tile_data| {
+                        crate::hevc::decode_with_config(tile_config, tile_data).map_err(Into::into)
+                    })
+                    .collect::<Result<_>>()
+            })
+        }
+        _ => {
+            // Unlimited: use global rayon pool
+            tile_data_list
+                .par_iter()
+                .map(|tile_data| {
+                    crate::hevc::decode_with_config(tile_config, tile_data).map_err(Into::into)
+                })
+                .collect::<Result<_>>()
+        }
+    }
+}
+
 /// Sentinel for no limits
 static NO_LIMITS: Limits = Limits {
     max_width: None,
@@ -29,6 +78,7 @@ pub(crate) fn decode_to_frame(
     data: &[u8],
     limits: Option<&Limits>,
     stop: &dyn Stop,
+    max_threads: Option<usize>,
 ) -> Result<crate::hevc::DecodedFrame> {
     let limits = limits.unwrap_or(&NO_LIMITS);
 
@@ -47,7 +97,7 @@ pub(crate) fn decode_to_frame(
 
     check_stop(stop)?;
 
-    let mut frame = decode_item(&container, &primary_item, 0, limits, stop)?;
+    let mut frame = decode_item(&container, &primary_item, 0, limits, stop, max_threads)?;
 
     check_stop(stop)?;
 
@@ -82,6 +132,7 @@ fn decode_item(
     depth: u32,
     limits: &Limits,
     stop: &dyn Stop,
+    max_threads: Option<usize>,
 ) -> Result<crate::hevc::DecodedFrame> {
     if depth > 8 {
         return Err(HeicError::InvalidData("Derived image reference chain too deep").into());
@@ -90,9 +141,9 @@ fn decode_item(
     check_stop(stop)?;
 
     let mut frame = match item.item_type {
-        ItemType::Grid => decode_grid(container, item, limits, stop)?,
-        ItemType::Iden => decode_iden(container, item, depth, limits, stop)?,
-        ItemType::Iovl => decode_iovl(container, item, depth, limits, stop)?,
+        ItemType::Grid => decode_grid(container, item, limits, stop, max_threads)?,
+        ItemType::Iden => decode_iden(container, item, depth, limits, stop, max_threads)?,
+        ItemType::Iovl => decode_iovl(container, item, depth, limits, stop, max_threads)?,
         _ => {
             let image_data = container.get_item_data(item.id)?;
 
@@ -152,6 +203,7 @@ fn decode_iden(
     depth: u32,
     limits: &Limits,
     stop: &dyn Stop,
+    max_threads: Option<usize>,
 ) -> Result<crate::hevc::DecodedFrame> {
     let source_ids = container.get_item_references(iden_item.id, FourCC::DIMG);
     let source_id = source_ids
@@ -162,7 +214,7 @@ fn decode_iden(
         .get_item(*source_id)
         .ok_or(HeicError::InvalidData("iden dimg target item not found"))?;
 
-    decode_item(container, &source_item, depth + 1, limits, stop)
+    decode_item(container, &source_item, depth + 1, limits, stop, max_threads)
 }
 
 /// Decode an image overlay (iovl) by compositing referenced tiles onto a canvas.
@@ -172,6 +224,7 @@ fn decode_iovl(
     depth: u32,
     limits: &Limits,
     stop: &dyn Stop,
+    max_threads: Option<usize>,
 ) -> Result<crate::hevc::DecodedFrame> {
     let iovl_data = container.get_item_data(iovl_item.id)?;
 
@@ -320,7 +373,7 @@ fn decode_iovl(
             .get_item(tile_id)
             .ok_or(HeicError::InvalidData("Missing overlay tile"))?;
 
-        let tile_frame = decode_item(container, &tile_item, depth + 1, limits, stop)?;
+        let tile_frame = decode_item(container, &tile_item, depth + 1, limits, stop, max_threads)?;
 
         // Propagate color conversion settings from first tile
         if idx == 0 {
@@ -396,6 +449,7 @@ fn decode_grid(
     grid_item: &heif::Item,
     limits: &Limits,
     stop: &dyn Stop,
+    max_threads: Option<usize>,
 ) -> Result<crate::hevc::DecodedFrame> {
     // Parse grid descriptor
     let grid_data = container.get_item_data(grid_item.id)?;
@@ -467,14 +521,8 @@ fn decode_grid(
 
     #[cfg(feature = "parallel")]
     {
-        // Parallel: decode ALL tiles concurrently, then blit into the output frame.
-        // Since each tile blits to a non-overlapping region, this is safe.
-        let all_tiles: Vec<crate::hevc::DecodedFrame> = tile_data_list
-            .par_iter()
-            .map(|tile_data| {
-                crate::hevc::decode_with_config(tile_config, tile_data).map_err(Into::into)
-            })
-            .collect::<Result<_>>()?;
+        // Parallel: decode tiles concurrently (respecting max_threads), then blit.
+        let all_tiles = decode_tiles_parallel(&tile_data_list, tile_config, max_threads)?;
 
         for (tile_idx, tile_frame) in all_tiles.iter().enumerate() {
             if tile_idx == 0 {
@@ -497,6 +545,7 @@ fn decode_grid(
 
     #[cfg(not(feature = "parallel"))]
     {
+        let _ = max_threads; // unused without parallel feature
         // Sequential: decode one tile, blit, drop — only 1 tile in memory at a time.
         for (tile_idx, tile_data) in tile_data_list.iter().enumerate() {
             check_stop(stop)?;
@@ -612,6 +661,7 @@ pub(crate) fn try_decode_grid_streaming(
     stop: &dyn Stop,
     layout: PixelLayout,
     output: &mut [u8],
+    max_threads: Option<usize>,
 ) -> Result<Option<(u32, u32)>> {
     let limits = limits.unwrap_or(&NO_LIMITS);
 
@@ -727,12 +777,8 @@ pub(crate) fn try_decode_grid_streaming(
         for row in 0..rows {
             let row_start = row as usize * cols_usize;
             let row_end = row_start + cols_usize;
-            let row_tiles: Vec<crate::hevc::DecodedFrame> = tile_data_list[row_start..row_end]
-                .par_iter()
-                .map(|tile_data| {
-                    crate::hevc::decode_with_config(tile_config, tile_data).map_err(Into::into)
-                })
-                .collect::<Result<_>>()?;
+            let row_tiles =
+                decode_tiles_parallel(&tile_data_list[row_start..row_end], tile_config, max_threads)?;
 
             for (col, mut tile_frame) in row_tiles.into_iter().enumerate() {
                 let tile_idx = row as usize * cols_usize + col;
@@ -765,6 +811,7 @@ pub(crate) fn try_decode_grid_streaming(
 
     #[cfg(not(feature = "parallel"))]
     {
+        let _ = max_threads; // unused without parallel feature
         for (tile_idx, tile_data) in tile_data_list.iter().enumerate() {
             check_stop(stop)?;
             let mut tile_frame = crate::hevc::decode_with_config(tile_config, tile_data)?;
@@ -810,6 +857,7 @@ pub(crate) fn try_decode_grid_to_sink(
     stop: &dyn Stop,
     layout: PixelLayout,
     sink: &mut dyn crate::RowSink,
+    max_threads: Option<usize>,
 ) -> Result<Option<(u32, u32)>> {
     let limits = limits.unwrap_or(&NO_LIMITS);
 
@@ -923,20 +971,19 @@ pub(crate) fn try_decode_grid_to_sink(
 
         // Decode tiles for this row
         #[cfg(feature = "parallel")]
-        let row_tiles: Vec<crate::hevc::DecodedFrame> = tile_data_list[row_start..row_end]
-            .par_iter()
-            .map(|tile_data| {
-                crate::hevc::decode_with_config(tile_config, tile_data).map_err(Into::into)
-            })
-            .collect::<Result<_>>()?;
+        let row_tiles: Vec<crate::hevc::DecodedFrame> =
+            decode_tiles_parallel(&tile_data_list[row_start..row_end], tile_config, max_threads)?;
 
         #[cfg(not(feature = "parallel"))]
-        let row_tiles: Vec<crate::hevc::DecodedFrame> = tile_data_list[row_start..row_end]
-            .iter()
-            .map(|tile_data| {
-                crate::hevc::decode_with_config(tile_config, tile_data).map_err(Into::into)
-            })
-            .collect::<Result<_>>()?;
+        let row_tiles: Vec<crate::hevc::DecodedFrame> = {
+            let _ = max_threads; // unused without parallel feature
+            tile_data_list[row_start..row_end]
+                .iter()
+                .map(|tile_data| {
+                    crate::hevc::decode_with_config(tile_config, tile_data).map_err(Into::into)
+                })
+                .collect::<Result<_>>()?
+        };
 
         // Color-convert each tile directly into the strip buffer
         for (col, mut tile_frame) in row_tiles.into_iter().enumerate() {
@@ -1211,6 +1258,7 @@ pub(crate) fn decode_gain_map(data: &[u8]) -> Result<HdrGainMap> {
         0,
         &Limits::default(),
         &Unstoppable,
+        None,
     )?;
 
     let width = frame.cropped_width();
@@ -1331,7 +1379,7 @@ pub(crate) fn decode_thumbnail(data: &[u8], layout: PixelLayout) -> Result<Optio
         .ok_or(HeicError::InvalidData("Thumbnail item not found"))?;
 
     let stop: &dyn Stop = &Unstoppable;
-    let frame = decode_item(&container, &thumb_item, 0, &NO_LIMITS, stop)?;
+    let frame = decode_item(&container, &thumb_item, 0, &NO_LIMITS, stop, None)?;
 
     let width = frame.cropped_width();
     let height = frame.cropped_height();

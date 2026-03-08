@@ -583,6 +583,7 @@ impl DecoderConfig {
             layout: PixelLayout::Rgba8,
             limits: None,
             stop: None,
+            max_threads: None,
         }
     }
 
@@ -596,7 +597,7 @@ impl DecoderConfig {
     ///
     /// Returns an error if the data is not valid HEIC/HEIF format.
     pub fn decode_to_frame(&self, data: &[u8]) -> Result<hevc::DecodedFrame> {
-        decode::decode_to_frame(data, None, &Unstoppable)
+        decode::decode_to_frame(data, None, &Unstoppable, None)
     }
 
     /// Estimate the peak memory usage for decoding an image of given dimensions.
@@ -726,6 +727,12 @@ pub struct DecodeRequest<'a> {
     layout: PixelLayout,
     limits: Option<&'a Limits>,
     stop: Option<&'a dyn Stop>,
+    /// Maximum thread count for parallel tile decoding.
+    ///
+    /// `None` means use the default (global rayon pool when `parallel` feature
+    /// is enabled, sequential otherwise). `Some(1)` forces single-threaded
+    /// decode even when the `parallel` feature is on.
+    max_threads: Option<usize>,
 }
 
 impl<'a> DecodeRequest<'a> {
@@ -755,6 +762,21 @@ impl<'a> DecodeRequest<'a> {
         self
     }
 
+    /// Limit the number of threads used for parallel tile decoding.
+    ///
+    /// When the `parallel` feature is enabled, tile decoding uses rayon for
+    /// parallelism. This method overrides the default thread count:
+    ///
+    /// - `Some(1)` forces single-threaded decode
+    /// - `Some(n)` uses at most `n` threads
+    /// - `None` (default) uses the global rayon pool
+    ///
+    /// Without the `parallel` feature, this has no effect.
+    pub fn with_max_threads(mut self, max_threads: usize) -> Self {
+        self.max_threads = Some(max_threads);
+        self
+    }
+
     /// Execute the decode and return pixel data.
     ///
     /// # Errors
@@ -763,7 +785,7 @@ impl<'a> DecodeRequest<'a> {
     /// or the operation is cancelled.
     pub fn decode(self) -> Result<DecodeOutput> {
         let stop: &dyn Stop = self.stop.unwrap_or(&Unstoppable);
-        let frame = decode::decode_to_frame(self.data, self.limits, stop)?;
+        let frame = decode::decode_to_frame(self.data, self.limits, stop, self.max_threads)?;
 
         let width = frame.cropped_width();
         let height = frame.cropped_height();
@@ -810,14 +832,19 @@ impl<'a> DecodeRequest<'a> {
         let stop: &dyn Stop = self.stop.unwrap_or(&Unstoppable);
 
         // Try streaming path for eligible grid images (no full-frame YCbCr allocation)
-        if let Some(result) =
-            decode::try_decode_grid_streaming(self.data, self.limits, stop, self.layout, output)?
-        {
+        if let Some(result) = decode::try_decode_grid_streaming(
+            self.data,
+            self.limits,
+            stop,
+            self.layout,
+            output,
+            self.max_threads,
+        )? {
             return Ok(result);
         }
 
         // Fallback: full-frame decode then color convert
-        let frame = decode::decode_to_frame(self.data, self.limits, stop)?;
+        let frame = decode::decode_to_frame(self.data, self.limits, stop, self.max_threads)?;
 
         let width = frame.cropped_width();
         let height = frame.cropped_height();
@@ -876,14 +903,19 @@ impl<'a> DecodeRequest<'a> {
         let stop: &dyn Stop = self.stop.unwrap_or(&Unstoppable);
 
         // Try streaming path for eligible grid images
-        if let Some(result) =
-            decode::try_decode_grid_to_sink(self.data, self.limits, stop, self.layout, sink)?
-        {
+        if let Some(result) = decode::try_decode_grid_to_sink(
+            self.data,
+            self.limits,
+            stop,
+            self.layout,
+            sink,
+            self.max_threads,
+        )? {
             return Ok(result);
         }
 
         // Fallback: full-frame decode then write to sink as one strip
-        let frame = decode::decode_to_frame(self.data, self.limits, stop)?;
+        let frame = decode::decode_to_frame(self.data, self.limits, stop, self.max_threads)?;
 
         let width = frame.cropped_width();
         let height = frame.cropped_height();
@@ -923,7 +955,7 @@ impl<'a> DecodeRequest<'a> {
     /// or the operation is cancelled.
     pub fn decode_yuv(self) -> Result<hevc::DecodedFrame> {
         let stop: &dyn Stop = self.stop.unwrap_or(&Unstoppable);
-        decode::decode_to_frame(self.data, self.limits, stop)
+        decode::decode_to_frame(self.data, self.limits, stop, self.max_threads)
     }
 }
 
