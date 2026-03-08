@@ -19,10 +19,65 @@ use rgb::{Rgb, Rgba};
 use zc::decode::{
     DecodeCapabilities, DecodeOutput, DecodeRowSink, OutputInfo, negotiate_pixel_format,
 };
-use zc::{ImageFormat, ImageInfo, Orientation, ResourceLimits, Unsupported};
+use zc::{ImageFormat, ImageInfo, Orientation, ResourceLimits, ThreadingPolicy, Unsupported};
 use zenpixels::{Cicp, ColorPrimaries, PixelBuffer, PixelDescriptor, TransferFunction};
 
 use crate::error::HeicError;
+
+// ── Threading helpers ────────────────────────────────────────────────────
+
+/// Convert a [`ThreadingPolicy`] to a concrete thread count.
+///
+/// Returns `0` for unlimited (use rayon default / global pool),
+/// `1` for single-threaded, or `n` for a specific limit.
+fn policy_to_threads(policy: ThreadingPolicy) -> usize {
+    match policy {
+        ThreadingPolicy::SingleThread => 1,
+        ThreadingPolicy::LimitOrSingle { max_threads } => max_threads as usize,
+        ThreadingPolicy::LimitOrAny {
+            preferred_max_threads,
+        } => preferred_max_threads as usize,
+        ThreadingPolicy::Balanced => {
+            #[cfg(feature = "std")]
+            {
+                std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1))
+            }
+            #[cfg(not(feature = "std"))]
+            {
+                1
+            }
+        }
+        ThreadingPolicy::Unlimited => 0,
+        _ => 0, // future variants default to unlimited
+    }
+}
+
+/// Run a closure respecting the given thread count.
+///
+/// When the `parallel` feature is enabled and `thread_count` is non-zero,
+/// creates a scoped rayon [`ThreadPool`] so that any `par_iter()` calls
+/// inside the closure are limited to that many threads. When `thread_count`
+/// is 0, uses the global rayon pool (unlimited). Without the `parallel`
+/// feature, runs the closure directly.
+#[cfg(feature = "parallel")]
+fn with_thread_pool<T: Send>(thread_count: usize, f: impl FnOnce() -> T + Send) -> T {
+    if thread_count == 0 {
+        // Unlimited: use the global rayon pool
+        f()
+    } else {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(thread_count)
+            .build()
+            .expect("failed to create rayon thread pool");
+        pool.install(f)
+    }
+}
+
+#[cfg(not(feature = "parallel"))]
+fn with_thread_pool<T>(thread_count: usize, f: impl FnOnce() -> T) -> T {
+    let _ = thread_count;
+    f()
+}
 
 // ── Capabilities ─────────────────────────────────────────────────────────
 
@@ -215,12 +270,14 @@ impl<'a> zc::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
         data: Cow<'a, [u8]>,
         preferred: &[PixelDescriptor],
     ) -> Result<HeicDecoder<'a>, HeicError> {
+        let thread_count = policy_to_threads(self.limits.threading());
         Ok(HeicDecoder {
             config: self.config,
             data,
             preferred: preferred.to_vec(),
             stop: self.stop,
             limits: self.native_limits(),
+            thread_count,
         })
     }
 
@@ -420,12 +477,22 @@ pub struct HeicDecoder<'a> {
     preferred: alloc::vec::Vec<PixelDescriptor>,
     stop: Option<&'a dyn zc::enough::Stop>,
     limits: Option<crate::Limits>,
+    /// Thread count from threading policy (0 = unlimited/default).
+    thread_count: usize,
 }
 
 impl zc::decode::Decode for HeicDecoder<'_> {
     type Error = HeicError;
 
     fn decode(self) -> Result<DecodeOutput, HeicError> {
+        let thread_count = self.thread_count;
+        with_thread_pool(thread_count, move || self.decode_inner())
+    }
+}
+
+impl HeicDecoder<'_> {
+    /// Inner decode implementation, called within the appropriate thread pool.
+    fn decode_inner(self) -> Result<DecodeOutput, HeicError> {
         let data: &[u8] = &self.data;
         let preferred = &self.preferred;
 
