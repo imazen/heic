@@ -238,6 +238,30 @@ impl DecodedFrame {
         }
     }
 
+    /// Compute `cropped_width * cropped_height` as `usize` with overflow check.
+    ///
+    /// # Panics
+    /// Panics if the product overflows `usize`.
+    fn total_cropped_pixels(&self) -> usize {
+        let w = self.cropped_width() as u64;
+        let h = self.cropped_height() as u64;
+        let total = w
+            .checked_mul(h)
+            .expect("dimension overflow: width * height exceeds u64");
+        usize::try_from(total).expect("dimension overflow: pixel count exceeds usize")
+    }
+
+    /// Compute `cropped_width * cropped_height * bpp` as `usize` with overflow check.
+    ///
+    /// # Panics
+    /// Panics if the product overflows `usize`.
+    fn total_cropped_bytes(&self, bytes_per_pixel: usize) -> usize {
+        let total = self.total_cropped_pixels();
+        total
+            .checked_mul(bytes_per_pixel)
+            .expect("dimension overflow: total bytes exceeds usize")
+    }
+
     /// Convert YCbCr to interleaved RGB bytes with conformance window cropping.
     ///
     /// Returns `cropped_width * cropped_height * 3` bytes in R, G, B order.
@@ -246,10 +270,7 @@ impl DecodedFrame {
     ///
     /// Uses SIMD-accelerated conversion for 4:2:0 chroma (AVX2 on x86-64).
     pub fn to_rgb(&self) -> Vec<u8> {
-        let out_width = self.cropped_width();
-        let out_height = self.cropped_height();
-        let total = (out_width * out_height) as usize;
-        let mut rgb = vec![0u8; total * 3];
+        let mut rgb = vec![0u8; self.total_cropped_bytes(3)];
         let shift = self.bit_depth - 8;
 
         let y_start = self.crop_top;
@@ -301,9 +322,7 @@ impl DecodedFrame {
     /// Returns `cropped_width * cropped_height * 4` bytes in B, G, R, A order.
     /// Uses real alpha from [`alpha_plane`](Self::alpha_plane) if present, otherwise 255.
     pub fn to_bgra(&self) -> Vec<u8> {
-        let out_width = self.cropped_width();
-        let out_height = self.cropped_height();
-        let mut bgra = Vec::with_capacity((out_width * out_height * 4) as usize);
+        let mut bgra = Vec::with_capacity(self.total_cropped_bytes(4));
         let shift = self.bit_depth - 8;
 
         let y_start = self.crop_top;
@@ -346,9 +365,7 @@ impl DecodedFrame {
     ///
     /// Returns `cropped_width * cropped_height * 3` bytes in B, G, R order.
     pub fn to_bgr(&self) -> Vec<u8> {
-        let out_width = self.cropped_width();
-        let out_height = self.cropped_height();
-        let mut bgr = Vec::with_capacity((out_width * out_height * 3) as usize);
+        let mut bgr = Vec::with_capacity(self.total_cropped_bytes(3));
         let shift = self.bit_depth - 8;
 
         let y_start = self.crop_top;
@@ -377,8 +394,6 @@ impl DecodedFrame {
     /// The buffer must be at least `cropped_width * cropped_height * 3` bytes.
     /// Returns the number of bytes written (always `cropped_width * cropped_height * 3`).
     pub fn write_rgb_into(&self, output: &mut [u8]) -> usize {
-        let out_width = self.cropped_width();
-        let out_height = self.cropped_height();
         let shift = self.bit_depth - 8;
 
         let y_start = self.crop_top;
@@ -391,7 +406,7 @@ impl DecodedFrame {
         if self.chroma_format == 1 {
             // SIMD-accelerated 4:2:0 path
             let c_stride = self.c_stride();
-            let needed = (out_width * out_height * 3) as usize;
+            let needed = self.total_cropped_bytes(3);
             if output.len() >= needed {
                 color_convert::convert_420_to_rgb(
                     &self.y_plane,
@@ -425,7 +440,7 @@ impl DecodedFrame {
                 }
             }
         }
-        (out_width * out_height * 3) as usize
+        self.total_cropped_bytes(3)
     }
 
     /// Write cropped pixels into a pre-allocated buffer in RGBA format.
@@ -433,8 +448,6 @@ impl DecodedFrame {
     /// The buffer must be at least `cropped_width * cropped_height * 4` bytes.
     /// Returns the number of bytes written. Uses real alpha if present, otherwise 255.
     pub fn write_rgba_into(&self, output: &mut [u8]) -> usize {
-        let out_width = self.cropped_width();
-        let out_height = self.cropped_height();
         let shift = self.bit_depth - 8;
 
         let y_start = self.crop_top;
@@ -469,7 +482,7 @@ impl DecodedFrame {
                 pixel_idx += 1;
             }
         }
-        (out_width * out_height * 4) as usize
+        self.total_cropped_bytes(4)
     }
 
     /// Write cropped pixels into a pre-allocated buffer in BGRA format.
@@ -477,8 +490,6 @@ impl DecodedFrame {
     /// The buffer must be at least `cropped_width * cropped_height * 4` bytes.
     /// Returns the number of bytes written. Uses real alpha if present, otherwise 255.
     pub fn write_bgra_into(&self, output: &mut [u8]) -> usize {
-        let out_width = self.cropped_width();
-        let out_height = self.cropped_height();
         let shift = self.bit_depth - 8;
 
         let y_start = self.crop_top;
@@ -513,7 +524,7 @@ impl DecodedFrame {
                 pixel_idx += 1;
             }
         }
-        (out_width * out_height * 4) as usize
+        self.total_cropped_bytes(4)
     }
 
     /// Write cropped pixels into a pre-allocated buffer in BGR format.
@@ -521,8 +532,6 @@ impl DecodedFrame {
     /// The buffer must be at least `cropped_width * cropped_height * 3` bytes.
     /// Returns the number of bytes written.
     pub fn write_bgr_into(&self, output: &mut [u8]) -> usize {
-        let out_width = self.cropped_width();
-        let out_height = self.cropped_height();
         let shift = self.bit_depth - 8;
 
         let y_start = self.crop_top;
@@ -545,7 +554,7 @@ impl DecodedFrame {
                 }
             }
         }
-        (out_width * out_height * 3) as usize
+        self.total_cropped_bytes(3)
     }
 
     /// Convert YCbCr to interleaved RGBA bytes with conformance window cropping.
@@ -553,9 +562,7 @@ impl DecodedFrame {
     /// Returns `cropped_width * cropped_height * 4` bytes in R, G, B, A order.
     /// Uses real alpha from [`alpha_plane`](Self::alpha_plane) if present, otherwise 255.
     pub fn to_rgba(&self) -> Vec<u8> {
-        let out_width = self.cropped_width();
-        let out_height = self.cropped_height();
-        let mut rgba = Vec::with_capacity((out_width * out_height * 4) as usize);
+        let mut rgba = Vec::with_capacity(self.total_cropped_bytes(4));
         let shift = self.bit_depth - 8;
 
         // Iterate over cropped region
@@ -762,10 +769,8 @@ impl DecodedFrame {
     /// For 10-bit sources (iPhone HEIC), this preserves the full 10-bit precision
     /// instead of truncating to 8-bit.
     pub fn to_rgb16(&self) -> Vec<u16> {
-        let out_width = self.cropped_width();
-        let out_height = self.cropped_height();
-        let total = (out_width * out_height) as usize;
-        let mut rgb = vec![0u16; total * 3];
+        let total_elems = self.total_cropped_bytes(3); // pixels * 3 channels
+        let mut rgb = vec![0u16; total_elems];
 
         let y_start = self.crop_top;
         let y_end = self.height - self.crop_bottom;
@@ -799,10 +804,8 @@ impl DecodedFrame {
     /// Same precision preservation as [`to_rgb16`](Self::to_rgb16), with alpha
     /// from [`alpha_plane`](Self::alpha_plane) (or max value if absent).
     pub fn to_rgba16(&self) -> Vec<u16> {
-        let out_width = self.cropped_width();
-        let out_height = self.cropped_height();
-        let total = (out_width * out_height) as usize;
-        let mut rgba = Vec::with_capacity(total * 4);
+        let total_elems = self.total_cropped_bytes(4); // pixels * 4 channels
+        let mut rgba = Vec::with_capacity(total_elems);
 
         let y_start = self.crop_top;
         let y_end = self.height - self.crop_bottom;
@@ -1024,88 +1027,44 @@ mod tests {
         }
     }
 
+    /// Verify that total_cropped_pixels uses u64 arithmetic, not u32.
+    /// Before the fix, `(65536u32 * 65536u32)` would overflow u32 to 0.
+    /// After the fix, it correctly computes 4,294,967,296 via u64.
     #[test]
-    #[should_panic(expected = "dimension overflow")]
-    fn to_rgb_u32_overflow_panics() {
-        // 65536 * 65536 = 2^32, overflows u32
+    fn total_cropped_pixels_no_u32_overflow() {
         let frame = frame_with_cropped_dims(65536, 65536);
-        let _ = frame.to_rgb();
+        // This would have been 0 with u32 arithmetic (65536 * 65536 wraps to 0)
+        let total = frame.total_cropped_pixels();
+        assert_eq!(total, 65536 * 65536); // 4_294_967_296 on 64-bit
     }
 
+    /// Verify that total_cropped_bytes correctly handles dimensions that
+    /// would overflow u32 when multiplied by bytes_per_pixel.
     #[test]
-    #[should_panic(expected = "dimension overflow")]
-    fn to_bgra_u32_overflow_panics() {
-        // 65536 * 65536 * 4 would overflow even u64 if dims were larger,
-        // but first the w*h itself overflows u32.
+    fn total_cropped_bytes_no_u32_overflow() {
         let frame = frame_with_cropped_dims(65536, 65536);
-        let _ = frame.to_bgra();
+        let total_rgb = frame.total_cropped_bytes(3);
+        assert_eq!(total_rgb, 65536usize * 65536 * 3); // 12_884_901_888
+
+        let total_rgba = frame.total_cropped_bytes(4);
+        assert_eq!(total_rgba, 65536usize * 65536 * 4); // 17_179_869_184
     }
 
+    /// Verify total_cropped_pixels handles large u32 values near u32::MAX.
+    /// u32::MAX * 2 = 8_589_934_590 which overflows u32 but fits in u64.
     #[test]
-    #[should_panic(expected = "dimension overflow")]
-    fn to_rgba_u32_overflow_panics() {
-        let frame = frame_with_cropped_dims(65536, 65536);
-        let _ = frame.to_rgba();
-    }
-
-    #[test]
-    #[should_panic(expected = "dimension overflow")]
-    fn to_bgr_u32_overflow_panics() {
-        let frame = frame_with_cropped_dims(65536, 65536);
-        let _ = frame.to_bgr();
-    }
-
-    #[test]
-    #[should_panic(expected = "dimension overflow")]
-    fn to_rgb16_u32_overflow_panics() {
-        let frame = frame_with_cropped_dims(65536, 65536);
-        let _ = frame.to_rgb16();
-    }
-
-    #[test]
-    #[should_panic(expected = "dimension overflow")]
-    fn to_rgba16_u32_overflow_panics() {
-        let frame = frame_with_cropped_dims(65536, 65536);
-        let _ = frame.to_rgba16();
-    }
-
-    #[test]
-    #[should_panic(expected = "dimension overflow")]
-    fn write_rgb_into_u32_overflow_panics() {
-        let frame = frame_with_cropped_dims(65536, 65536);
-        let mut buf = [0u8; 16];
-        let _ = frame.write_rgb_into(&mut buf);
-    }
-
-    #[test]
-    #[should_panic(expected = "dimension overflow")]
-    fn write_rgba_into_u32_overflow_panics() {
-        let frame = frame_with_cropped_dims(65536, 65536);
-        let mut buf = [0u8; 16];
-        let _ = frame.write_rgba_into(&mut buf);
-    }
-
-    #[test]
-    #[should_panic(expected = "dimension overflow")]
-    fn write_bgra_into_u32_overflow_panics() {
-        let frame = frame_with_cropped_dims(65536, 65536);
-        let mut buf = [0u8; 16];
-        let _ = frame.write_bgra_into(&mut buf);
-    }
-
-    #[test]
-    #[should_panic(expected = "dimension overflow")]
-    fn write_bgr_into_u32_overflow_panics() {
-        let frame = frame_with_cropped_dims(65536, 65536);
-        let mut buf = [0u8; 16];
-        let _ = frame.write_bgr_into(&mut buf);
-    }
-
-    #[test]
-    #[should_panic(expected = "dimension overflow")]
-    fn to_rgb_max_u32_dims_panics() {
-        // u32::MAX * 2 definitely overflows
+    fn total_cropped_pixels_near_u32_max() {
         let frame = frame_with_cropped_dims(u32::MAX, 2);
-        let _ = frame.to_rgb();
+        let total = frame.total_cropped_pixels();
+        assert_eq!(total, u32::MAX as usize * 2);
+    }
+
+    /// Verify that a small frame works correctly (regression sanity check).
+    #[test]
+    fn total_cropped_pixels_small_frame() {
+        let frame = frame_with_cropped_dims(100, 200);
+        assert_eq!(frame.total_cropped_pixels(), 20_000);
+        assert_eq!(frame.total_cropped_bytes(3), 60_000);
+        assert_eq!(frame.total_cropped_bytes(4), 80_000);
     }
 }

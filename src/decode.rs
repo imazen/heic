@@ -66,7 +66,7 @@ pub(crate) fn decode_to_frame(
                 .copied()
         });
     if let Some(alpha_id) = alpha_id
-        && let Some(alpha_plane) = decode_alpha_plane(&container, alpha_id, &frame)
+        && let Some(alpha_plane) = decode_alpha_plane(&container, alpha_id, &frame, limits)
     {
         frame.alpha_plane = Some(alpha_plane);
     }
@@ -1113,10 +1113,18 @@ fn decode_alpha_plane(
     container: &heif::HeifContainer<'_>,
     alpha_id: u32,
     primary_frame: &crate::hevc::DecodedFrame,
+    limits: &Limits,
 ) -> Option<Vec<u16>> {
     let alpha_item = container.get_item(alpha_id)?;
     let alpha_data = container.get_item_data(alpha_id).ok()?;
     let alpha_config = alpha_item.hevc_config.as_ref()?;
+
+    // Check limits on alpha image dimensions before decoding
+    if let Some((w, h)) = alpha_item.dimensions {
+        limits.check_dimensions(w, h).ok()?;
+        let estimated = DecoderConfig::estimate_memory(w, h, PixelLayout::Rgba8);
+        limits.check_memory(estimated).ok()?;
+    }
 
     let alpha_frame = crate::hevc::decode_with_config(alpha_config, &alpha_data).ok()?;
 
@@ -1125,7 +1133,8 @@ fn decode_alpha_plane(
     let alpha_w = alpha_frame.cropped_width();
     let alpha_h = alpha_frame.cropped_height();
 
-    let total_pixels = (primary_w * primary_h) as usize;
+    // Use u64 arithmetic to avoid u32 overflow
+    let total_pixels = usize::try_from((primary_w as u64).checked_mul(primary_h as u64)?).ok()?;
     let mut alpha_plane = Vec::with_capacity(total_pixels);
 
     if alpha_w == primary_w && alpha_h == primary_h {

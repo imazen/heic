@@ -445,8 +445,7 @@ impl ImageInfo {
                     break;
                 }
             }
-            let (width, height) =
-                apply_transform_dimensions(w, h, &primary_item.transforms);
+            let (width, height) = apply_transform_dimensions(w, h, &primary_item.transforms);
             return Ok(ImageInfo {
                 width,
                 height,
@@ -472,11 +471,8 @@ impl ImageInfo {
         let hevc_info =
             hevc::get_info(&image_data).map_err(|e| ProbeError::Corrupt(HeicError::from(e)))?;
 
-        let (width, height) = apply_transform_dimensions(
-            hevc_info.width,
-            hevc_info.height,
-            &primary_item.transforms,
-        );
+        let (width, height) =
+            apply_transform_dimensions(hevc_info.width, hevc_info.height, &primary_item.transforms);
         Ok(ImageInfo {
             width,
             height,
