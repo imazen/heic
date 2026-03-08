@@ -43,7 +43,7 @@ fn decode_tiles_parallel(
             let pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(n)
                 .build()
-                .map_err(|e| HeicError::InvalidData("failed to create thread pool"))?;
+                .map_err(|_| HeicError::InvalidData("failed to create thread pool"))?;
             pool.install(|| {
                 tile_data_list
                     .par_iter()
@@ -214,7 +214,14 @@ fn decode_iden(
         .get_item(*source_id)
         .ok_or(HeicError::InvalidData("iden dimg target item not found"))?;
 
-    decode_item(container, &source_item, depth + 1, limits, stop, max_threads)
+    decode_item(
+        container,
+        &source_item,
+        depth + 1,
+        limits,
+        stop,
+        max_threads,
+    )
 }
 
 /// Decode an image overlay (iovl) by compositing referenced tiles onto a canvas.
@@ -777,8 +784,11 @@ pub(crate) fn try_decode_grid_streaming(
         for row in 0..rows {
             let row_start = row as usize * cols_usize;
             let row_end = row_start + cols_usize;
-            let row_tiles =
-                decode_tiles_parallel(&tile_data_list[row_start..row_end], tile_config, max_threads)?;
+            let row_tiles = decode_tiles_parallel(
+                &tile_data_list[row_start..row_end],
+                tile_config,
+                max_threads,
+            )?;
 
             for (col, mut tile_frame) in row_tiles.into_iter().enumerate() {
                 let tile_idx = row as usize * cols_usize + col;
@@ -971,8 +981,11 @@ pub(crate) fn try_decode_grid_to_sink(
 
         // Decode tiles for this row
         #[cfg(feature = "parallel")]
-        let row_tiles: Vec<crate::hevc::DecodedFrame> =
-            decode_tiles_parallel(&tile_data_list[row_start..row_end], tile_config, max_threads)?;
+        let row_tiles: Vec<crate::hevc::DecodedFrame> = decode_tiles_parallel(
+            &tile_data_list[row_start..row_end],
+            tile_config,
+            max_threads,
+        )?;
 
         #[cfg(not(feature = "parallel"))]
         let row_tiles: Vec<crate::hevc::DecodedFrame> = {

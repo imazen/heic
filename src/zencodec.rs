@@ -52,33 +52,6 @@ fn policy_to_threads(policy: ThreadingPolicy) -> usize {
     }
 }
 
-/// Run a closure respecting the given thread count.
-///
-/// When the `parallel` feature is enabled and `thread_count` is non-zero,
-/// creates a scoped rayon [`ThreadPool`] so that any `par_iter()` calls
-/// inside the closure are limited to that many threads. When `thread_count`
-/// is 0, uses the global rayon pool (unlimited). Without the `parallel`
-/// feature, runs the closure directly.
-#[cfg(feature = "parallel")]
-fn with_thread_pool<T: Send>(thread_count: usize, f: impl FnOnce() -> T + Send) -> T {
-    if thread_count == 0 {
-        // Unlimited: use the global rayon pool
-        f()
-    } else {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(thread_count)
-            .build()
-            .expect("failed to create rayon thread pool");
-        pool.install(f)
-    }
-}
-
-#[cfg(not(feature = "parallel"))]
-fn with_thread_pool<T>(thread_count: usize, f: impl FnOnce() -> T) -> T {
-    let _ = thread_count;
-    f()
-}
-
 // ── Capabilities ─────────────────────────────────────────────────────────
 
 static HEIC_DECODE_CAPS: DecodeCapabilities = DecodeCapabilities::new()
@@ -341,6 +314,7 @@ impl<'a> zc::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
             deferred_error: None,
         };
 
+        let thread_count = policy_to_threads(self.limits.threading());
         let native_limits = self.native_limits();
         let mut req = self
             .config
@@ -352,6 +326,9 @@ impl<'a> zc::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
         }
         if let Some(stop) = self.stop {
             req = req.with_stop(stop);
+        }
+        if thread_count > 0 {
+            req = req.with_max_threads(thread_count);
         }
 
         // Call begin with probe dimensions if available
@@ -375,7 +352,14 @@ impl<'a> zc::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
         data: Cow<'a, [u8]>,
         preferred: &[PixelDescriptor],
     ) -> Result<HeicStreamDecoder, HeicError> {
-        HeicStreamDecoder::new(&data, preferred, self.native_limits().as_ref(), self.stop)
+        let thread_count = policy_to_threads(self.limits.threading());
+        HeicStreamDecoder::new(
+            &data,
+            preferred,
+            self.native_limits().as_ref(),
+            self.stop,
+            thread_count,
+        )
     }
 
     fn full_frame_decoder(
@@ -485,14 +469,6 @@ impl zc::decode::Decode for HeicDecoder<'_> {
     type Error = HeicError;
 
     fn decode(self) -> Result<DecodeOutput, HeicError> {
-        let thread_count = self.thread_count;
-        with_thread_pool(thread_count, move || self.decode_inner())
-    }
-}
-
-impl HeicDecoder<'_> {
-    /// Inner decode implementation, called within the appropriate thread pool.
-    fn decode_inner(self) -> Result<DecodeOutput, HeicError> {
         let data: &[u8] = &self.data;
         let preferred = &self.preferred;
 
@@ -514,6 +490,9 @@ impl HeicDecoder<'_> {
             }
             if let Some(stop) = self.stop {
                 req = req.with_stop(stop);
+            }
+            if self.thread_count > 0 {
+                req = req.with_max_threads(self.thread_count);
             }
             let frame = req.decode_yuv().map_err(|e| e.into_inner())?;
 
@@ -575,6 +554,9 @@ impl HeicDecoder<'_> {
             }
             if let Some(stop) = self.stop {
                 req = req.with_stop(stop);
+            }
+            if self.thread_count > 0 {
+                req = req.with_max_threads(self.thread_count);
             }
             let native_output = req.decode().map_err(|e| e.into_inner())?;
             let has_alpha =
@@ -646,6 +628,7 @@ impl HeicStreamDecoder {
         preferred: &[PixelDescriptor],
         limits: Option<&crate::Limits>,
         stop: Option<&dyn zc::enough::Stop>,
+        thread_count: usize,
     ) -> Result<Self, HeicError> {
         let stop_ref: &dyn enough::Stop = stop.unwrap_or(&enough::Unstoppable);
 
@@ -699,6 +682,9 @@ impl HeicStreamDecoder {
             }
             if let Some(s) = stop {
                 req = req.with_stop(s);
+            }
+            if thread_count > 0 {
+                req = req.with_max_threads(thread_count);
             }
             let frame = req.decode_yuv().map_err(|e| e.into_inner())?;
             let has_alpha = frame.alpha_plane.is_some();
@@ -756,6 +742,9 @@ impl HeicStreamDecoder {
             }
             if let Some(s) = stop {
                 req = req.with_stop(s);
+            }
+            if thread_count > 0 {
+                req = req.with_max_threads(thread_count);
             }
             let native_output = req.decode().map_err(|e| e.into_inner())?;
             let mut pb = raw_to_pixel_buffer(
@@ -1380,5 +1369,96 @@ mod tests {
             descriptor_to_layout(PixelDescriptor::BGRA8_SRGB),
             crate::PixelLayout::Bgra8
         );
+    }
+
+    #[test]
+    fn policy_to_threads_single() {
+        assert_eq!(policy_to_threads(ThreadingPolicy::SingleThread), 1);
+    }
+
+    #[test]
+    fn policy_to_threads_unlimited() {
+        assert_eq!(policy_to_threads(ThreadingPolicy::Unlimited), 0);
+    }
+
+    #[test]
+    fn policy_to_threads_limit_or_single() {
+        assert_eq!(
+            policy_to_threads(ThreadingPolicy::LimitOrSingle { max_threads: 4 }),
+            4
+        );
+    }
+
+    #[test]
+    fn policy_to_threads_limit_or_any() {
+        assert_eq!(
+            policy_to_threads(ThreadingPolicy::LimitOrAny {
+                preferred_max_threads: 8
+            }),
+            8
+        );
+    }
+
+    #[test]
+    fn policy_to_threads_balanced() {
+        let n = policy_to_threads(ThreadingPolicy::Balanced);
+        // Balanced should be at least 1 and at most available parallelism
+        assert!(n >= 1);
+    }
+
+    /// Verify SingleThread decode produces valid output through the zencodec adapter.
+    #[test]
+    fn single_thread_decode_via_adapter() {
+        use zc::decode::{Decode, DecodeJob as _, DecoderConfig as _};
+
+        let path =
+            std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into());
+        let file = format!("{path}/libheif/examples/example.heic");
+        let Ok(data) = std::fs::read(&file) else {
+            eprintln!("Skipping test: {file} not found");
+            return;
+        };
+
+        let config = HeicDecoderConfig::new();
+        let limits = ResourceLimits::none().with_threading(ThreadingPolicy::SingleThread);
+        let job = config.job().with_limits(limits);
+        let decoder = job
+            .decoder(Cow::Borrowed(&data), &[PixelDescriptor::RGB8_SRGB])
+            .expect("decoder creation");
+        let output = decoder.decode().expect("single-thread decode");
+
+        let info = output.info();
+        assert_eq!(info.width, 1280);
+        assert_eq!(info.height, 854);
+
+        let pixels = output.pixels();
+        assert_eq!(pixels.width(), 1280);
+        assert_eq!(pixels.rows(), 854);
+        // Verify non-zero data (actual image was decoded)
+        assert!(pixels.row(0).iter().any(|&b| b != 0));
+    }
+
+    /// Verify SingleThread native decode via with_max_threads on DecodeRequest.
+    #[test]
+    fn single_thread_native_decode() {
+        let path =
+            std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into());
+        let file = format!("{path}/libheif/examples/example.heic");
+        let Ok(data) = std::fs::read(&file) else {
+            eprintln!("Skipping test: {file} not found");
+            return;
+        };
+
+        let config = crate::DecoderConfig::new();
+        let output = config
+            .decode_request(&data)
+            .with_output_layout(crate::PixelLayout::Rgb8)
+            .with_max_threads(1)
+            .decode()
+            .expect("single-thread native decode");
+
+        assert_eq!(output.width, 1280);
+        assert_eq!(output.height, 854);
+        assert!(output.data.iter().any(|&b| b != 0));
     }
 }
