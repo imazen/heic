@@ -47,7 +47,7 @@ garb = { version = "0.2", default-features = false, optional = true }
 criterion = "0.6"
 fast-ssim2 = { version = "0.6.5", features = ["imgref"] }
 imgref = "1.11"
-heic-wasm-rs = { path = "../heic/heic-wasm-rs" }
+heic-wasm-rs = { path = "../../heic/heic-wasm-rs" }
 png = "0.17"
 
 [profile.release]
