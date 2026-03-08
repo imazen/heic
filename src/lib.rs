@@ -294,6 +294,31 @@ pub struct ImageInfo {
     pub has_icc_profile: bool,
 }
 
+/// Adjust dimensions for transforms that the decoder will apply.
+///
+/// Rotation by 90° or 270° swaps width and height. Mirror and 180° rotation
+/// don't change dimensions. Clean aperture crops to rational dimensions
+/// (approximated here via integer division).
+fn apply_transform_dimensions(
+    mut w: u32,
+    mut h: u32,
+    transforms: &[heif::Transform],
+) -> (u32, u32) {
+    for t in transforms {
+        match t {
+            heif::Transform::Rotation(rot) if rot.angle == 90 || rot.angle == 270 => {
+                core::mem::swap(&mut w, &mut h);
+            }
+            heif::Transform::CleanAperture(clap) if clap.width_d > 0 && clap.height_d > 0 => {
+                w = clap.width_n / clap.width_d;
+                h = clap.height_n / clap.height_d;
+            }
+            _ => {} // mirror, 0°, 180° don't change dimensions
+        }
+    }
+    (w, h)
+}
+
 impl ImageInfo {
     /// Minimum bytes needed to attempt header parsing.
     ///
@@ -379,9 +404,14 @@ impl ImageInfo {
         {
             let bit_depth = config.bit_depth_luma_minus8 + 8;
             let chroma_format = config.chroma_format;
+            let (width, height) = apply_transform_dimensions(
+                hevc_info.width,
+                hevc_info.height,
+                &primary_item.transforms,
+            );
             return Ok(ImageInfo {
-                width: hevc_info.width,
-                height: hevc_info.height,
+                width,
+                height,
                 has_alpha,
                 bit_depth,
                 chroma_format,
@@ -415,9 +445,11 @@ impl ImageInfo {
                     break;
                 }
             }
+            let (width, height) =
+                apply_transform_dimensions(w, h, &primary_item.transforms);
             return Ok(ImageInfo {
-                width: w,
-                height: h,
+                width,
+                height,
                 has_alpha,
                 bit_depth,
                 chroma_format,
@@ -440,9 +472,14 @@ impl ImageInfo {
         let hevc_info =
             hevc::get_info(&image_data).map_err(|e| ProbeError::Corrupt(HeicError::from(e)))?;
 
+        let (width, height) = apply_transform_dimensions(
+            hevc_info.width,
+            hevc_info.height,
+            &primary_item.transforms,
+        );
         Ok(ImageInfo {
-            width: hevc_info.width,
-            height: hevc_info.height,
+            width,
+            height,
             has_alpha,
             bit_depth: 8,
             chroma_format: 1,

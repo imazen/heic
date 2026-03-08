@@ -375,8 +375,10 @@ fn test_image_info_grid_with_exif() {
     let info = heic_decoder::ImageInfo::from_bytes(&data).expect("probe grid image");
     assert!(info.has_exif, "iPhone HEIC should have EXIF");
     assert!(info.has_xmp, "iPhone HEIC should have XMP");
-    assert_eq!(info.width, 4032);
-    assert_eq!(info.height, 3024);
+    // Post-transform dimensions: iPhone photo is 4032x3024 raw but has irot 90°
+    // rotation, so final decoded output is 3024x4032 (portrait)
+    assert_eq!(info.width, 3024);
+    assert_eq!(info.height, 4032);
     println!(
         "Grid ImageInfo: {}x{}, bit_depth={}, has_exif={}, has_xmp={}",
         info.width, info.height, info.bit_depth, info.has_exif, info.has_xmp
@@ -444,4 +446,29 @@ fn test_decode_thumbnail_none() {
             println!("C001.heic has a thumbnail (unexpected but OK)");
         }
     }
+}
+
+#[test]
+fn test_image_info_matches_decoded_dimensions() {
+    // Regression: ImageInfo returned raw (pre-transform) dimensions while decoder
+    // applied irot/imir/clap transforms, causing dimension mismatch panics.
+    // iPhone photos have irot 90°, making raw 4032x3024 → decoded 3024x4032.
+    let data = std::fs::read(iphone_heic()).expect("read");
+    let info = heic_decoder::ImageInfo::from_bytes(&data).expect("probe");
+
+    let decoder = DecoderConfig::new();
+    let decoded = decoder
+        .decode(&data, heic_decoder::PixelLayout::Rgb8)
+        .expect("decode");
+
+    assert_eq!(
+        info.width, decoded.width,
+        "ImageInfo width {} != decoded width {}",
+        info.width, decoded.width
+    );
+    assert_eq!(
+        info.height, decoded.height,
+        "ImageInfo height {} != decoded height {}",
+        info.height, decoded.height
+    );
 }
