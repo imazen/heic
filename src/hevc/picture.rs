@@ -991,3 +991,121 @@ fn scale_to_u16(val: i32, max_native: i32) -> u16 {
         ((v * 65535 + (max_native as u64 / 2)) / max_native as u64) as u16
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    /// Build a minimal frame with the given cropped dimensions.
+    /// Internal planes are empty — only used to test overflow checks
+    /// in the conversion methods, NOT actual pixel data.
+    fn frame_with_cropped_dims(w: u32, h: u32) -> DecodedFrame {
+        DecodedFrame {
+            width: w,
+            height: h,
+            y_plane: vec![],
+            cb_plane: vec![],
+            cr_plane: vec![],
+            bit_depth: 8,
+            chroma_format: 1,
+            crop_left: 0,
+            crop_right: 0,
+            crop_top: 0,
+            crop_bottom: 0,
+            deblock_flags: vec![],
+            deblock_stride: 0,
+            qp_map: vec![],
+            alpha_plane: None,
+            full_range: false,
+            matrix_coeffs: 1,
+            color_primaries: 1,
+            transfer_characteristics: 1,
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "dimension overflow")]
+    fn to_rgb_u32_overflow_panics() {
+        // 65536 * 65536 = 2^32, overflows u32
+        let frame = frame_with_cropped_dims(65536, 65536);
+        let _ = frame.to_rgb();
+    }
+
+    #[test]
+    #[should_panic(expected = "dimension overflow")]
+    fn to_bgra_u32_overflow_panics() {
+        // 65536 * 65536 * 4 would overflow even u64 if dims were larger,
+        // but first the w*h itself overflows u32.
+        let frame = frame_with_cropped_dims(65536, 65536);
+        let _ = frame.to_bgra();
+    }
+
+    #[test]
+    #[should_panic(expected = "dimension overflow")]
+    fn to_rgba_u32_overflow_panics() {
+        let frame = frame_with_cropped_dims(65536, 65536);
+        let _ = frame.to_rgba();
+    }
+
+    #[test]
+    #[should_panic(expected = "dimension overflow")]
+    fn to_bgr_u32_overflow_panics() {
+        let frame = frame_with_cropped_dims(65536, 65536);
+        let _ = frame.to_bgr();
+    }
+
+    #[test]
+    #[should_panic(expected = "dimension overflow")]
+    fn to_rgb16_u32_overflow_panics() {
+        let frame = frame_with_cropped_dims(65536, 65536);
+        let _ = frame.to_rgb16();
+    }
+
+    #[test]
+    #[should_panic(expected = "dimension overflow")]
+    fn to_rgba16_u32_overflow_panics() {
+        let frame = frame_with_cropped_dims(65536, 65536);
+        let _ = frame.to_rgba16();
+    }
+
+    #[test]
+    #[should_panic(expected = "dimension overflow")]
+    fn write_rgb_into_u32_overflow_panics() {
+        let frame = frame_with_cropped_dims(65536, 65536);
+        let mut buf = [0u8; 16];
+        let _ = frame.write_rgb_into(&mut buf);
+    }
+
+    #[test]
+    #[should_panic(expected = "dimension overflow")]
+    fn write_rgba_into_u32_overflow_panics() {
+        let frame = frame_with_cropped_dims(65536, 65536);
+        let mut buf = [0u8; 16];
+        let _ = frame.write_rgba_into(&mut buf);
+    }
+
+    #[test]
+    #[should_panic(expected = "dimension overflow")]
+    fn write_bgra_into_u32_overflow_panics() {
+        let frame = frame_with_cropped_dims(65536, 65536);
+        let mut buf = [0u8; 16];
+        let _ = frame.write_bgra_into(&mut buf);
+    }
+
+    #[test]
+    #[should_panic(expected = "dimension overflow")]
+    fn write_bgr_into_u32_overflow_panics() {
+        let frame = frame_with_cropped_dims(65536, 65536);
+        let mut buf = [0u8; 16];
+        let _ = frame.write_bgr_into(&mut buf);
+    }
+
+    #[test]
+    #[should_panic(expected = "dimension overflow")]
+    fn to_rgb_max_u32_dims_panics() {
+        // u32::MAX * 2 definitely overflows
+        let frame = frame_with_cropped_dims(u32::MAX, 2);
+        let _ = frame.to_rgb();
+    }
+}
