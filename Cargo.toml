@@ -38,7 +38,7 @@ archmage = { version = "0.9.4", default-features = false, features = ["macros"] 
 safe_unaligned_simd = "0.2.5"
 rayon = { version = "1.10", optional = true }
 zencodec-types = { path = "../zencodec-types", optional = true }
-zenpixels = { version = "0.1", default-features = false, features = ["buffer"], optional = true }
+zenpixels = { path = "../zenpixels/zenpixels", default-features = false, features = ["buffer"], optional = true }
 rgb = { version = "0.8", default-features = false, features = ["as-bytes"], optional = true }
 imgref = { version = "1.12", optional = true }
 garb = { version = "0.2.1", default-features = false, optional = true }

@@ -67,7 +67,8 @@ static HEIC_DECODE_CAPS: DecodeCapabilities = DecodeCapabilities::new()
     .with_native_16bit(true)
     .with_native_alpha(true)
     .with_enforces_max_pixels(true)
-    .with_enforces_max_memory(true);
+    .with_enforces_max_memory(true)
+    .with_enforces_max_input_bytes(true);
 
 // ── Supported descriptors ──────────────────────────────────────────────────
 
@@ -222,11 +223,34 @@ impl<'a> zc::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
     }
 
     fn probe(&self, data: &[u8]) -> Result<ImageInfo, HeicError> {
+        self.limits
+            .check_input_size(data.len() as u64)
+            .map_err(|e| HeicError::LimitExceeded(limit_exceeded_msg(e)))?;
         let native = crate::ImageInfo::from_bytes(data).map_err(probe_error_to_heic)?;
-        Ok(convert_info(&native, data, &self.config.inner))
+        Ok(build_image_info_lightweight(&native))
+    }
+
+    fn probe_full(&self, data: &[u8]) -> Result<ImageInfo, HeicError> {
+        self.limits
+            .check_input_size(data.len() as u64)
+            .map_err(|e| HeicError::LimitExceeded(limit_exceeded_msg(e)))?;
+        let native = crate::ImageInfo::from_bytes(data).map_err(probe_error_to_heic)?;
+        // Parse the HEIF container once and extract all metadata from it
+        let container = crate::heif::parse(data, &enough::Unstoppable)
+            .map_err(|e| e.into_inner())
+            .ok();
+        Ok(build_image_info_full(
+            &native,
+            container.as_ref(),
+            native.width,
+            native.height,
+        ))
     }
 
     fn output_info(&self, data: &[u8]) -> Result<OutputInfo, HeicError> {
+        self.limits
+            .check_input_size(data.len() as u64)
+            .map_err(|e| HeicError::LimitExceeded(limit_exceeded_msg(e)))?;
         let native = crate::ImageInfo::from_bytes(data).map_err(probe_error_to_heic)?;
         let available = available_descriptors(native.has_alpha, native.bit_depth);
         let base_desc = available[0]; // default for this image
@@ -243,6 +267,9 @@ impl<'a> zc::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
         data: Cow<'a, [u8]>,
         preferred: &[PixelDescriptor],
     ) -> Result<HeicDecoder<'a>, HeicError> {
+        self.limits
+            .check_input_size(data.len() as u64)
+            .map_err(|e| HeicError::LimitExceeded(limit_exceeded_msg(e)))?;
         let thread_count = policy_to_threads(self.limits.threading());
         Ok(HeicDecoder {
             config: self.config,
@@ -260,6 +287,9 @@ impl<'a> zc::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
         sink: &mut dyn DecodeRowSink,
         preferred: &[PixelDescriptor],
     ) -> Result<OutputInfo, HeicError> {
+        self.limits
+            .check_input_size(data.len() as u64)
+            .map_err(|e| HeicError::LimitExceeded(limit_exceeded_msg(e)))?;
         // Probe for image properties
         let probe_info = crate::ImageInfo::from_bytes(&data).ok();
         let has_alpha = probe_info.as_ref().is_some_and(|pi| pi.has_alpha);
@@ -352,6 +382,9 @@ impl<'a> zc::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
         data: Cow<'a, [u8]>,
         preferred: &[PixelDescriptor],
     ) -> Result<HeicStreamDecoder, HeicError> {
+        self.limits
+            .check_input_size(data.len() as u64)
+            .map_err(|e| HeicError::LimitExceeded(limit_exceeded_msg(e)))?;
         let thread_count = policy_to_threads(self.limits.threading());
         HeicStreamDecoder::new(
             &data,
@@ -576,14 +609,30 @@ impl zc::decode::Decode for HeicDecoder<'_> {
             (pb, w, h, has_alpha)
         };
 
-        // Build ImageInfo with all available metadata
-        let info = build_image_info(
-            &probe_info,
-            &self.config.inner,
-            data,
+        // Build ImageInfo with all available metadata.
+        // Parse the HEIF container once for all metadata extraction.
+        let container = crate::heif::parse(data, &enough::Unstoppable)
+            .map_err(|e| e.into_inner())
+            .ok();
+        let info = build_image_info_full(
+            &probe_info.unwrap_or(crate::ImageInfo {
+                width,
+                height,
+                has_alpha,
+                bit_depth: 8,
+                chroma_format: 1,
+                has_exif: false,
+                has_xmp: false,
+                has_thumbnail: false,
+                color_primaries: 2,
+                transfer_characteristics: 2,
+                matrix_coefficients: 2,
+                video_full_range: false,
+                has_icc_profile: false,
+            }),
+            container.as_ref(),
             width,
             height,
-            has_alpha,
         );
         Ok(DecodeOutput::new(buf, info))
     }
@@ -640,20 +689,19 @@ impl HeicStreamDecoder {
             .as_ref()
             .ok_or(HeicError::InvalidData("cannot probe HEIC header"))?;
 
-        // Build ImageInfo for the trait
-        let info = build_image_info(
-            &probe_info,
-            &config,
-            data,
-            pi.width,
-            pi.height,
-            pi.has_alpha,
-        );
+        // Parse container once for metadata extraction and grid init
+        let container = crate::heif::parse(data, stop_ref)
+            .map_err(|e| e.into_inner())
+            .ok();
+
+        // Build ImageInfo for the trait (uses pre-parsed container)
+        let info = build_image_info_full(pi, container.as_ref(), pi.width, pi.height);
 
         // Try grid path for 8-bit, no-alpha images
         if pi.bit_depth <= 8
             && !pi.has_alpha
-            && let Some(grid_state) = Self::try_init_grid(data, preferred, limits, stop_ref, pi)?
+            && let Some(grid_state) =
+                Self::try_init_grid(container.as_ref(), data, preferred, limits, stop_ref, pi)?
         {
             let descriptor = cicp_descriptor(
                 layout_to_descriptor(grid_state.layout),
@@ -775,7 +823,10 @@ impl HeicStreamDecoder {
     }
 
     /// Try to initialize grid streaming state. Returns None if not eligible.
+    ///
+    /// Accepts a pre-parsed container if available, otherwise parses from `data`.
     fn try_init_grid(
+        pre_parsed: Option<&crate::heif::HeifContainer<'_>>,
         data: &[u8],
         preferred: &[PixelDescriptor],
         limits: Option<&crate::Limits>,
@@ -786,7 +837,15 @@ impl HeicStreamDecoder {
 
         stop.check().map_err(HeicError::Cancelled)?;
 
-        let container = heif::parse(data, stop).map_err(|e| e.into_inner())?;
+        // Use pre-parsed container or parse now
+        let owned;
+        let container: &heif::HeifContainer<'_> = match pre_parsed {
+            Some(c) => c,
+            None => {
+                owned = heif::parse(data, stop).map_err(|e| e.into_inner())?;
+                &owned
+            }
+        };
         let primary_item = container.primary_item().ok_or(HeicError::NoPrimaryImage)?;
 
         // Must be a grid with no transforms and no alpha
@@ -1041,92 +1100,139 @@ fn raw_to_pixel_buffer(
 
 // ── Native → trait metadata conversion ─────────────────────────────────────
 
-/// Build a complete `zc::ImageInfo` from probe data and metadata extraction.
-fn build_image_info(
-    probe_info: &Option<crate::ImageInfo>,
-    config: &crate::DecoderConfig,
-    data: &[u8],
-    width: u32,
-    height: u32,
-    has_alpha: bool,
-) -> ImageInfo {
-    let mut info = ImageInfo::new(width, height, ImageFormat::Heic)
+/// Build a lightweight `zc::ImageInfo` from probe data only.
+///
+/// Does NOT parse the HEIF container or extract ICC/EXIF/XMP/gain map.
+/// Used by `probe()` for cheap header-only metadata.
+fn build_image_info_lightweight(pi: &crate::ImageInfo) -> ImageInfo {
+    let mut info = ImageInfo::new(pi.width, pi.height, ImageFormat::Heic)
         .with_frame_count(1) // HEIC is always single-frame
-        .with_orientation(Orientation::Normal); // Decoder applies transforms
+        .with_orientation(Orientation::Normal) // Decoder applies transforms
+        .with_alpha(pi.has_alpha)
+        .with_bit_depth(pi.bit_depth)
+        .with_channel_count(if pi.has_alpha { 4 } else { 3 });
 
-    if let Some(pi) = probe_info {
-        info = info
-            .with_alpha(pi.has_alpha)
-            .with_bit_depth(pi.bit_depth)
-            .with_channel_count(if pi.has_alpha { 4 } else { 3 });
-
-        // Set CICP if we have non-default values
-        if pi.color_primaries != 2
-            || pi.transfer_characteristics != 2
-            || pi.matrix_coefficients != 2
-        {
-            info = info.with_cicp(Cicp::new(
-                pi.color_primaries as u8,
-                pi.transfer_characteristics as u8,
-                pi.matrix_coefficients as u8,
-                pi.video_full_range,
-            ));
-        }
-
-        // Wire up has_icc_profile from probe
-        if pi.has_icc_profile
-            && let Ok(Some(icc_data)) = config.extract_icc(data)
-        {
-            info = info.with_icc_profile(icc_data);
-        }
-
-        // Detect HDR gain map
-        if has_gain_map(data) {
-            info = info.with_gain_map(true);
-        }
-    } else {
-        info = info.with_alpha(has_alpha);
-    }
-
-    // Extract metadata (best-effort)
-    if let Ok(Some(exif)) = config.extract_exif(data) {
-        info = info.with_exif(exif.into_owned());
-    }
-    if let Ok(Some(xmp)) = config.extract_xmp(data) {
-        info = info.with_xmp(xmp.into_owned());
+    // Set CICP if we have non-default values
+    if pi.color_primaries != 2 || pi.transfer_characteristics != 2 || pi.matrix_coefficients != 2 {
+        info = info.with_cicp(Cicp::new(
+            pi.color_primaries as u8,
+            pi.transfer_characteristics as u8,
+            pi.matrix_coefficients as u8,
+            pi.video_full_range,
+        ));
     }
 
     info
 }
 
-/// Check whether a HEIC file contains an HDR gain map (Apple format).
-fn has_gain_map(data: &[u8]) -> bool {
-    let Ok(container) = crate::heif::parse(data, &enough::Unstoppable).map_err(|e| e.into_inner())
-    else {
-        return false;
-    };
-    let Some(primary_item) = container.primary_item() else {
-        return false;
-    };
-    !container
-        .find_auxiliary_items(primary_item.id, "urn:com:apple:photo:2020:aux:hdrgainmap")
-        .is_empty()
+/// Build a complete `zc::ImageInfo` with all metadata from a pre-parsed container.
+///
+/// Extracts ICC profile, EXIF, XMP, and gain map from the container in a
+/// single pass, avoiding the cost of re-parsing the HEIF container for each.
+fn build_image_info_full(
+    pi: &crate::ImageInfo,
+    container: Option<&crate::heif::HeifContainer<'_>>,
+    width: u32,
+    height: u32,
+) -> ImageInfo {
+    let mut info = ImageInfo::new(width, height, ImageFormat::Heic)
+        .with_frame_count(1) // HEIC is always single-frame
+        .with_orientation(Orientation::Normal) // Decoder applies transforms
+        .with_alpha(pi.has_alpha)
+        .with_bit_depth(pi.bit_depth)
+        .with_channel_count(if pi.has_alpha { 4 } else { 3 });
+
+    // Set CICP if we have non-default values
+    if pi.color_primaries != 2 || pi.transfer_characteristics != 2 || pi.matrix_coefficients != 2 {
+        info = info.with_cicp(Cicp::new(
+            pi.color_primaries as u8,
+            pi.transfer_characteristics as u8,
+            pi.matrix_coefficients as u8,
+            pi.video_full_range,
+        ));
+    }
+
+    // Extract all metadata from the pre-parsed container
+    if let Some(container) = container {
+        let primary_item = container.primary_item();
+
+        // ICC profile from colr box
+        if pi.has_icc_profile
+            && let Some(ref item) = primary_item
+            && let Some(crate::heif::ColorInfo::IccProfile(icc)) = &item.color_info
+        {
+            info = info.with_icc_profile(icc.clone());
+        }
+
+        // HDR gain map (Apple format)
+        if let Some(ref item) = primary_item
+            && !container
+                .find_auxiliary_items(item.id, "urn:com:apple:photo:2020:aux:hdrgainmap")
+                .is_empty()
+        {
+            info = info.with_gain_map(true);
+        }
+
+        // EXIF extraction
+        if let Some(exif) = extract_exif_from_container(container) {
+            info = info.with_exif(exif);
+        }
+
+        // XMP extraction
+        if let Some(xmp) = extract_xmp_from_container(container) {
+            info = info.with_xmp(xmp);
+        }
+    }
+
+    info
 }
 
-/// Convert `crate::ImageInfo` to `zc::ImageInfo` (used for probe).
-fn convert_info(
-    native: &crate::ImageInfo,
-    data: &[u8],
-    config: &crate::DecoderConfig,
-) -> ImageInfo {
-    build_image_info(
-        &Some(*native),
-        config,
-        data,
-        native.width,
-        native.height,
-        native.has_alpha,
-    )
+/// Extract EXIF data from a pre-parsed HEIF container.
+fn extract_exif_from_container(
+    container: &crate::heif::HeifContainer<'_>,
+) -> Option<alloc::vec::Vec<u8>> {
+    use crate::heif::FourCC;
+    for item_info in &container.item_infos {
+        if item_info.item_type != FourCC(*b"Exif") {
+            continue;
+        }
+        let Ok(exif_data) = container.get_item_data(item_info.item_id) else {
+            continue;
+        };
+        if exif_data.len() < 4 {
+            continue;
+        }
+        let tiff_offset =
+            u32::from_be_bytes([exif_data[0], exif_data[1], exif_data[2], exif_data[3]]) as usize;
+        let tiff_start = 4 + tiff_offset;
+        if tiff_start < exif_data.len() {
+            return Some(exif_data[tiff_start..].to_vec());
+        }
+    }
+    None
+}
+
+/// Extract XMP data from a pre-parsed HEIF container.
+fn extract_xmp_from_container(
+    container: &crate::heif::HeifContainer<'_>,
+) -> Option<alloc::vec::Vec<u8>> {
+    use crate::heif::FourCC;
+    for item_info in &container.item_infos {
+        if item_info.item_type == FourCC(*b"mime")
+            && (item_info.content_type.contains("xmp")
+                || item_info.content_type.contains("rdf+xml")
+                || item_info.content_type == "application/rdf+xml")
+            && let Ok(xmp_data) = container.get_item_data(item_info.item_id)
+        {
+            return Some(xmp_data.into_owned());
+        }
+    }
+    None
+}
+
+/// Convert a [`zc::LimitExceeded`] to a static error message for [`HeicError::LimitExceeded`].
+fn limit_exceeded_msg(_e: zc::LimitExceeded) -> &'static str {
+    "input data size exceeds max_input_bytes"
 }
 
 /// Derive TransferFunction and ColorPrimaries from native CICP values.
@@ -1202,6 +1308,7 @@ mod tests {
         assert!(caps.native_16bit());
         assert!(caps.native_alpha());
         assert!(caps.hdr());
+        assert!(caps.enforces_max_input_bytes());
     }
 
     #[test]
@@ -1460,5 +1567,192 @@ mod tests {
         assert_eq!(output.width, 1280);
         assert_eq!(output.height, 854);
         assert!(output.data.iter().any(|&b| b != 0));
+    }
+
+    // ── Fix 2: max_input_bytes enforcement tests ───────────────────────
+
+    #[test]
+    fn probe_enforces_max_input_bytes() {
+        use zc::decode::{DecodeJob as _, DecoderConfig as _};
+
+        let path =
+            std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into());
+        let file = format!("{path}/libheif/examples/example.heic");
+        let Ok(data) = std::fs::read(&file) else {
+            eprintln!("Skipping test: {file} not found");
+            return;
+        };
+
+        let config = HeicDecoderConfig::new();
+        // Set max_input_bytes to 100 bytes — much smaller than the file
+        let limits = ResourceLimits::none().with_max_input_bytes(100);
+        let job = config.job().with_limits(limits);
+        let result = job.probe(&data);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, HeicError::LimitExceeded(_)),
+            "expected LimitExceeded, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn probe_allows_within_max_input_bytes() {
+        use zc::decode::{DecodeJob as _, DecoderConfig as _};
+
+        let path =
+            std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into());
+        let file = format!("{path}/libheif/examples/example.heic");
+        let Ok(data) = std::fs::read(&file) else {
+            eprintln!("Skipping test: {file} not found");
+            return;
+        };
+
+        let config = HeicDecoderConfig::new();
+        // Set max_input_bytes large enough to allow the file
+        let limits = ResourceLimits::none().with_max_input_bytes(data.len() as u64 + 1000);
+        let job = config.job().with_limits(limits);
+        let result = job.probe(&data);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn decoder_enforces_max_input_bytes() {
+        use zc::decode::{DecodeJob as _, DecoderConfig as _};
+
+        let path =
+            std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into());
+        let file = format!("{path}/libheif/examples/example.heic");
+        let Ok(data) = std::fs::read(&file) else {
+            eprintln!("Skipping test: {file} not found");
+            return;
+        };
+
+        let config = HeicDecoderConfig::new();
+        let limits = ResourceLimits::none().with_max_input_bytes(100);
+        let job = config.job().with_limits(limits);
+        let result = job.decoder(Cow::Borrowed(&data), &[PixelDescriptor::RGB8_SRGB]);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(
+            matches!(err, HeicError::LimitExceeded(_)),
+            "expected LimitExceeded, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn probe_full_enforces_max_input_bytes() {
+        use zc::decode::{DecodeJob as _, DecoderConfig as _};
+
+        let path =
+            std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into());
+        let file = format!("{path}/libheif/examples/example.heic");
+        let Ok(data) = std::fs::read(&file) else {
+            eprintln!("Skipping test: {file} not found");
+            return;
+        };
+
+        let config = HeicDecoderConfig::new();
+        let limits = ResourceLimits::none().with_max_input_bytes(100);
+        let job = config.job().with_limits(limits);
+        let result = job.probe_full(&data);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, HeicError::LimitExceeded(_)),
+            "expected LimitExceeded, got {err:?}"
+        );
+    }
+
+    // ── Fix 3: probe() vs probe_full() behavior tests ───────────────────
+
+    #[test]
+    fn probe_returns_lightweight_info() {
+        use zc::decode::{DecodeJob as _, DecoderConfig as _};
+
+        let path =
+            std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into());
+        let file = format!("{path}/libheif/examples/example.heic");
+        let Ok(data) = std::fs::read(&file) else {
+            eprintln!("Skipping test: {file} not found");
+            return;
+        };
+
+        let config = HeicDecoderConfig::new();
+        let job = config.job();
+        let info = job.probe(&data).expect("probe should succeed");
+
+        // probe() should return dimensions and basic info
+        assert_eq!(info.width, 1280);
+        assert_eq!(info.height, 854);
+        assert_eq!(info.format, ImageFormat::Heic);
+        assert_eq!(info.frame_count, Some(1));
+
+        // probe() should NOT extract EXIF/XMP/ICC (those require full container parse)
+        assert!(
+            info.embedded_metadata.exif.is_none(),
+            "probe() should not extract EXIF"
+        );
+        assert!(
+            info.embedded_metadata.xmp.is_none(),
+            "probe() should not extract XMP"
+        );
+        assert!(
+            info.source_color.icc_profile.is_none(),
+            "probe() should not extract ICC profile"
+        );
+    }
+
+    #[test]
+    fn probe_full_returns_complete_info() {
+        use zc::decode::{DecodeJob as _, DecoderConfig as _};
+
+        // Use iPhone test file which has EXIF metadata
+        let path =
+            std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into());
+        let file = format!("{path}/test-images/classic-car-iphone12pro.heic");
+        let Ok(data) = std::fs::read(&file) else {
+            eprintln!("Skipping test: {file} not found");
+            return;
+        };
+
+        let config = HeicDecoderConfig::new();
+        let job = config.job();
+        let info = job.probe_full(&data).expect("probe_full should succeed");
+
+        // probe_full() should return dimensions
+        assert_eq!(info.width, 3024);
+        assert_eq!(info.height, 4032);
+        assert_eq!(info.format, ImageFormat::Heic);
+
+        // probe_full() should extract EXIF (iPhone image has EXIF)
+        assert!(
+            info.embedded_metadata.exif.is_some(),
+            "probe_full() should extract EXIF from iPhone HEIC"
+        );
+    }
+
+    #[test]
+    fn probe_and_probe_full_agree_on_dimensions() {
+        use zc::decode::{DecodeJob as _, DecoderConfig as _};
+
+        let path =
+            std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into());
+        let file = format!("{path}/libheif/examples/example.heic");
+        let Ok(data) = std::fs::read(&file) else {
+            eprintln!("Skipping test: {file} not found");
+            return;
+        };
+
+        let config = HeicDecoderConfig::new();
+        let job_light = config.job();
+        let job_full = config.job();
+        let light = job_light.probe(&data).expect("probe");
+        let full = job_full.probe_full(&data).expect("probe_full");
+
+        assert_eq!(light.width, full.width);
+        assert_eq!(light.height, full.height);
+        assert_eq!(light.format, full.format);
+        assert_eq!(light.frame_count, full.frame_count);
     }
 }
