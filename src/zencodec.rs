@@ -59,10 +59,10 @@ static HEIC_DECODE_CAPS: DecodeCapabilities = DecodeCapabilities::new()
     .with_exif(true)
     .with_xmp(true)
     .with_cicp(true)
-    .with_cancel(true)
+    .with_stop(true)
     .with_cheap_probe(true)
     .with_decode_into(true)
-    .with_row_level(true)
+    .with_streaming(true)
     .with_hdr(true)
     .with_native_16bit(true)
     .with_native_alpha(true)
@@ -297,7 +297,8 @@ impl<'a> zc::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
 
         // Negotiate output format
         let available = available_descriptors(has_alpha, bit_depth);
-        let negotiated = negotiate_pixel_format(preferred, &available);
+        let negotiated = negotiate_pixel_format(preferred, &available)
+            .expect("pixel format negotiation failed");
 
         if is_16bit(negotiated) {
             // 16-bit: full decode, then push rows
@@ -512,7 +513,8 @@ impl zc::decode::Decode for HeicDecoder<'_> {
 
         // Negotiate output format
         let available = available_descriptors(has_alpha, bit_depth);
-        let negotiated = negotiate_pixel_format(preferred, &available);
+        let negotiated = negotiate_pixel_format(preferred, &available)
+            .expect("pixel format negotiation failed");
 
         let (buf, width, height, has_alpha): (PixelBuffer, u32, u32, bool) = if is_16bit(negotiated)
         {
@@ -721,7 +723,8 @@ impl HeicStreamDecoder {
 
         // Non-grid fallback: full decode upfront
         let available = available_descriptors(pi.has_alpha, pi.bit_depth);
-        let negotiated = negotiate_pixel_format(preferred, &available);
+        let negotiated = negotiate_pixel_format(preferred, &available)
+            .expect("pixel format negotiation failed");
 
         let pixels: PixelBuffer = if is_16bit(negotiated) {
             let mut req = config.decode_request(data);
@@ -943,7 +946,8 @@ impl HeicStreamDecoder {
 
         // Negotiate 8-bit layout for grid tiles (no alpha, ≤8-bit)
         let available = available_descriptors(false, 8);
-        let negotiated = negotiate_pixel_format(preferred, &available);
+        let negotiated = negotiate_pixel_format(preferred, &available)
+            .expect("pixel format negotiation failed");
         let layout = descriptor_to_layout(negotiated);
 
         Ok(Some(GridState {
@@ -1164,14 +1168,13 @@ fn build_image_info_full(
             info = info.with_icc_profile(icc.clone());
         }
 
-        // HDR gain map (Apple format)
-        if let Some(ref item) = primary_item
-            && !container
-                .find_auxiliary_items(item.id, "urn:com:apple:photo:2020:aux:hdrgainmap")
-                .is_empty()
-        {
-            info = info.with_gain_map(true);
-        }
+        // HDR gain map (Apple format) — detection only, not exposed in ImageInfo
+        // TODO: re-add when zencodec adds gain map support to ImageInfo
+        // if let Some(ref item) = primary_item
+        //     && !container
+        //         .find_auxiliary_items(item.id, "urn:com:apple:photo:2020:aux:hdrgainmap")
+        //         .is_empty()
+        // { }
 
         // EXIF extraction
         if let Some(exif) = extract_exif_from_container(container) {
