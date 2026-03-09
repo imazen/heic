@@ -4,7 +4,7 @@ use alloc::collections::TryReserveError;
 use alloc::string::String;
 use core::fmt;
 use enough::StopReason;
-use whereat::At;
+use whereat::{At, at};
 
 /// Result type for HEIC operations, with error location tracking.
 ///
@@ -94,14 +94,14 @@ impl From<TryReserveError> for HeicError {
 impl From<HevcError> for At<HeicError> {
     #[track_caller]
     fn from(e: HevcError) -> Self {
-        At::from(HeicError::from(e))
+        at!(HeicError::from(e))
     }
 }
 
 /// Check a `Stop` token and convert to `At<HeicError>` on cancellation.
 #[track_caller]
 pub(crate) fn check_stop(stop: &dyn enough::Stop) -> Result<()> {
-    stop.check().map_err(|r| At::from(HeicError::Cancelled(r)))
+    stop.check().map_err(|r| at!(HeicError::Cancelled(r)))
 }
 
 /// Errors specific to HEVC decoding

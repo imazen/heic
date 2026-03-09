@@ -98,6 +98,8 @@
 #![warn(missing_docs)]
 extern crate alloc;
 
+whereat::define_at_crate_info!();
+
 mod decode;
 mod error;
 #[doc(hidden)]
@@ -120,7 +122,7 @@ pub use hevc::DecodedFrame;
 pub use enough::{Stop, StopReason, Unstoppable};
 
 // Re-export At for error location tracking
-pub use whereat::At;
+pub use whereat::{At, at};
 
 use alloc::borrow::Cow;
 use alloc::vec::Vec;
@@ -195,17 +197,17 @@ impl Limits {
         if let Some(max_w) = self.max_width
             && u64::from(width) > max_w
         {
-            return Err(HeicError::LimitExceeded("image width exceeds limit").into());
+            return Err(at!(HeicError::LimitExceeded("image width exceeds limit")));
         }
         if let Some(max_h) = self.max_height
             && u64::from(height) > max_h
         {
-            return Err(HeicError::LimitExceeded("image height exceeds limit").into());
+            return Err(at!(HeicError::LimitExceeded("image height exceeds limit")));
         }
         if let Some(max_px) = self.max_pixels
             && u64::from(width) * u64::from(height) > max_px
         {
-            return Err(HeicError::LimitExceeded("pixel count exceeds limit").into());
+            return Err(at!(HeicError::LimitExceeded("pixel count exceeds limit")));
         }
         Ok(())
     }
@@ -215,7 +217,9 @@ impl Limits {
         if let Some(max_mem) = self.max_memory_bytes
             && estimated_bytes > max_mem
         {
-            return Err(HeicError::LimitExceeded("estimated memory exceeds limit").into());
+            return Err(at!(HeicError::LimitExceeded(
+                "estimated memory exceeds limit"
+            )));
         }
         Ok(())
     }
@@ -690,7 +694,9 @@ impl DecoderConfig {
     /// Returns an error if the HEIF container is malformed.
     pub fn extract_icc(&self, data: &[u8]) -> Result<Option<Vec<u8>>> {
         let container = heif::parse(data, &Unstoppable)?;
-        let primary_item = container.primary_item().ok_or(HeicError::NoPrimaryImage)?;
+        let primary_item = container
+            .primary_item()
+            .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
         match &primary_item.color_info {
             Some(heif::ColorInfo::IccProfile(icc)) => Ok(Some(icc.clone())),
             _ => Ok(None),
@@ -851,16 +857,17 @@ impl<'a> DecodeRequest<'a> {
         let required = (width as usize)
             .checked_mul(height as usize)
             .and_then(|n| n.checked_mul(self.layout.bytes_per_pixel()))
-            .ok_or(HeicError::LimitExceeded(
-                "output buffer size overflows usize",
-            ))?;
+            .ok_or_else(|| {
+                at!(HeicError::LimitExceeded(
+                    "output buffer size overflows usize",
+                ))
+            })?;
 
         if output.len() < required {
-            return Err(HeicError::BufferTooSmall {
+            return Err(at!(HeicError::BufferTooSmall {
                 required,
                 actual: output.len(),
-            }
-            .into());
+            }));
         }
 
         match self.layout {

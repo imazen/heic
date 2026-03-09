@@ -14,6 +14,8 @@ use super::boxes::{
     ImageRotation, ImageSpatialExtents, ItemInfo, ItemLocation, ItemProperty, ItemReference,
     PropertyAssociation, Transform,
 };
+use whereat::at;
+
 use crate::error::{HeicError, Result, check_stop};
 
 // ---------------------------------------------------------------------------
@@ -207,18 +209,18 @@ impl<'a> HeifContainer<'a> {
             .item_locations
             .iter()
             .find(|l| l.item_id == item_id)
-            .ok_or(HeicError::InvalidData("item not found in iloc"))?;
+            .ok_or_else(|| at!(HeicError::InvalidData("item not found in iloc")))?;
 
         if loc.extents.is_empty() {
-            return Err(HeicError::InvalidData("item has no extents").into());
+            return Err(at!(HeicError::InvalidData("item has no extents")));
         }
 
         let source = match loc.construction_method {
             0 => self.data, // File offset (typically into mdat)
             1 => self
                 .idat_data
-                .ok_or(HeicError::InvalidData("construction_method=1 but no idat"))?,
-            _ => return Err(HeicError::Unsupported("construction_method >= 2").into()),
+                .ok_or_else(|| at!(HeicError::InvalidData("construction_method=1 but no idat")))?,
+            _ => return Err(at!(HeicError::Unsupported("construction_method >= 2"))),
         };
 
         if loc.extents.len() == 1 {
@@ -227,16 +229,18 @@ impl<'a> HeifContainer<'a> {
             let offset = usize::try_from(
                 loc.base_offset
                     .checked_add(offset)
-                    .ok_or(HeicError::InvalidData("extent offset overflow"))?,
+                    .ok_or_else(|| at!(HeicError::InvalidData("extent offset overflow")))?,
             )
-            .map_err(|_| HeicError::InvalidData("extent offset too large"))?;
+            .map_err(|_| at!(HeicError::InvalidData("extent offset too large")))?;
             let length = usize::try_from(length)
-                .map_err(|_| HeicError::InvalidData("extent length too large"))?;
+                .map_err(|_| at!(HeicError::InvalidData("extent length too large")))?;
             let end = offset
                 .checked_add(length)
-                .ok_or(HeicError::InvalidData("extent end overflow"))?;
+                .ok_or_else(|| at!(HeicError::InvalidData("extent end overflow")))?;
             if end > source.len() {
-                return Err(HeicError::InvalidData("extent extends past end of data").into());
+                return Err(at!(HeicError::InvalidData(
+                    "extent extends past end of data"
+                )));
             }
             return Ok(Cow::Borrowed(&source[offset..end]));
         }
@@ -247,28 +251,30 @@ impl<'a> HeifContainer<'a> {
             .iter()
             .map(|&(_, len)| len)
             .try_fold(0u64, |acc, len| acc.checked_add(len))
-            .ok_or(HeicError::InvalidData("multi-extent total length overflow"))?;
+            .ok_or_else(|| at!(HeicError::InvalidData("multi-extent total length overflow")))?;
         let total_len = usize::try_from(total_len)
-            .map_err(|_| HeicError::InvalidData("multi-extent total too large"))?;
+            .map_err(|_| at!(HeicError::InvalidData("multi-extent total too large")))?;
 
         let mut buf = Vec::new();
         buf.try_reserve(total_len)
-            .map_err(|_| HeicError::OutOfMemory)?;
+            .map_err(|_| at!(HeicError::OutOfMemory))?;
 
         for &(extent_offset, extent_length) in &loc.extents {
             let offset = usize::try_from(
                 loc.base_offset
                     .checked_add(extent_offset)
-                    .ok_or(HeicError::InvalidData("extent offset overflow"))?,
+                    .ok_or_else(|| at!(HeicError::InvalidData("extent offset overflow")))?,
             )
-            .map_err(|_| HeicError::InvalidData("extent offset too large"))?;
+            .map_err(|_| at!(HeicError::InvalidData("extent offset too large")))?;
             let length = usize::try_from(extent_length)
-                .map_err(|_| HeicError::InvalidData("extent length too large"))?;
+                .map_err(|_| at!(HeicError::InvalidData("extent length too large")))?;
             let end = offset
                 .checked_add(length)
-                .ok_or(HeicError::InvalidData("extent end overflow"))?;
+                .ok_or_else(|| at!(HeicError::InvalidData("extent end overflow")))?;
             if end > source.len() {
-                return Err(HeicError::InvalidData("extent extends past end of data").into());
+                return Err(at!(HeicError::InvalidData(
+                    "extent extends past end of data"
+                )));
             }
             buf.extend_from_slice(&source[offset..end]);
         }
@@ -352,7 +358,7 @@ pub fn parse<'a>(data: &'a [u8], stop: &dyn Stop) -> Result<HeifContainer<'a>> {
 
     // Verify we have required boxes
     if container.brand.0 == *b"    " {
-        return Err(HeicError::InvalidContainer("missing ftyp box").into());
+        return Err(at!(HeicError::InvalidContainer("missing ftyp box")));
     }
 
     Ok(container)
@@ -361,7 +367,7 @@ pub fn parse<'a>(data: &'a [u8], stop: &dyn Stop) -> Result<HeifContainer<'a>> {
 fn parse_ftyp(ftyp: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
     let content = ftyp.content;
     if content.len() < 8 {
-        return Err(HeicError::InvalidContainer("ftyp too short").into());
+        return Err(at!(HeicError::InvalidContainer("ftyp too short")));
     }
 
     container.brand = FourCC::from_bytes(&content[0..4]).unwrap();
@@ -397,7 +403,7 @@ fn parse_ftyp(ftyp: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
             .any(|b| valid_brands.contains(b));
 
     if !is_heif {
-        return Err(HeicError::InvalidContainer("not a HEIF file").into());
+        return Err(at!(HeicError::InvalidContainer("not a HEIF file")));
     }
 
     Ok(())
@@ -410,7 +416,7 @@ fn parse_meta<'a>(
 ) -> Result<()> {
     // Meta is a full box - skip version/flags
     if meta.content.len() < 4 {
-        return Err(HeicError::InvalidContainer("meta box too short").into());
+        return Err(at!(HeicError::InvalidContainer("meta box too short")));
     }
 
     let content = &meta.content[4..];
@@ -436,18 +442,18 @@ fn parse_meta<'a>(
 fn parse_pitm(pitm: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
     let content = pitm.content;
     if content.len() < 4 {
-        return Err(HeicError::InvalidContainer("pitm too short").into());
+        return Err(at!(HeicError::InvalidContainer("pitm too short")));
     }
 
     let version = content[0];
     if version == 0 {
         if content.len() < 6 {
-            return Err(HeicError::InvalidContainer("pitm v0 too short").into());
+            return Err(at!(HeicError::InvalidContainer("pitm v0 too short")));
         }
         container.primary_item_id = u16::from_be_bytes([content[4], content[5]]) as u32;
     } else {
         if content.len() < 8 {
-            return Err(HeicError::InvalidContainer("pitm v1 too short").into());
+            return Err(at!(HeicError::InvalidContainer("pitm v1 too short")));
         }
         container.primary_item_id =
             u32::from_be_bytes([content[4], content[5], content[6], content[7]]);
@@ -459,7 +465,7 @@ fn parse_pitm(pitm: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
 fn parse_iloc(iloc: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop) -> Result<()> {
     let content = iloc.content;
     if content.len() < 8 {
-        return Err(HeicError::InvalidContainer("iloc too short").into());
+        return Err(at!(HeicError::InvalidContainer("iloc too short")));
     }
 
     let version = content[0];
@@ -486,13 +492,15 @@ fn parse_iloc(iloc: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop
     };
 
     if item_count > MAX_ITEMS {
-        return Err(HeicError::LimitExceeded("iloc item count exceeds limit").into());
+        return Err(at!(HeicError::LimitExceeded(
+            "iloc item count exceeds limit"
+        )));
     }
 
     container
         .item_locations
         .try_reserve(item_count as usize)
-        .map_err(|_| HeicError::OutOfMemory)?;
+        .map_err(|_| at!(HeicError::OutOfMemory))?;
 
     for _ in 0..item_count {
         check_stop(stop)?;
@@ -542,13 +550,15 @@ fn parse_iloc(iloc: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop
         pos += 2;
 
         if u32::from(extent_count) > MAX_EXTENTS_PER_ITEM {
-            return Err(HeicError::LimitExceeded("extent count per item exceeds limit").into());
+            return Err(at!(HeicError::LimitExceeded(
+                "extent count per item exceeds limit"
+            )));
         }
 
         let mut extents = Vec::new();
         extents
             .try_reserve(extent_count as usize)
-            .map_err(|_| HeicError::OutOfMemory)?;
+            .map_err(|_| at!(HeicError::OutOfMemory))?;
         for _ in 0..extent_count {
             if version >= 1 && index_size > 0 {
                 // Extent index - skip
@@ -590,7 +600,7 @@ fn read_sized_int(data: &[u8], pos: &mut usize, size: usize) -> u64 {
 fn parse_iinf(iinf: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop) -> Result<()> {
     let content = iinf.content;
     if content.len() < 6 {
-        return Err(HeicError::InvalidContainer("iinf too short").into());
+        return Err(at!(HeicError::InvalidContainer("iinf too short")));
     }
 
     let version = content[0];
@@ -612,13 +622,15 @@ fn parse_iinf(iinf: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop
     };
 
     if entry_count > MAX_ITEMS {
-        return Err(HeicError::LimitExceeded("iinf entry count exceeds limit").into());
+        return Err(at!(HeicError::LimitExceeded(
+            "iinf entry count exceeds limit"
+        )));
     }
 
     container
         .item_infos
         .try_reserve(entry_count as usize)
-        .map_err(|_| HeicError::OutOfMemory)?;
+        .map_err(|_| at!(HeicError::OutOfMemory))?;
 
     // Parse infe boxes
     let remaining = &content[pos..];
@@ -644,7 +656,7 @@ fn parse_infe(infe: &Box<'_>) -> Result<ItemInfo> {
 
     let version = *content
         .first()
-        .ok_or(HeicError::InvalidContainer("infe too short"))?;
+        .ok_or_else(|| at!(HeicError::InvalidContainer("infe too short")))?;
     // Minimum: 4 (ver+flags) + id (2 or 4) + 2 (protection) + type (4 if v>=2)
     let min_len = match version {
         0..=1 => 4 + 2 + 2, // 8
@@ -652,7 +664,7 @@ fn parse_infe(infe: &Box<'_>) -> Result<ItemInfo> {
         _ => 4 + 4 + 2 + 4, // 14 (version >= 3 uses 4-byte item_id)
     };
     if content.len() < min_len {
-        return Err(HeicError::InvalidContainer("infe too short").into());
+        return Err(at!(HeicError::InvalidContainer("infe too short")));
     }
 
     let flags = u32::from_be_bytes([0, content[1], content[2], content[3]]);
@@ -698,7 +710,7 @@ fn parse_infe(infe: &Box<'_>) -> Result<ItemInfo> {
     }
     let name_end = content[pos..].iter().position(|&b| b == 0).unwrap_or(0);
     if name_end > MAX_STRING_LENGTH {
-        return Err(HeicError::InvalidContainer("item name too long").into());
+        return Err(at!(HeicError::InvalidContainer("item name too long")));
     }
     let item_name = str::from_utf8(&content[pos..pos + name_end])
         .unwrap_or("")
@@ -709,7 +721,7 @@ fn parse_infe(infe: &Box<'_>) -> Result<ItemInfo> {
     let content_type = if pos < content.len() {
         let ct_end = content[pos..].iter().position(|&b| b == 0).unwrap_or(0);
         if ct_end > MAX_STRING_LENGTH {
-            return Err(HeicError::InvalidContainer("content type too long").into());
+            return Err(at!(HeicError::InvalidContainer("content type too long")));
         }
         str::from_utf8(&content[pos..pos + ct_end])
             .unwrap_or("")
@@ -744,7 +756,9 @@ fn parse_ipco(ipco: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop
     for (prop_count, child) in BoxIterator::new(ipco.content).enumerate() {
         check_stop(stop)?;
         if prop_count >= MAX_PROPERTIES as usize {
-            return Err(HeicError::LimitExceeded("property count exceeds limit").into());
+            return Err(at!(HeicError::LimitExceeded(
+                "property count exceeds limit"
+            )));
         }
         let prop = match child.box_type() {
             FourCC::ISPE => {
@@ -808,7 +822,7 @@ fn parse_clap(clap: &Box<'_>) -> Result<CleanAperture> {
     let content = clap.content;
     // clap box: 8 fields of 4 bytes each = 32 bytes (no version/flags)
     if content.len() < 32 {
-        return Err(HeicError::InvalidContainer("clap too short").into());
+        return Err(at!(HeicError::InvalidContainer("clap too short")));
     }
 
     let width_n = u32::from_be_bytes([content[0], content[1], content[2], content[3]]);
@@ -822,7 +836,9 @@ fn parse_clap(clap: &Box<'_>) -> Result<CleanAperture> {
 
     // Validate denominators are non-zero
     if width_d == 0 || height_d == 0 || horiz_off_d == 0 || vert_off_d == 0 {
-        return Err(HeicError::InvalidContainer("clap has zero denominator").into());
+        return Err(at!(HeicError::InvalidContainer(
+            "clap has zero denominator"
+        )));
     }
 
     Ok(CleanAperture {
@@ -841,7 +857,7 @@ fn parse_irot(irot: &Box<'_>) -> Result<ImageRotation> {
     let content = irot.content;
     // irot box: 1 byte angle (0=0°, 1=90°CCW, 2=180°, 3=270°CCW)
     if content.is_empty() {
-        return Err(HeicError::InvalidContainer("irot too short").into());
+        return Err(at!(HeicError::InvalidContainer("irot too short")));
     }
     let angle = match content[0] & 0x03 {
         0 => 0,
@@ -857,7 +873,7 @@ fn parse_imir(imir: &Box<'_>) -> Result<ImageMirror> {
     let content = imir.content;
     // imir box: 1 byte (7 bits reserved, 1 bit axis)
     if content.is_empty() {
-        return Err(HeicError::InvalidContainer("imir too short").into());
+        return Err(at!(HeicError::InvalidContainer("imir too short")));
     }
     Ok(ImageMirror {
         axis: content[0] & 0x01,
@@ -868,7 +884,7 @@ fn parse_auxc(auxc: &Box<'_>) -> Result<String> {
     let content = auxc.content;
     // auxC is a full box: version/flags (4 bytes) + null-terminated UTF-8 aux_type string
     if content.len() < 5 {
-        return Err(HeicError::InvalidContainer("auxC too short").into());
+        return Err(at!(HeicError::InvalidContainer("auxC too short")));
     }
 
     // Skip version/flags (4 bytes)
@@ -876,7 +892,7 @@ fn parse_auxc(auxc: &Box<'_>) -> Result<String> {
     // Find null terminator
     let end = data.iter().position(|&b| b == 0).unwrap_or(data.len());
     if end > MAX_STRING_LENGTH {
-        return Err(HeicError::InvalidContainer("auxC string too long").into());
+        return Err(at!(HeicError::InvalidContainer("auxC string too long")));
     }
     let aux_type = str::from_utf8(&data[..end]).unwrap_or("").to_string();
     Ok(aux_type)
@@ -885,7 +901,7 @@ fn parse_auxc(auxc: &Box<'_>) -> Result<String> {
 fn parse_ispe(ispe: &Box<'_>) -> Result<ImageSpatialExtents> {
     let content = ispe.content;
     if content.len() < 12 {
-        return Err(HeicError::InvalidContainer("ispe too short").into());
+        return Err(at!(HeicError::InvalidContainer("ispe too short")));
     }
 
     // Skip version/flags (4 bytes)
@@ -894,10 +910,12 @@ fn parse_ispe(ispe: &Box<'_>) -> Result<ImageSpatialExtents> {
 
     // Validate dimensions are non-zero and reasonable
     if width == 0 || height == 0 {
-        return Err(HeicError::InvalidContainer("ispe has zero dimension").into());
+        return Err(at!(HeicError::InvalidContainer("ispe has zero dimension")));
     }
     if width > (1 << 30) || height > (1 << 30) {
-        return Err(HeicError::InvalidContainer("ispe dimensions too large").into());
+        return Err(at!(HeicError::InvalidContainer(
+            "ispe dimensions too large"
+        )));
     }
 
     Ok(ImageSpatialExtents { width, height })
@@ -906,7 +924,7 @@ fn parse_ispe(ispe: &Box<'_>) -> Result<ImageSpatialExtents> {
 fn parse_hvcc(hvcc: &Box<'_>) -> Result<HevcDecoderConfig> {
     let content = hvcc.content;
     if content.len() < 23 {
-        return Err(HeicError::InvalidContainer("hvcC too short").into());
+        return Err(at!(HeicError::InvalidContainer("hvcC too short")));
     }
 
     let config_version = content[0];
@@ -936,7 +954,9 @@ fn parse_hvcc(hvcc: &Box<'_>) -> Result<HevcDecoderConfig> {
 
     // Validate length_size_minus_one: valid values are 0, 1, 3 (sizes 1, 2, 4 bytes)
     if length_size_minus_one == 2 {
-        return Err(HeicError::InvalidContainer("hvcC invalid length_size_minus_one=2").into());
+        return Err(at!(HeicError::InvalidContainer(
+            "hvcC invalid length_size_minus_one=2"
+        )));
     }
 
     let num_arrays = content[22];
@@ -964,7 +984,7 @@ fn parse_hvcc(hvcc: &Box<'_>) -> Result<HevcDecoderConfig> {
             pos += 2;
 
             if nalu_len > MAX_NAL_UNIT_SIZE {
-                return Err(HeicError::LimitExceeded("NAL unit too large").into());
+                return Err(at!(HeicError::LimitExceeded("NAL unit too large")));
             }
 
             if pos + nalu_len > content.len() {
@@ -995,7 +1015,7 @@ fn parse_hvcc(hvcc: &Box<'_>) -> Result<HevcDecoderConfig> {
 fn parse_colr(colr: &Box<'_>) -> Result<ColorInfo> {
     let content = colr.content;
     if content.len() < 4 {
-        return Err(HeicError::InvalidContainer("colr too short").into());
+        return Err(at!(HeicError::InvalidContainer("colr too short")));
     }
 
     let color_type = FourCC::from_bytes(&content[0..4]).unwrap();
@@ -1003,7 +1023,7 @@ fn parse_colr(colr: &Box<'_>) -> Result<ColorInfo> {
     match &color_type.0 {
         b"nclx" => {
             if content.len() < 11 {
-                return Err(HeicError::InvalidContainer("nclx colr too short").into());
+                return Err(at!(HeicError::InvalidContainer("nclx colr too short")));
             }
             Ok(ColorInfo::Nclx {
                 color_primaries: u16::from_be_bytes([content[4], content[5]]),
@@ -1016,18 +1036,18 @@ fn parse_colr(colr: &Box<'_>) -> Result<ColorInfo> {
             // ICC profile
             let icc_data = &content[4..];
             if icc_data.len() > MAX_ICC_PROFILE_SIZE {
-                return Err(HeicError::LimitExceeded("ICC profile too large").into());
+                return Err(at!(HeicError::LimitExceeded("ICC profile too large")));
             }
             Ok(ColorInfo::IccProfile(icc_data.to_vec()))
         }
-        _ => Err(HeicError::InvalidContainer("unknown color type").into()),
+        _ => Err(at!(HeicError::InvalidContainer("unknown color type"))),
     }
 }
 
 fn parse_iref(iref: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop) -> Result<()> {
     let content = iref.content;
     if content.len() < 4 {
-        return Err(HeicError::InvalidContainer("iref too short").into());
+        return Err(at!(HeicError::InvalidContainer("iref too short")));
     }
 
     let version = content[0];
@@ -1044,7 +1064,9 @@ fn parse_iref(iref: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop
 
         while pos < data.len() {
             if total_refs >= MAX_REFERENCES {
-                return Err(HeicError::LimitExceeded("reference count exceeds limit").into());
+                return Err(at!(HeicError::LimitExceeded(
+                    "reference count exceeds limit"
+                )));
             }
 
             let (from_id, id_size) = if version == 0 {
@@ -1073,13 +1095,15 @@ fn parse_iref(iref: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop
             pos += 2;
 
             if u32::from(ref_count) > MAX_REFS_PER_ENTRY {
-                return Err(HeicError::LimitExceeded("refs per entry exceeds limit").into());
+                return Err(at!(HeicError::LimitExceeded(
+                    "refs per entry exceeds limit"
+                )));
             }
 
             let mut to_ids = Vec::new();
             to_ids
                 .try_reserve(ref_count as usize)
-                .map_err(|_| HeicError::OutOfMemory)?;
+                .map_err(|_| at!(HeicError::OutOfMemory))?;
             for _ in 0..ref_count {
                 if pos + id_size > data.len() {
                     break;
@@ -1108,7 +1132,7 @@ fn parse_iref(iref: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop
 fn parse_ipma(ipma: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop) -> Result<()> {
     let content = ipma.content;
     if content.len() < 8 {
-        return Err(HeicError::InvalidContainer("ipma too short").into());
+        return Err(at!(HeicError::InvalidContainer("ipma too short")));
     }
 
     let version = content[0];
@@ -1124,13 +1148,15 @@ fn parse_ipma(ipma: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop
     pos += 4;
 
     if entry_count > MAX_ITEMS {
-        return Err(HeicError::LimitExceeded("ipma entry count exceeds limit").into());
+        return Err(at!(HeicError::LimitExceeded(
+            "ipma entry count exceeds limit"
+        )));
     }
 
     container
         .property_associations
         .try_reserve(entry_count as usize)
-        .map_err(|_| HeicError::OutOfMemory)?;
+        .map_err(|_| at!(HeicError::OutOfMemory))?;
 
     for _ in 0..entry_count {
         check_stop(stop)?;

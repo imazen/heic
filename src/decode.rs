@@ -6,6 +6,8 @@ use alloc::vec::Vec;
 
 use enough::{Stop, Unstoppable};
 
+use whereat::at;
+
 use crate::error::check_stop;
 use crate::heif::{self, CleanAperture, ColorInfo, FourCC, ItemType, Transform};
 use crate::{
@@ -43,7 +45,7 @@ fn decode_tiles_parallel(
             let pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(n)
                 .build()
-                .map_err(|_| HeicError::InvalidData("failed to create thread pool"))?;
+                .map_err(|_| at!(HeicError::InvalidData("failed to create thread pool")))?;
             pool.install(|| {
                 tile_data_list
                     .par_iter()
@@ -85,7 +87,9 @@ pub(crate) fn decode_to_frame(
     check_stop(stop)?;
 
     let container = heif::parse(data, stop)?;
-    let primary_item = container.primary_item().ok_or(HeicError::NoPrimaryImage)?;
+    let primary_item = container
+        .primary_item()
+        .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
 
     // Check limits on primary item dimensions if available from ispe
     if let Some((w, h)) = primary_item.dimensions {
@@ -135,7 +139,9 @@ fn decode_item(
     max_threads: Option<usize>,
 ) -> Result<crate::hevc::DecodedFrame> {
     if depth > 8 {
-        return Err(HeicError::InvalidData("Derived image reference chain too deep").into());
+        return Err(at!(HeicError::InvalidData(
+            "Derived image reference chain too deep"
+        )));
     }
 
     check_stop(stop)?;
@@ -208,11 +214,11 @@ fn decode_iden(
     let source_ids = container.get_item_references(iden_item.id, FourCC::DIMG);
     let source_id = source_ids
         .first()
-        .ok_or(HeicError::InvalidData("iden item has no dimg reference"))?;
+        .ok_or_else(|| at!(HeicError::InvalidData("iden item has no dimg reference")))?;
 
     let source_item = container
         .get_item(*source_id)
-        .ok_or(HeicError::InvalidData("iden dimg target item not found"))?;
+        .ok_or_else(|| at!(HeicError::InvalidData("iden dimg target item not found")))?;
 
     decode_item(
         container,
@@ -239,7 +245,7 @@ fn decode_iovl(
     // - version (1 byte) + flags (3 bytes)
     // - canvas_fill_value: 2 bytes * num_channels (flags & 0x01 determines 32-bit offsets)
     if iovl_data.len() < 6 {
-        return Err(HeicError::InvalidData("Overlay descriptor too short").into());
+        return Err(at!(HeicError::InvalidData("Overlay descriptor too short")));
     }
 
     let flags = iovl_data[1];
@@ -247,7 +253,9 @@ fn decode_iovl(
 
     let tile_ids = container.get_item_references(iovl_item.id, FourCC::DIMG);
     if tile_ids.is_empty() {
-        return Err(HeicError::InvalidData("Overlay has no tile references").into());
+        return Err(at!(HeicError::InvalidData(
+            "Overlay has no tile references"
+        )));
     }
 
     // Calculate expected layout
@@ -258,9 +266,11 @@ fn decode_iovl(
     let fill_bytes = iovl_data
         .len()
         .checked_sub(fixed_end + tile_data_size)
-        .ok_or(HeicError::InvalidData(
-            "Overlay descriptor too short for tiles",
-        ))?;
+        .ok_or_else(|| {
+            at!(HeicError::InvalidData(
+                "Overlay descriptor too short for tiles",
+            ))
+        })?;
 
     // Parse canvas fill values (16-bit per channel)
     let num_fill_channels = fill_bytes / 2;
@@ -274,7 +284,7 @@ fn decode_iovl(
     // Read canvas dimensions
     let (canvas_width, canvas_height) = if large {
         if pos + 8 > iovl_data.len() {
-            return Err(HeicError::InvalidData("Overlay descriptor truncated").into());
+            return Err(at!(HeicError::InvalidData("Overlay descriptor truncated")));
         }
         let w = u32::from_be_bytes([
             iovl_data[pos],
@@ -292,7 +302,7 @@ fn decode_iovl(
         (w, h)
     } else {
         if pos + 4 > iovl_data.len() {
-            return Err(HeicError::InvalidData("Overlay descriptor truncated").into());
+            return Err(at!(HeicError::InvalidData("Overlay descriptor truncated")));
         }
         let w = u16::from_be_bytes([iovl_data[pos], iovl_data[pos + 1]]) as u32;
         let h = u16::from_be_bytes([iovl_data[pos + 2], iovl_data[pos + 3]]) as u32;
@@ -308,7 +318,7 @@ fn decode_iovl(
     for _ in 0..tile_ids.len() {
         let (x, y) = if large {
             if pos + 8 > iovl_data.len() {
-                return Err(HeicError::InvalidData("Overlay offset data truncated").into());
+                return Err(at!(HeicError::InvalidData("Overlay offset data truncated")));
             }
             let x = i32::from_be_bytes([
                 iovl_data[pos],
@@ -326,7 +336,7 @@ fn decode_iovl(
             (x, y)
         } else {
             if pos + 4 > iovl_data.len() {
-                return Err(HeicError::InvalidData("Overlay offset data truncated").into());
+                return Err(at!(HeicError::InvalidData("Overlay offset data truncated")));
             }
             let x = i16::from_be_bytes([iovl_data[pos], iovl_data[pos + 1]]) as i32;
             let y = i16::from_be_bytes([iovl_data[pos + 2], iovl_data[pos + 3]]) as i32;
@@ -339,11 +349,11 @@ fn decode_iovl(
     // Decode first tile to get format info
     let first_tile_item = container
         .get_item(tile_ids[0])
-        .ok_or(HeicError::InvalidData("Missing overlay tile item"))?;
+        .ok_or_else(|| at!(HeicError::InvalidData("Missing overlay tile item")))?;
     let first_tile_config = first_tile_item
         .hevc_config
         .as_ref()
-        .ok_or(HeicError::InvalidData("Missing overlay tile hvcC"))?;
+        .ok_or_else(|| at!(HeicError::InvalidData("Missing overlay tile hvcC")))?;
 
     let bit_depth = first_tile_config.bit_depth_luma_minus8 + 8;
     let chroma_format = first_tile_config.chroma_format;
@@ -378,7 +388,7 @@ fn decode_iovl(
 
         let tile_item = container
             .get_item(tile_id)
-            .ok_or(HeicError::InvalidData("Missing overlay tile"))?;
+            .ok_or_else(|| at!(HeicError::InvalidData("Missing overlay tile")))?;
 
         let tile_frame = decode_item(container, &tile_item, depth + 1, limits, stop, max_threads)?;
 
@@ -462,7 +472,7 @@ fn decode_grid(
     let grid_data = container.get_item_data(grid_item.id)?;
 
     if grid_data.len() < 8 {
-        return Err(HeicError::InvalidData("Grid descriptor too short").into());
+        return Err(at!(HeicError::InvalidData("Grid descriptor too short")));
     }
 
     let flags = grid_data[1];
@@ -470,7 +480,9 @@ fn decode_grid(
     let cols = grid_data[3] as u32 + 1;
     let (output_width, output_height) = if (flags & 1) != 0 {
         if grid_data.len() < 12 {
-            return Err(HeicError::InvalidData("Grid descriptor too short for 32-bit dims").into());
+            return Err(at!(HeicError::InvalidData(
+                "Grid descriptor too short for 32-bit dims"
+            )));
         }
         (
             u32::from_be_bytes([grid_data[4], grid_data[5], grid_data[6], grid_data[7]]),
@@ -490,22 +502,22 @@ fn decode_grid(
     let tile_ids = container.get_item_references(grid_item.id, FourCC::DIMG);
     let expected_tiles = (rows * cols) as usize;
     if tile_ids.len() != expected_tiles {
-        return Err(HeicError::InvalidData("Grid tile count mismatch").into());
+        return Err(at!(HeicError::InvalidData("Grid tile count mismatch")));
     }
 
     // Get hvcC config from the first tile item
     let first_tile = container
         .get_item(tile_ids[0])
-        .ok_or(HeicError::InvalidData("Missing tile item"))?;
+        .ok_or_else(|| at!(HeicError::InvalidData("Missing tile item")))?;
     let tile_config = first_tile
         .hevc_config
         .as_ref()
-        .ok_or(HeicError::InvalidData("Missing tile hvcC config"))?;
+        .ok_or_else(|| at!(HeicError::InvalidData("Missing tile hvcC config")))?;
 
     // Get tile dimensions from ispe
     let (tile_width, tile_height) = first_tile
         .dimensions
-        .ok_or(HeicError::InvalidData("Missing tile dimensions"))?;
+        .ok_or_else(|| at!(HeicError::InvalidData("Missing tile dimensions")))?;
 
     // Create output frame at the grid's output dimensions
     let bit_depth = tile_config.bit_depth_luma_minus8 + 8;
@@ -675,7 +687,9 @@ pub(crate) fn try_decode_grid_streaming(
     check_stop(stop)?;
 
     let container = heif::parse(data, stop)?;
-    let primary_item = container.primary_item().ok_or(HeicError::NoPrimaryImage)?;
+    let primary_item = container
+        .primary_item()
+        .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
 
     // Eligibility: must be a grid with no transforms and no alpha
     if primary_item.item_type != ItemType::Grid {
@@ -703,7 +717,7 @@ pub(crate) fn try_decode_grid_streaming(
     let grid_data = container.get_item_data(primary_item.id)?;
 
     if grid_data.len() < 8 {
-        return Err(HeicError::InvalidData("Grid descriptor too short").into());
+        return Err(at!(HeicError::InvalidData("Grid descriptor too short")));
     }
 
     let flags = grid_data[1];
@@ -711,7 +725,9 @@ pub(crate) fn try_decode_grid_streaming(
     let cols = grid_data[3] as u32 + 1;
     let (output_width, output_height) = if (flags & 1) != 0 {
         if grid_data.len() < 12 {
-            return Err(HeicError::InvalidData("Grid descriptor too short for 32-bit dims").into());
+            return Err(at!(HeicError::InvalidData(
+                "Grid descriptor too short for 32-bit dims"
+            )));
         }
         (
             u32::from_be_bytes([grid_data[4], grid_data[5], grid_data[6], grid_data[7]]),
@@ -731,34 +747,35 @@ pub(crate) fn try_decode_grid_streaming(
     let required = (output_width as usize)
         .checked_mul(output_height as usize)
         .and_then(|n| n.checked_mul(bpp))
-        .ok_or(HeicError::LimitExceeded(
-            "output buffer size overflows usize",
-        ))?;
+        .ok_or_else(|| {
+            at!(HeicError::LimitExceeded(
+                "output buffer size overflows usize",
+            ))
+        })?;
     if output.len() < required {
-        return Err(HeicError::BufferTooSmall {
+        return Err(at!(HeicError::BufferTooSmall {
             required,
             actual: output.len(),
-        }
-        .into());
+        }));
     }
 
     // Get tile info
     let tile_ids = container.get_item_references(primary_item.id, FourCC::DIMG);
     let expected_tiles = (rows * cols) as usize;
     if tile_ids.len() != expected_tiles {
-        return Err(HeicError::InvalidData("Grid tile count mismatch").into());
+        return Err(at!(HeicError::InvalidData("Grid tile count mismatch")));
     }
 
     let first_tile = container
         .get_item(tile_ids[0])
-        .ok_or(HeicError::InvalidData("Missing tile item"))?;
+        .ok_or_else(|| at!(HeicError::InvalidData("Missing tile item")))?;
     let tile_config = first_tile
         .hevc_config
         .as_ref()
-        .ok_or(HeicError::InvalidData("Missing tile hvcC config"))?;
+        .ok_or_else(|| at!(HeicError::InvalidData("Missing tile hvcC config")))?;
     let (tile_width, tile_height) = first_tile
         .dimensions
-        .ok_or(HeicError::InvalidData("Missing tile dimensions"))?;
+        .ok_or_else(|| at!(HeicError::InvalidData("Missing tile dimensions")))?;
 
     // Determine color conversion overrides from grid item's colr nclx
     let color_override = match &primary_item.color_info {
@@ -874,7 +891,9 @@ pub(crate) fn try_decode_grid_to_sink(
     check_stop(stop)?;
 
     let container = heif::parse(data, stop)?;
-    let primary_item = container.primary_item().ok_or(HeicError::NoPrimaryImage)?;
+    let primary_item = container
+        .primary_item()
+        .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
 
     // Eligibility: must be a grid with no transforms and no alpha
     if primary_item.item_type != ItemType::Grid {
@@ -902,7 +921,7 @@ pub(crate) fn try_decode_grid_to_sink(
     let grid_data = container.get_item_data(primary_item.id)?;
 
     if grid_data.len() < 8 {
-        return Err(HeicError::InvalidData("Grid descriptor too short").into());
+        return Err(at!(HeicError::InvalidData("Grid descriptor too short")));
     }
 
     let flags = grid_data[1];
@@ -910,7 +929,9 @@ pub(crate) fn try_decode_grid_to_sink(
     let cols = grid_data[3] as u32 + 1;
     let (output_width, output_height) = if (flags & 1) != 0 {
         if grid_data.len() < 12 {
-            return Err(HeicError::InvalidData("Grid descriptor too short for 32-bit dims").into());
+            return Err(at!(HeicError::InvalidData(
+                "Grid descriptor too short for 32-bit dims"
+            )));
         }
         (
             u32::from_be_bytes([grid_data[4], grid_data[5], grid_data[6], grid_data[7]]),
@@ -929,19 +950,19 @@ pub(crate) fn try_decode_grid_to_sink(
     let tile_ids = container.get_item_references(primary_item.id, FourCC::DIMG);
     let expected_tiles = (rows * cols) as usize;
     if tile_ids.len() != expected_tiles {
-        return Err(HeicError::InvalidData("Grid tile count mismatch").into());
+        return Err(at!(HeicError::InvalidData("Grid tile count mismatch")));
     }
 
     let first_tile = container
         .get_item(tile_ids[0])
-        .ok_or(HeicError::InvalidData("Missing tile item"))?;
+        .ok_or_else(|| at!(HeicError::InvalidData("Missing tile item")))?;
     let tile_config = first_tile
         .hevc_config
         .as_ref()
-        .ok_or(HeicError::InvalidData("Missing tile hvcC config"))?;
+        .ok_or_else(|| at!(HeicError::InvalidData("Missing tile hvcC config")))?;
     let (tile_width, tile_height) = first_tile
         .dimensions
-        .ok_or(HeicError::InvalidData("Missing tile dimensions"))?;
+        .ok_or_else(|| at!(HeicError::InvalidData("Missing tile dimensions")))?;
 
     // Determine color conversion overrides from grid item's colr nclx
     let color_override = match &primary_item.color_info {
@@ -1251,18 +1272,20 @@ fn decode_alpha_plane(
 /// Decode gain map from Apple HDR HEIC
 pub(crate) fn decode_gain_map(data: &[u8]) -> Result<HdrGainMap> {
     let container = heif::parse(data, &Unstoppable)?;
-    let primary_item = container.primary_item().ok_or(HeicError::NoPrimaryImage)?;
+    let primary_item = container
+        .primary_item()
+        .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
 
     let gainmap_ids =
         container.find_auxiliary_items(primary_item.id, "urn:com:apple:photo:2020:aux:hdrgainmap");
 
     let &gainmap_id = gainmap_ids
         .first()
-        .ok_or(HeicError::InvalidData("No HDR gain map found"))?;
+        .ok_or_else(|| at!(HeicError::InvalidData("No HDR gain map found")))?;
 
     let gainmap_item = container
         .get_item(gainmap_id)
-        .ok_or(HeicError::InvalidData("Missing gain map item"))?;
+        .ok_or_else(|| at!(HeicError::InvalidData("Missing gain map item")))?;
 
     // Use decode_item to handle grids, iden, and plain HEVC gain maps
     let frame = decode_item(
@@ -1380,7 +1403,9 @@ pub(crate) fn extract_exif<'a>(data: &'a [u8]) -> Result<Option<Cow<'a, [u8]>>> 
 /// Decode thumbnail image from HEIC container
 pub(crate) fn decode_thumbnail(data: &[u8], layout: PixelLayout) -> Result<Option<DecodeOutput>> {
     let container = heif::parse(data, &Unstoppable)?;
-    let primary_item = container.primary_item().ok_or(HeicError::NoPrimaryImage)?;
+    let primary_item = container
+        .primary_item()
+        .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
 
     let thumb_ids = container.find_thumbnails(primary_item.id);
     let Some(&thumb_id) = thumb_ids.first() else {
@@ -1389,7 +1414,7 @@ pub(crate) fn decode_thumbnail(data: &[u8], layout: PixelLayout) -> Result<Optio
 
     let thumb_item = container
         .get_item(thumb_id)
-        .ok_or(HeicError::InvalidData("Thumbnail item not found"))?;
+        .ok_or_else(|| at!(HeicError::InvalidData("Thumbnail item not found")))?;
 
     let stop: &dyn Stop = &Unstoppable;
     let frame = decode_item(&container, &thumb_item, 0, &NO_LIMITS, stop, None)?;
