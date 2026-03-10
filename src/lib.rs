@@ -108,10 +108,10 @@ pub mod heif;
 pub mod hevc;
 
 #[cfg(feature = "zencodec")]
-mod zencodec;
+mod codec;
 
 #[cfg(feature = "zencodec")]
-pub use zencodec::{
+pub use codec::{
     HeicDecodeJob, HeicDecoder as HeicZenDecoder, HeicDecoderConfig, HeicStreamDecoder,
 };
 

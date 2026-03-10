@@ -16,10 +16,10 @@
 use alloc::borrow::Cow;
 
 use rgb::{Rgb, Rgba};
-use zc::decode::{
+use zencodec::decode::{
     DecodeCapabilities, DecodeOutput, DecodeRowSink, OutputInfo, negotiate_pixel_format,
 };
-use zc::{ImageFormat, ImageInfo, Orientation, ResourceLimits, ThreadingPolicy, Unsupported};
+use zencodec::{ImageFormat, ImageInfo, Orientation, ResourceLimits, ThreadingPolicy, Unsupported};
 use zenpixels::{Cicp, ColorPrimaries, PixelBuffer, PixelDescriptor, TransferFunction};
 
 use crate::error::HeicError;
@@ -83,7 +83,7 @@ static DECODE_DESCRIPTORS: &[PixelDescriptor] = &[
 
 // ── Decoder Config ─────────────────────────────────────────────────────────
 
-/// HEIC decoder configuration implementing [`zc::decode::DecoderConfig`].
+/// HEIC decoder configuration implementing [`zencodec::decode::DecoderConfig`].
 ///
 /// Wraps [`crate::DecoderConfig`] for use with the zencodec trait system.
 /// HEIC decoding has no tunable parameters, so this is a thin wrapper.
@@ -114,7 +114,7 @@ impl Default for HeicDecoderConfig {
     }
 }
 
-impl zc::decode::DecoderConfig for HeicDecoderConfig {
+impl zencodec::decode::DecoderConfig for HeicDecoderConfig {
     type Error = HeicError;
     type Job<'a> = HeicDecodeJob<'a>;
 
@@ -144,7 +144,7 @@ impl zc::decode::DecoderConfig for HeicDecoderConfig {
 /// Per-operation HEIC decode job.
 pub struct HeicDecodeJob<'a> {
     config: &'a HeicDecoderConfig,
-    stop: Option<&'a dyn zc::enough::Stop>,
+    stop: Option<&'a dyn zencodec::enough::Stop>,
     limits: ResourceLimits,
 }
 
@@ -206,13 +206,13 @@ fn descriptor_to_layout(desc: PixelDescriptor) -> crate::PixelLayout {
     }
 }
 
-impl<'a> zc::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
+impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
     type Error = HeicError;
     type Dec = HeicDecoder<'a>;
     type StreamDec = HeicStreamDecoder;
     type FullFrameDec = Unsupported<HeicError>;
 
-    fn with_stop(mut self, stop: &'a dyn zc::enough::Stop) -> Self {
+    fn with_stop(mut self, stop: &'a dyn zencodec::enough::Stop) -> Self {
         self.stop = Some(stop);
         self
     }
@@ -303,7 +303,7 @@ impl<'a> zc::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
         if is_16bit(negotiated) {
             // 16-bit: full decode, then push rows
             let dec = self.decoder(data, preferred)?;
-            let output = <HeicDecoder<'_> as zc::decode::Decode>::decode(dec)?;
+            let output = <HeicDecoder<'_> as zencodec::decode::Decode>::decode(dec)?;
             let ps = output.pixels();
             let desc = ps.descriptor();
             let w = ps.width();
@@ -409,7 +409,7 @@ impl<'a> zc::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
 
 // ── RowSink adapter ────────────────────────────────────────────────────────
 
-/// Adapts `zc::decode::DecodeRowSink` to the native `crate::RowSink` interface.
+/// Adapts `zencodec::decode::DecodeRowSink` to the native `crate::RowSink` interface.
 ///
 /// The native decoder writes tightly packed pixels into a flat buffer returned
 /// by `RowSink::demand()`. This adapter buffers one strip at a time, then
@@ -493,13 +493,13 @@ pub struct HeicDecoder<'a> {
     config: &'a HeicDecoderConfig,
     data: Cow<'a, [u8]>,
     preferred: alloc::vec::Vec<PixelDescriptor>,
-    stop: Option<&'a dyn zc::enough::Stop>,
+    stop: Option<&'a dyn zencodec::enough::Stop>,
     limits: Option<crate::Limits>,
     /// Thread count from threading policy (0 = unlimited/default).
     thread_count: usize,
 }
 
-impl zc::decode::Decode for HeicDecoder<'_> {
+impl zencodec::decode::Decode for HeicDecoder<'_> {
     type Error = HeicError;
 
     fn decode(self) -> Result<DecodeOutput, HeicError> {
@@ -678,7 +678,7 @@ impl HeicStreamDecoder {
         data: &[u8],
         preferred: &[PixelDescriptor],
         limits: Option<&crate::Limits>,
-        stop: Option<&dyn zc::enough::Stop>,
+        stop: Option<&dyn zencodec::enough::Stop>,
         thread_count: usize,
     ) -> Result<Self, HeicError> {
         let stop_ref: &dyn enough::Stop = stop.unwrap_or(&enough::Unstoppable);
@@ -1025,7 +1025,7 @@ impl HeicStreamDecoder {
     }
 }
 
-impl zc::decode::StreamingDecode for HeicStreamDecoder {
+impl zencodec::decode::StreamingDecode for HeicStreamDecoder {
     type Error = HeicError;
 
     fn next_batch(&mut self) -> Result<Option<(u32, zenpixels::PixelSlice<'_>)>, HeicError> {
@@ -1104,7 +1104,7 @@ fn raw_to_pixel_buffer(
 
 // ── Native → trait metadata conversion ─────────────────────────────────────
 
-/// Build a lightweight `zc::ImageInfo` from probe data only.
+/// Build a lightweight `zencodec::ImageInfo` from probe data only.
 ///
 /// Does NOT parse the HEIF container or extract ICC/EXIF/XMP/gain map.
 /// Used by `probe()` for cheap header-only metadata.
@@ -1129,7 +1129,7 @@ fn build_image_info_lightweight(pi: &crate::ImageInfo) -> ImageInfo {
     info
 }
 
-/// Build a complete `zc::ImageInfo` with all metadata from a pre-parsed container.
+/// Build a complete `zencodec::ImageInfo` with all metadata from a pre-parsed container.
 ///
 /// Extracts ICC profile, EXIF, XMP, and gain map from the container in a
 /// single pass, avoiding the cost of re-parsing the HEIF container for each.
@@ -1233,8 +1233,8 @@ fn extract_xmp_from_container(
     None
 }
 
-/// Convert a [`zc::LimitExceeded`] to a static error message for [`HeicError::LimitExceeded`].
-fn limit_exceeded_msg(_e: zc::LimitExceeded) -> &'static str {
+/// Convert a [`zencodec::LimitExceeded`] to a static error message for [`HeicError::LimitExceeded`].
+fn limit_exceeded_msg(_e: zencodec::LimitExceeded) -> &'static str {
     "input data size exceeds max_input_bytes"
 }
 
@@ -1278,10 +1278,10 @@ mod tests {
     fn config_creation() {
         let config = HeicDecoderConfig::new();
         assert_eq!(
-            <HeicDecoderConfig as zc::decode::DecoderConfig>::formats(),
+            <HeicDecoderConfig as zencodec::decode::DecoderConfig>::formats(),
             &[ImageFormat::Heic]
         );
-        let descriptors = <HeicDecoderConfig as zc::decode::DecoderConfig>::supported_descriptors();
+        let descriptors = <HeicDecoderConfig as zencodec::decode::DecoderConfig>::supported_descriptors();
         assert!(!descriptors.is_empty());
         assert!(descriptors.contains(&PixelDescriptor::RGB8_SRGB));
         assert!(descriptors.contains(&PixelDescriptor::RGBA8_SRGB));
@@ -1293,7 +1293,7 @@ mod tests {
     fn default_config() {
         let config = HeicDecoderConfig::default();
         assert_eq!(
-            <HeicDecoderConfig as zc::decode::DecoderConfig>::formats(),
+            <HeicDecoderConfig as zencodec::decode::DecoderConfig>::formats(),
             &[ImageFormat::Heic]
         );
         let _ = config;
@@ -1301,7 +1301,7 @@ mod tests {
 
     #[test]
     fn capabilities_reported() {
-        let caps = <HeicDecoderConfig as zc::decode::DecoderConfig>::capabilities();
+        let caps = <HeicDecoderConfig as zencodec::decode::DecoderConfig>::capabilities();
         assert!(caps.icc());
         assert!(caps.exif());
         assert!(caps.xmp());
@@ -1316,14 +1316,14 @@ mod tests {
 
     #[test]
     fn job_creation() {
-        use zc::decode::DecoderConfig as _;
+        use zencodec::decode::DecoderConfig as _;
         let config = HeicDecoderConfig::new();
         let _job = config.job();
     }
 
     #[test]
     fn full_frame_decoder_returns_unsupported() {
-        use zc::decode::{DecodeJob as _, DecoderConfig as _};
+        use zencodec::decode::{DecodeJob as _, DecoderConfig as _};
         let config = HeicDecoderConfig::new();
         let result = config.job().full_frame_decoder(Cow::Borrowed(&[]), &[]);
         assert!(result.is_err());
@@ -1331,7 +1331,7 @@ mod tests {
 
     #[test]
     fn probe_invalid_data() {
-        use zc::decode::{DecodeJob as _, DecoderConfig as _};
+        use zencodec::decode::{DecodeJob as _, DecoderConfig as _};
         let config = HeicDecoderConfig::new();
         let result = config.job().probe(b"not a heic file");
         assert!(result.is_err());
@@ -1519,7 +1519,7 @@ mod tests {
     /// Verify SingleThread decode produces valid output through the zencodec adapter.
     #[test]
     fn single_thread_decode_via_adapter() {
-        use zc::decode::{Decode, DecodeJob as _, DecoderConfig as _};
+        use zencodec::decode::{Decode, DecodeJob as _, DecoderConfig as _};
 
         let path =
             std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into());
@@ -1576,7 +1576,7 @@ mod tests {
 
     #[test]
     fn probe_enforces_max_input_bytes() {
-        use zc::decode::{DecodeJob as _, DecoderConfig as _};
+        use zencodec::decode::{DecodeJob as _, DecoderConfig as _};
 
         let path =
             std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into());
@@ -1601,7 +1601,7 @@ mod tests {
 
     #[test]
     fn probe_allows_within_max_input_bytes() {
-        use zc::decode::{DecodeJob as _, DecoderConfig as _};
+        use zencodec::decode::{DecodeJob as _, DecoderConfig as _};
 
         let path =
             std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into());
@@ -1621,7 +1621,7 @@ mod tests {
 
     #[test]
     fn decoder_enforces_max_input_bytes() {
-        use zc::decode::{DecodeJob as _, DecoderConfig as _};
+        use zencodec::decode::{DecodeJob as _, DecoderConfig as _};
 
         let path =
             std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into());
@@ -1645,7 +1645,7 @@ mod tests {
 
     #[test]
     fn probe_full_enforces_max_input_bytes() {
-        use zc::decode::{DecodeJob as _, DecoderConfig as _};
+        use zencodec::decode::{DecodeJob as _, DecoderConfig as _};
 
         let path =
             std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into());
@@ -1671,7 +1671,7 @@ mod tests {
 
     #[test]
     fn probe_returns_lightweight_info() {
-        use zc::decode::{DecodeJob as _, DecoderConfig as _};
+        use zencodec::decode::{DecodeJob as _, DecoderConfig as _};
 
         let path =
             std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into());
@@ -1708,7 +1708,7 @@ mod tests {
 
     #[test]
     fn probe_full_returns_complete_info() {
-        use zc::decode::{DecodeJob as _, DecoderConfig as _};
+        use zencodec::decode::{DecodeJob as _, DecoderConfig as _};
 
         // Use iPhone test file which has EXIF metadata
         let path =
@@ -1737,7 +1737,7 @@ mod tests {
 
     #[test]
     fn probe_and_probe_full_agree_on_dimensions() {
-        use zc::decode::{DecodeJob as _, DecoderConfig as _};
+        use zencodec::decode::{DecodeJob as _, DecoderConfig as _};
 
         let path =
             std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into());
