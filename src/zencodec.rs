@@ -1,11 +1,11 @@
-//! zencodec-types trait implementations for heic-decoder.
+//! zencodec trait implementations for heic-decoder.
 //!
 //! Provides [`HeicDecoderConfig`] that implements the 4-layer decode trait
-//! hierarchy from zencodec-types, wrapping the native heic-decoder API.
+//! hierarchy from zencodec, wrapping the native heic-decoder API.
 //!
 //! # Trait mapping
 //!
-//! | zencodec-types | heic-decoder adapter |
+//! | zencodec | heic-decoder adapter |
 //! |----------------|----------------------|
 //! | `DecoderConfig` | [`HeicDecoderConfig`] |
 //! | `DecodeJob<'a>` | [`HeicDecodeJob`] |
@@ -85,7 +85,7 @@ static DECODE_DESCRIPTORS: &[PixelDescriptor] = &[
 
 /// HEIC decoder configuration implementing [`zc::decode::DecoderConfig`].
 ///
-/// Wraps [`crate::DecoderConfig`] for use with the zencodec-types trait system.
+/// Wraps [`crate::DecoderConfig`] for use with the zencodec trait system.
 /// HEIC decoding has no tunable parameters, so this is a thin wrapper.
 #[derive(Clone, Debug)]
 pub struct HeicDecoderConfig {
@@ -149,7 +149,7 @@ pub struct HeicDecodeJob<'a> {
 }
 
 impl<'a> HeicDecodeJob<'a> {
-    /// Build native limits from zencodec-types ResourceLimits.
+    /// Build native limits from zencodec ResourceLimits.
     fn native_limits(&self) -> Option<crate::Limits> {
         if !self.limits.has_any() {
             return None;
