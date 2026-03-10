@@ -1314,7 +1314,7 @@ mod tests {
         assert!(caps.exif());
         assert!(caps.xmp());
         assert!(caps.cicp());
-        assert!(caps.cancel());
+        assert!(caps.stop());
         assert!(caps.cheap_probe());
         assert!(caps.native_16bit());
         assert!(caps.native_alpha());
@@ -1349,28 +1349,28 @@ mod tests {
     fn negotiate_no_preference_no_alpha() {
         let available = available_descriptors(false, 8);
         let desc = negotiate_pixel_format(&[], &available);
-        assert_eq!(desc, PixelDescriptor::RGB8_SRGB);
+        assert_eq!(desc, Some(PixelDescriptor::RGB8_SRGB));
     }
 
     #[test]
     fn negotiate_no_preference_with_alpha() {
         let available = available_descriptors(true, 8);
         let desc = negotiate_pixel_format(&[], &available);
-        assert_eq!(desc, PixelDescriptor::RGBA8_SRGB);
+        assert_eq!(desc, Some(PixelDescriptor::RGBA8_SRGB));
     }
 
     #[test]
     fn negotiate_rgba_preference() {
         let available = available_descriptors(false, 8);
         let desc = negotiate_pixel_format(&[PixelDescriptor::RGBA8_SRGB], &available);
-        assert_eq!(desc, PixelDescriptor::RGBA8_SRGB);
+        assert_eq!(desc, Some(PixelDescriptor::RGBA8_SRGB));
     }
 
     #[test]
     fn negotiate_bgra_preference() {
         let available = available_descriptors(false, 8);
         let desc = negotiate_pixel_format(&[PixelDescriptor::BGRA8_SRGB], &available);
-        assert_eq!(desc, PixelDescriptor::BGRA8_SRGB);
+        assert_eq!(desc, Some(PixelDescriptor::BGRA8_SRGB));
     }
 
     #[test]
@@ -1378,7 +1378,7 @@ mod tests {
         let available = available_descriptors(false, 10);
         let desc = negotiate_pixel_format(&[], &available);
         // 16-bit source with no preference → default to 16-bit
-        assert_eq!(desc, PixelDescriptor::RGB16_SRGB);
+        assert_eq!(desc, Some(PixelDescriptor::RGB16_SRGB));
     }
 
     #[test]
@@ -1386,7 +1386,7 @@ mod tests {
         let available = available_descriptors(false, 10);
         let desc = negotiate_pixel_format(&[PixelDescriptor::RGB8_SRGB], &available);
         // Caller explicitly prefers 8-bit
-        assert_eq!(desc, PixelDescriptor::RGB8_SRGB);
+        assert_eq!(desc, Some(PixelDescriptor::RGB8_SRGB));
     }
 
     #[test]
