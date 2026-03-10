@@ -19,7 +19,9 @@ use rgb::{Rgb, Rgba};
 use zencodec::decode::{
     DecodeCapabilities, DecodeOutput, DecodeRowSink, OutputInfo, negotiate_pixel_format,
 };
-use zencodec::{ImageFormat, ImageInfo, Orientation, ResourceLimits, ThreadingPolicy, Unsupported};
+use zencodec::{
+    ImageFormat, ImageInfo, ImageSequence, Orientation, ResourceLimits, ThreadingPolicy, Unsupported,
+};
 use zenpixels::{Cicp, ColorPrimaries, PixelBuffer, PixelDescriptor, TransferFunction};
 
 use crate::error::HeicError;
@@ -1110,7 +1112,10 @@ fn raw_to_pixel_buffer(
 /// Used by `probe()` for cheap header-only metadata.
 fn build_image_info_lightweight(pi: &crate::ImageInfo) -> ImageInfo {
     let mut info = ImageInfo::new(pi.width, pi.height, ImageFormat::Heic)
-        .with_frame_count(1) // HEIC is always single-frame
+        .with_sequence(ImageSequence::Multi {
+            image_count: Some(1),
+            random_access: true,
+        })
         .with_orientation(Orientation::Normal) // Decoder applies transforms
         .with_alpha(pi.has_alpha)
         .with_bit_depth(pi.bit_depth)
@@ -1140,7 +1145,10 @@ fn build_image_info_full(
     height: u32,
 ) -> ImageInfo {
     let mut info = ImageInfo::new(width, height, ImageFormat::Heic)
-        .with_frame_count(1) // HEIC is always single-frame
+        .with_sequence(ImageSequence::Multi {
+            image_count: Some(1),
+            random_access: true,
+        })
         .with_orientation(Orientation::Normal) // Decoder applies transforms
         .with_alpha(pi.has_alpha)
         .with_bit_depth(pi.bit_depth)
@@ -1689,7 +1697,7 @@ mod tests {
         assert_eq!(info.width, 1280);
         assert_eq!(info.height, 854);
         assert_eq!(info.format, ImageFormat::Heic);
-        assert_eq!(info.frame_count, Some(1));
+        assert_eq!(info.frame_count(), Some(1));
 
         // probe() should NOT extract EXIF/XMP/ICC (those require full container parse)
         assert!(
@@ -1756,6 +1764,6 @@ mod tests {
         assert_eq!(light.width, full.width);
         assert_eq!(light.height, full.height);
         assert_eq!(light.format, full.format);
-        assert_eq!(light.frame_count, full.frame_count);
+        assert_eq!(light.frame_count(), full.frame_count());
     }
 }
