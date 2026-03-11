@@ -177,11 +177,11 @@ impl<'a> SliceContext<'a> {
         );
 
         let cabac = CabacDecoder::new(slice_data)?;
-        let (range, offset) = cabac.get_state();
+        let (_range, _offset) = cabac.get_state();
         debug_trace!(
             "DEBUG: CABAC init state: range={}, offset={}",
-            range,
-            offset
+            _range,
+            _offset
         );
 
         // Initialize context models
@@ -292,7 +292,7 @@ impl<'a> SliceContext<'a> {
         self.ctb_x = start_addr % pic_width_in_ctbs;
 
         let mut ctu_count = 0u32;
-        let total_ctus = pic_width_in_ctbs * pic_height_in_ctbs;
+        let _total_ctus = pic_width_in_ctbs * pic_height_in_ctbs;
 
         // WPP: saved context models from CTB column 1 of previous row
         let mut wpp_saved_ctx: Option<[super::cabac::ContextModel; context::NUM_CONTEXTS]> = None;
@@ -318,13 +318,13 @@ impl<'a> SliceContext<'a> {
 
             // DEBUG: Print CTU state periodically
             if ctu_count.is_multiple_of(50) || ctu_count <= 3 {
-                let (range, offset) = self.cabac.get_state();
+                let (_range, _offset) = self.cabac.get_state();
                 debug_trace!(
                     "DEBUG: CTU {} byte={} cabac=({},{}) x={} y={}",
                     ctu_count,
                     byte_pos,
-                    range,
-                    offset,
+                    _range,
+                    _offset,
                     self.ctb_x,
                     self.ctb_y
                 );
@@ -580,7 +580,7 @@ impl<'a> SliceContext<'a> {
             // Decode split_cu_flag
             let flag = self.decode_split_cu_flag(x0, y0, ct_depth)?;
             if self.debug_ctu {
-                let (r, o) = self.cabac.get_state();
+                let (_r, _o) = self.cabac.get_state();
                 debug_trace!(
                     "  CTU37: split_cu_flag at ({},{}) depth={} log2={} → {} (r={},o={})",
                     x0,
@@ -588,8 +588,8 @@ impl<'a> SliceContext<'a> {
                     ct_depth,
                     log2_cb_size,
                     flag,
-                    r,
-                    o
+                    _r,
+                    _o
                 );
             }
             flag
@@ -779,28 +779,28 @@ impl<'a> SliceContext<'a> {
                     core::sync::atomic::AtomicU32::new(0);
                 let count = NXN_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 if count == 0 || x0 < 64 && y0 < 64 {
-                    let (r, o) = self.cabac.get_state();
+                    let (_r, _o) = self.cabac.get_state();
                     debug_trace!(
                         "DEBUG: part_mode at ({},{}) log2={}: {:?} cabac=({},{})",
                         x0,
                         y0,
                         log2_cb_size,
                         pm,
-                        r,
-                        o
+                        _r,
+                        _o
                     );
                 }
             }
             if self.debug_ctu {
-                let (r, o) = self.cabac.get_state();
+                let (_r, _o) = self.cabac.get_state();
                 debug_trace!(
                     "  CTU37: CU at ({},{}) log2={} part_mode={:?} (r={},o={})",
                     x0,
                     y0,
                     log2_cb_size,
                     pm,
-                    r,
-                    o
+                    _r,
+                    _o
                 );
             }
             pm
@@ -823,12 +823,12 @@ impl<'a> SliceContext<'a> {
                 // Single PU covering entire CU
                 let modes = self.decode_intra_prediction(x0, y0, log2_cb_size, true, frame)?;
                 if self.debug_ctu {
-                    let (r, o) = self.cabac.get_state();
+                    let (_r, _o) = self.cabac.get_state();
                     debug_trace!(
                         "  CTU37: After intra_prediction at (1144,120): mode={:?} (r={},o={}) bits={}",
                         modes,
-                        r,
-                        o,
+                        _r,
+                        _o,
                         self.cabac.get_position().2
                     );
                 }
@@ -900,14 +900,14 @@ impl<'a> SliceContext<'a> {
             )?;
 
             if self.debug_ctu {
-                let (r, o) = self.cabac.get_state();
+                let (_r, _o) = self.cabac.get_state();
                 debug_trace!(
                     "  CTU37: After transform_tree at ({},{}) log2={} (r={},o={})",
                     x0,
                     y0,
                     log2_cb_size,
-                    r,
-                    o
+                    _r,
+                    _o
                 );
             }
         }
@@ -1194,14 +1194,14 @@ impl<'a> SliceContext<'a> {
         // Decode and apply luma residuals (adds to prediction already in frame)
         if cbf_luma {
             if debug_tt {
-                let (r, o) = self.cabac.get_state();
+                let (_r, _o) = self.cabac.get_state();
                 debug_trace!(
                     "    TT: decoding luma residual at ({},{}) log2={} (r={},o={})",
                     x0,
                     y0,
                     log2_size,
-                    r,
-                    o
+                    _r,
+                    _o
                 );
             }
             self.decode_and_apply_residual(x0, y0, log2_size, 0, scan_order, frame)?;
@@ -1547,7 +1547,7 @@ impl<'a> SliceContext<'a> {
         &mut self,
         x0: u32,
         y0: u32,
-        log2_size: u8,
+        _log2_size: u8,
         _frame: &DecodedFrame,
     ) -> Result<(IntraPredMode, IntraPredMode)> {
         let intra_luma_mode = self.decode_intra_luma_mode(x0, y0)?;
@@ -1558,7 +1558,7 @@ impl<'a> SliceContext<'a> {
                 "DEBUG: intra_mode at ({},{}) size={}: mode={:?}",
                 x0,
                 y0,
-                1u32 << log2_size,
+                1u32 << _log2_size,
                 intra_luma_mode
             );
         }

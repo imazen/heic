@@ -20,7 +20,8 @@ use zencodec::decode::{
     DecodeCapabilities, DecodeOutput, DecodeRowSink, OutputInfo, negotiate_pixel_format,
 };
 use zencodec::{
-    ImageFormat, ImageInfo, ImageSequence, Orientation, ResourceLimits, ThreadingPolicy, Unsupported,
+    ImageFormat, ImageInfo, ImageSequence, Orientation, ResourceLimits, ThreadingPolicy,
+    Unsupported,
 };
 use zenpixels::{Cicp, ColorPrimaries, PixelBuffer, PixelDescriptor, TransferFunction};
 
@@ -299,8 +300,8 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
 
         // Negotiate output format
         let available = available_descriptors(has_alpha, bit_depth);
-        let negotiated = negotiate_pixel_format(preferred, &available)
-            .expect("pixel format negotiation failed");
+        let negotiated =
+            negotiate_pixel_format(preferred, &available).expect("pixel format negotiation failed");
 
         if is_16bit(negotiated) {
             // 16-bit: full decode, then push rows
@@ -515,8 +516,8 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
 
         // Negotiate output format
         let available = available_descriptors(has_alpha, bit_depth);
-        let negotiated = negotiate_pixel_format(preferred, &available)
-            .expect("pixel format negotiation failed");
+        let negotiated =
+            negotiate_pixel_format(preferred, &available).expect("pixel format negotiation failed");
 
         let (buf, width, height, has_alpha): (PixelBuffer, u32, u32, bool) = if is_16bit(negotiated)
         {
@@ -725,8 +726,8 @@ impl HeicStreamDecoder {
 
         // Non-grid fallback: full decode upfront
         let available = available_descriptors(pi.has_alpha, pi.bit_depth);
-        let negotiated = negotiate_pixel_format(preferred, &available)
-            .expect("pixel format negotiation failed");
+        let negotiated =
+            negotiate_pixel_format(preferred, &available).expect("pixel format negotiation failed");
 
         let pixels: PixelBuffer = if is_16bit(negotiated) {
             let mut req = config.decode_request(data);
@@ -948,8 +949,8 @@ impl HeicStreamDecoder {
 
         // Negotiate 8-bit layout for grid tiles (no alpha, ≤8-bit)
         let available = available_descriptors(false, 8);
-        let negotiated = negotiate_pixel_format(preferred, &available)
-            .expect("pixel format negotiation failed");
+        let negotiated =
+            negotiate_pixel_format(preferred, &available).expect("pixel format negotiation failed");
         let layout = descriptor_to_layout(negotiated);
 
         Ok(Some(GridState {
@@ -1289,7 +1290,8 @@ mod tests {
             <HeicDecoderConfig as zencodec::decode::DecoderConfig>::formats(),
             &[ImageFormat::Heic]
         );
-        let descriptors = <HeicDecoderConfig as zencodec::decode::DecoderConfig>::supported_descriptors();
+        let descriptors =
+            <HeicDecoderConfig as zencodec::decode::DecoderConfig>::supported_descriptors();
         assert!(!descriptors.is_empty());
         assert!(descriptors.contains(&PixelDescriptor::RGB8_SRGB));
         assert!(descriptors.contains(&PixelDescriptor::RGBA8_SRGB));
