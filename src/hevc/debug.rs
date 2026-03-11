@@ -150,7 +150,7 @@ pub fn compare_coeffs(
     ours: &[i16],
     reference: &[i16],
     size: usize,
-    _context: &str,
+    context: &str,
 ) -> Vec<(usize, usize, i16, i16)> {
     let mut diffs = Vec::new();
 

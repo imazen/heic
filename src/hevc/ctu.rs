@@ -292,7 +292,7 @@ impl<'a> SliceContext<'a> {
         self.ctb_x = start_addr % pic_width_in_ctbs;
 
         let mut ctu_count = 0u32;
-        let _total_ctus = pic_width_in_ctbs * pic_height_in_ctbs;
+        let total_ctus = pic_width_in_ctbs * pic_height_in_ctbs;
 
         // WPP: saved context models from CTB column 1 of previous row
         let mut wpp_saved_ctx: Option<[super::cabac::ContextModel; context::NUM_CONTEXTS]> = None;
