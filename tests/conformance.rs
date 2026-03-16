@@ -185,6 +185,15 @@ fn decode_with_ours(bitstream: &Path) -> Result<Vec<Vec<u16>>, String> {
     let frames = decoder
         .decode_annex_b(&data)
         .map_err(|e| format!("decode: {e}"))?;
+    // Log some frame stats
+    if !frames.is_empty() {
+        let f0 = &frames[0];
+        let uninit_f0 = f0.y_plane.iter().filter(|&&v| v == u16::MAX).count();
+        eprintln!(
+            "  Frame 0: {}x{} coded, {}x{} cropped, uninit_in_full={}",
+            f0.width, f0.height, f0.cropped_width(), f0.cropped_height(), uninit_f0
+        );
+    }
     // Extract cropped Y plane (conformance window applied)
     Ok(frames
         .into_iter()

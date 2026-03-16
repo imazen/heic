@@ -898,6 +898,7 @@ impl<'a> SliceContext<'a> {
             // Resolve merge candidate → real motion vectors
             let motion =
                 self.resolve_motion(&coding, x0, y0, cb_size, cb_size, 0, PartMode::Part2Nx2N);
+
             self.store_mv_info(x0, y0, cb_size, cb_size, motion);
 
             // Apply motion compensation (prediction → frame)
@@ -1264,16 +1265,25 @@ impl<'a> SliceContext<'a> {
             // For 4:4:4, each child handles its own chroma — skip this.
             if log2_size == 3 && frame.chroma_format != 3 {
                 let sis = self.sps.strong_intra_smoothing_enabled_flag;
-                let scan_order = residual::get_scan_order(2, intra_chroma_mode.as_u8(), 1);
+                let is_intra_cu = self.get_pred_mode_at(x0, y0) == PredMode::Intra;
+                let scan_order = if is_intra_cu {
+                    residual::get_scan_order(2, intra_chroma_mode.as_u8(), 1)
+                } else {
+                    ScanOrder::Diagonal
+                };
 
-                // Predict and apply Cb
-                intra::predict_intra(frame, x0 / 2, y0 / 2, 2, intra_chroma_mode, 1, sis);
+                // Predict Cb (intra only)
+                if is_intra_cu {
+                    intra::predict_intra(frame, x0 / 2, y0 / 2, 2, intra_chroma_mode, 1, sis);
+                }
                 if cbf_cb {
                     self.decode_and_apply_residual(x0 / 2, y0 / 2, 2, 1, scan_order, frame)?;
                 }
 
-                // Predict and apply Cr
-                intra::predict_intra(frame, x0 / 2, y0 / 2, 2, intra_chroma_mode, 2, sis);
+                // Predict Cr (intra only)
+                if is_intra_cu {
+                    intra::predict_intra(frame, x0 / 2, y0 / 2, 2, intra_chroma_mode, 2, sis);
+                }
                 if cbf_cr {
                     self.decode_and_apply_residual(x0 / 2, y0 / 2, 2, 2, scan_order, frame)?;
                 }
@@ -1316,10 +1326,10 @@ impl<'a> SliceContext<'a> {
         frame: &mut DecodedFrame,
     ) -> Result<()> {
         let debug_tt = self.debug_ctu;
+        let is_intra_cu = self.get_pred_mode_at(x0, y0) == PredMode::Intra;
 
         // Decode cbf_luma - per H.265 spec 7.3.8.6:
         // cbf_luma is coded if: CuPredMode == MODE_INTRA || trafoDepth != 0 || cbf_cb || cbf_cr
-        // For INTRA mode (all HEIC images), cbf_luma is ALWAYS coded
         // Context: offset 0 if trafo_depth > 0, offset 1 if trafo_depth == 0
         let ctx_offset = if trafo_depth == 0 { 1 } else { 0 };
         let ctx_idx = context::CBF_LUMA + ctx_offset;
@@ -1361,10 +1371,16 @@ impl<'a> SliceContext<'a> {
         let sis = self.sps.strong_intra_smoothing_enabled_flag;
 
         // Predict luma at TU level BEFORE residual application
-        // This ensures each TU reads reconstructed neighbors from prior TUs
-        intra::predict_intra(frame, x0, y0, log2_size, actual_luma_mode, 0, sis);
+        // Only for intra CUs — inter CUs already have MC prediction in the frame
+        if is_intra_cu {
+            intra::predict_intra(frame, x0, y0, log2_size, actual_luma_mode, 0, sis);
+        }
 
-        let scan_order = residual::get_scan_order(log2_size, actual_luma_mode.as_u8(), 0);
+        let scan_order = if is_intra_cu {
+            residual::get_scan_order(log2_size, actual_luma_mode.as_u8(), 0)
+        } else {
+            ScanOrder::Diagonal // Inter always uses diagonal scan
+        };
 
         // Decode and apply luma residuals (adds to prediction already in frame)
         if cbf_luma {
@@ -1400,11 +1416,16 @@ impl<'a> SliceContext<'a> {
             } else {
                 (log2_size - 1, x0 / 2, y0 / 2)
             };
-            let chroma_scan_order =
-                residual::get_scan_order(chroma_log2_size, intra_chroma_mode.as_u8(), 1);
+            let chroma_scan_order = if is_intra_cu {
+                residual::get_scan_order(chroma_log2_size, intra_chroma_mode.as_u8(), 1)
+            } else {
+                ScanOrder::Diagonal
+            };
 
-            // Predict and apply Cb
-            intra::predict_intra(frame, cx, cy, chroma_log2_size, intra_chroma_mode, 1, sis);
+            // Predict Cb (intra only — inter MC already wrote prediction)
+            if is_intra_cu {
+                intra::predict_intra(frame, cx, cy, chroma_log2_size, intra_chroma_mode, 1, sis);
+            }
             if cbf_cb {
                 self.decode_and_apply_residual(
                     cx,
@@ -1416,8 +1437,10 @@ impl<'a> SliceContext<'a> {
                 )?;
             }
 
-            // Predict and apply Cr
-            intra::predict_intra(frame, cx, cy, chroma_log2_size, intra_chroma_mode, 2, sis);
+            // Predict Cr (intra only)
+            if is_intra_cu {
+                intra::predict_intra(frame, cx, cy, chroma_log2_size, intra_chroma_mode, 2, sis);
+            }
             if cbf_cr {
                 self.decode_and_apply_residual(
                     cx,
