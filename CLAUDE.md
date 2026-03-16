@@ -196,8 +196,7 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 
 ## Known Limitations
 
-- Only I-slices supported (sufficient for HEIC still images)
-- No inter prediction (P/B slices)
+- Inter prediction (P/B slices): syntax parsing complete, MC/candidate derivation implemented, decode pipeline wiring in progress (branch: `inter-prediction`)
 - 4:4:4 chroma: decodes correctly (61.9dB), but no SIMD color conversion path (uses scalar)
 
 ## Known Bugs
@@ -219,14 +218,18 @@ src/
     ├── mod.rs       # Main decode entry point
     ├── bitstream.rs # NAL unit parsing, BitstreamReader
     ├── params.rs    # VPS, SPS, PPS
-    ├── slice.rs     # Slice header parsing
-    ├── ctu.rs       # CTU/CU decoding, SliceContext
+    ├── slice.rs     # Slice header parsing (I/P/B)
+    ├── ctu.rs       # CTU/CU decoding, SliceContext (intra + inter syntax)
     ├── intra.rs     # Intra prediction (35 modes)
+    ├── inter.rs     # Inter prediction types, merge/AMVP candidate derivation
+    ├── mc.rs        # Motion compensation (quarter-pel luma, eighth-pel chroma)
+    ├── refpic.rs    # Reference picture set parsing, POC derivation, list construction
+    ├── dpb.rs       # Decoded picture buffer management
     ├── cabac.rs     # CABAC decoder, context tables
     ├── residual.rs  # Transform coefficient parsing
     ├── transform.rs # Inverse DCT/DST (scalar + incant! dispatch)
     ├── transform_simd.rs # SIMD transforms: IDST 4x4, IDCT 8/16/32, residual add, dequantize
-    ├── deblock.rs   # Deblocking filter (H.265 8.7.2)
+    ├── deblock.rs   # Deblocking filter (H.265 8.7.2, inter-aware bS)
     ├── sao.rs       # Sample Adaptive Offset (H.265 8.7.3)
     ├── debug.rs     # CABAC tracker, invariant checks
     ├── picture.rs   # Frame buffer, YCbCr→RGB conversion, deblock metadata
