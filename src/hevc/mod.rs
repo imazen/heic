@@ -233,6 +233,23 @@ pub struct VideoDecoder {
     prev_poc_msb: i32,
     /// POC of the last decoded frame (for display order sorting)
     last_decoded_poc: i32,
+    /// Current picture being decoded (for multi-slice pictures)
+    current_pic: Option<CurrentPicture>,
+}
+
+/// State for a picture being decoded across multiple slices
+#[allow(dead_code)]
+struct CurrentPicture {
+    frame: DecodedFrame,
+    poc: i32,
+    slice_type: slice::SliceType,
+    /// Accumulated slice contexts for deblocking/SAO
+    pred_mode_map: Vec<slice::PredMode>,
+    mv_info: Vec<inter::PbMotion>,
+    cbf_map: Vec<bool>,
+    cbf_map_stride: u32,
+    pu_stride: u32,
+    min_pu_size: u32,
 }
 
 impl VideoDecoder {
@@ -245,6 +262,7 @@ impl VideoDecoder {
             prev_poc_lsb: 0,
             prev_poc_msb: 0,
             last_decoded_poc: 0,
+            current_pic: None,
         }
     }
 
@@ -270,38 +288,90 @@ impl VideoDecoder {
         }
     }
 
-    /// Decode a slice NAL unit
+    /// Finish the current picture: insert into DPB, return frame + POC
+    fn finish_current_picture(&mut self) -> Option<(i32, DecodedFrame)> {
+        let pic = self.current_pic.take()?;
+        if let Some(sps) = &self.sps {
+            let min_pu = ((1u32 << sps.log2_min_cb_size()) / 2).max(1);
+            let mut entry = DpbEntry::new(clone_frame_for_ref(&pic.frame), pic.poc, min_pu);
+            entry.mv_info = pic.mv_info;
+            entry.pred_mode_map = pic.pred_mode_map;
+            entry.is_output = true;
+            self.dpb.insert(entry);
+        }
+        Some((pic.poc, pic.frame))
+    }
+
+    /// Decode a slice NAL unit. Returns a frame only when a NEW picture starts
+    /// (the previously accumulated picture is returned).
     fn decode_slice_nal(
         &mut self,
         nal: &bitstream::NalUnit<'_>,
     ) -> Result<Option<DecodedFrame>> {
+        // Clone SPS/PPS to avoid borrow conflicts with &mut self
         let sps = self
             .sps
-            .as_ref()
+            .clone()
             .ok_or(HevcError::MissingParameterSet("SPS"))?;
         let pps = self
             .pps
-            .as_ref()
+            .clone()
             .ok_or(HevcError::MissingParameterSet("PPS"))?;
 
-        let parse_result = slice::SliceHeader::parse(nal, sps, pps)?;
+        let parse_result = slice::SliceHeader::parse(nal, &sps, &pps)?;
         let slice_header = parse_result.header;
         let data_offset = parse_result.data_offset;
 
-        // Derive POC
+        // When a new picture starts, finish the previous one
+        let mut output_frame = None;
         let is_irap = nal.nal_type.is_irap();
-        let (curr_poc, poc_lsb, poc_msb) = refpic::derive_poc(
-            slice_header.slice_pic_order_cnt_lsb,
-            sps.log2_max_pic_order_cnt_lsb_minus4 + 4,
-            self.prev_poc_lsb,
-            self.prev_poc_msb,
-            is_irap,
-            false,
-        );
 
-        // IRAP: flush DPB
-        if is_irap {
-            self.dpb.flush();
+        let curr_poc;
+        if slice_header.first_slice_segment_in_pic_flag {
+            // Finish previous picture
+            if let Some((poc, frame)) = self.finish_current_picture() {
+                output_frame = Some(frame);
+                self.last_decoded_poc = poc;
+            }
+
+            // Derive POC for new picture
+            let (poc, lsb, msb) = refpic::derive_poc(
+                slice_header.slice_pic_order_cnt_lsb,
+                sps.log2_max_pic_order_cnt_lsb_minus4 + 4,
+                self.prev_poc_lsb,
+                self.prev_poc_msb,
+                is_irap,
+                false,
+            );
+            curr_poc = poc;
+            self.prev_poc_lsb = lsb;
+            self.prev_poc_msb = msb;
+
+            // IRAP: flush DPB
+            if is_irap {
+                self.dpb.flush();
+            }
+
+            // Create new frame
+            let frame = create_frame(&sps);
+            let min_pu = ((1u32 << sps.log2_min_cb_size()) / 2).max(1);
+            let pu_stride = sps.pic_width_in_luma_samples.div_ceil(min_pu);
+            let pu_count =
+                (pu_stride * sps.pic_height_in_luma_samples.div_ceil(min_pu)) as usize;
+            self.current_pic = Some(CurrentPicture {
+                frame,
+                poc: curr_poc,
+                slice_type: slice_header.slice_type,
+                pred_mode_map: alloc::vec![slice::PredMode::Intra; pu_count],
+                mv_info: alloc::vec![inter::PbMotion::UNAVAILABLE; pu_count],
+                cbf_map: alloc::vec![false; (sps.pic_width_in_luma_samples.div_ceil(4) * sps.pic_height_in_luma_samples.div_ceil(4)) as usize],
+                cbf_map_stride: sps.pic_width_in_luma_samples.div_ceil(4),
+                pu_stride,
+                min_pu_size: min_pu,
+            });
+        } else {
+            // Continuation slice: use current picture's POC
+            curr_poc = self.current_pic.as_ref().map_or(0, |p| p.poc);
         }
 
         // Build reference picture lists
@@ -334,15 +404,12 @@ impl VideoDecoder {
             RefPicLists::default()
         };
 
-        // Collect reference frames from DPB for the slice context
+        // Collect reference frames from DPB
         let ref_frames: Vec<Option<DecodedFrame>> = if !slice_header.slice_type.is_intra() {
-            // We need to clone frames from the DPB for the duration of decoding.
-            // The current frame lives outside the DPB, so no aliasing.
             let max_dpb_slot = self.dpb.capacity();
             let mut frames = Vec::with_capacity(max_dpb_slot);
             for slot in 0..max_dpb_slot {
                 if let Some(entry) = self.dpb.get(slot) {
-                    // Clone the frame planes for MC access during decode
                     frames.push(Some(clone_frame_for_ref(&entry.frame)));
                 } else {
                     frames.push(None);
@@ -353,14 +420,10 @@ impl VideoDecoder {
             Vec::new()
         };
 
-        // Create frame
-        let mut frame = create_frame(sps);
-
         // Build collocated frame for temporal MVP
         let collocated_data = if slice_header.slice_temporal_mvp_enabled_flag
             && !slice_header.slice_type.is_intra()
         {
-            // Determine collocated reference
             let col_list = if slice_header.slice_type == slice::SliceType::B
                 && !slice_header.collocated_from_l0_flag
             {
@@ -385,7 +448,7 @@ impl VideoDecoder {
                         pu_stride: entry.mv_stride,
                         min_pu_size: min_pu,
                         poc: entry.poc,
-                        ref_poc: ref_pic_lists.poc, // approximate: use current slice's ref POCs
+                        ref_poc: ref_pic_lists.poc,
                     }
                 })
             } else {
@@ -395,33 +458,34 @@ impl VideoDecoder {
             None
         };
 
-        // Decode slice
+        // Decode slice into current picture's frame
+        let pic = self
+            .current_pic
+            .as_mut()
+            .ok_or(HevcError::DecodingError("no current picture"))?;
         let slice_data = &nal.payload[data_offset..];
-        let mut ctx = ctu::SliceContext::new(sps, pps, &slice_header, slice_data)?;
+        let mut ctx = ctu::SliceContext::new(&sps, &pps, &slice_header, slice_data)?;
         ctx.curr_poc = curr_poc;
         ctx.ref_pic_lists = ref_pic_lists;
         ctx.ref_frames = ref_frames;
         ctx.collocated_data = collocated_data;
 
-        ctx.decode_slice(&mut frame)?;
+        ctx.decode_slice(&mut pic.frame)?;
 
-        // Apply deblocking
-        apply_loop_filters(&slice_header, sps, pps, &ctx, &mut frame);
+        // Apply loop filters
+        apply_loop_filters(&slice_header, &sps, &pps, &ctx, &mut pic.frame);
 
-        // Update POC state
-        self.prev_poc_lsb = poc_lsb;
-        self.prev_poc_msb = poc_msb;
-        self.last_decoded_poc = curr_poc;
+        // Copy motion/pred_mode data from slice context to picture
+        let pm_len = pic.pred_mode_map.len().min(ctx.pred_mode_map.len());
+        pic.pred_mode_map[..pm_len].copy_from_slice(&ctx.pred_mode_map[..pm_len]);
+        let mv_len = pic.mv_info.len().min(ctx.mv_info.len());
+        pic.mv_info[..mv_len].copy_from_slice(&ctx.mv_info[..mv_len]);
 
-        // Insert into DPB for future reference
-        let min_pu = ((1u32 << sps.log2_min_cb_size()) / 2).max(1);
-        let mut entry = DpbEntry::new(clone_frame_for_ref(&frame), curr_poc, min_pu);
-        entry.mv_info = ctx.mv_info;
-        entry.pred_mode_map = ctx.pred_mode_map;
-        entry.is_output = true;
-        self.dpb.insert(entry);
+        if !slice_header.slice_type.is_intra() {
+            pic.slice_type = slice_header.slice_type;
+        }
 
-        Ok(Some(frame))
+        Ok(output_frame)
     }
 
     /// Decode an entire Annex B bitstream, returning all decoded frames in **display order** (by POC).
@@ -435,6 +499,10 @@ impl VideoDecoder {
                 frames.push((self.last_decoded_poc, frame));
             }
         }
+        // Flush the last picture
+        if let Some((poc, frame)) = self.finish_current_picture() {
+            frames.push((poc, frame));
+        }
 
         // Sort by POC to produce display order
         frames.sort_by_key(|(poc, _)| *poc);
@@ -443,6 +511,7 @@ impl VideoDecoder {
 
     /// Flush: return any remaining pictures and clear the DPB
     pub fn flush(&mut self) {
+        self.current_pic = None;
         self.dpb.clear();
         self.prev_poc_lsb = 0;
         self.prev_poc_msb = 0;
