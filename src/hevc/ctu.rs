@@ -148,8 +148,8 @@ pub struct SliceContext<'a> {
     /// Intra luma mode map (indexed by min_pu_size grid, stores IntraPredMode as u8)
     /// min_pu_size = min_cb_size / 2, to support NxN PU resolution
     intra_mode_map: Vec<u8>,
-    /// Width of intra_mode_map in min_pu_size units
-    intra_mode_map_stride: u32,
+    /// Width of intra_mode_map in min_pu_size units (also used as PU map stride)
+    pub intra_mode_map_stride: u32,
     /// Intra chroma mode map (indexed by min_pu_size grid, stores IntraPredMode as u8)
     intra_chroma_mode_map: Vec<u8>,
     /// Current CU base position (set at decode_coding_unit start)
@@ -177,15 +177,13 @@ pub struct SliceContext<'a> {
 
     // -- Inter prediction state --
     /// Prediction mode map at min_pu_size granularity (Intra/Inter/Skip)
-    pred_mode_map: Vec<PredMode>,
+    pub pred_mode_map: Vec<PredMode>,
     /// Motion vector info at min_pu_size granularity
-    mv_info: Vec<PbMotion>,
-    /// CBF (coded block flag) map at 4x4 granularity for deblocking boundary strength (Phase 6)
-    #[allow(dead_code)]
-    cbf_map: Vec<bool>,
+    pub mv_info: Vec<PbMotion>,
+    /// CBF (coded block flag) map at 4x4 granularity for deblocking boundary strength
+    pub cbf_map: Vec<bool>,
     /// Stride of cbf_map (width / 4)
-    #[allow(dead_code)]
-    cbf_map_stride: u32,
+    pub cbf_map_stride: u32,
 }
 
 impl<'a> SliceContext<'a> {
@@ -1771,7 +1769,7 @@ impl<'a> SliceContext<'a> {
     }
 
     /// Get min PU size (= min_cb_size / 2, at least 1)
-    fn min_pu_size(&self) -> u32 {
+    pub fn min_pu_size(&self) -> u32 {
         ((1u32 << self.sps.log2_min_cb_size()) / 2).max(1)
     }
 
@@ -1912,8 +1910,8 @@ impl<'a> SliceContext<'a> {
         }
     }
 
-    /// Store CBF (coded block flag) for a TU region at 4x4 granularity (Phase 6)
-    #[allow(dead_code)]
+    /// Store CBF (coded block flag) for a TU region at 4x4 granularity
+    #[allow(dead_code)] // Called when inter decode pipeline is wired up
     fn store_cbf(&mut self, x0: u32, y0: u32, size: u32, has_coeffs: bool) {
         let bx = x0 / 4;
         let by = y0 / 4;

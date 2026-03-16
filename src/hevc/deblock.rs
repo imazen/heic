@@ -1,9 +1,12 @@
 //! Deblocking filter (H.265 Section 8.7.2)
 //!
 //! Applies strong/weak filtering at CU and TU boundaries to reduce blocking artifacts.
-//! For I-slices (HEIC still images), all boundaries have bS=2 since both sides are intra-coded.
+//! For I-slices, all boundaries have bS=2. For P/B slices, bS depends on
+//! prediction mode, reference pictures, and motion vector differences.
 
+use super::inter::PbMotion;
 use super::picture::{DEBLOCK_FLAG_HORIZ, DEBLOCK_FLAG_VERT, DecodedFrame};
+use super::slice::PredMode;
 
 /// Beta prime values for deblocking filter (Table 8-12)
 /// Index 0-51 maps QP to beta prime threshold
@@ -25,6 +28,94 @@ static TC_PRIME: [u16; 54] = [
     14, 16, 18, 20, 22, 24,
 ];
 
+/// Compute boundary strength for an edge (H.265 8.7.2.4)
+///
+/// For I-slices (inter_ctx is None), bS=2 always.
+/// For P/B slices, bS depends on prediction mode, ref pics, and MVs.
+fn compute_bs(x: u32, y: u32, vertical: bool, inter_ctx: &Option<&InterDeblockCtx<'_>>) -> i32 {
+    let ctx = match inter_ctx {
+        Some(c) => c,
+        None => return 2, // I-slice: always bS=2
+    };
+
+    // Get positions on P side (before boundary) and Q side (at boundary)
+    let (px, py, qx, qy) = if vertical {
+        (x.wrapping_sub(1), y, x, y)
+    } else {
+        (x, y.wrapping_sub(1), x, y)
+    };
+
+    // Get prediction modes
+    let get_pred = |sx: u32, sy: u32| -> PredMode {
+        let idx = (sy / ctx.min_pu_size * ctx.pu_stride + sx / ctx.min_pu_size) as usize;
+        if idx < ctx.pred_mode.len() {
+            ctx.pred_mode[idx]
+        } else {
+            PredMode::Intra
+        }
+    };
+
+    let pred_p = get_pred(px, py);
+    let pred_q = get_pred(qx, qy);
+
+    // bS=2: either side is intra
+    if pred_p == PredMode::Intra || pred_q == PredMode::Intra {
+        return 2;
+    }
+
+    // Check CBF (non-zero coefficients at this TU boundary)
+    let get_cbf = |sx: u32, sy: u32| -> bool {
+        let idx = (sy / 4 * ctx.cbf_map_stride + sx / 4) as usize;
+        if idx < ctx.cbf_map.len() {
+            ctx.cbf_map[idx]
+        } else {
+            false
+        }
+    };
+
+    if get_cbf(px, py) || get_cbf(qx, qy) {
+        return 2;
+    }
+
+    // bS=1: different reference pictures or MV difference >= 1 integer pel (4 quarter-pel)
+    let get_mv = |sx: u32, sy: u32| -> PbMotion {
+        let idx = (sy / ctx.min_pu_size * ctx.pu_stride + sx / ctx.min_pu_size) as usize;
+        if idx < ctx.mv_info.len() {
+            ctx.mv_info[idx]
+        } else {
+            PbMotion::UNAVAILABLE
+        }
+    };
+
+    let mv_p = get_mv(px, py);
+    let mv_q = get_mv(qx, qy);
+
+    // Different number of active predictions
+    let count_p = mv_p.pred_flag[0] as u8 + mv_p.pred_flag[1] as u8;
+    let count_q = mv_q.pred_flag[0] as u8 + mv_q.pred_flag[1] as u8;
+    if count_p != count_q {
+        return 1;
+    }
+
+    // Different reference indices
+    if mv_p.ref_idx != mv_q.ref_idx {
+        return 1;
+    }
+
+    // MV difference >= 4 quarter-pel (1 integer pel) in any component
+    for list in 0..2 {
+        if mv_p.pred_flag[list] {
+            let dx = (mv_p.mv[list].x as i32 - mv_q.mv[list].x as i32).abs();
+            let dy = (mv_p.mv[list].y as i32 - mv_q.mv[list].y as i32).abs();
+            if dx >= 4 || dy >= 4 {
+                return 1;
+            }
+        }
+    }
+
+    0 // bS=0: no filtering needed
+}
+
 /// Chroma QP mapping table (Table 8-10) for indices 30-42
 #[rustfmt::skip]
 static CHROMA_QP_TABLE: [i32; 13] = [
@@ -42,17 +133,35 @@ fn chroma_qp_mapping(qp_i: i32) -> i32 {
     }
 }
 
+/// Optional inter prediction context for boundary strength derivation
+pub struct InterDeblockCtx<'a> {
+    /// Prediction mode map (min_pu granularity)
+    pub pred_mode: &'a [PredMode],
+    /// Motion vector info (min_pu granularity)
+    pub mv_info: &'a [PbMotion],
+    /// PU map stride
+    pub pu_stride: u32,
+    /// Minimum PU size in luma samples
+    pub min_pu_size: u32,
+    /// CBF map at 4x4 granularity (true = has non-zero coefficients)
+    pub cbf_map: &'a [bool],
+    /// CBF map stride (width / 4)
+    pub cbf_map_stride: u32,
+}
+
 /// Apply the deblocking filter to a decoded frame.
 ///
 /// `beta_offset` and `tc_offset` come from slice header (slice_beta_offset_div2 * 2
 /// and slice_tc_offset_div2 * 2).
 /// `cb_qp_offset` and `cr_qp_offset` come from PPS (pps_cb_qp_offset / pps_cr_qp_offset).
+/// `inter_ctx` is None for I-slices (all bS=2) and Some for P/B slices.
 pub fn apply_deblocking_filter(
     frame: &mut DecodedFrame,
     beta_offset: i32,
     tc_offset: i32,
     cb_qp_offset: i32,
     cr_qp_offset: i32,
+    inter_ctx: Option<&InterDeblockCtx<'_>>,
 ) {
     let width = frame.width;
     let height = frame.height;
@@ -77,7 +186,10 @@ pub fn apply_deblocking_filter(
                     qp_q
                 };
 
-                filter_edge_luma(frame, x, y, true, qp_p, qp_q, beta_offset, tc_offset);
+                let bs = compute_bs(x, y, true, &inter_ctx);
+                if bs > 0 {
+                    filter_edge_luma(frame, x, y, true, qp_p, qp_q, beta_offset, tc_offset, bs);
+                }
             }
             y += 4;
         }
@@ -103,16 +215,19 @@ pub fn apply_deblocking_filter(
                     qp_q
                 };
 
-                filter_edge_luma(frame, x, y, false, qp_p, qp_q, beta_offset, tc_offset);
+                let bs = compute_bs(x, y, false, &inter_ctx);
+                if bs > 0 {
+                    filter_edge_luma(frame, x, y, false, qp_p, qp_q, beta_offset, tc_offset, bs);
+                }
             }
             x += 4;
         }
         y += 8;
     }
 
-    // Chroma deblocking (only for bS=2, which is all edges for I-slices)
+    // Chroma deblocking (only at bS=2 boundaries)
     if frame.chroma_format > 0 {
-        apply_chroma_deblocking(frame, tc_offset, cb_qp_offset, cr_qp_offset);
+        apply_chroma_deblocking(frame, tc_offset, cb_qp_offset, cr_qp_offset, &inter_ctx);
     }
 }
 
@@ -132,12 +247,10 @@ fn filter_edge_luma(
     qp_q: i32,
     beta_offset: i32,
     tc_offset: i32,
+    bs: i32,
 ) {
     let bit_depth = frame.bit_depth as i32;
     let max_val = (1i32 << bit_depth) - 1;
-
-    // For I-slices, bS is always 2 at boundaries
-    let bs = 2i32;
 
     // Compute thresholds
     let qp_l = (qp_q + qp_p + 1) >> 1;
@@ -304,6 +417,7 @@ fn apply_chroma_deblocking(
     tc_offset: i32,
     cb_qp_offset: i32,
     cr_qp_offset: i32,
+    inter_ctx: &Option<&InterDeblockCtx<'_>>,
 ) {
     let width = frame.width;
     let height = frame.height;
@@ -344,6 +458,13 @@ fn apply_chroma_deblocking(
             if idx < frame.deblock_flags.len()
                 && (frame.deblock_flags[idx] & DEBLOCK_FLAG_VERT) != 0
             {
+                // Chroma only filters at bS=2
+                let bs = compute_bs(x, y, true, inter_ctx);
+                if bs < 2 {
+                    y += y_step_vert;
+                    continue;
+                }
+
                 let qp_q = frame.qp_map[idx] as i32;
                 let qp_p = if bx > 0 {
                     frame.qp_map[(by * frame.deblock_stride + bx - 1) as usize] as i32
@@ -414,6 +535,12 @@ fn apply_chroma_deblocking(
             if idx < frame.deblock_flags.len()
                 && (frame.deblock_flags[idx] & DEBLOCK_FLAG_HORIZ) != 0
             {
+                let bs = compute_bs(x, y, false, inter_ctx);
+                if bs < 2 {
+                    x += x_step_horiz;
+                    continue;
+                }
+
                 let qp_q = frame.qp_map[idx] as i32;
                 let qp_p = if by > 0 {
                     frame.qp_map[((by - 1) * frame.deblock_stride + bx) as usize] as i32

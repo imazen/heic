@@ -246,7 +246,27 @@ fn decode_slice(
         let tc_offset = slice_header.slice_tc_offset_div2 as i32 * 2;
         let cb_qp_offset = pps.pps_cb_qp_offset as i32;
         let cr_qp_offset = pps.pps_cr_qp_offset as i32;
-        deblock::apply_deblocking_filter(frame, beta_offset, tc_offset, cb_qp_offset, cr_qp_offset);
+        // For I-slices, pass None (all bS=2). For P/B, pass inter context.
+        let inter_ctx = if !slice_header.slice_type.is_intra() {
+            Some(deblock::InterDeblockCtx {
+                pred_mode: &ctx.pred_mode_map,
+                mv_info: &ctx.mv_info,
+                pu_stride: ctx.intra_mode_map_stride,
+                min_pu_size: ctx.min_pu_size(),
+                cbf_map: &ctx.cbf_map,
+                cbf_map_stride: ctx.cbf_map_stride,
+            })
+        } else {
+            None
+        };
+        deblock::apply_deblocking_filter(
+            frame,
+            beta_offset,
+            tc_offset,
+            cb_qp_offset,
+            cr_qp_offset,
+            inter_ctx.as_ref(),
+        );
     }
 
     // 6. Apply SAO (Sample Adaptive Offset)
