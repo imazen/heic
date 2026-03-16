@@ -196,7 +196,7 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 
 ## Known Limitations
 
-- Inter prediction (P/B slices): syntax parsing complete, MC/candidate derivation implemented, decode pipeline wiring in progress (branch: `inter-prediction`)
+- Inter prediction (P/B slices): full pipeline implemented on `inter-prediction` branch — syntax parsing, merge/AMVP candidate derivation, temporal MVP, scalar MC, DPB management, VideoDecoder API. Needs real-world P/B stream testing and SIMD MC (Phase 7).
 - 4:4:4 chroma: decodes correctly (61.9dB), but no SIMD color conversion path (uses scalar)
 
 ## Known Bugs
