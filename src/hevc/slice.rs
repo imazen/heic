@@ -5,6 +5,7 @@
 
 use super::bitstream::{BitstreamReader, NalUnit};
 use super::params::{Pps, Sps};
+use super::refpic;
 use crate::error::HevcError;
 
 type Result<T> = core::result::Result<T, HevcError>;
@@ -221,6 +222,13 @@ pub struct SliceHeader {
     /// Number of entry point offsets (for tiles/WPP)
     pub num_entry_point_offsets: u32,
 
+    /// Active short-term RPS index (into SPS short_term_rps, or inline)
+    pub short_term_ref_pic_set_idx: u8,
+    /// Inline short-term RPS parsed from slice header (if not from SPS)
+    pub inline_short_term_rps: Option<refpic::ShortTermRefPicSet>,
+    /// Temporal MVP enabled flag (per-slice)
+    pub slice_temporal_mvp_enabled_flag: bool,
+
     /// Derived: SliceQPY = 26 + pps.init_qp_minus26 + slice_qp_delta
     pub slice_qp_y: i32,
 }
@@ -307,10 +315,63 @@ impl SliceHeader {
             0
         };
 
-        // Skip short-term and long-term ref pic set parsing for I-slices in still images
-        // These are not needed for single-frame HEIC decoding
+        // Parse short-term and long-term reference picture sets
+        let mut short_term_ref_pic_set_idx = 0u8;
+        let mut inline_short_term_rps = None;
+        let mut slice_temporal_mvp_enabled_flag = false;
+
         if !nal.nal_type.is_idr() {
-            skip_ref_pic_set(&mut reader, sps)?;
+            let short_term_ref_pic_set_sps_flag = reader.read_bit()? != 0;
+
+            if !short_term_ref_pic_set_sps_flag {
+                // Parse inline short-term ref pic set (index = num_short_term_ref_pic_sets)
+                let rps = refpic::parse_short_term_rps(
+                    &mut reader,
+                    sps.num_short_term_ref_pic_sets,
+                    sps.num_short_term_ref_pic_sets,
+                    &sps.short_term_rps,
+                )?;
+                inline_short_term_rps = Some(rps);
+                short_term_ref_pic_set_idx = sps.num_short_term_ref_pic_sets;
+            } else if sps.num_short_term_ref_pic_sets > 1 {
+                let bits = ceil_log2(sps.num_short_term_ref_pic_sets as u32);
+                short_term_ref_pic_set_idx = reader.read_bits(bits)? as u8;
+            }
+
+            // Long-term ref pics
+            if sps.long_term_ref_pics_present_flag {
+                let num_lt_sps = sps.long_term_ref_pics_sps.lt_ref_pic_poc_lsb.len();
+                let num_long_term_sps = if num_lt_sps > 0 {
+                    reader.read_ue()?
+                } else {
+                    0
+                };
+                let num_long_term_pics = reader.read_ue()?;
+
+                let poc_bits = sps.log2_max_pic_order_cnt_lsb_minus4 + 4;
+
+                for i in 0..(num_long_term_sps + num_long_term_pics) {
+                    if i < num_long_term_sps {
+                        // lt_idx_sps
+                        if num_lt_sps > 1 {
+                            let bits = ceil_log2(num_lt_sps as u32);
+                            reader.read_bits(bits)?;
+                        }
+                    } else {
+                        reader.read_bits(poc_bits)?; // poc_lsb_lt
+                        reader.read_bit()?; // used_by_curr_pic_lt_flag
+                    }
+                    let delta_poc_msb_present = reader.read_bit()? != 0;
+                    if delta_poc_msb_present {
+                        reader.read_ue()?; // delta_poc_msb_cycle_lt
+                    }
+                }
+            }
+
+            // Temporal MVP
+            if sps.sps_temporal_mvp_enabled_flag {
+                slice_temporal_mvp_enabled_flag = reader.read_bit()? != 0;
+            }
         }
 
         // SAO flags
@@ -443,6 +504,9 @@ impl SliceHeader {
                 slice_tc_offset_div2,
                 slice_loop_filter_across_slices_enabled_flag,
                 num_entry_point_offsets,
+                short_term_ref_pic_set_idx,
+                inline_short_term_rps,
+                slice_temporal_mvp_enabled_flag,
                 slice_qp_y,
             },
             data_offset,
@@ -450,80 +514,6 @@ impl SliceHeader {
     }
 }
 
-/// Skip reference picture set parsing (for non-IDR pictures)
-fn skip_ref_pic_set(reader: &mut BitstreamReader<'_>, sps: &Sps) -> Result<()> {
-    let short_term_ref_pic_set_sps_flag = reader.read_bit()? != 0;
-
-    if !short_term_ref_pic_set_sps_flag {
-        // Parse inline short-term ref pic set
-        skip_short_term_ref_pic_set(reader, sps.num_short_term_ref_pic_sets)?;
-    } else if sps.num_short_term_ref_pic_sets > 1 {
-        let bits = ceil_log2(sps.num_short_term_ref_pic_sets as u32);
-        reader.read_bits(bits)?;
-    }
-
-    // Long-term ref pics
-    if sps.long_term_ref_pics_present_flag {
-        let num_long_term_sps = reader.read_ue()?;
-        let num_long_term_pics = reader.read_ue()?;
-
-        let poc_bits = sps.log2_max_pic_order_cnt_lsb_minus4 + 4;
-
-        for i in 0..(num_long_term_sps + num_long_term_pics) {
-            if i < num_long_term_sps {
-                // lt_idx_sps - bits depend on num_long_term_ref_pics_sps
-                // For simplicity, skip
-                reader.read_ue()?;
-            } else {
-                reader.read_bits(poc_bits)?; // poc_lsb_lt
-                reader.read_bit()?; // used_by_curr_pic_lt_flag
-            }
-            let delta_poc_msb_present = reader.read_bit()? != 0;
-            if delta_poc_msb_present {
-                reader.read_ue()?; // delta_poc_msb_cycle_lt
-            }
-        }
-    }
-
-    // Temporal MVP
-    if sps.sps_temporal_mvp_enabled_flag {
-        reader.read_bit()?; // slice_temporal_mvp_enabled_flag
-    }
-
-    Ok(())
-}
-
-/// Skip inline short-term ref pic set
-fn skip_short_term_ref_pic_set(reader: &mut BitstreamReader<'_>, idx: u8) -> Result<()> {
-    let inter_ref_pic_set_prediction_flag = if idx != 0 {
-        reader.read_bit()? != 0
-    } else {
-        false
-    };
-
-    if inter_ref_pic_set_prediction_flag {
-        // Would need previous set info
-        reader.read_bit()?; // delta_rps_sign
-        reader.read_ue()?; // abs_delta_rps_minus1
-        // This is incomplete - would need to loop based on previous set
-        return Err(HevcError::Unsupported("inter-predicted ref pic set"));
-    }
-
-    let num_negative_pics = reader.read_ue()?;
-    let num_positive_pics = reader.read_ue()?;
-
-    for _ in 0..num_negative_pics {
-        reader.read_ue()?; // delta_poc_s0_minus1
-        reader.read_bit()?; // used_by_curr_pic_s0_flag
-    }
-
-    for _ in 0..num_positive_pics {
-        reader.read_ue()?; // delta_poc_s1_minus1
-        reader.read_bit()?; // used_by_curr_pic_s1_flag
-    }
-
-    Ok(())
-}
 
 /// Calculate ceil(log2(x))
 fn ceil_log2(x: u32) -> u8 {

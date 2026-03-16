@@ -4,6 +4,7 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use super::bitstream::BitstreamReader;
+use super::refpic::{self, LongTermRefPicSps, ShortTermRefPicSet};
 use crate::error::HevcError;
 
 type Result<T> = core::result::Result<T, HevcError>;
@@ -88,8 +89,12 @@ pub struct Sps {
     pub pcm_params: Option<PcmParams>,
     /// Number of short-term reference picture sets
     pub num_short_term_ref_pic_sets: u8,
+    /// Parsed short-term reference picture sets from SPS
+    pub short_term_rps: Vec<ShortTermRefPicSet>,
     /// Long-term reference pictures present flag
     pub long_term_ref_pics_present_flag: bool,
+    /// Long-term reference picture info from SPS
+    pub long_term_ref_pics_sps: LongTermRefPicSps,
     /// Temporal MVP enabled flag
     pub sps_temporal_mvp_enabled_flag: bool,
     /// Strong intra smoothing enabled flag
@@ -560,18 +565,33 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
     };
 
     let num_short_term_ref_pic_sets = reader.read_ue()? as u8;
-    // Skip short term ref pic sets (not needed for still images)
+    let mut short_term_rps = Vec::with_capacity(num_short_term_ref_pic_sets as usize);
     for i in 0..num_short_term_ref_pic_sets {
-        skip_short_term_ref_pic_set(&mut reader, i, num_short_term_ref_pic_sets)?;
+        let rps = refpic::parse_short_term_rps(
+            &mut reader,
+            i,
+            num_short_term_ref_pic_sets,
+            &short_term_rps,
+        )?;
+        short_term_rps.push(rps);
     }
 
     let long_term_ref_pics_present_flag = reader.read_bit()? != 0;
+    let mut long_term_ref_pics_sps = LongTermRefPicSps::default();
     if long_term_ref_pics_present_flag {
-        let num_long_term_ref_pics_sps = reader.read_ue()?;
+        let num_long_term_ref_pics_sps = reader.read_ue()? as usize;
+        let poc_bits = log2_max_pic_order_cnt_lsb_minus4 + 4;
+        long_term_ref_pics_sps
+            .lt_ref_pic_poc_lsb
+            .reserve(num_long_term_ref_pics_sps);
+        long_term_ref_pics_sps
+            .used_by_curr_pic_lt
+            .reserve(num_long_term_ref_pics_sps);
         for _ in 0..num_long_term_ref_pics_sps {
-            let _lt_ref_pic_poc_lsb_sps =
-                reader.read_bits(log2_max_pic_order_cnt_lsb_minus4 + 4)?;
-            let _used_by_curr_pic_lt_sps_flag = reader.read_bit()?;
+            let poc_lsb = reader.read_bits(poc_bits)?;
+            let used = reader.read_bit()? != 0;
+            long_term_ref_pics_sps.lt_ref_pic_poc_lsb.push(poc_lsb);
+            long_term_ref_pics_sps.used_by_curr_pic_lt.push(used);
         }
     }
 
@@ -642,7 +662,9 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
         pcm_enabled_flag,
         pcm_params,
         num_short_term_ref_pic_sets,
+        short_term_rps,
         long_term_ref_pics_present_flag,
+        long_term_ref_pics_sps,
         sps_temporal_mvp_enabled_flag,
         strong_intra_smoothing_enabled_flag,
         vui_parameters_present_flag,
@@ -890,37 +912,3 @@ fn parse_scaling_list_data(reader: &mut BitstreamReader<'_>) -> Result<ScalingLi
     Ok(data)
 }
 
-fn skip_short_term_ref_pic_set(
-    reader: &mut BitstreamReader<'_>,
-    idx: u8,
-    _num_sets: u8,
-) -> Result<()> {
-    let inter_ref_pic_set_prediction_flag = if idx != 0 {
-        reader.read_bit()? != 0
-    } else {
-        false
-    };
-
-    if inter_ref_pic_set_prediction_flag {
-        // Simplified - skip inter prediction
-        if idx == _num_sets {
-            let _delta_idx_minus1 = reader.read_ue()?;
-        }
-        let _delta_rps_sign = reader.read_bit()?;
-        let _abs_delta_rps_minus1 = reader.read_ue()?;
-        // Would need previous set info to properly parse
-    } else {
-        let num_negative_pics = reader.read_ue()?;
-        let num_positive_pics = reader.read_ue()?;
-        for _ in 0..num_negative_pics {
-            let _delta_poc_s0_minus1 = reader.read_ue()?;
-            let _used_by_curr_pic_s0_flag = reader.read_bit()?;
-        }
-        for _ in 0..num_positive_pics {
-            let _delta_poc_s1_minus1 = reader.read_ue()?;
-            let _used_by_curr_pic_s1_flag = reader.read_bit()?;
-        }
-    }
-
-    Ok(())
-}
