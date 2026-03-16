@@ -359,6 +359,9 @@ impl<'a> CabacDecoder<'a> {
             if bit == 0 {
                 break;
             }
+            if n >= 31 {
+                return Err(HevcError::InvalidBitstream("EGk prefix too long"));
+            }
             base += 1 << n;
             n += 1;
             if n >= k + 32 {
@@ -384,13 +387,15 @@ impl<'a> CabacDecoder<'a> {
 
     /// Renormalize the decoder state
     fn renormalize(&mut self) -> Result<()> {
+        let mut iters = 0u32;
         while self.range < 256 {
             self.range <<= 1;
-            // Shift value and read more bits
             self.read_bit()?;
+            iters += 1;
+            if iters > 16 {
+                return Err(HevcError::CabacError("renormalization diverged"));
+            }
         }
-        // Invariant: after renormalization, range >= 256
-        debug_assert!(self.range >= 256, "range {} < 256 after renorm", self.range);
         Ok(())
     }
 
