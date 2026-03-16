@@ -25,8 +25,11 @@ macro_rules! debug_trace {
 
 use super::cabac::{CabacDecoder, ContextModel, INIT_VALUES, context};
 use super::debug;
-use super::inter::{MotionVector, PbMotion, PbMotionCoding};
+use super::inter::{
+    self, MergePuParams, MotionVector, MvContext, PbMotion, PbMotionCoding, RefPicLists,
+};
 use super::intra;
+use super::mc::{self, ChromaRef, McBlock};
 use super::params::{Pps, Sps};
 use super::picture::DecodedFrame;
 use super::residual::{self, ScanOrder};
@@ -184,6 +187,13 @@ pub struct SliceContext<'a> {
     pub cbf_map: Vec<bool>,
     /// Stride of cbf_map (width / 4)
     pub cbf_map_stride: u32,
+    /// Current picture POC
+    pub curr_poc: i32,
+    /// Reference picture lists (constructed from slice header + DPB)
+    pub ref_pic_lists: RefPicLists,
+    /// Reference frames from DPB (indexed by DPB slot, not ref list index).
+    /// Empty for I-slices. For P/B, populated by VideoDecoder before decode.
+    pub ref_frames: Vec<Option<DecodedFrame>>,
 }
 
 impl<'a> SliceContext<'a> {
@@ -322,6 +332,9 @@ impl<'a> SliceContext<'a> {
                     * sps.pic_height_in_luma_samples.div_ceil(4)) as usize
             ],
             cbf_map_stride: sps.pic_width_in_luma_samples.div_ceil(4),
+            curr_poc: 0,
+            ref_pic_lists: RefPicLists::default(),
+            ref_frames: Vec::new(),
         })
     }
 
@@ -843,14 +856,13 @@ impl<'a> SliceContext<'a> {
         if pred_mode == PredMode::Skip {
             let coding = self.decode_inter_pu(x0, y0, cb_size, cb_size, ct_depth, true)?;
 
-            // Store placeholder motion info (will be resolved in Phase 4/5)
-            let motion = PbMotion {
-                pred_flag: [true, false],
-                ref_idx: [0, -1],
-                mv: [MotionVector::ZERO, MotionVector::ZERO],
-            };
+            // Resolve merge candidate → real motion vectors
+            let motion =
+                self.resolve_motion(&coding, x0, y0, cb_size, cb_size, 0, PartMode::Part2Nx2N);
             self.store_mv_info(x0, y0, cb_size, cb_size, motion);
-            let _ = coding; // Will be used for merge candidate derivation in Phase 4
+
+            // Apply motion compensation (prediction → frame)
+            self.apply_mc(&motion, x0, y0, cb_size, cb_size, frame);
             return Ok(());
         }
 
@@ -965,22 +977,23 @@ impl<'a> SliceContext<'a> {
                 }
             }
         } else {
-            // Inter prediction: decode PUs based on partition mode
+            // Inter prediction: decode PUs, resolve motion, apply MC
             let pu_list = partition_to_pu_list(part_mode, x0, y0, cb_size);
-            for &(px, py, pw, ph) in &pu_list {
+            for (part_idx, &(px, py, pw, ph)) in pu_list.iter().enumerate() {
                 let coding = self.decode_inter_pu(px, py, pw, ph, ct_depth, false)?;
-                // Store placeholder motion (real derivation in Phase 4)
-                let motion = PbMotion {
-                    pred_flag: [
-                        coding.inter_pred_idc == 1 || coding.inter_pred_idc == 3 || coding.merge_flag,
-                        coding.inter_pred_idc == 2 || coding.inter_pred_idc == 3,
-                    ],
-                    ref_idx: coding.ref_idx,
-                    mv: [MotionVector::ZERO, MotionVector::ZERO],
-                };
+                let motion = self.resolve_motion(
+                    &coding,
+                    px,
+                    py,
+                    pw,
+                    ph,
+                    part_idx as u8,
+                    part_mode,
+                );
                 self.store_mv_info(px, py, pw, ph, motion);
+                self.apply_mc(&motion, px, py, pw, ph, frame);
             }
-            // Inter CUs use DC placeholder for intra modes (unused in transform path)
+            // Inter CUs use DC for intra modes (unused in transform path)
             (IntraPredMode::Dc, IntraPredMode::Dc)
         };
 
@@ -1921,6 +1934,221 @@ impl<'a> SliceContext<'a> {
                 let idx = ((by + dy) * self.cbf_map_stride + (bx + dx)) as usize;
                 if idx < self.cbf_map.len() {
                     self.cbf_map[idx] = has_coeffs;
+                }
+            }
+        }
+    }
+
+    // -- Inter prediction resolution and motion compensation --
+
+    /// Build an MvContext for merge/AMVP candidate derivation
+    fn build_mv_context(&self) -> MvContext<'_> {
+        MvContext {
+            mv_info: &self.mv_info,
+            pred_mode: &self.pred_mode_map,
+            pu_stride: self.intra_mode_map_stride,
+            min_pu_size: self.min_pu_size(),
+            pic_width: self.sps.pic_width_in_luma_samples,
+            pic_height: self.sps.pic_height_in_luma_samples,
+            curr_poc: self.curr_poc,
+            ref_pic_lists: &self.ref_pic_lists,
+            is_b_slice: self.header.slice_type == SliceType::B,
+            log2_parallel_merge_level: self.pps.log2_parallel_merge_level_minus2 + 2,
+        }
+    }
+
+    /// Resolve coded motion (merge or AMVP) into final PbMotion with real MVs
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_motion(
+        &self,
+        coding: &PbMotionCoding,
+        px: u32,
+        py: u32,
+        pw: u32,
+        ph: u32,
+        part_idx: u8,
+        part_mode: PartMode,
+    ) -> PbMotion {
+        let mv_ctx = self.build_mv_context();
+
+        if coding.merge_flag {
+            // Merge mode: select from merge candidate list
+            let pu_params = MergePuParams {
+                xp: px,
+                yp: py,
+                w: pw,
+                h: ph,
+                part_idx,
+                part_mode,
+                max_num_merge_cand: self.header.max_num_merge_cand,
+            };
+            let cand_list = inter::derive_merge_candidates(&mv_ctx, &pu_params);
+            let idx = (coding.merge_idx as usize).min(cand_list.len() - 1);
+            let mut motion = cand_list[idx];
+
+            // H.265 8.5.3.1.1 step 9: for small PUs (nPbW+nPbH==12), disable L1
+            if pw + ph == 12 {
+                motion.pred_flag[1] = false;
+                motion.ref_idx[1] = -1;
+            }
+            motion
+        } else {
+            // AMVP mode: derive MVP, add MVD
+            let uses_l0 = coding.inter_pred_idc == 1 || coding.inter_pred_idc == 3;
+            let uses_l1 = coding.inter_pred_idc == 2 || coding.inter_pred_idc == 3;
+
+            let mut motion = PbMotion::UNAVAILABLE;
+
+            if uses_l0 {
+                let mvp_list =
+                    inter::derive_amvp_candidates(&mv_ctx, px, py, pw, ph, coding.ref_idx[0], 0);
+                let mvp = mvp_list[coding.mvp_l0_flag as usize];
+                motion.pred_flag[0] = true;
+                motion.ref_idx[0] = coding.ref_idx[0];
+                motion.mv[0] = MotionVector {
+                    x: mvp.x.wrapping_add(coding.mvd[0][0]),
+                    y: mvp.y.wrapping_add(coding.mvd[0][1]),
+                };
+            }
+
+            if uses_l1 {
+                let mvp_list =
+                    inter::derive_amvp_candidates(&mv_ctx, px, py, pw, ph, coding.ref_idx[1], 1);
+                let mvp = mvp_list[coding.mvp_l1_flag as usize];
+                motion.pred_flag[1] = true;
+                motion.ref_idx[1] = coding.ref_idx[1];
+                motion.mv[1] = MotionVector {
+                    x: mvp.x.wrapping_add(coding.mvd[1][0]),
+                    y: mvp.y.wrapping_add(coding.mvd[1][1]),
+                };
+            }
+
+            motion
+        }
+    }
+
+    /// Apply motion compensation for a PU: fetch from reference frame(s), blend, write to frame
+    fn apply_mc(
+        &self,
+        motion: &PbMotion,
+        px: u32,
+        py: u32,
+        pw: u32,
+        ph: u32,
+        frame: &mut DecodedFrame,
+    ) {
+        let bit_depth = self.sps.bit_depth_y();
+        let blk = McBlock {
+            xp: px,
+            yp: py,
+            w: pw,
+            h: ph,
+            bit_depth,
+        };
+        let buf_size = (pw * ph) as usize;
+
+        // Get reference frame for a given list
+        let get_ref_frame = |list: usize| -> Option<&DecodedFrame> {
+            if !motion.pred_flag[list] || motion.ref_idx[list] < 0 {
+                return None;
+            }
+            let ref_idx = motion.ref_idx[list] as usize;
+            let dpb_idx = self.ref_pic_lists.dpb_index[list].get(ref_idx)?;
+            if *dpb_idx < 0 {
+                return None;
+            }
+            self.ref_frames.get(*dpb_idx as usize)?.as_ref()
+        };
+
+        let ref_l0 = get_ref_frame(0);
+        let ref_l1 = get_ref_frame(1);
+
+        let is_bi = motion.pred_flag[0] && motion.pred_flag[1];
+
+        // Luma MC
+        if is_bi {
+            if let (Some(r0), Some(r1)) = (ref_l0, ref_l1) {
+                let mut pred0 = vec![0i16; buf_size];
+                let mut pred1 = vec![0i16; buf_size];
+                mc::mc_luma(r0, motion.mv[0], &blk, &mut pred0);
+                mc::mc_luma(r1, motion.mv[1], &blk, &mut pred1);
+                mc::blend_bi(
+                    &pred0,
+                    &pred1,
+                    &mut frame.y_plane,
+                    frame.width as usize,
+                    &blk,
+                );
+            }
+        } else {
+            let (ref_frame, mv) = if motion.pred_flag[0] {
+                (ref_l0, motion.mv[0])
+            } else {
+                (ref_l1, motion.mv[1])
+            };
+            if let Some(rf) = ref_frame {
+                let mut pred = vec![0i16; buf_size];
+                mc::mc_luma(rf, mv, &blk, &mut pred);
+                mc::blend_uni(&pred, &mut frame.y_plane, frame.width as usize, &blk);
+            }
+        }
+
+        // Chroma MC (4:2:0, 4:2:2, 4:4:4)
+        if self.sps.chroma_format_idc > 0 {
+            let (sub_x, sub_y) = match self.sps.chroma_format_idc {
+                1 => (2u32, 2u32),
+                2 => (2, 1),
+                3 => (1, 1),
+                _ => (2, 2),
+            };
+            let cpw = pw / sub_x;
+            let cph = ph / sub_y;
+            let cpx = px / sub_x;
+            let cpy = py / sub_y;
+            let cblk = McBlock {
+                xp: cpx,
+                yp: cpy,
+                w: cpw,
+                h: cph,
+                bit_depth: self.sps.bit_depth_c(),
+            };
+            let cbuf_size = (cpw * cph) as usize;
+
+            for c_idx in 0..2u8 {
+                let mc_one_list = |rf: &DecodedFrame, mv: MotionVector, pred: &mut [i16]| {
+                    let (plane, stride) = rf.plane(c_idx + 1);
+                    let (_, c_height) = rf.chroma_dims();
+                    let cref = ChromaRef {
+                        plane,
+                        stride,
+                        height: c_height,
+                        sub_x,
+                        sub_y,
+                    };
+                    mc::mc_chroma(&cref, mv, &cblk, pred);
+                };
+
+                let (plane_mut, plane_stride) = frame.plane_mut(c_idx + 1);
+
+                if is_bi {
+                    if let (Some(r0), Some(r1)) = (ref_l0, ref_l1) {
+                        let mut pred0 = vec![0i16; cbuf_size];
+                        let mut pred1 = vec![0i16; cbuf_size];
+                        mc_one_list(r0, motion.mv[0], &mut pred0);
+                        mc_one_list(r1, motion.mv[1], &mut pred1);
+                        mc::blend_bi(&pred0, &pred1, plane_mut, plane_stride, &cblk);
+                    }
+                } else {
+                    let (rf, mv) = if motion.pred_flag[0] {
+                        (ref_l0, motion.mv[0])
+                    } else {
+                        (ref_l1, motion.mv[1])
+                    };
+                    if let Some(rf) = rf {
+                        let mut pred = vec![0i16; cbuf_size];
+                        mc_one_list(rf, mv, &mut pred);
+                        mc::blend_uni(&pred, plane_mut, plane_stride, &cblk);
+                    }
                 }
             }
         }
