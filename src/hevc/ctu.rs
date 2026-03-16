@@ -254,11 +254,30 @@ impl<'a> SliceContext<'a> {
             _offset
         );
 
-        // Initialize context models
+        // Initialize context models with correct init table for slice type
+        // H.265 9.3.2.2: initType depends on slice_type and cabac_init_flag
+        use super::cabac::{INIT_VALUES_B, INIT_VALUES_P};
+        let init_table: &[u8; context::NUM_CONTEXTS] = match header.slice_type {
+            SliceType::I => &INIT_VALUES,
+            SliceType::P => {
+                if header.cabac_init_flag {
+                    &INIT_VALUES_B
+                } else {
+                    &INIT_VALUES_P
+                }
+            }
+            SliceType::B => {
+                if header.cabac_init_flag {
+                    &INIT_VALUES_P
+                } else {
+                    &INIT_VALUES_B
+                }
+            }
+        };
         let mut ctx = [ContextModel::new(154); context::NUM_CONTEXTS];
         let slice_qp = header.slice_qp_y;
 
-        for (i, init_val) in INIT_VALUES.iter().enumerate() {
+        for (i, init_val) in init_table.iter().enumerate() {
             ctx[i].init(*init_val, slice_qp);
         }
 
@@ -2124,9 +2143,7 @@ impl<'a> SliceContext<'a> {
         let is_bi = motion.pred_flag[0] && motion.pred_flag[1];
 
         // Luma MC
-        if is_bi && ref_l0.is_some() && ref_l1.is_some() {
-            let r0 = ref_l0.unwrap();
-            let r1 = ref_l1.unwrap();
+        if is_bi && let Some(r0) = ref_l0 && let Some(r1) = ref_l1 {
             let mut pred0 = vec![0i16; buf_size];
             let mut pred1 = vec![0i16; buf_size];
             mc::mc_luma(r0, motion.mv[0], &blk, &mut pred0);

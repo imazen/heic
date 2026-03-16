@@ -501,3 +501,151 @@ pub static INIT_VALUES: [u8; context::NUM_CONTEXTS] = [
     154, 154, 154, 154, 154, 154, 154, 154, // RES_SCALE_SIGN_FLAG (2)
     154, 154,
 ];
+
+/// Initial context values for P-slice (initType=1) from H.265 spec / libde265
+///
+/// Used for: P-slice with cabac_init_flag=0, or B-slice with cabac_init_flag=1
+#[allow(dead_code)]
+pub static INIT_VALUES_P: [u8; context::NUM_CONTEXTS] = [
+    // SPLIT_CU_FLAG (3)
+    107, 139, 126,
+    // CU_TRANSQUANT_BYPASS_FLAG (1)
+    154,
+    // CU_SKIP_FLAG (3)
+    197, 185, 201,
+    // PALETTE_MODE_FLAG (1)
+    154,
+    // PRED_MODE_FLAG (1)
+    149,
+    // PART_MODE (4)
+    154, 139, 154, 154,
+    // PREV_INTRA_LUMA_PRED_FLAG (1)
+    154,
+    // INTRA_CHROMA_PRED_MODE (1)
+    152,
+    // INTER_PRED_IDC (5)
+    95, 79, 63, 31, 31,
+    // MERGE_FLAG (1)
+    110,
+    // MERGE_IDX (1)
+    122,
+    // MVP_LX_FLAG (1)
+    168,
+    // REF_IDX (2)
+    153, 153,
+    // ABS_MVD_GREATER0_FLAG (2) — both x,y share libde265 context[0]
+    140, 140,
+    // ABS_MVD_GREATER1_FLAG (1) — libde265 context[1]
+    198,
+    // SPLIT_TRANSFORM_FLAG (3)
+    124, 138, 94,
+    // CBF_LUMA (2)
+    153, 111,
+    // CBF_CBCR (5) — 4 from cbf_chroma + 1 default
+    149, 107, 167, 154, 154,
+    // TRANSFORM_SKIP_FLAG (2)
+    139, 139,
+    // LAST_SIG_COEFF_X_PREFIX (18)
+    125, 110, 94, 110, 95, 79, 125, 111, 110, 78, 110, 111, 111, 95, 94, 108, 123, 108,
+    // LAST_SIG_COEFF_Y_PREFIX (18)
+    125, 110, 94, 110, 95, 79, 125, 111, 110, 78, 110, 111, 111, 95, 94, 108, 123, 108,
+    // CODED_SUB_BLOCK_FLAG (4)
+    121, 140, 61, 154,
+    // SIG_COEFF_FLAG (42 + 2 skipmode = 44)
+    155, 154, 139, 153, 139, 123, 123, 63, 153, 166, 183, 140, 136, 153, 154, 166,
+    183, 140, 136, 153, 154, 166, 183, 140, 136, 153, 154, 170, 153, 123, 123, 107,
+    121, 107, 121, 167, 151, 183, 140, 151, 183, 140, 140, 140,
+    // COEFF_ABS_LEVEL_GREATER1_FLAG (24)
+    154, 196, 196, 167, 154, 152, 167, 182, 182, 134, 149, 136, 153, 121, 136, 137,
+    169, 194, 166, 167, 154, 167, 137, 182,
+    // COEFF_ABS_LEVEL_GREATER2_FLAG (6)
+    107, 167, 91, 122, 107, 167,
+    // SAO_MERGE_FLAG (1)
+    153,
+    // SAO_TYPE_IDX (1)
+    185,
+    // CU_QP_DELTA_ABS (2)
+    154, 154,
+    // CU_CHROMA_QP_OFFSET_FLAG (1)
+    154,
+    // CU_CHROMA_QP_OFFSET_IDX (1)
+    154,
+    // LOG2_RES_SCALE_ABS_PLUS1 (8)
+    154, 154, 154, 154, 154, 154, 154, 154,
+    // RES_SCALE_SIGN_FLAG (2)
+    154, 154,
+];
+
+/// Initial context values for B-slice (initType=2) from H.265 spec / libde265
+///
+/// Used for: B-slice with cabac_init_flag=0, or P-slice with cabac_init_flag=1
+#[allow(dead_code)]
+pub static INIT_VALUES_B: [u8; context::NUM_CONTEXTS] = [
+    // SPLIT_CU_FLAG (3)
+    107, 139, 126,
+    // CU_TRANSQUANT_BYPASS_FLAG (1)
+    154,
+    // CU_SKIP_FLAG (3)
+    197, 185, 201,
+    // PALETTE_MODE_FLAG (1)
+    154,
+    // PRED_MODE_FLAG (1)
+    134,
+    // PART_MODE (4)
+    154, 139, 154, 154,
+    // PREV_INTRA_LUMA_PRED_FLAG (1)
+    183,
+    // INTRA_CHROMA_PRED_MODE (1)
+    152,
+    // INTER_PRED_IDC (5)
+    95, 79, 63, 31, 31,
+    // MERGE_FLAG (1)
+    154,
+    // MERGE_IDX (1)
+    137,
+    // MVP_LX_FLAG (1)
+    168,
+    // REF_IDX (2)
+    153, 153,
+    // ABS_MVD_GREATER0_FLAG (2) — both x,y share libde265 context[0]
+    169, 169,
+    // ABS_MVD_GREATER1_FLAG (1) — libde265 context[1]
+    198,
+    // SPLIT_TRANSFORM_FLAG (3)
+    224, 167, 122,
+    // CBF_LUMA (2)
+    153, 111,
+    // CBF_CBCR (5) — 4 from cbf_chroma + 1 default
+    149, 92, 167, 154, 154,
+    // TRANSFORM_SKIP_FLAG (2)
+    139, 139,
+    // LAST_SIG_COEFF_X_PREFIX (18)
+    125, 110, 124, 110, 95, 94, 125, 111, 111, 79, 125, 126, 111, 111, 79, 108, 123, 93,
+    // LAST_SIG_COEFF_Y_PREFIX (18)
+    125, 110, 124, 110, 95, 94, 125, 111, 111, 79, 125, 126, 111, 111, 79, 108, 123, 93,
+    // CODED_SUB_BLOCK_FLAG (4)
+    121, 140, 61, 154,
+    // SIG_COEFF_FLAG (42 + 2 skipmode = 44)
+    170, 154, 139, 153, 139, 123, 123, 63, 124, 166, 183, 140, 136, 153, 154, 166,
+    183, 140, 136, 153, 154, 166, 183, 140, 136, 153, 154, 170, 153, 138, 138, 122,
+    121, 122, 121, 167, 151, 183, 140, 151, 183, 140, 140, 140,
+    // COEFF_ABS_LEVEL_GREATER1_FLAG (24)
+    154, 196, 167, 167, 154, 152, 167, 182, 182, 134, 149, 136, 153, 121, 136, 122,
+    169, 208, 166, 167, 154, 152, 167, 182,
+    // COEFF_ABS_LEVEL_GREATER2_FLAG (6)
+    107, 167, 91, 107, 107, 167,
+    // SAO_MERGE_FLAG (1)
+    153,
+    // SAO_TYPE_IDX (1)
+    160,
+    // CU_QP_DELTA_ABS (2)
+    154, 154,
+    // CU_CHROMA_QP_OFFSET_FLAG (1)
+    154,
+    // CU_CHROMA_QP_OFFSET_IDX (1)
+    154,
+    // LOG2_RES_SCALE_ABS_PLUS1 (8)
+    154, 154, 154, 154, 154, 154, 154, 154,
+    // RES_SCALE_SIGN_FLAG (2)
+    154, 154,
+];
