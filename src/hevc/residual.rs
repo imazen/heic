@@ -687,7 +687,7 @@ pub fn decode_residual(
                     );
                 }
                 rice_param = new_rice;
-                coeff_values[n as usize] = base + remaining;
+                coeff_values[n as usize] = base.saturating_add(remaining);
             }
         }
 
