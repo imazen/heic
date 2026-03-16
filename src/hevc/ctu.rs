@@ -1563,8 +1563,12 @@ impl<'a> SliceContext<'a> {
         };
 
         if let Some(sl) = scaling_list {
-            // matrixId: intra Y=0, Cb=1, Cr=2 (all HEIC is intra)
-            let matrix_id = c_idx;
+            // matrixId: intra Y=0, Cb=1, Cr=2; inter Y=3, Cb=4, Cr=5
+            let matrix_id = if self.get_pred_mode_at(x0, y0) == PredMode::Intra {
+                c_idx
+            } else {
+                c_idx + 3
+            };
             // Build scaling matrix in raster order for this TU (reuse persistent buffer)
             let scaling_matrix = &mut self.scaling_buf;
             for py in 0..size {
