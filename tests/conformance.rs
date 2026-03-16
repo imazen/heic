@@ -67,10 +67,10 @@ fn find_bitstream(dir: &Path) -> Option<PathBuf> {
         return None;
     }
     for entry in walkdir(dir) {
-        if let Some(ext) = entry.extension() {
-            if ext == "bit" || ext == "bin" || ext == "265" {
-                return Some(entry);
-            }
+        if let Some(ext) = entry.extension()
+            && (ext == "bit" || ext == "bin" || ext == "265")
+        {
+            return Some(entry);
         }
     }
     None
@@ -104,7 +104,7 @@ fn ensure_reference_yuv(name: &str, bitstream: &Path) -> Option<PathBuf> {
 
     // Also check if the vector shipped with a .yuv
     for entry in walkdir(&top_dir) {
-        if entry.extension().map_or(false, |e| e == "yuv")
+        if entry.extension().is_some_and(|e| e == "yuv")
             && !entry.to_string_lossy().contains("md5")
         {
             return Some(entry);
@@ -178,14 +178,29 @@ fn count_frame_types(bitstream: &Path) -> String {
     }
 }
 
-/// Decode a bitstream with our decoder and return per-frame Y planes.
+/// Decode a bitstream with our decoder and return per-frame cropped Y planes.
 fn decode_with_ours(bitstream: &Path) -> Result<Vec<Vec<u16>>, String> {
     let data = std::fs::read(bitstream).map_err(|e| format!("read: {e}"))?;
     let mut decoder = heic_decoder::VideoDecoder::new(16);
     let frames = decoder
         .decode_annex_b(&data)
         .map_err(|e| format!("decode: {e}"))?;
-    Ok(frames.into_iter().map(|f| f.y_plane).collect())
+    // Extract cropped Y plane (conformance window applied)
+    Ok(frames
+        .into_iter()
+        .map(|f| {
+            let cw = f.cropped_width();
+            let ch = f.cropped_height();
+            let stride = f.width as usize;
+            let mut cropped = Vec::with_capacity((cw * ch) as usize);
+            for y in f.crop_top..(f.height - f.crop_bottom) {
+                let row_start = y as usize * stride + f.crop_left as usize;
+                let row_end = row_start + cw as usize;
+                cropped.extend_from_slice(&f.y_plane[row_start..row_end]);
+            }
+            cropped
+        })
+        .collect())
 }
 
 /// Load reference YUV frames (420p 8-bit)
@@ -230,7 +245,7 @@ fn compare_y_planes(ours: &[u16], reference: &[u16], width: u32, height: u32) ->
         }
     }
 
-    let mse = if ours.len() > 0 {
+    let mse = if !ours.is_empty() {
         sse as f64 / ours.len() as f64
     } else {
         0.0
@@ -348,8 +363,34 @@ fn girlshy() {
     eprintln!("\n=== girlshy ===");
     eprintln!("  {width}x{height}, {frame_types}");
 
+    // Generate reference YUV
+    let ref_path = PathBuf::from("/tmp/girlshy_ref.yuv");
+    if !ref_path.exists() {
+        let _ = Command::new(DEC265)
+            .arg(bitstream)
+            .args(["-o", "/tmp/girlshy_ref.yuv", "--quiet"])
+            .status();
+    }
+
     match decode_with_ours(bitstream) {
-        Ok(frames) => eprintln!("  Decoded {} frames", frames.len()),
+        Ok(our_frames) => {
+            let ref_frames = load_reference_yuv(&ref_path, width, height);
+            eprintln!(
+                "  Decoded {} frames (ref: {} frames)",
+                our_frames.len(),
+                ref_frames.len()
+            );
+            let n = our_frames.len().min(ref_frames.len());
+            for i in 0..n.min(15) {
+                let (psnr, num_diff, max_diff) =
+                    compare_y_planes(&our_frames[i], &ref_frames[i], width, height);
+                let uninit = our_frames[i].iter().filter(|&&v| v == u16::MAX).count();
+                let total_px = width * height;
+                eprintln!(
+                    "  Frame {i}: PSNR={psnr:.1}dB, diff={num_diff}/{total_px} max={max_diff}, uninit={uninit}"
+                );
+            }
+        }
         Err(e) => eprintln!("  FAIL: {e}"),
     }
 }

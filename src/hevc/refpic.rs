@@ -253,14 +253,14 @@ pub fn derive_poc(
 ///
 /// `curr_poc`: POC of the current picture
 /// `rps`: the active short-term reference picture set
-/// `dpb_pocs`: POC values of pictures in the DPB (indexed by DPB slot)
+/// `dpb_slots`: (DPB slot index, POC) pairs for active reference pictures
 /// `num_ref_idx_active`: \[L0, L1\] active reference counts from slice header
 /// `ref_pic_list_modification`: optional reordering tables \[L0\]\[L1\]
 /// `slice_type_is_b`: true if B-slice (L1 is constructed differently)
 pub fn build_ref_pic_lists(
     curr_poc: i32,
     rps: &ShortTermRefPicSet,
-    dpb_pocs: &[i32],
+    dpb_slots: &[(usize, i32)],
     num_ref_idx_active: [u8; 2],
     ref_pic_list_modification: Option<&[[u8; MAX_NUM_REF_PICS]; 2]>,
     modification_flag: [bool; 2],
@@ -280,7 +280,7 @@ pub fn build_ref_pic_lists(
     for i in 0..rps.num_negative_pics as usize {
         if rps.used_by_curr_pic_s0[i] {
             let ref_poc = curr_poc + rps.delta_poc_s0[i];
-            if let Some(dpb_idx) = find_dpb_by_poc(dpb_pocs, ref_poc)
+            if let Some(dpb_idx) = find_dpb_by_poc(dpb_slots, ref_poc)
                 && temp_l0_count < MAX_NUM_REF_PICS
             {
                 temp_l0[temp_l0_count] = (dpb_idx as i8, ref_poc);
@@ -294,7 +294,7 @@ pub fn build_ref_pic_lists(
     for i in 0..rps.num_positive_pics as usize {
         if rps.used_by_curr_pic_s1[i] {
             let ref_poc = curr_poc + rps.delta_poc_s1[i];
-            if let Some(dpb_idx) = find_dpb_by_poc(dpb_pocs, ref_poc)
+            if let Some(dpb_idx) = find_dpb_by_poc(dpb_slots, ref_poc)
                 && temp_l0_count < MAX_NUM_REF_PICS
             {
                 temp_l0[temp_l0_count] = (dpb_idx as i8, ref_poc);
@@ -355,7 +355,7 @@ pub fn build_ref_pic_lists(
         for i in 0..rps.num_positive_pics as usize {
             if rps.used_by_curr_pic_s1[i] {
                 let ref_poc = curr_poc + rps.delta_poc_s1[i];
-                if let Some(dpb_idx) = find_dpb_by_poc(dpb_pocs, ref_poc)
+                if let Some(dpb_idx) = find_dpb_by_poc(dpb_slots, ref_poc)
                     && temp_l1_count < MAX_NUM_REF_PICS
                 {
                     temp_l1[temp_l1_count] = (dpb_idx as i8, ref_poc);
@@ -388,8 +388,11 @@ pub fn build_ref_pic_lists(
 }
 
 /// Find a DPB entry by POC value. Returns the DPB slot index.
-fn find_dpb_by_poc(dpb_pocs: &[i32], poc: i32) -> Option<usize> {
-    dpb_pocs.iter().position(|&p| p == poc)
+fn find_dpb_by_poc(dpb_slots: &[(usize, i32)], poc: i32) -> Option<usize> {
+    dpb_slots
+        .iter()
+        .find(|(_, p)| *p == poc)
+        .map(|(slot, _)| *slot)
 }
 
 /// Sort delta_poc and used_by_curr_pic arrays in decreasing order (for S0)

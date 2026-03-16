@@ -231,6 +231,8 @@ pub struct VideoDecoder {
     prev_poc_lsb: u32,
     /// Previous POC MSB (for POC derivation)
     prev_poc_msb: i32,
+    /// POC of the last decoded frame (for display order sorting)
+    last_decoded_poc: i32,
 }
 
 impl VideoDecoder {
@@ -242,6 +244,7 @@ impl VideoDecoder {
             dpb: Dpb::new(max_dpb_size),
             prev_poc_lsb: 0,
             prev_poc_msb: 0,
+            last_decoded_poc: 0,
         }
     }
 
@@ -314,11 +317,11 @@ impl VideoDecoder {
                 }
             };
 
-            let dpb_pocs = self.dpb.active_pocs();
+            let dpb_slots = self.dpb.active_slots_and_pocs();
             refpic::build_ref_pic_lists(
                 curr_poc,
                 active_rps,
-                &dpb_pocs,
+                &dpb_slots,
                 [
                     slice_header.num_ref_idx_l0_active,
                     slice_header.num_ref_idx_l1_active,
@@ -408,6 +411,7 @@ impl VideoDecoder {
         // Update POC state
         self.prev_poc_lsb = poc_lsb;
         self.prev_poc_msb = poc_msb;
+        self.last_decoded_poc = curr_poc;
 
         // Insert into DPB for future reference
         let min_pu = ((1u32 << sps.log2_min_cb_size()) / 2).max(1);
@@ -420,18 +424,20 @@ impl VideoDecoder {
         Ok(Some(frame))
     }
 
-    /// Decode an entire Annex B bitstream, returning all decoded frames in decode order.
+    /// Decode an entire Annex B bitstream, returning all decoded frames in **display order** (by POC).
     ///
     /// This is the simplest way to decode a raw H.265 bitstream with P/B slices.
     pub fn decode_annex_b(&mut self, data: &[u8]) -> Result<Vec<DecodedFrame>> {
         let nal_units = bitstream::parse_nal_units(data)?;
-        let mut frames = Vec::new();
+        let mut frames: Vec<(i32, DecodedFrame)> = Vec::new();
         for nal in &nal_units {
             if let Some(frame) = self.decode_nal(nal)? {
-                frames.push(frame);
+                frames.push((self.last_decoded_poc, frame));
             }
         }
-        Ok(frames)
+        // Sort by POC to produce display order
+        frames.sort_by_key(|(poc, _)| *poc);
+        Ok(frames.into_iter().map(|(_, f)| f).collect())
     }
 
     /// Flush: return any remaining pictures and clear the DPB

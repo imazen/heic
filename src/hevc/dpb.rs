@@ -112,6 +112,16 @@ impl Dpb {
             .collect()
     }
 
+    /// Get active (slot_index, poc) pairs for reference list construction.
+    /// The slot index is the DPB entry position, used to look up reference frames.
+    pub fn active_slots_and_pocs(&self) -> Vec<(usize, i32)> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| e.as_ref().filter(|e| e.is_reference).map(|e| (i, e.poc)))
+            .collect()
+    }
+
     /// Find a DPB entry by POC value
     pub fn find_by_poc(&self, poc: i32) -> Option<usize> {
         self.entries
