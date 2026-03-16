@@ -293,11 +293,12 @@ impl<'a> CabacDecoder<'a> {
 
         #[cfg(feature = "std")]
         if self.bin_trace_count > 0 {
+            let bin_num = 1000 - self.bin_trace_count;
             self.bin_trace_count -= 1;
             eprintln!(
-                "B{} c r={} v={} s={} m={} b={} bp={}",
-                200 - self.bin_trace_count - 1,
-                self.range, self.value, ctx.state, ctx.mps, bin_val, self.byte_pos
+                "B{} c r={} v={} s={} m={} b={} bp={} bn={}",
+                bin_num,
+                self.range, self.value, ctx.state, ctx.mps, bin_val, self.byte_pos, self.bits_needed
             );
         }
 
@@ -330,23 +331,57 @@ impl<'a> CabacDecoder<'a> {
 
         #[cfg(feature = "std")]
         if self.bin_trace_count > 0 {
+            let bin_num = 1000 - self.bin_trace_count;
             self.bin_trace_count -= 1;
             eprintln!(
-                "B{} x r={} b={} bp={}",
-                200 - self.bin_trace_count - 1,
-                self.range, bin_val, self.byte_pos
+                "B{} x r={} b={} bp={} bn={}",
+                bin_num, self.range, bin_val, self.byte_pos, self.bits_needed
             );
         }
 
         Ok(bin_val)
     }
 
-    /// Decode multiple bypass bins
+    /// Decode multiple bypass bins (parallel, matching libde265 FL_bypass_parallel)
+    ///
+    /// Shifts value by n bits at once and reads at most one byte, matching
+    /// the H.265 reference decoder behavior for fixed-length bypass decode.
     pub fn decode_bypass_bits(&mut self, n: u8) -> Result<u32> {
-        let mut result = 0u32;
-        for _ in 0..n {
-            result = (result << 1) | self.decode_bypass()? as u32;
+        if n == 0 {
+            return Ok(0);
         }
+        self.bin_counter += n as u32;
+
+        // Shift value and bits_needed by n at once
+        self.value <<= n;
+        self.bits_needed += n as i32;
+
+        // Read at most one byte
+        if self.bits_needed >= 0 {
+            if self.byte_pos < self.data.len() {
+                let input = self.data[self.byte_pos] as u32;
+                self.value |= input << self.bits_needed as u32;
+                self.byte_pos += 1;
+            }
+            self.bits_needed -= 8;
+        }
+
+        // Extract n-bit value via division
+        let scaled_range = self.range << 7;
+        let max_val = (1u32 << n) - 1;
+        let result = (self.value / scaled_range).min(max_val);
+        self.value -= result * scaled_range;
+
+        #[cfg(feature = "std")]
+        if self.bin_trace_count > 0 {
+            let bin_num = 1000 - self.bin_trace_count;
+            self.bin_trace_count = self.bin_trace_count.saturating_sub(n as u32);
+            eprintln!(
+                "B{} xN({n}) r={} b={result} bp={} bn={}",
+                bin_num, self.range, self.byte_pos, self.bits_needed
+            );
+        }
+
         Ok(result)
     }
 
