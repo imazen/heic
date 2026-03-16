@@ -530,8 +530,9 @@ impl VideoDecoder {
             frames.push((poc, frame));
         }
 
-        // Sort by POC to produce display order
+        // Sort by POC to produce display order, deduplicate
         frames.sort_by_key(|(poc, _)| *poc);
+        frames.dedup_by_key(|(poc, _)| *poc);
         Ok(frames.into_iter().map(|(_, f)| f).collect())
     }
 
