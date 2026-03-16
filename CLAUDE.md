@@ -196,8 +196,15 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 
 ## Known Limitations
 
-- Inter prediction (P/B slices): full pipeline implemented on `inter-prediction` branch — syntax parsing, merge/AMVP candidate derivation, temporal MVP, scalar MC, DPB management, VideoDecoder API. Needs real-world P/B stream testing and SIMD MC (Phase 7).
+- Inter prediction (P/B slices) on `inter-prediction` branch:
+  - Full pipeline: syntax parsing, merge/AMVP/TMVP, scalar MC, DPB, VideoDecoder
+  - Conformance: 48/48 vectors decode without crash, 1 pixel-exact (I-only)
+  - Quality: ~14-17dB on early inter frames, UNINIT on some B-frames
+  - Root causes identified: CABAC init tables partially fixed, intra/inter TU prediction fixed
+  - Remaining: proper cbf_luma conditional for inter, B-frame DPB ordering, CABAC context selection accuracy
+  - Deferred: SIMD MC (Phase 7), weighted prediction application
 - 4:4:4 chroma: decodes correctly (61.9dB), but no SIMD color conversion path (uses scalar)
+- Dependent slice segments: not supported (2 vectors fail)
 
 ## Known Bugs
 
