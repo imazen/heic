@@ -185,15 +185,6 @@ fn decode_with_ours(bitstream: &Path) -> Result<Vec<Vec<u16>>, String> {
     let frames = decoder
         .decode_annex_b(&data)
         .map_err(|e| format!("decode: {e}"))?;
-    // Log some frame stats
-    if !frames.is_empty() {
-        let f0 = &frames[0];
-        let uninit_f0 = f0.y_plane.iter().filter(|&&v| v == u16::MAX).count();
-        eprintln!(
-            "  Frame 0: {}x{} coded, {}x{} cropped, uninit_in_full={}",
-            f0.width, f0.height, f0.cropped_width(), f0.cropped_height(), uninit_f0
-        );
-    }
     // Extract cropped Y plane (conformance window applied)
     Ok(frames
         .into_iter()
@@ -398,6 +389,34 @@ fn girlshy() {
                 eprintln!(
                     "  Frame {i}: PSNR={psnr:.1}dB, diff={num_diff}/{total_px} max={max_diff}, uninit={uninit}"
                 );
+                // Show first differing pixel for frame 1
+                if i == 1 && num_diff > 0 {
+                    for j in 0..our_frames[i].len().min(ref_frames[i].len()) {
+                        let a = our_frames[i][j];
+                        let b = ref_frames[i][j];
+                        if a != b {
+                            let px = j as u32 % width;
+                            let py = j as u32 / width;
+                            eprintln!(
+                                "    First diff at ({px},{py}): ours={a}, ref={b}, diff={}",
+                                (a as i32 - b as i32).abs()
+                            );
+                            break;
+                        }
+                    }
+                    // Also show pixel (0,0) comparison
+                    if !our_frames[i].is_empty() && !ref_frames[i].is_empty() {
+                        eprintln!(
+                            "    (0,0): ours={}, ref={}",
+                            our_frames[i][0], ref_frames[i][0]
+                        );
+                        eprintln!(
+                            "    (100,100): ours={}, ref={}",
+                            our_frames[i][(100 * width + 100) as usize],
+                            ref_frames[i][(100 * width + 100) as usize]
+                        );
+                    }
+                }
             }
         }
         Err(e) => eprintln!("  FAIL: {e}"),

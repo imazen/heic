@@ -435,6 +435,7 @@ impl VideoDecoder {
                 frames.push((self.last_decoded_poc, frame));
             }
         }
+
         // Sort by POC to produce display order
         frames.sort_by_key(|(poc, _)| *poc);
         Ok(frames.into_iter().map(|(_, f)| f).collect())

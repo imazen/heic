@@ -1330,11 +1330,17 @@ impl<'a> SliceContext<'a> {
 
         // Decode cbf_luma - per H.265 spec 7.3.8.6:
         // cbf_luma is coded if: CuPredMode == MODE_INTRA || trafoDepth != 0 || cbf_cb || cbf_cr
-        // Context: offset 0 if trafo_depth > 0, offset 1 if trafo_depth == 0
-        let ctx_offset = if trafo_depth == 0 { 1 } else { 0 };
-        let ctx_idx = context::CBF_LUMA + ctx_offset;
-        let cbf_luma = self.cabac.decode_bin(&mut self.ctx[ctx_idx])? != 0;
-        se_trace("cbf_luma", cbf_luma as i64, &self.cabac);
+        // For inter at trafo_depth==0 without chroma CBF, cbf_luma is implied 1
+        // (rqt_root_cbf was already true, so there must be residual somewhere)
+        let cbf_luma = if is_intra_cu || trafo_depth != 0 || cbf_cb || cbf_cr {
+            let ctx_offset = if trafo_depth == 0 { 1 } else { 0 };
+            let ctx_idx = context::CBF_LUMA + ctx_offset;
+            let val = self.cabac.decode_bin(&mut self.ctx[ctx_idx])? != 0;
+            se_trace("cbf_luma", val as i64, &self.cabac);
+            val
+        } else {
+            true // Implied: inter, trafo_depth==0, no chroma CBF
+        };
 
         // Per H.265 7.3.8.11: decode cu_qp_delta before residuals
         // Condition: (cbf_luma || cbf_cb || cbf_cr) && cu_qp_delta_enabled_flag && !IsCuQpDeltaCoded
