@@ -2106,23 +2106,38 @@ impl<'a> SliceContext<'a> {
         let ref_l0 = get_ref_frame(0);
         let ref_l1 = get_ref_frame(1);
 
+        // If no reference frames are available, fill with neutral value to avoid UNINIT
+        if ref_l0.is_none() && ref_l1.is_none() {
+            let neutral_y = if bit_depth == 8 { 128u16 } else { 1u16 << (bit_depth - 1) };
+            let stride = frame.width as usize;
+            for j in 0..ph {
+                for i in 0..pw {
+                    let idx = (py + j) as usize * stride + (px + i) as usize;
+                    if idx < frame.y_plane.len() {
+                        frame.y_plane[idx] = neutral_y;
+                    }
+                }
+            }
+            return;
+        }
+
         let is_bi = motion.pred_flag[0] && motion.pred_flag[1];
 
         // Luma MC
-        if is_bi {
-            if let (Some(r0), Some(r1)) = (ref_l0, ref_l1) {
-                let mut pred0 = vec![0i16; buf_size];
-                let mut pred1 = vec![0i16; buf_size];
-                mc::mc_luma(r0, motion.mv[0], &blk, &mut pred0);
-                mc::mc_luma(r1, motion.mv[1], &blk, &mut pred1);
-                mc::blend_bi(
-                    &pred0,
-                    &pred1,
-                    &mut frame.y_plane,
-                    frame.width as usize,
-                    &blk,
-                );
-            }
+        if is_bi && ref_l0.is_some() && ref_l1.is_some() {
+            let r0 = ref_l0.unwrap();
+            let r1 = ref_l1.unwrap();
+            let mut pred0 = vec![0i16; buf_size];
+            let mut pred1 = vec![0i16; buf_size];
+            mc::mc_luma(r0, motion.mv[0], &blk, &mut pred0);
+            mc::mc_luma(r1, motion.mv[1], &blk, &mut pred1);
+            mc::blend_bi(
+                &pred0,
+                &pred1,
+                &mut frame.y_plane,
+                frame.width as usize,
+                &blk,
+            );
         } else {
             let (ref_frame, mv) = if motion.pred_flag[0] {
                 (ref_l0, motion.mv[0])
