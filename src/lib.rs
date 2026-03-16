@@ -116,7 +116,7 @@ pub use codec::{
 };
 
 pub use error::{HeicError, HevcError, ProbeError, Result};
-pub use hevc::DecodedFrame;
+pub use hevc::{DecodedFrame, VideoDecoder};
 
 // Re-export Stop and Unstoppable for ergonomics
 pub use enough::{Stop, StopReason, Unstoppable};

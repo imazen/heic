@@ -26,7 +26,8 @@ macro_rules! debug_trace {
 use super::cabac::{CabacDecoder, ContextModel, INIT_VALUES, context};
 use super::debug;
 use super::inter::{
-    self, MergePuParams, MotionVector, MvContext, PbMotion, PbMotionCoding, RefPicLists,
+    self, CollocatedFrame, MergePuParams, MotionVector, MvContext, PbMotion, PbMotionCoding,
+    RefPicLists,
 };
 use super::intra;
 use super::mc::{self, ChromaRef, McBlock};
@@ -194,6 +195,24 @@ pub struct SliceContext<'a> {
     /// Reference frames from DPB (indexed by DPB slot, not ref list index).
     /// Empty for I-slices. For P/B, populated by VideoDecoder before decode.
     pub ref_frames: Vec<Option<DecodedFrame>>,
+    /// Collocated frame data for temporal MVP (owned copy from DPB)
+    pub collocated_data: Option<OwnedCollocatedFrame>,
+}
+
+/// Owned collocated frame data for temporal MVP (copied from DPB entry)
+pub struct OwnedCollocatedFrame {
+    /// Motion vectors
+    pub mv_info: Vec<PbMotion>,
+    /// Prediction modes
+    pub pred_mode: Vec<PredMode>,
+    /// PU stride
+    pub pu_stride: u32,
+    /// Min PU size
+    pub min_pu_size: u32,
+    /// POC
+    pub poc: i32,
+    /// Reference POCs from this frame's slice
+    pub ref_poc: [[i32; inter::MAX_NUM_REF_PICS]; 2],
 }
 
 impl<'a> SliceContext<'a> {
@@ -335,6 +354,7 @@ impl<'a> SliceContext<'a> {
             curr_poc: 0,
             ref_pic_lists: RefPicLists::default(),
             ref_frames: Vec::new(),
+            collocated_data: None,
         })
     }
 
@@ -1941,8 +1961,28 @@ impl<'a> SliceContext<'a> {
 
     // -- Inter prediction resolution and motion compensation --
 
+    /// Build an MvContext for merge/AMVP candidate derivation.
+    ///
+    /// The returned `col_frame` must be kept alive as long as the `MvContext` is used,
+    /// since the context borrows from it. Call as:
+    /// ```ignore
+    /// let col_frame = self.build_collocated_frame();
+    /// let mv_ctx = self.build_mv_context(col_frame.as_ref());
+    /// ```
+    fn build_collocated_frame(&self) -> Option<CollocatedFrame<'_>> {
+        let data = self.collocated_data.as_ref()?;
+        Some(CollocatedFrame {
+            mv_info: &data.mv_info,
+            pred_mode: &data.pred_mode,
+            pu_stride: data.pu_stride,
+            min_pu_size: data.min_pu_size,
+            poc: data.poc,
+            ref_poc: data.ref_poc,
+        })
+    }
+
     /// Build an MvContext for merge/AMVP candidate derivation
-    fn build_mv_context(&self) -> MvContext<'_> {
+    fn build_mv_context<'c>(&'c self, col: Option<&'c CollocatedFrame<'c>>) -> MvContext<'c> {
         MvContext {
             mv_info: &self.mv_info,
             pred_mode: &self.pred_mode_map,
@@ -1954,7 +1994,7 @@ impl<'a> SliceContext<'a> {
             ref_pic_lists: &self.ref_pic_lists,
             is_b_slice: self.header.slice_type == SliceType::B,
             log2_parallel_merge_level: self.pps.log2_parallel_merge_level_minus2 + 2,
-            collocated: None, // TODO: wire collocated frame from DPB via VideoDecoder
+            collocated: col,
             ctb_size: self.sps.ctb_size(),
         }
     }
@@ -1971,7 +2011,8 @@ impl<'a> SliceContext<'a> {
         part_idx: u8,
         part_mode: PartMode,
     ) -> PbMotion {
-        let mv_ctx = self.build_mv_context();
+        let col_frame = self.build_collocated_frame();
+        let mv_ctx = self.build_mv_context(col_frame.as_ref());
 
         if coding.merge_flag {
             // Merge mode: select from merge candidate list

@@ -353,12 +353,52 @@ impl VideoDecoder {
         // Create frame
         let mut frame = create_frame(sps);
 
+        // Build collocated frame for temporal MVP
+        let collocated_data = if slice_header.slice_temporal_mvp_enabled_flag
+            && !slice_header.slice_type.is_intra()
+        {
+            // Determine collocated reference
+            let col_list = if slice_header.slice_type == slice::SliceType::B
+                && !slice_header.collocated_from_l0_flag
+            {
+                1usize
+            } else {
+                0
+            };
+            let col_ref_idx = slice_header.collocated_ref_idx as usize;
+            let col_dpb_idx = ref_pic_lists
+                .dpb_index
+                .get(col_list)
+                .and_then(|l| l.get(col_ref_idx))
+                .copied()
+                .unwrap_or(-1);
+
+            if col_dpb_idx >= 0 {
+                self.dpb.get(col_dpb_idx as usize).map(|entry| {
+                    let min_pu = ((1u32 << sps.log2_min_cb_size()) / 2).max(1);
+                    ctu::OwnedCollocatedFrame {
+                        mv_info: entry.mv_info.clone(),
+                        pred_mode: entry.pred_mode_map.clone(),
+                        pu_stride: entry.mv_stride,
+                        min_pu_size: min_pu,
+                        poc: entry.poc,
+                        ref_poc: ref_pic_lists.poc, // approximate: use current slice's ref POCs
+                    }
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Decode slice
         let slice_data = &nal.payload[data_offset..];
         let mut ctx = ctu::SliceContext::new(sps, pps, &slice_header, slice_data)?;
         ctx.curr_poc = curr_poc;
         ctx.ref_pic_lists = ref_pic_lists;
         ctx.ref_frames = ref_frames;
+        ctx.collocated_data = collocated_data;
 
         ctx.decode_slice(&mut frame)?;
 
