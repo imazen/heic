@@ -12,6 +12,7 @@ pub(crate) mod debug;
 pub(crate) mod dpb;
 pub(crate) mod inter;
 mod intra;
+pub(crate) mod mc;
 pub(crate) mod params;
 mod picture;
 pub(crate) mod refpic;
