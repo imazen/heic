@@ -1954,6 +1954,8 @@ impl<'a> SliceContext<'a> {
             ref_pic_lists: &self.ref_pic_lists,
             is_b_slice: self.header.slice_type == SliceType::B,
             log2_parallel_merge_level: self.pps.log2_parallel_merge_level_minus2 + 2,
+            collocated: None, // TODO: wire collocated frame from DPB via VideoDecoder
+            ctb_size: self.sps.ctb_size(),
         }
     }
 

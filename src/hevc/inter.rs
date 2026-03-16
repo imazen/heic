@@ -132,6 +132,22 @@ pub struct RefPicLists {
 
 // ── Merge candidate list derivation (H.265 8.5.3.2.2) ──────────────────
 
+/// Collocated frame motion info for temporal MVP
+pub struct CollocatedFrame<'a> {
+    /// Motion vectors of the collocated frame
+    pub mv_info: &'a [PbMotion],
+    /// Prediction mode map of the collocated frame
+    pub pred_mode: &'a [super::slice::PredMode],
+    /// PU stride of the collocated frame
+    pub pu_stride: u32,
+    /// Min PU size of the collocated frame
+    pub min_pu_size: u32,
+    /// POC of the collocated frame
+    pub poc: i32,
+    /// Reference picture list POCs of the collocated frame
+    pub ref_poc: [[i32; MAX_NUM_REF_PICS]; 2],
+}
+
 /// Context needed to derive motion vector candidates from the current picture.
 /// This borrows the per-PU motion/pred-mode maps from SliceContext.
 pub struct MvContext<'a> {
@@ -155,6 +171,10 @@ pub struct MvContext<'a> {
     pub is_b_slice: bool,
     /// log2_parallel_merge_level
     pub log2_parallel_merge_level: u8,
+    /// Collocated frame for temporal MVP (None if unavailable)
+    pub collocated: Option<&'a CollocatedFrame<'a>>,
+    /// CTB size for temporal MVP position validation
+    pub ctb_size: u32,
 }
 
 impl MvContext<'_> {
@@ -299,8 +319,13 @@ pub fn derive_merge_candidates(
         }
     }
 
-    // TODO Phase 4b: temporal MVP candidate would go here
-    // For now, skip temporal (requires DPB access with collocated frame)
+    // Temporal MVP candidate
+    if count < max
+        && let Some(tmvp) = derive_temporal_candidate(ctx, xp, yp, w, h)
+    {
+        cand[count] = tmvp;
+        count += 1;
+    }
 
     // Combined bipredictive candidates (B-slices only, if count > 1 and < max)
     if ctx.is_b_slice && count > 1 && count < max {
@@ -439,7 +464,25 @@ pub fn derive_amvp_candidates(
         }
     }
 
-    // TODO: temporal MVP candidate would go here (Phase 4b)
+    // Temporal MVP candidate for AMVP (if < 2 candidates)
+    if mvp_count < 2
+        && let Some(tmvp) = derive_temporal_candidate(ctx, xp, yp, w, h)
+    {
+        let tmv = if list_idx == 0 && tmvp.pred_flag[0] {
+            tmvp.mv[0]
+        } else if list_idx == 1 && tmvp.pred_flag[1] {
+            tmvp.mv[1]
+        } else if tmvp.pred_flag[0] {
+            tmvp.mv[0]
+        } else {
+            tmvp.mv[1]
+        };
+        if mvp_count == 0 || tmv != mvp[0] {
+            mvp[mvp_count] = tmv;
+            mvp_count += 1;
+        }
+    }
+    let _ = mvp_count;
 
     // Pad with zero MVs
     // (mvp is already initialized to ZERO, so nothing to do)
@@ -464,6 +507,106 @@ pub fn scale_mv(mv: MotionVector, dist_src: i32, dist_dst: i32) -> MotionVector 
         y: ((scale as i64 * mv.y as i64 + 127 + (if scale * (mv.y as i32) < 0 { 1 } else { 0 }))
             >> 8)
             .clamp(-32768, 32767) as i16,
+    }
+}
+
+// ── Temporal MVP derivation (H.265 8.5.3.2.7) ──────────────────────────
+
+/// Derive temporal motion vector candidate from collocated frame
+fn derive_temporal_candidate(
+    ctx: &MvContext<'_>,
+    xp: u32,
+    yp: u32,
+    w: u32,
+    h: u32,
+) -> Option<PbMotion> {
+    let col = ctx.collocated.as_ref()?;
+
+    // Try bottom-right corner first, aligned to 16-pixel grid
+    let br_x = ((xp + w) & !15) as i32;
+    let br_y = ((yp + h) & !15) as i32;
+
+    // Bottom-right must be in same CTU row and within picture bounds
+    let ctb = ctx.ctb_size as i32;
+    let same_ctu_row = (br_y / ctb) == (yp as i32 / ctb);
+    let in_bounds = br_x >= 0
+        && br_y >= 0
+        && (br_x as u32) < ctx.pic_width
+        && (br_y as u32) < ctx.pic_height;
+
+    let col_pos = if same_ctu_row && in_bounds {
+        (br_x, br_y)
+    } else {
+        // Fallback: center of PU, aligned to 16-pixel grid
+        let cx = ((xp + w / 2) & !15) as i32;
+        let cy = ((yp + h / 2) & !15) as i32;
+        (cx, cy)
+    };
+
+    // Get motion from collocated frame at col_pos
+    let col_x = col_pos.0.clamp(0, ctx.pic_width as i32 - 1) as u32;
+    let col_y = col_pos.1.clamp(0, ctx.pic_height as i32 - 1) as u32;
+    let pu_x = col_x / col.min_pu_size;
+    let pu_y = col_y / col.min_pu_size;
+    let col_idx = (pu_y * col.pu_stride + pu_x) as usize;
+
+    if col_idx >= col.mv_info.len() {
+        return None;
+    }
+    if col_idx >= col.pred_mode.len() {
+        return None;
+    }
+
+    let col_pred = col.pred_mode[col_idx];
+    if !matches!(
+        col_pred,
+        super::slice::PredMode::Inter | super::slice::PredMode::Skip
+    ) {
+        return None;
+    }
+
+    let col_motion = &col.mv_info[col_idx];
+
+    // Try to derive a scaled MV from the collocated block
+    // For each list, scale the collocated MV by POC distance ratio
+    let mut result = PbMotion::UNAVAILABLE;
+
+    for target_list in 0..2usize {
+        if target_list == 1 && !ctx.is_b_slice {
+            continue;
+        }
+        let num_active = ctx.ref_pic_lists.num_ref_idx_active[target_list];
+        if num_active == 0 {
+            continue;
+        }
+        let target_ref_poc = ctx.ref_pic_lists.poc[target_list][0];
+
+        // Find a valid MV in the collocated block
+        for col_list in 0..2usize {
+            if !col_motion.pred_flag[col_list] || col_motion.ref_idx[col_list] < 0 {
+                continue;
+            }
+            let col_ref_idx = col_motion.ref_idx[col_list] as usize;
+            if col_ref_idx >= MAX_NUM_REF_PICS {
+                continue;
+            }
+            let col_ref_poc = col.ref_poc[col_list][col_ref_idx];
+
+            let dist_col = col.poc - col_ref_poc;
+            let dist_curr = ctx.curr_poc - target_ref_poc;
+
+            let scaled = scale_mv(col_motion.mv[col_list], dist_col, dist_curr);
+            result.pred_flag[target_list] = true;
+            result.ref_idx[target_list] = 0;
+            result.mv[target_list] = scaled;
+            break; // Use first valid collocated MV
+        }
+    }
+
+    if result.pred_flag[0] || result.pred_flag[1] {
+        Some(result)
+    } else {
+        None
     }
 }
 
