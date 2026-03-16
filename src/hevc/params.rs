@@ -911,4 +911,3 @@ fn parse_scaling_list_data(reader: &mut BitstreamReader<'_>) -> Result<ScalingLi
     }
     Ok(data)
 }
-

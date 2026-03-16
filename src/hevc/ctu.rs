@@ -25,12 +25,13 @@ macro_rules! debug_trace {
 
 use super::cabac::{CabacDecoder, ContextModel, INIT_VALUES, context};
 use super::debug;
+use super::inter::{MotionVector, PbMotion, PbMotionCoding};
 use super::intra;
 use super::params::{Pps, Sps};
 use super::picture::DecodedFrame;
 use super::residual::{self, ScanOrder};
 use super::sao::SaoMap;
-use super::slice::{IntraPredMode, PartMode, PredMode, SliceHeader};
+use super::slice::{IntraPredMode, PartMode, PredMode, SliceHeader, SliceType};
 use super::transform;
 use super::transform_simd::add_residual_block_scalar;
 #[cfg(target_arch = "x86_64")]
@@ -65,6 +66,36 @@ fn se_trace(name: &str, val: i64, cabac: &CabacDecoder) {
 
 /// Chroma QP mapping table (H.265 Table 8-10)
 /// Maps qPi (0-57) to QpC for 8-bit video
+/// Map partition mode to PU rectangles: (x, y, width, height)
+/// Returns up to 4 PUs for NxN, 2 for split modes, 1 for 2Nx2N
+fn partition_to_pu_list(
+    part_mode: PartMode,
+    x0: u32,
+    y0: u32,
+    cb_size: u32,
+) -> alloc::vec::Vec<(u32, u32, u32, u32)> {
+    let n = cb_size;
+    match part_mode {
+        PartMode::Part2Nx2N => alloc::vec![(x0, y0, n, n)],
+        PartMode::Part2NxN => alloc::vec![(x0, y0, n, n / 2), (x0, y0 + n / 2, n, n / 2)],
+        PartMode::PartNx2N => alloc::vec![(x0, y0, n / 2, n), (x0 + n / 2, y0, n / 2, n)],
+        PartMode::PartNxN => alloc::vec![
+            (x0, y0, n / 2, n / 2),
+            (x0 + n / 2, y0, n / 2, n / 2),
+            (x0, y0 + n / 2, n / 2, n / 2),
+            (x0 + n / 2, y0 + n / 2, n / 2, n / 2),
+        ],
+        PartMode::Part2NxnU => alloc::vec![(x0, y0, n, n / 4), (x0, y0 + n / 4, n, 3 * n / 4)],
+        PartMode::Part2NxnD => {
+            alloc::vec![(x0, y0, n, 3 * n / 4), (x0, y0 + 3 * n / 4, n, n / 4)]
+        }
+        PartMode::PartnLx2N => alloc::vec![(x0, y0, n / 4, n), (x0 + n / 4, y0, 3 * n / 4, n)],
+        PartMode::PartnRx2N => {
+            alloc::vec![(x0, y0, 3 * n / 4, n), (x0 + 3 * n / 4, y0, n / 4, n)]
+        }
+    }
+}
+
 fn chroma_qp_mapping(qp_i: i32) -> i32 {
     // Table 8-10: qPi to QpC mapping
     // For qPi 0-29, QpC = qPi
@@ -143,6 +174,18 @@ pub struct SliceContext<'a> {
     residual_buf: [i16; 1024],
     /// Reusable scaling matrix buffer
     scaling_buf: [u8; 1024],
+
+    // -- Inter prediction state --
+    /// Prediction mode map at min_pu_size granularity (Intra/Inter/Skip)
+    pred_mode_map: Vec<PredMode>,
+    /// Motion vector info at min_pu_size granularity
+    mv_info: Vec<PbMotion>,
+    /// CBF (coded block flag) map at 4x4 granularity for deblocking boundary strength (Phase 6)
+    #[allow(dead_code)]
+    cbf_map: Vec<bool>,
+    /// Stride of cbf_map (width / 4)
+    #[allow(dead_code)]
+    cbf_map_stride: u32,
 }
 
 impl<'a> SliceContext<'a> {
@@ -273,6 +316,14 @@ impl<'a> SliceContext<'a> {
             sao_map: SaoMap::new(sps.pic_width_in_ctbs(), sps.pic_height_in_ctbs()),
             residual_buf: [0i16; 1024],
             scaling_buf: [16u8; 1024],
+            pred_mode_map: vec![PredMode::Intra; pu_map_size],
+            mv_info: vec![PbMotion::UNAVAILABLE; pu_map_size],
+            cbf_map: vec![
+                false;
+                (sps.pic_width_in_luma_samples.div_ceil(4)
+                    * sps.pic_height_in_luma_samples.div_ceil(4)) as usize
+            ],
+            cbf_map_stride: sps.pic_width_in_luma_samples.div_ceil(4),
         })
     }
 
@@ -758,30 +809,78 @@ impl<'a> SliceContext<'a> {
         // Set ct_depth for this CU (used by split_cu_flag context derivation)
         self.set_ct_depth(x0, y0, log2_cb_size, ct_depth);
 
-        // For I-slices, prediction mode is always INTRA
-        let pred_mode = PredMode::Intra;
+        let is_intra_slice = self.header.slice_type.is_intra();
 
-        // Decode transquant_bypass_flag if enabled
-        self.cu_transquant_bypass_flag = if self.pps.transquant_bypass_enabled_flag {
-            let ctx_idx = context::CU_TRANSQUANT_BYPASS_FLAG;
-            self.cabac.decode_bin(&mut self.ctx[ctx_idx])? != 0
+        // --- cu_skip_flag (P/B slices only) ---
+        let cu_skip = if !is_intra_slice {
+            self.decode_cu_skip_flag(x0, y0)?
         } else {
             false
         };
 
-        // Decode partition mode
-        let part_mode = if log2_cb_size == self.sps.log2_min_cb_size() {
-            // At minimum size, can be 2Nx2N or NxN
-            let pm = self.decode_part_mode(pred_mode, log2_cb_size)?;
-            // Debug: log part_mode for first CTU (and count NxN)
-            if pm == PartMode::PartNxN {
-                static NXN_COUNT: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                let count = NXN_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                if count == 0 || x0 < 64 && y0 < 64 {
+        // Determine prediction mode
+        let pred_mode;
+        if cu_skip {
+            pred_mode = PredMode::Skip;
+        } else {
+            // Decode transquant_bypass_flag if enabled
+            self.cu_transquant_bypass_flag = if self.pps.transquant_bypass_enabled_flag {
+                let ctx_idx = context::CU_TRANSQUANT_BYPASS_FLAG;
+                self.cabac.decode_bin(&mut self.ctx[ctx_idx])? != 0
+            } else {
+                false
+            };
+
+            if !is_intra_slice {
+                pred_mode = self.decode_pred_mode_flag()?;
+            } else {
+                pred_mode = PredMode::Intra;
+            }
+        }
+
+        // Store prediction mode for the CU
+        self.store_pred_mode(x0, y0, log2_cb_size, pred_mode);
+
+        // --- Skip mode: decode merge_idx only, no partition/residual ---
+        if pred_mode == PredMode::Skip {
+            let coding = self.decode_inter_pu(x0, y0, cb_size, cb_size, ct_depth, true)?;
+
+            // Store placeholder motion info (will be resolved in Phase 4/5)
+            let motion = PbMotion {
+                pred_flag: [true, false],
+                ref_idx: [0, -1],
+                mv: [MotionVector::ZERO, MotionVector::ZERO],
+            };
+            self.store_mv_info(x0, y0, cb_size, cb_size, motion);
+            let _ = coding; // Will be used for merge candidate derivation in Phase 4
+            return Ok(());
+        }
+
+        // --- Decode partition mode ---
+        let part_mode = if pred_mode == PredMode::Intra {
+            if log2_cb_size == self.sps.log2_min_cb_size() {
+                let pm = self.decode_part_mode(pred_mode, log2_cb_size)?;
+                if pm == PartMode::PartNxN {
+                    static NXN_COUNT: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let count = NXN_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if count == 0 || x0 < 64 && y0 < 64 {
+                        let (_r, _o) = self.cabac.get_state();
+                        debug_trace!(
+                            "DEBUG: part_mode at ({},{}) log2={}: {:?} cabac=({},{})",
+                            x0,
+                            y0,
+                            log2_cb_size,
+                            pm,
+                            _r,
+                            _o
+                        );
+                    }
+                }
+                if self.debug_ctu {
                     let (_r, _o) = self.cabac.get_state();
                     debug_trace!(
-                        "DEBUG: part_mode at ({},{}) log2={}: {:?} cabac=({},{})",
+                        "  CTU37: CU at ({},{}) log2={} part_mode={:?} (r={},o={})",
                         x0,
                         y0,
                         log2_cb_size,
@@ -790,109 +889,128 @@ impl<'a> SliceContext<'a> {
                         _o
                     );
                 }
+                pm
+            } else {
+                if self.debug_ctu {
+                    debug_trace!(
+                        "  CTU37: CU at ({},{}) log2={} part_mode=2Nx2N (implicit)",
+                        x0,
+                        y0,
+                        log2_cb_size
+                    );
+                }
+                PartMode::Part2Nx2N
             }
-            if self.debug_ctu {
-                let (_r, _o) = self.cabac.get_state();
-                debug_trace!(
-                    "  CTU37: CU at ({},{}) log2={} part_mode={:?} (r={},o={})",
+        } else {
+            // Inter: decode partition mode with all 8 modes available
+            self.decode_part_mode(pred_mode, log2_cb_size)?
+        };
+
+        // --- Decode prediction info ---
+        let (intra_luma_mode, intra_chroma_mode) = if pred_mode == PredMode::Intra {
+            match part_mode {
+                PartMode::Part2Nx2N => {
+                    let modes =
+                        self.decode_intra_prediction(x0, y0, log2_cb_size, true, frame)?;
+                    if self.debug_ctu {
+                        let (_r, _o) = self.cabac.get_state();
+                        debug_trace!(
+                            "  CTU37: After intra_prediction: mode={:?} (r={},o={}) bits={}",
+                            modes,
+                            _r,
+                            _o,
+                            self.cabac.get_position().2
+                        );
+                    }
+                    modes
+                }
+                PartMode::PartNxN => {
+                    let half = cb_size / 2;
+                    let log2_pu_size = log2_cb_size - 1;
+
+                    let prev_flags = [
+                        self.decode_prev_intra_luma_pred_flag()?,
+                        self.decode_prev_intra_luma_pred_flag()?,
+                        self.decode_prev_intra_luma_pred_flag()?,
+                        self.decode_prev_intra_luma_pred_flag()?,
+                    ];
+
+                    let luma_mode_0 = self.derive_intra_luma_mode(x0, y0, prev_flags[0])?;
+                    self.store_intra_mode(x0, y0, log2_pu_size, luma_mode_0);
+
+                    let luma_mode_1 =
+                        self.derive_intra_luma_mode(x0 + half, y0, prev_flags[1])?;
+                    self.store_intra_mode(x0 + half, y0, log2_pu_size, luma_mode_1);
+
+                    let luma_mode_2 =
+                        self.derive_intra_luma_mode(x0, y0 + half, prev_flags[2])?;
+                    self.store_intra_mode(x0, y0 + half, log2_pu_size, luma_mode_2);
+
+                    let luma_mode_3 =
+                        self.derive_intra_luma_mode(x0 + half, y0 + half, prev_flags[3])?;
+                    self.store_intra_mode(
+                        x0 + half,
+                        y0 + half,
+                        log2_pu_size,
+                        luma_mode_3,
+                    );
+
+                    let chroma_mode = self.decode_intra_chroma_mode(luma_mode_0)?;
+                    self.store_intra_chroma_mode(x0, y0, log2_cb_size, chroma_mode);
+
+                    (luma_mode_0, chroma_mode)
+                }
+                _ => {
+                    return Err(HevcError::InvalidBitstream(
+                        "invalid intra partition mode",
+                    ));
+                }
+            }
+        } else {
+            // Inter prediction: decode PUs based on partition mode
+            let pu_list = partition_to_pu_list(part_mode, x0, y0, cb_size);
+            for &(px, py, pw, ph) in &pu_list {
+                let coding = self.decode_inter_pu(px, py, pw, ph, ct_depth, false)?;
+                // Store placeholder motion (real derivation in Phase 4)
+                let motion = PbMotion {
+                    pred_flag: [
+                        coding.inter_pred_idc == 1 || coding.inter_pred_idc == 3 || coding.merge_flag,
+                        coding.inter_pred_idc == 2 || coding.inter_pred_idc == 3,
+                    ],
+                    ref_idx: coding.ref_idx,
+                    mv: [MotionVector::ZERO, MotionVector::ZERO],
+                };
+                self.store_mv_info(px, py, pw, ph, motion);
+            }
+            // Inter CUs use DC placeholder for intra modes (unused in transform path)
+            (IntraPredMode::Dc, IntraPredMode::Dc)
+        };
+
+        // --- Decode residual (transform tree) ---
+        if pred_mode == PredMode::Inter {
+            // Inter: rqt_root_cbf determines if there's any residual
+            let has_residual = self.decode_rqt_root_cbf()?;
+            if has_residual {
+                let intra_split_flag = false;
+                self.decode_transform_tree(
                     x0,
                     y0,
                     log2_cb_size,
-                    pm,
-                    _r,
-                    _o
-                );
+                    0,
+                    intra_luma_mode,
+                    intra_chroma_mode,
+                    intra_split_flag,
+                    frame,
+                )?;
             }
-            pm
-        } else {
-            // Larger sizes are always 2Nx2N for intra
-            if self.debug_ctu {
-                debug_trace!(
-                    "  CTU37: CU at ({},{}) log2={} part_mode=2Nx2N (implicit)",
-                    x0,
-                    y0,
-                    log2_cb_size
-                );
-            }
-            PartMode::Part2Nx2N
-        };
-
-        // Decode prediction info and get intra modes for scan order
-        let (intra_luma_mode, intra_chroma_mode) = match part_mode {
-            PartMode::Part2Nx2N => {
-                // Single PU covering entire CU
-                let modes = self.decode_intra_prediction(x0, y0, log2_cb_size, true, frame)?;
-                if self.debug_ctu {
-                    let (_r, _o) = self.cabac.get_state();
-                    debug_trace!(
-                        "  CTU37: After intra_prediction at (1144,120): mode={:?} (r={},o={}) bits={}",
-                        modes,
-                        _r,
-                        _o,
-                        self.cabac.get_position().2
-                    );
-                }
-                modes
-            }
-            PartMode::PartNxN => {
-                // Four PUs (only at minimum CU size for intra)
-                // For 4:2:0, all four 4x4 luma PUs share one 4x4 chroma block
-                let half = cb_size / 2;
-                let log2_pu_size = log2_cb_size - 1;
-
-                // Per H.265 spec 7.3.8.5 and libde265 slice.cc:4385-4458:
-                // FIRST pass: decode ALL prev_intra_luma_pred_flag (context-coded bins)
-                let prev_flags = [
-                    self.decode_prev_intra_luma_pred_flag()?,
-                    self.decode_prev_intra_luma_pred_flag()?,
-                    self.decode_prev_intra_luma_pred_flag()?,
-                    self.decode_prev_intra_luma_pred_flag()?,
-                ];
-
-                // SECOND pass: decode mpm_idx/rem (bypass bins) and store IMMEDIATELY
-                // per libde265: each PU mode stored before next PU's neighbor lookup
-                let luma_mode_0 = self.derive_intra_luma_mode(x0, y0, prev_flags[0])?;
-                self.store_intra_mode(x0, y0, log2_pu_size, luma_mode_0);
-
-                let luma_mode_1 = self.derive_intra_luma_mode(x0 + half, y0, prev_flags[1])?;
-                self.store_intra_mode(x0 + half, y0, log2_pu_size, luma_mode_1);
-
-                let luma_mode_2 = self.derive_intra_luma_mode(x0, y0 + half, prev_flags[2])?;
-                self.store_intra_mode(x0, y0 + half, log2_pu_size, luma_mode_2);
-
-                let luma_mode_3 =
-                    self.derive_intra_luma_mode(x0 + half, y0 + half, prev_flags[3])?;
-                self.store_intra_mode(x0 + half, y0 + half, log2_pu_size, luma_mode_3);
-
-                // Decode chroma mode once (using first luma mode for derivation if mode=4)
-                let chroma_mode = self.decode_intra_chroma_mode(luma_mode_0)?;
-
-                // Store chroma mode for the whole CU region
-                self.store_intra_chroma_mode(x0, y0, log2_cb_size, chroma_mode);
-
-                // NOTE: Prediction is NOT done here. It happens in decode_transform_unit_leaf
-                // and the 8x8→4x4 chroma split handler, so each TU is predicted →
-                // reconstructed before the next TU reads its neighbors.
-
-                (luma_mode_0, chroma_mode)
-            }
-            _ => {
-                // Other partition modes not used for intra
-                return Err(HevcError::InvalidBitstream("invalid intra partition mode"));
-            }
-        };
-
-        // Decode rqt_root_cbf (residual quad-tree coded block flag)
-        // For intra, this is always coded (not signaled, assumed 1)
-        // unless transquant_bypass is enabled
-        if !self.cu_transquant_bypass_flag {
-            // Decode transform tree
+        } else if !self.cu_transquant_bypass_flag {
+            // Intra: residual always present (rqt_root_cbf implied 1)
             let intra_split_flag = part_mode == PartMode::PartNxN;
             self.decode_transform_tree(
                 x0,
                 y0,
                 log2_cb_size,
-                0, // trafo_depth
+                0,
                 intra_luma_mode,
                 intra_chroma_mode,
                 intra_split_flag,
@@ -959,9 +1077,16 @@ impl<'a> SliceContext<'a> {
         cbf_cr_parent: bool,
         frame: &mut DecodedFrame,
     ) -> Result<()> {
-        // Per H.265: MaxTrafoDepth = max_transform_hierarchy_depth_intra + IntraSplitFlag
-        let max_trafo_depth =
-            self.sps.max_transform_hierarchy_depth_intra + if intra_split_flag { 1 } else { 0 };
+        // Per H.265: MaxTrafoDepth depends on prediction mode
+        // Intra: max_transform_hierarchy_depth_intra + IntraSplitFlag
+        // Inter: max_transform_hierarchy_depth_inter
+        let max_trafo_depth = if intra_split_flag
+            || self.get_pred_mode_at(x0, y0) == PredMode::Intra
+        {
+            self.sps.max_transform_hierarchy_depth_intra + if intra_split_flag { 1 } else { 0 }
+        } else {
+            self.sps.max_transform_hierarchy_depth_inter
+        };
         let log2_min_trafo_size = self.sps.log2_min_tb_size();
         let log2_max_trafo_size = self.sps.log2_max_tb_size();
 
@@ -1441,8 +1566,85 @@ impl<'a> SliceContext<'a> {
                 }
             }
         } else {
-            // Inter partition modes (not implemented)
-            Err(HevcError::Unsupported("inter partition modes"))
+            // Inter partition modes (H.265 Table 9-34)
+            let ctx_base = context::PART_MODE;
+            let min_cb_log2 = self.sps.log2_min_cb_size();
+            let amp = self.sps.amp_enabled_flag;
+
+            // First bin: 2Nx2N(1) vs other(0)
+            let bin0 = self.cabac.decode_bin(&mut self.ctx[ctx_base])?;
+            if bin0 != 0 {
+                se_trace("part_mode", 0, &self.cabac);
+                return Ok(PartMode::Part2Nx2N);
+            }
+
+            // At minimum CU size, fewer modes available
+            if log2_cb_size == min_cb_log2 {
+                // Second bin distinguishes: 2NxN(1), Nx2N+NxN(0)
+                let bin1 = self.cabac.decode_bin(&mut self.ctx[ctx_base + 1])?;
+                if bin1 != 0 {
+                    se_trace("part_mode", 1, &self.cabac);
+                    return Ok(PartMode::Part2NxN);
+                }
+                // Third bin: Nx2N(1) vs NxN(0)
+                if log2_cb_size > 3 {
+                    // NxN only for inter at min CU if size > 8
+                    let bin2 = self.cabac.decode_bin(&mut self.ctx[ctx_base + 2])?;
+                    if bin2 != 0 {
+                        se_trace("part_mode", 2, &self.cabac);
+                        return Ok(PartMode::PartNx2N);
+                    }
+                    se_trace("part_mode", 3, &self.cabac);
+                    Ok(PartMode::PartNxN)
+                } else {
+                    se_trace("part_mode", 2, &self.cabac);
+                    Ok(PartMode::PartNx2N)
+                }
+            } else if amp {
+                // AMP modes available
+                let bin1 = self.cabac.decode_bin(&mut self.ctx[ctx_base + 1])?;
+                if bin1 != 0 {
+                    // Horizontal: 2NxN or AMP 2NxnU/2NxnD
+                    let bin3 = self.cabac.decode_bin(&mut self.ctx[ctx_base + 3])?;
+                    if bin3 != 0 {
+                        se_trace("part_mode", 1, &self.cabac);
+                        return Ok(PartMode::Part2NxN);
+                    }
+                    let bin_bypass = self.cabac.decode_bypass()?;
+                    if bin_bypass == 0 {
+                        se_trace("part_mode", 4, &self.cabac);
+                        Ok(PartMode::Part2NxnU)
+                    } else {
+                        se_trace("part_mode", 5, &self.cabac);
+                        Ok(PartMode::Part2NxnD)
+                    }
+                } else {
+                    // Vertical: Nx2N or AMP nLx2N/nRx2N
+                    let bin3 = self.cabac.decode_bin(&mut self.ctx[ctx_base + 3])?;
+                    if bin3 != 0 {
+                        se_trace("part_mode", 2, &self.cabac);
+                        return Ok(PartMode::PartNx2N);
+                    }
+                    let bin_bypass = self.cabac.decode_bypass()?;
+                    if bin_bypass == 0 {
+                        se_trace("part_mode", 6, &self.cabac);
+                        Ok(PartMode::PartnLx2N)
+                    } else {
+                        se_trace("part_mode", 7, &self.cabac);
+                        Ok(PartMode::PartnRx2N)
+                    }
+                }
+            } else {
+                // No AMP: just 2NxN or Nx2N
+                let bin1 = self.cabac.decode_bin(&mut self.ctx[ctx_base + 1])?;
+                if bin1 != 0 {
+                    se_trace("part_mode", 1, &self.cabac);
+                    Ok(PartMode::Part2NxN)
+                } else {
+                    se_trace("part_mode", 2, &self.cabac);
+                    Ok(PartMode::PartNx2N)
+                }
+            }
         }
     }
 
@@ -1659,6 +1861,335 @@ impl<'a> SliceContext<'a> {
             return IntraPredMode::Dc;
         }
         self.get_intra_mode_at(x0, y0 - 1)
+    }
+
+    // -- Inter prediction storage methods --
+
+    /// Store prediction mode for a CU region
+    fn store_pred_mode(&mut self, x0: u32, y0: u32, log2_size: u8, mode: PredMode) {
+        let min_pu = self.min_pu_size();
+        let stride = self.intra_mode_map_stride;
+        let count = ((1u32 << log2_size) / min_pu).max(1);
+        let start_x = x0 / min_pu;
+        let start_y = y0 / min_pu;
+        for dy in 0..count {
+            for dx in 0..count {
+                let idx = ((start_y + dy) * stride + (start_x + dx)) as usize;
+                if idx < self.pred_mode_map.len() {
+                    self.pred_mode_map[idx] = mode;
+                }
+            }
+        }
+    }
+
+    /// Get prediction mode at a sample position
+    fn get_pred_mode_at(&self, x: u32, y: u32) -> PredMode {
+        let min_pu = self.min_pu_size();
+        let stride = self.intra_mode_map_stride;
+        let idx = ((y / min_pu) * stride + (x / min_pu)) as usize;
+        if idx < self.pred_mode_map.len() {
+            self.pred_mode_map[idx]
+        } else {
+            PredMode::Intra
+        }
+    }
+
+    /// Store motion information for a PU region
+    fn store_mv_info(&mut self, x0: u32, y0: u32, w: u32, h: u32, motion: PbMotion) {
+        let min_pu = self.min_pu_size();
+        let stride = self.intra_mode_map_stride;
+        let sx = x0 / min_pu;
+        let sy = y0 / min_pu;
+        let cw = (w / min_pu).max(1);
+        let ch = (h / min_pu).max(1);
+        for dy in 0..ch {
+            for dx in 0..cw {
+                let idx = ((sy + dy) * stride + (sx + dx)) as usize;
+                if idx < self.mv_info.len() {
+                    self.mv_info[idx] = motion;
+                }
+            }
+        }
+    }
+
+    /// Store CBF (coded block flag) for a TU region at 4x4 granularity (Phase 6)
+    #[allow(dead_code)]
+    fn store_cbf(&mut self, x0: u32, y0: u32, size: u32, has_coeffs: bool) {
+        let bx = x0 / 4;
+        let by = y0 / 4;
+        let bs = (size / 4).max(1);
+        for dy in 0..bs {
+            for dx in 0..bs {
+                let idx = ((by + dy) * self.cbf_map_stride + (bx + dx)) as usize;
+                if idx < self.cbf_map.len() {
+                    self.cbf_map[idx] = has_coeffs;
+                }
+            }
+        }
+    }
+
+    // -- Inter CU/PU CABAC syntax decoders --
+
+    /// Decode cu_skip_flag (H.265 9.3.4.2.1)
+    /// Contexts 4-6, depends on left and above neighbor skip status
+    fn decode_cu_skip_flag(&mut self, x0: u32, y0: u32) -> Result<bool> {
+        let ctx_inc = self.derive_cu_skip_ctx(x0, y0);
+        let ctx_idx = context::CU_SKIP_FLAG + ctx_inc;
+        let val = self.cabac.decode_bin(&mut self.ctx[ctx_idx])? != 0;
+        se_trace("cu_skip_flag", val as i64, &self.cabac);
+        Ok(val)
+    }
+
+    /// Derive context increment for cu_skip_flag from neighbors
+    fn derive_cu_skip_ctx(&self, x0: u32, y0: u32) -> usize {
+        let mut ctx_inc = 0;
+        // Left neighbor
+        if x0 > 0 && self.get_pred_mode_at(x0 - 1, y0) == PredMode::Skip {
+            ctx_inc += 1;
+        }
+        // Above neighbor
+        if y0 > 0 {
+            let ctb_size = self.sps.ctb_size();
+            let ctb_y_start = (y0 / ctb_size) * ctb_size;
+            if y0 > ctb_y_start && self.get_pred_mode_at(x0, y0 - 1) == PredMode::Skip {
+                ctx_inc += 1;
+            }
+        }
+        ctx_inc
+    }
+
+    /// Decode pred_mode_flag (H.265 7.3.8.5)
+    /// Context 8, 0 = Inter, 1 = Intra
+    fn decode_pred_mode_flag(&mut self) -> Result<PredMode> {
+        let ctx_idx = context::PRED_MODE_FLAG;
+        let val = self.cabac.decode_bin(&mut self.ctx[ctx_idx])?;
+        se_trace("pred_mode_flag", val as i64, &self.cabac);
+        if val != 0 {
+            Ok(PredMode::Intra)
+        } else {
+            Ok(PredMode::Inter)
+        }
+    }
+
+    /// Decode merge_flag (context 20)
+    fn decode_merge_flag(&mut self) -> Result<bool> {
+        let ctx_idx = context::MERGE_FLAG;
+        let val = self.cabac.decode_bin(&mut self.ctx[ctx_idx])? != 0;
+        se_trace("merge_flag", val as i64, &self.cabac);
+        Ok(val)
+    }
+
+    /// Decode merge_idx (context 21 + bypass bins)
+    fn decode_merge_idx(&mut self, max_cand: u8) -> Result<u8> {
+        if max_cand <= 1 {
+            return Ok(0);
+        }
+        let ctx_idx = context::MERGE_IDX;
+        let first = self.cabac.decode_bin(&mut self.ctx[ctx_idx])?;
+        se_trace("merge_idx", first as i64, &self.cabac);
+        if first == 0 {
+            return Ok(0);
+        }
+        // Remaining bins are bypass (truncated unary)
+        let mut idx = 1u8;
+        while idx < max_cand - 1 {
+            let bit = self.cabac.decode_bypass()?;
+            if bit == 0 {
+                break;
+            }
+            idx += 1;
+        }
+        Ok(idx)
+    }
+
+    /// Decode inter_pred_idc (contexts 15-19)
+    fn decode_inter_pred_idc(&mut self, ct_depth: u8, cb_size: u32) -> Result<u8> {
+        // For small blocks (nPbW + nPbH == 12), only L0/L1 allowed (1 bin)
+        if cb_size == 8 {
+            let ctx_idx = context::INTER_PRED_IDC + 4; // ctx 19
+            let val = self.cabac.decode_bin(&mut self.ctx[ctx_idx])?;
+            se_trace("inter_pred_idc", val as i64, &self.cabac);
+            return Ok(if val == 0 { 1 } else { 2 }); // L0=1, L1=2
+        }
+        // First bin: Bi(1) vs uni(0)
+        let ctx_idx = context::INTER_PRED_IDC + (ct_depth as usize).min(3);
+        let first = self.cabac.decode_bin(&mut self.ctx[ctx_idx])?;
+        if first != 0 {
+            se_trace("inter_pred_idc", 3, &self.cabac);
+            return Ok(3); // Bi
+        }
+        // Second bin: L0(0) vs L1(1)
+        let ctx_idx2 = context::INTER_PRED_IDC + 4;
+        let val = self.cabac.decode_bin(&mut self.ctx[ctx_idx2])?;
+        let idc: u8 = if val == 0 { 1 } else { 2 };
+        se_trace("inter_pred_idc", idc as i64, &self.cabac);
+        Ok(idc)
+    }
+
+    /// Decode ref_idx (contexts 23-24 + bypass)
+    fn decode_ref_idx(&mut self, num_active: u8) -> Result<i8> {
+        if num_active <= 1 {
+            return Ok(0);
+        }
+        let ctx0 = context::REF_IDX;
+        let first = self.cabac.decode_bin(&mut self.ctx[ctx0])?;
+        if first == 0 {
+            se_trace("ref_idx", 0, &self.cabac);
+            return Ok(0);
+        }
+        let ctx1 = context::REF_IDX + 1;
+        let second = self.cabac.decode_bin(&mut self.ctx[ctx1])?;
+        if second == 0 {
+            se_trace("ref_idx", 1, &self.cabac);
+            return Ok(1);
+        }
+        // Remaining bins are bypass (truncated unary)
+        let mut idx = 2i8;
+        while idx < num_active as i8 - 1 {
+            let bit = self.cabac.decode_bypass()?;
+            if bit == 0 {
+                break;
+            }
+            idx += 1;
+        }
+        se_trace("ref_idx", idx as i64, &self.cabac);
+        Ok(idx)
+    }
+
+    /// Decode MVD (motion vector difference) for one component (H.265 7.3.8.9)
+    /// Returns (mvd_x, mvd_y)
+    fn decode_mvd(&mut self) -> Result<(i16, i16)> {
+        // abs_mvd_greater0_flag for x and y
+        let ctx0 = context::ABS_MVD_GREATER0_FLAG;
+        let abs_gt0_x = self.cabac.decode_bin(&mut self.ctx[ctx0])? != 0;
+        let abs_gt0_y = self.cabac.decode_bin(&mut self.ctx[ctx0 + 1])? != 0;
+
+        // abs_mvd_greater1_flag (only if gt0 is true)
+        let ctx1 = context::ABS_MVD_GREATER1_FLAG;
+        let abs_gt1_x = if abs_gt0_x {
+            self.cabac.decode_bin(&mut self.ctx[ctx1])? != 0
+        } else {
+            false
+        };
+        let abs_gt1_y = if abs_gt0_y {
+            self.cabac.decode_bin(&mut self.ctx[ctx1])? != 0
+        } else {
+            false
+        };
+
+        // abs_mvd_minus2 (EGk bypass) + sign
+        let mvd_x = if abs_gt0_x {
+            let abs_val = if abs_gt1_x {
+                let rem = self.cabac.decode_egk_bypass(1)?;
+                (rem as i32) + 2
+            } else {
+                1
+            };
+            let sign = self.cabac.decode_bypass()?;
+            if sign != 0 {
+                -(abs_val as i16)
+            } else {
+                abs_val as i16
+            }
+        } else {
+            0
+        };
+
+        let mvd_y = if abs_gt0_y {
+            let abs_val = if abs_gt1_y {
+                let rem = self.cabac.decode_egk_bypass(1)?;
+                (rem as i32) + 2
+            } else {
+                1
+            };
+            let sign = self.cabac.decode_bypass()?;
+            if sign != 0 {
+                -(abs_val as i16)
+            } else {
+                abs_val as i16
+            }
+        } else {
+            0
+        };
+
+        se_trace(
+            "mvd",
+            ((mvd_x as i64) << 16) | (mvd_y as u16 as i64),
+            &self.cabac,
+        );
+        Ok((mvd_x, mvd_y))
+    }
+
+    /// Decode mvp_lx_flag (context 22)
+    fn decode_mvp_lx_flag(&mut self) -> Result<bool> {
+        let ctx_idx = context::MVP_LX_FLAG;
+        let val = self.cabac.decode_bin(&mut self.ctx[ctx_idx])? != 0;
+        se_trace("mvp_lx_flag", val as i64, &self.cabac);
+        Ok(val)
+    }
+
+    /// Decode rqt_root_cbf for inter CUs (context: CBF_LUMA offset 1)
+    fn decode_rqt_root_cbf(&mut self) -> Result<bool> {
+        let ctx_idx = context::CBF_LUMA + 1;
+        let val = self.cabac.decode_bin(&mut self.ctx[ctx_idx])? != 0;
+        se_trace("rqt_root_cbf", val as i64, &self.cabac);
+        Ok(val)
+    }
+
+    /// Decode prediction unit syntax for a single inter PU
+    fn decode_inter_pu(
+        &mut self,
+        _x0: u32,
+        _y0: u32,
+        w: u32,
+        _h: u32,
+        ct_depth: u8,
+        merge: bool,
+    ) -> Result<PbMotionCoding> {
+        let mut coding = PbMotionCoding::default();
+
+        if merge {
+            coding.merge_flag = true;
+            coding.merge_idx = self.decode_merge_idx(self.header.max_num_merge_cand)?;
+            return Ok(coding);
+        }
+
+        coding.merge_flag = self.decode_merge_flag()?;
+        if coding.merge_flag {
+            coding.merge_idx = self.decode_merge_idx(self.header.max_num_merge_cand)?;
+            return Ok(coding);
+        }
+
+        // AMVP mode
+        let is_b = self.header.slice_type == SliceType::B;
+        if is_b {
+            coding.inter_pred_idc = self.decode_inter_pred_idc(ct_depth, w)?;
+        } else {
+            coding.inter_pred_idc = 1; // P-slice: always L0
+        }
+
+        let uses_l0 = coding.inter_pred_idc == 1 || coding.inter_pred_idc == 3;
+        let uses_l1 = coding.inter_pred_idc == 2 || coding.inter_pred_idc == 3;
+
+        // L0
+        if uses_l0 {
+            coding.ref_idx[0] = self.decode_ref_idx(self.header.num_ref_idx_l0_active)?;
+            let (mvd_x, mvd_y) = self.decode_mvd()?;
+            coding.mvd[0] = [mvd_x, mvd_y];
+            coding.mvp_l0_flag = self.decode_mvp_lx_flag()?;
+        }
+
+        // L1
+        if uses_l1 {
+            coding.ref_idx[1] = self.decode_ref_idx(self.header.num_ref_idx_l1_active)?;
+            if !self.header.mvd_l1_zero_flag || coding.inter_pred_idc != 3 {
+                let (mvd_x, mvd_y) = self.decode_mvd()?;
+                coding.mvd[1] = [mvd_x, mvd_y];
+            }
+            coding.mvp_l1_flag = self.decode_mvp_lx_flag()?;
+        }
+
+        Ok(coding)
     }
 
     /// Map rem_intra_luma_pred_mode to actual mode (excluding MPM candidates)

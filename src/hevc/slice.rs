@@ -363,11 +363,7 @@ impl SliceHeader {
             // Long-term ref pics
             if sps.long_term_ref_pics_present_flag {
                 let num_lt_sps = sps.long_term_ref_pics_sps.lt_ref_pic_poc_lsb.len();
-                let num_long_term_sps = if num_lt_sps > 0 {
-                    reader.read_ue()?
-                } else {
-                    0
-                };
+                let num_long_term_sps = if num_lt_sps > 0 { reader.read_ue()? } else { 0 };
                 let num_long_term_pics = reader.read_ue()?;
 
                 let poc_bits = sps.log2_max_pic_order_cnt_lsb_minus4 + 4;
@@ -438,7 +434,8 @@ impl SliceHeader {
 
             // ref_pic_list_modification (H.265 7.3.6.2)
             if pps.lists_modification_present_flag {
-                let total_curr_pics = count_curr_pics(sps, short_term_ref_pic_set_idx, &inline_short_term_rps);
+                let total_curr_pics =
+                    count_curr_pics(sps, short_term_ref_pic_set_idx, &inline_short_term_rps);
                 if total_curr_pics > 1 {
                     let mut mod_table = [[0u8; super::inter::MAX_NUM_REF_PICS]; 2];
                     let bits = ceil_log2(total_curr_pics).max(1);
@@ -457,7 +454,9 @@ impl SliceHeader {
                         let l1_flag = reader.read_bit()? != 0;
                         ref_pic_list_modification_flag[1] = l1_flag;
                         if l1_flag {
-                            for entry in mod_table[1].iter_mut().take(num_ref_idx_l1_active as usize) {
+                            for entry in
+                                mod_table[1].iter_mut().take(num_ref_idx_l1_active as usize)
+                            {
                                 *entry = reader.read_bits(bits)? as u8;
                             }
                         }
@@ -640,14 +639,9 @@ impl SliceHeader {
     }
 }
 
-
 /// Count the total number of reference pictures used by the current picture (NumPocTotalCurr).
 /// Used to determine ref_pic_list_modification entry bit width.
-fn count_curr_pics(
-    sps: &Sps,
-    rps_idx: u8,
-    inline_rps: &Option<refpic::ShortTermRefPicSet>,
-) -> u32 {
+fn count_curr_pics(sps: &Sps, rps_idx: u8, inline_rps: &Option<refpic::ShortTermRefPicSet>) -> u32 {
     let rps = if let Some(rps) = inline_rps {
         rps
     } else if (rps_idx as usize) < sps.short_term_rps.len() {

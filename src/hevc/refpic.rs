@@ -82,9 +82,12 @@ pub fn parse_short_term_rps(
             0
         };
 
-        let ref_rps_idx = st_rps_idx.checked_sub(delta_idx_minus1 + 1).ok_or(
-            HevcError::InvalidBitstream("inter_ref_pic_set: ref index out of range"),
-        )?;
+        let ref_rps_idx =
+            st_rps_idx
+                .checked_sub(delta_idx_minus1 + 1)
+                .ok_or(HevcError::InvalidBitstream(
+                    "inter_ref_pic_set: ref index out of range",
+                ))?;
 
         if ref_rps_idx as usize >= prev_sets.len() {
             return Err(HevcError::InvalidBitstream(
@@ -94,8 +97,7 @@ pub fn parse_short_term_rps(
 
         let delta_rps_sign = reader.read_bit()?;
         let abs_delta_rps_minus1 = reader.read_ue()?;
-        let delta_rps =
-            (1 - 2 * delta_rps_sign as i32) * (abs_delta_rps_minus1 as i32 + 1);
+        let delta_rps = (1 - 2 * delta_rps_sign as i32) * (abs_delta_rps_minus1 as i32 + 1);
 
         let ref_set = &prev_sets[ref_rps_idx as usize];
         let ref_num_delta_pocs = ref_set.num_delta_pocs() as usize;
@@ -129,8 +131,7 @@ pub fn parse_short_term_rps(
         let mut pos_count = 0u8;
 
         // Process the "extra" entry (j == ref_num_delta_pocs corresponds to delta_rps itself)
-        if use_delta_flag[ref_num_delta_pocs] || used_by_curr_pic_flag[ref_num_delta_pocs]
-        {
+        if use_delta_flag[ref_num_delta_pocs] || used_by_curr_pic_flag[ref_num_delta_pocs] {
             let d_poc = delta_rps;
             if d_poc < 0 {
                 rps.delta_poc_s0[neg_count as usize] = d_poc;
@@ -152,14 +153,12 @@ pub fn parse_short_term_rps(
                 if d_poc < 0 {
                     if (neg_count as usize) < MAX_NUM_REF_PICS {
                         rps.delta_poc_s0[neg_count as usize] = d_poc;
-                        rps.used_by_curr_pic_s0[neg_count as usize] =
-                            used_by_curr_pic_flag[j];
+                        rps.used_by_curr_pic_s0[neg_count as usize] = used_by_curr_pic_flag[j];
                         neg_count += 1;
                     }
                 } else if d_poc > 0 && (pos_count as usize) < MAX_NUM_REF_PICS {
                     rps.delta_poc_s1[pos_count as usize] = d_poc;
-                    rps.used_by_curr_pic_s1[pos_count as usize] =
-                        used_by_curr_pic_flag[j];
+                    rps.used_by_curr_pic_s1[pos_count as usize] = used_by_curr_pic_flag[j];
                     pos_count += 1;
                 }
             }

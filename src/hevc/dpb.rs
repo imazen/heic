@@ -130,10 +130,11 @@ impl Dpb {
         }
 
         // Evict: prefer entries that are not reference and already output
-        if let Some(idx) = self.entries.iter().position(|e| {
-            e.as_ref()
-                .is_some_and(|e| !e.is_reference && e.is_output)
-        }) {
+        if let Some(idx) = self
+            .entries
+            .iter()
+            .position(|e| e.as_ref().is_some_and(|e| !e.is_reference && e.is_output))
+        {
             self.entries[idx] = Some(entry);
             return Some(idx);
         }
