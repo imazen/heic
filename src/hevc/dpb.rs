@@ -129,6 +129,18 @@ impl Dpb {
             .position(|e| e.as_ref().is_some_and(|e| e.poc == poc))
     }
 
+    /// Evict all non-reference, already-output entries to free DPB slots.
+    pub fn evict_unneeded(&mut self) {
+        for slot in &mut self.entries {
+            if let Some(e) = slot
+                && !e.is_reference
+                && e.is_output
+            {
+                *slot = None;
+            }
+        }
+    }
+
     /// Insert a frame into the DPB. Returns the slot index.
     ///
     /// If the DPB is full, the oldest non-reference, already-output entry is evicted.

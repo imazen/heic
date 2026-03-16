@@ -291,15 +291,20 @@ impl VideoDecoder {
     /// Finish the current picture: insert into DPB, return frame + POC
     fn finish_current_picture(&mut self) -> Option<(i32, DecodedFrame)> {
         let pic = self.current_pic.take()?;
+        let poc = pic.poc;
         if let Some(sps) = &self.sps {
             let min_pu = ((1u32 << sps.log2_min_cb_size()) / 2).max(1);
-            let mut entry = DpbEntry::new(clone_frame_for_ref(&pic.frame), pic.poc, min_pu);
+            let mut entry = DpbEntry::new(clone_frame_for_ref(&pic.frame), poc, min_pu);
             entry.mv_info = pic.mv_info;
             entry.pred_mode_map = pic.pred_mode_map;
             entry.is_output = true;
+
+            // Evict non-reference, already-output frames before inserting
+            // This ensures DPB doesn't fill up with frames that are no longer needed
+            self.dpb.evict_unneeded();
             self.dpb.insert(entry);
         }
-        Some((pic.poc, pic.frame))
+        Some((poc, pic.frame))
     }
 
     /// Decode a slice NAL unit. Returns a frame only when a NEW picture starts
@@ -350,6 +355,27 @@ impl VideoDecoder {
             // IRAP: flush DPB
             if is_irap {
                 self.dpb.flush();
+            } else {
+                // Mark unused references based on the active RPS (H.265 8.3.2)
+                let active_rps = if let Some(ref inline) = slice_header.inline_short_term_rps {
+                    inline
+                } else {
+                    let idx = slice_header.short_term_ref_pic_set_idx as usize;
+                    if idx < sps.short_term_rps.len() {
+                        &sps.short_term_rps[idx]
+                    } else {
+                        &sps.short_term_rps[0] // fallback
+                    }
+                };
+                // Compute the set of POC values referenced by this picture
+                let mut ref_pocs = Vec::new();
+                for i in 0..active_rps.num_negative_pics as usize {
+                    ref_pocs.push(curr_poc + active_rps.delta_poc_s0[i]);
+                }
+                for i in 0..active_rps.num_positive_pics as usize {
+                    ref_pocs.push(curr_poc + active_rps.delta_poc_s1[i]);
+                }
+                self.dpb.mark_unused(&ref_pocs);
             }
 
             // Create new frame
