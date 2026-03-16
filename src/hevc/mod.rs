@@ -420,6 +420,20 @@ impl VideoDecoder {
         Ok(Some(frame))
     }
 
+    /// Decode an entire Annex B bitstream, returning all decoded frames in decode order.
+    ///
+    /// This is the simplest way to decode a raw H.265 bitstream with P/B slices.
+    pub fn decode_annex_b(&mut self, data: &[u8]) -> Result<Vec<DecodedFrame>> {
+        let nal_units = bitstream::parse_nal_units(data)?;
+        let mut frames = Vec::new();
+        for nal in &nal_units {
+            if let Some(frame) = self.decode_nal(nal)? {
+                frames.push(frame);
+            }
+        }
+        Ok(frames)
+    }
+
     /// Flush: return any remaining pictures and clear the DPB
     pub fn flush(&mut self) {
         self.dpb.clear();
