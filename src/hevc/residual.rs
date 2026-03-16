@@ -223,7 +223,7 @@ pub fn decode_residual(
         }
     }
 
-    // Surgical trace for diverging residual (set to u32::MAX to disable)
+    // Trace disabled (enable for debugging)
     #[cfg(feature = "std")]
     let rc_trace = false;
     #[cfg(not(feature = "std"))]

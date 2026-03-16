@@ -445,9 +445,6 @@ impl<'a> SliceContext<'a> {
             let end_of_slice = self.cabac.decode_terminate()?;
             se_trace("end_of_slice", end_of_slice as i64, &self.cabac);
 
-            // Log per-CTU byte position for inter frames
-            #[cfg(feature = "std")]
-
             if end_of_slice != 0 {
                 debug_trace!(
                     "DEBUG: end_of_slice after CTU {}, decoded {}/{} CTUs",
