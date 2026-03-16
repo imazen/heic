@@ -535,8 +535,8 @@ pub static INIT_VALUES_P: [u8; context::NUM_CONTEXTS] = [
     153, 153,
     // ABS_MVD_GREATER01_FLAG (2) — [0]=greater0, [1]=greater1
     140, 198,
-    // (padding for old ABS_MVD_GREATER1_FLAG slot)
-    140,
+    // RQT_ROOT_CBF (1) — repurposed from old ABS_MVD_GREATER1_FLAG slot
+    79,
     // SPLIT_TRANSFORM_FLAG (3)
     124, 138, 94,
     // CBF_LUMA (2)
@@ -609,8 +609,8 @@ pub static INIT_VALUES_B: [u8; context::NUM_CONTEXTS] = [
     153, 153,
     // ABS_MVD_GREATER01_FLAG (2) — [0]=greater0, [1]=greater1
     169, 198,
-    // (padding for old ABS_MVD_GREATER1_FLAG slot)
-    140,
+    // RQT_ROOT_CBF (1) — repurposed from old ABS_MVD_GREATER1_FLAG slot
+    79,
     // SPLIT_TRANSFORM_FLAG (3)
     224, 167, 122,
     // CBF_LUMA (2)

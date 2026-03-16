@@ -2460,7 +2460,9 @@ impl<'a> SliceContext<'a> {
 
     /// Decode rqt_root_cbf for inter CUs (context: CBF_LUMA offset 1)
     fn decode_rqt_root_cbf(&mut self) -> Result<bool> {
-        let ctx_idx = context::CBF_LUMA + 1;
+        // Use ABS_MVD_GREATER1_FLAG slot (index 27) repurposed for rqt_root_cbf
+        // Init value = 79 (set in INIT_VALUES_P/B)
+        let ctx_idx = context::ABS_MVD_GREATER1_FLAG;
         let val = self.cabac.decode_bin(&mut self.ctx[ctx_idx])? != 0;
         se_trace("rqt_root_cbf", val as i64, &self.cabac);
         Ok(val)
