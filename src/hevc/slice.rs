@@ -229,6 +229,28 @@ pub struct SliceHeader {
     /// Temporal MVP enabled flag (per-slice)
     pub slice_temporal_mvp_enabled_flag: bool,
 
+    // -- Inter prediction fields (P/B slices) --
+    /// Number of active L0 references
+    pub num_ref_idx_l0_active: u8,
+    /// Number of active L1 references
+    pub num_ref_idx_l1_active: u8,
+    /// MVD L1 zero flag (B-slices)
+    pub mvd_l1_zero_flag: bool,
+    /// CABAC init flag
+    pub cabac_init_flag: bool,
+    /// Collocated from L0 flag (temporal MVP)
+    pub collocated_from_l0_flag: bool,
+    /// Collocated reference index
+    pub collocated_ref_idx: u8,
+    /// Maximum number of merge candidates
+    pub max_num_merge_cand: u8,
+    /// Reference picture list modification tables \[L0\]\[L1\]
+    pub ref_pic_list_modification: Option<[[u8; super::inter::MAX_NUM_REF_PICS]; 2]>,
+    /// Reference picture list modification flags \[L0, L1\]
+    pub ref_pic_list_modification_flag: [bool; 2],
+    /// Prediction weight table
+    pub pred_weight_table: Option<super::inter::PredWeightTable>,
+
     /// Derived: SliceQPY = 26 + pps.init_qp_minus26 + slice_qp_delta
     pub slice_qp_y: i32,
 }
@@ -388,10 +410,104 @@ impl SliceHeader {
                 (false, false)
             };
 
-        // For P/B slices, there would be ref idx and weight table parsing here
-        // We skip this for I-slices (HEIC still images are typically I-frames)
+        // Parse P/B slice inter prediction fields
+        let mut num_ref_idx_l0_active = pps.num_ref_idx_l0_default_active_minus1 + 1;
+        let mut num_ref_idx_l1_active = if slice_type == SliceType::B {
+            pps.num_ref_idx_l1_default_active_minus1 + 1
+        } else {
+            0
+        };
+        let mut mvd_l1_zero_flag = false;
+        let mut cabac_init_flag = false;
+        let mut collocated_from_l0_flag = true;
+        let mut collocated_ref_idx = 0u8;
+        let mut max_num_merge_cand = 5u8;
+        let mut ref_pic_list_modification = None;
+        let mut ref_pic_list_modification_flag = [false; 2];
+        let mut pred_weight_table = None;
+
         if slice_type != SliceType::I {
-            return Err(HevcError::Unsupported("P/B slices not yet implemented"));
+            // num_ref_idx_active_override_flag
+            let override_flag = reader.read_bit()? != 0;
+            if override_flag {
+                num_ref_idx_l0_active = reader.read_ue()? as u8 + 1;
+                if slice_type == SliceType::B {
+                    num_ref_idx_l1_active = reader.read_ue()? as u8 + 1;
+                }
+            }
+
+            // ref_pic_list_modification (H.265 7.3.6.2)
+            if pps.lists_modification_present_flag {
+                let total_curr_pics = count_curr_pics(sps, short_term_ref_pic_set_idx, &inline_short_term_rps);
+                if total_curr_pics > 1 {
+                    let mut mod_table = [[0u8; super::inter::MAX_NUM_REF_PICS]; 2];
+                    let bits = ceil_log2(total_curr_pics).max(1);
+
+                    // L0 modification
+                    let l0_flag = reader.read_bit()? != 0;
+                    ref_pic_list_modification_flag[0] = l0_flag;
+                    if l0_flag {
+                        for entry in mod_table[0].iter_mut().take(num_ref_idx_l0_active as usize) {
+                            *entry = reader.read_bits(bits)? as u8;
+                        }
+                    }
+
+                    // L1 modification (B-slices only)
+                    if slice_type == SliceType::B {
+                        let l1_flag = reader.read_bit()? != 0;
+                        ref_pic_list_modification_flag[1] = l1_flag;
+                        if l1_flag {
+                            for entry in mod_table[1].iter_mut().take(num_ref_idx_l1_active as usize) {
+                                *entry = reader.read_bits(bits)? as u8;
+                            }
+                        }
+                    }
+
+                    ref_pic_list_modification = Some(mod_table);
+                }
+            }
+
+            // mvd_l1_zero_flag (B-slices only)
+            if slice_type == SliceType::B {
+                mvd_l1_zero_flag = reader.read_bit()? != 0;
+            }
+
+            // cabac_init_flag
+            if pps.cabac_init_present_flag {
+                cabac_init_flag = reader.read_bit()? != 0;
+            }
+
+            // Collocated info (for temporal MVP)
+            if slice_temporal_mvp_enabled_flag {
+                if slice_type == SliceType::B {
+                    collocated_from_l0_flag = reader.read_bit()? != 0;
+                }
+                let max_ref = if collocated_from_l0_flag {
+                    num_ref_idx_l0_active
+                } else {
+                    num_ref_idx_l1_active
+                };
+                if max_ref > 1 {
+                    collocated_ref_idx = reader.read_ue()? as u8;
+                }
+            }
+
+            // pred_weight_table
+            if (pps.weighted_pred_flag && slice_type == SliceType::P)
+                || (pps.weighted_bipred_flag && slice_type == SliceType::B)
+            {
+                pred_weight_table = Some(parse_pred_weight_table(
+                    &mut reader,
+                    sps,
+                    slice_type,
+                    num_ref_idx_l0_active,
+                    num_ref_idx_l1_active,
+                )?);
+            }
+
+            // five_minus_max_num_merge_cand
+            let five_minus = reader.read_ue()? as u8;
+            max_num_merge_cand = 5u8.saturating_sub(five_minus);
         }
 
         // slice_qp_delta
@@ -507,6 +623,16 @@ impl SliceHeader {
                 short_term_ref_pic_set_idx,
                 inline_short_term_rps,
                 slice_temporal_mvp_enabled_flag,
+                num_ref_idx_l0_active,
+                num_ref_idx_l1_active,
+                mvd_l1_zero_flag,
+                cabac_init_flag,
+                collocated_from_l0_flag,
+                collocated_ref_idx,
+                max_num_merge_cand,
+                ref_pic_list_modification,
+                ref_pic_list_modification_flag,
+                pred_weight_table,
                 slice_qp_y,
             },
             data_offset,
@@ -514,6 +640,145 @@ impl SliceHeader {
     }
 }
 
+
+/// Count the total number of reference pictures used by the current picture (NumPocTotalCurr).
+/// Used to determine ref_pic_list_modification entry bit width.
+fn count_curr_pics(
+    sps: &Sps,
+    rps_idx: u8,
+    inline_rps: &Option<refpic::ShortTermRefPicSet>,
+) -> u32 {
+    let rps = if let Some(rps) = inline_rps {
+        rps
+    } else if (rps_idx as usize) < sps.short_term_rps.len() {
+        &sps.short_term_rps[rps_idx as usize]
+    } else {
+        return 0;
+    };
+
+    let mut count = 0u32;
+    for i in 0..rps.num_negative_pics as usize {
+        if rps.used_by_curr_pic_s0[i] {
+            count += 1;
+        }
+    }
+    for i in 0..rps.num_positive_pics as usize {
+        if rps.used_by_curr_pic_s1[i] {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Parse prediction weight table (H.265 7.3.6.3)
+fn parse_pred_weight_table(
+    reader: &mut BitstreamReader<'_>,
+    sps: &Sps,
+    slice_type: SliceType,
+    num_ref_l0: u8,
+    num_ref_l1: u8,
+) -> Result<super::inter::PredWeightTable> {
+    let luma_log2_weight_denom = reader.read_ue()? as u8;
+    let chroma_log2_weight_denom = if sps.chroma_array_type() != 0 {
+        let delta = reader.read_se()?;
+        (luma_log2_weight_denom as i32 + delta).clamp(0, 7) as u8
+    } else {
+        0
+    };
+    let mut wt = super::inter::PredWeightTable {
+        luma_log2_weight_denom,
+        chroma_log2_weight_denom,
+        ..super::inter::PredWeightTable::default()
+    };
+
+    // L0 flags
+    for i in 0..num_ref_l0 as usize {
+        wt.luma_weight_flag[0][i] = reader.read_bit()? != 0;
+    }
+    if sps.chroma_array_type() != 0 {
+        for i in 0..num_ref_l0 as usize {
+            wt.chroma_weight_flag[0][i] = reader.read_bit()? != 0;
+        }
+    }
+
+    // L0 weights/offsets
+    let luma_denom = 1i16 << wt.luma_log2_weight_denom;
+    let chroma_denom = 1i16 << wt.chroma_log2_weight_denom;
+    for i in 0..num_ref_l0 as usize {
+        if wt.luma_weight_flag[0][i] {
+            let delta = reader.read_se()? as i16;
+            wt.luma_weight[0][i] = luma_denom + delta;
+            wt.luma_offset[0][i] = reader.read_se()? as i16;
+        } else {
+            wt.luma_weight[0][i] = luma_denom;
+            wt.luma_offset[0][i] = 0;
+        }
+        if wt.chroma_weight_flag[0][i] {
+            for j in 0..2 {
+                let delta = reader.read_se()? as i16;
+                wt.chroma_weight[0][i][j] = chroma_denom + delta;
+                let offset = reader.read_se()? as i16;
+                // H.265 eq: ChromaOffset = Clip3(-128, 127, offset - ((128*w + 2^(wd-1)) >> wd) + 128)
+                let wp_offset = offset
+                    - ((128 * wt.chroma_weight[0][i][j] as i32
+                        + (1 << (wt.chroma_log2_weight_denom - 1))) as i16
+                        >> wt.chroma_log2_weight_denom)
+                    + 128;
+                wt.chroma_offset[0][i][j] = wp_offset.clamp(-128, 127);
+            }
+        } else {
+            for j in 0..2 {
+                wt.chroma_weight[0][i][j] = chroma_denom;
+                wt.chroma_offset[0][i][j] = 0;
+            }
+        }
+    }
+
+    // L1 weights/offsets (B-slices only)
+    if slice_type == SliceType::B {
+        // L1 flags
+        for i in 0..num_ref_l1 as usize {
+            wt.luma_weight_flag[1][i] = reader.read_bit()? != 0;
+        }
+        if sps.chroma_array_type() != 0 {
+            for i in 0..num_ref_l1 as usize {
+                wt.chroma_weight_flag[1][i] = reader.read_bit()? != 0;
+            }
+        }
+
+        for i in 0..num_ref_l1 as usize {
+            if wt.luma_weight_flag[1][i] {
+                let delta = reader.read_se()? as i16;
+                wt.luma_weight[1][i] = luma_denom + delta;
+                wt.luma_offset[1][i] = reader.read_se()? as i16;
+            } else {
+                wt.luma_weight[1][i] = luma_denom;
+                wt.luma_offset[1][i] = 0;
+            }
+            if wt.chroma_weight_flag[1][i] {
+                for j in 0..2 {
+                    let delta = reader.read_se()? as i16;
+                    wt.chroma_weight[1][i][j] = chroma_denom + delta;
+                    let offset = reader.read_se()? as i16;
+                    let wp_offset = offset
+                        - ((128 * wt.chroma_weight[1][i][j] as i32
+                            + (1 << (wt.chroma_log2_weight_denom - 1)))
+                            as i16
+                            >> wt.chroma_log2_weight_denom)
+                        + 128;
+                    wt.chroma_offset[1][i][j] = wp_offset.clamp(-128, 127);
+                }
+            } else {
+                for j in 0..2 {
+                    wt.chroma_weight[1][i][j] = chroma_denom;
+                    wt.chroma_offset[1][i][j] = 0;
+                }
+            }
+        }
+    }
+
+    Ok(wt)
+}
 
 /// Calculate ceil(log2(x))
 fn ceil_log2(x: u32) -> u8 {
