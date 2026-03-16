@@ -166,6 +166,8 @@ pub struct CabacDecoder<'a> {
     bits_needed: i32,
     /// Bin counter for debug tracing
     bin_counter: u32,
+    /// Per-bin trace counter (0 = disabled, >0 = log bins)
+    pub bin_trace_count: u32,
 }
 
 #[allow(dead_code)]
@@ -199,6 +201,7 @@ impl<'a> CabacDecoder<'a> {
             value: 0,
             bits_needed: 8,
             bin_counter: 0,
+            bin_trace_count: 0,
         };
 
         // Initialize value (matching libde265 exactly)
@@ -288,6 +291,16 @@ impl<'a> CabacDecoder<'a> {
         // Renormalize
         self.renormalize()?;
 
+        #[cfg(feature = "std")]
+        if self.bin_trace_count > 0 {
+            self.bin_trace_count -= 1;
+            eprintln!(
+                "B{} c r={} v={} s={} m={} b={} bp={}",
+                200 - self.bin_trace_count - 1,
+                self.range, self.value, ctx.state, ctx.mps, bin_val, self.byte_pos
+            );
+        }
+
         Ok(bin_val)
     }
 
@@ -308,12 +321,24 @@ impl<'a> CabacDecoder<'a> {
         }
 
         let scaled_range = self.range << 7;
-        if self.value >= scaled_range {
+        let bin_val = if self.value >= scaled_range {
             self.value -= scaled_range;
-            Ok(1)
+            1u8
         } else {
-            Ok(0)
+            0
+        };
+
+        #[cfg(feature = "std")]
+        if self.bin_trace_count > 0 {
+            self.bin_trace_count -= 1;
+            eprintln!(
+                "B{} x r={} b={} bp={}",
+                200 - self.bin_trace_count - 1,
+                self.range, bin_val, self.byte_pos
+            );
         }
+
+        Ok(bin_val)
     }
 
     /// Decode multiple bypass bins

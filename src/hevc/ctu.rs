@@ -958,6 +958,7 @@ impl<'a> SliceContext<'a> {
         };
 
         // --- Decode prediction info ---
+        let mut pu_list_is_merge = false;
         let (intra_luma_mode, intra_chroma_mode) = if pred_mode == PredMode::Intra {
             match part_mode {
                 PartMode::Part2Nx2N => {
@@ -1020,8 +1021,12 @@ impl<'a> SliceContext<'a> {
         } else {
             // Inter prediction: decode PUs, resolve motion, apply MC
             let pu_list = partition_to_pu_list(part_mode, x0, y0, cb_size);
+            let mut any_merge = false;
             for (part_idx, &(px, py, pw, ph)) in pu_list.iter().enumerate() {
                 let coding = self.decode_inter_pu(px, py, pw, ph, ct_depth, false)?;
+                if coding.merge_flag {
+                    any_merge = true;
+                }
                 let motion = self.resolve_motion(
                     &coding,
                     px,
@@ -1034,6 +1039,7 @@ impl<'a> SliceContext<'a> {
                 self.store_mv_info(px, py, pw, ph, motion);
                 self.apply_mc(&motion, px, py, pw, ph, frame);
             }
+            pu_list_is_merge = any_merge;
             // Inter CUs use DC for intra modes (unused in transform path)
             (IntraPredMode::Dc, IntraPredMode::Dc)
         };
@@ -1041,7 +1047,14 @@ impl<'a> SliceContext<'a> {
         // --- Decode residual (transform tree) ---
         if pred_mode == PredMode::Inter {
             // Inter: rqt_root_cbf determines if there's any residual
-            let has_residual = self.decode_rqt_root_cbf()?;
+            // For Part2Nx2N merge CUs, rqt_root_cbf is implied 1 (H.265 7.3.8.5)
+            let is_merge_2nx2n = part_mode == PartMode::Part2Nx2N
+                && pu_list_is_merge;
+            let has_residual = if is_merge_2nx2n {
+                true // rqt_root_cbf implied 1
+            } else {
+                self.decode_rqt_root_cbf()?
+            };
             if has_residual {
                 let intra_split_flag = false;
                 self.decode_transform_tree(
