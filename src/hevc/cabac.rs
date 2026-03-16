@@ -533,10 +533,10 @@ pub static INIT_VALUES_P: [u8; context::NUM_CONTEXTS] = [
     168,
     // REF_IDX (2)
     153, 153,
-    // ABS_MVD_GREATER0_FLAG (2) — both x,y share libde265 context[0]
-    140, 140,
-    // ABS_MVD_GREATER1_FLAG (1) — libde265 context[1]
-    198,
+    // ABS_MVD_GREATER01_FLAG (2) — [0]=greater0, [1]=greater1
+    140, 198,
+    // (padding for old ABS_MVD_GREATER1_FLAG slot)
+    140,
     // SPLIT_TRANSFORM_FLAG (3)
     124, 138, 94,
     // CBF_LUMA (2)
@@ -607,10 +607,10 @@ pub static INIT_VALUES_B: [u8; context::NUM_CONTEXTS] = [
     168,
     // REF_IDX (2)
     153, 153,
-    // ABS_MVD_GREATER0_FLAG (2) — both x,y share libde265 context[0]
-    169, 169,
-    // ABS_MVD_GREATER1_FLAG (1) — libde265 context[1]
-    198,
+    // ABS_MVD_GREATER01_FLAG (2) — [0]=greater0, [1]=greater1
+    169, 198,
+    // (padding for old ABS_MVD_GREATER1_FLAG slot)
+    140,
     // SPLIT_TRANSFORM_FLAG (3)
     224, 167, 122,
     // CBF_LUMA (2)

@@ -2389,20 +2389,20 @@ impl<'a> SliceContext<'a> {
     /// Decode MVD (motion vector difference) for one component (H.265 7.3.8.9)
     /// Returns (mvd_x, mvd_y)
     fn decode_mvd(&mut self) -> Result<(i16, i16)> {
-        // abs_mvd_greater0_flag for x and y
-        let ctx0 = context::ABS_MVD_GREATER0_FLAG;
-        let abs_gt0_x = self.cabac.decode_bin(&mut self.ctx[ctx0])? != 0;
-        let abs_gt0_y = self.cabac.decode_bin(&mut self.ctx[ctx0 + 1])? != 0;
+        // abs_mvd_greater0_flag for x and y (both use same context per H.265 9.3.3)
+        let ctx_gt0 = context::ABS_MVD_GREATER0_FLAG;
+        let abs_gt0_x = self.cabac.decode_bin(&mut self.ctx[ctx_gt0])? != 0;
+        let abs_gt0_y = self.cabac.decode_bin(&mut self.ctx[ctx_gt0])? != 0;
 
-        // abs_mvd_greater1_flag (only if gt0 is true)
-        let ctx1 = context::ABS_MVD_GREATER1_FLAG;
+        // abs_mvd_greater1_flag for x and y (both use same context, next index)
+        let ctx_gt1 = context::ABS_MVD_GREATER0_FLAG + 1;
         let abs_gt1_x = if abs_gt0_x {
-            self.cabac.decode_bin(&mut self.ctx[ctx1])? != 0
+            self.cabac.decode_bin(&mut self.ctx[ctx_gt1])? != 0
         } else {
             false
         };
         let abs_gt1_y = if abs_gt0_y {
-            self.cabac.decode_bin(&mut self.ctx[ctx1])? != 0
+            self.cabac.decode_bin(&mut self.ctx[ctx_gt1])? != 0
         } else {
             false
         };
