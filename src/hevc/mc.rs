@@ -215,7 +215,9 @@ pub fn mc_chroma(cref: &ChromaRef<'_>, mv: MotionVector, blk: &McBlock, pred: &m
     let frac_x = (cmv_x & 7) as usize;
     let frac_y = (cmv_y & 7) as usize;
 
-    let shift1 = blk.bit_depth as i32 - 8 + 4;
+    // Combined shift: spec shift1 (Min(4, BitDepthC-8)) + shift3 (14-BitDepthC)
+    // For 8-bit: 0 + 6 = 6. Same normalization as luma (coefficients sum to 64).
+    let shift1 = blk.bit_depth as i32 - 8 + 6;
     let offset1 = 1i32 << (shift1 - 1);
     let max_val = (1i32 << blk.bit_depth) - 1;
     let internal_shift = 14 - blk.bit_depth as i32;
@@ -289,7 +291,7 @@ pub fn mc_chroma(cref: &ChromaRef<'_>, mv: MotionVector, blk: &McBlock, pred: &m
         }
 
         let coeff_v = &CHROMA_FILTER[frac_y];
-        let shift2 = 4i32;
+        let shift2 = 6i32; // H.265 spec shift2 = 6 (normalize 2nd filter pass)
         if bi_pred {
             let offset2 = 1i64 << (shift2 - 1);
             for j in 0..h as i32 {
