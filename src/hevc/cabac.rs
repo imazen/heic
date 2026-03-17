@@ -318,36 +318,12 @@ impl<'a> CabacDecoder<'a> {
         Ok(bin_val)
     }
 
-    /// Decode multiple bypass bins (parallel, matching libde265 FL_bypass_parallel)
-    ///
-    /// Shifts value by n bits at once and reads at most one byte, matching
-    /// the H.265 reference decoder behavior for fixed-length bypass decode.
+    /// Decode multiple bypass bins (sequential, one bit at a time)
     pub fn decode_bypass_bits(&mut self, n: u8) -> Result<u32> {
-        if n == 0 {
-            return Ok(0);
+        let mut result = 0u32;
+        for _ in 0..n {
+            result = (result << 1) | self.decode_bypass()? as u32;
         }
-        self.bin_counter += n as u32;
-
-        // Shift value and bits_needed by n at once
-        self.value <<= n;
-        self.bits_needed += n as i32;
-
-        // Read at most one byte
-        if self.bits_needed >= 0 {
-            if self.byte_pos < self.data.len() {
-                let input = self.data[self.byte_pos] as u32;
-                self.value |= input << self.bits_needed as u32;
-                self.byte_pos += 1;
-            }
-            self.bits_needed -= 8;
-        }
-
-        // Extract n-bit value via division
-        let scaled_range = self.range << 7;
-        let max_val = (1u32 << n) - 1;
-        let result = (self.value / scaled_range).min(max_val);
-        self.value -= result * scaled_range;
-
         Ok(result)
     }
 
