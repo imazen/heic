@@ -50,7 +50,7 @@ type Result<T> = core::result::Result<T, HevcError>;
 
 /// Global SE counter for syntax element tracing
 pub static SE_COUNTER: AtomicU32 = AtomicU32::new(0);
-pub const SE_TRACE_LIMIT: u32 = 50;
+pub const SE_TRACE_LIMIT: u32 = 0;
 
 /// Log a syntax element decode for differential testing.
 /// Set SE_TRACE_LIMIT > 0 to enable tracing.
@@ -481,6 +481,17 @@ impl<'a> SliceContext<'a> {
             // Track CTU position for debugging
             let (byte_pos, _, _) = self.cabac.get_position();
             debug::track_ctu_start(ctu_count, byte_pos);
+
+            // CTU-CK trace for per-CTU comparison with dec265
+            #[cfg(feature = "std")]
+            if self.mv_trace {
+                let mut cksum: u64 = 0;
+                for c in self.ctx.iter() {
+                    let (s, m) = c.get_state();
+                    cksum += s as u64 * 3 + m as u64;
+                }
+                eprintln!("CTU-CK ctu={} bp={} ck={}", ctu_count, byte_pos, cksum);
+            }
 
             // DEBUG: Print CTU state periodically
             if ctu_count.is_multiple_of(50) || ctu_count <= 3 {
