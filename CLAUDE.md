@@ -202,10 +202,12 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
   - P-frame quality (girlshy WPP): 39.8dB, 93.5% pixel-exact (R0:100% R1:90% R2:86% R3:100%)
   - CABAC verified BIT-EXACT vs dec265 (all 28 CTU byte positions match for MERGE_A)
   - Unfiltered I-frame verified 100% pixel-exact vs dec265 (proves CABAC + transform correct)
-  - MERGE_A first B-frame (POC=4): 97.1% pixel-exact (36.4dB), remaining 2.9% at deblocking boundaries
-  - Fixed: CBF tracking for deblocking bS=2, DST/DCT for inter 4x4 TUs, chroma MC shifts (4→6), skip/no-residual CU boundary marking, WPP entry point offsets + CABAC reinit, cu_skip_flag cross-CTB-row context derivation, deblocking TB/PB edge distinction with separate bS derivation, bi-pred cross-list bS comparison
-  - IMPORTANT: dec265 reference YUV is in DECODE ORDER, not display order. Use ffmpeg for display-order reference.
-  - Remaining: B-frames compound deblocking diffs through reference chain (2.9% per frame → ~15-20dB after 3+ refs). Last frame of MERGE_A has UNINIT from pred_mode_map error accumulation.
+  - MERGE_A first B-frame (POC=4): 97.1% pixel-exact (36.4dB), remaining 2.9% = 2.6% MC + 0.3% cascading deblock
+  - Deblocking filter verified CORRECT: 0/3307 edges where identical input pixels produce different decisions (confirmed vs dec265 trace)
+  - Fixed: CBF tracking for deblocking bS=2, DST/DCT for inter 4x4 TUs, chroma MC shifts (4→6), skip/no-residual CU boundary marking, WPP entry point offsets + CABAC reinit, cu_skip_flag cross-CTB-row context derivation, deblocking TB/PB edge distinction with separate bS derivation, bi-pred cross-list bS comparison, bi-pred H+V MC rounding offset (was adding +32 in V-pass intermediate, spec says pure truncation)
+  - IMPORTANT: dec265 reference YUV is in DISPLAY ORDER (not decode order). Both -o and --disable-deblocking outputs are display-ordered.
+  - Remaining MC errors: ~2576 pixels in POC=4 (uni-pred from L1), concentrated in specific PU regions with large diffs (up to +18). Likely MV derivation or reference list issue for L1 uni-prediction. The errors compound through reference chain for later frames.
+  - Deblock trace infrastructure: `enable_deblock_trace()` dumps all edge parameters to /tmp/our_deblock_trace.txt (matching dec265 format)
   - SSIMULACRA2: I-frame 100.00, AMVP_A avg -31 (Fr1: 96), MERGE_A avg -170 (Fr4: 31)
   - Deferred: SIMD MC (Phase 7), weighted prediction application
 - 4:4:4 chroma: decodes correctly (61.9dB), but no SIMD color conversion path (uses scalar)
