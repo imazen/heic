@@ -200,20 +200,14 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
   - Full pipeline: syntax parsing, merge/AMVP/TMVP, scalar MC, DPB, VideoDecoder
   - Conformance: 48/48 vectors decode without crash, 1 pixel-exact (I-only)
   - CABAC verified BIT-EXACT vs dec265 (all 28 CTU byte positions match for MERGE_A)
-  - Unfiltered I-frame: 100% pixel-exact vs dec265
-  - MERGE_A B-frame quality (nofilter vs dec265):
-    - POC=4 (I→B): 100% pixel-exact (refs only I-frame)
-    - POC=2: 95.6% exact, POC=1: 94.4%, POC=3: 90.5%
-    - POC=5-7: 60-67% (error propagation from earlier frames)
-  - MERGE_A filtered (vs dec265 reference_display.yuv):
-    - Fr0(I): inf dB, Fr4: 78.6dB (100% exact, max=3)
-    - Fr2: 33.5dB (94.9%), Fr1: 34.9dB (94.0%), Fr3: 28.2dB (89.7%)
+  - MERGE_A unfiltered: ALL 8 frames 100% pixel-exact vs dec265 (POC 0-7)
   - Fixed bugs:
+    - Temporal MVP fallback: only tried one collocated position (bottom-right OR center), but H.265 8.5.3.2.8 requires trying bottom-right first, then falling back to center when collocated block is intra
+    - Small PU L1 restriction: nPbW+nPbH==12 rule unconditionally disabled L1, but H.265 8.5.3.2.2 step 10 only disables L1 when both L0 and L1 are active (bi-prediction)
     - ref_idx decode: truncated unary consumed extra CABAC bin when num_active>=2 (CABAC desync)
     - AMVP: isScaledFlagLX, B-candidate always-run, same-list-first ordering
     - Temporal MVP: collocated MV selection (NoBackwardPredFlag, col_from_l0_flag), per-list derivation, collocated frame ref_poc stored in DPB
     - Earlier: CBF tracking for deblocking bS=2, DST/DCT for inter 4x4 TUs, chroma MC shifts (4→6), skip/no-residual CU boundary marking, WPP entry point offsets + CABAC reinit, cu_skip_flag cross-CTB-row context derivation, deblocking TB/PB edge distinction with separate bS derivation, bi-pred cross-list bS comparison, bi-pred H+V MC rounding offset
-  - Remaining ~5% errors in POC=2: concentrated in specific CTUs, likely AMVP candidate derivation subtlety (PB availability checks) or MC filter edge cases
   - IMPORTANT: dec265 reference YUV is in DISPLAY ORDER (not decode order)
   - Deblock trace infrastructure: `enable_deblock_trace()` dumps all edge parameters to /tmp/our_deblock_trace.txt
   - Deferred: SIMD MC (Phase 7), weighted prediction application
