@@ -9,7 +9,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::inter::PbMotion;
+use super::inter::{PbMotion, MAX_NUM_REF_PICS};
 use super::picture::DecodedFrame;
 use super::slice::PredMode;
 
@@ -33,6 +33,9 @@ pub struct DpbEntry {
     pub mv_stride: u32,
     /// Prediction mode map at min-PU granularity (Intra/Inter/Skip)
     pub pred_mode_map: Vec<PredMode>,
+    /// Reference picture list POCs from this frame's slice [L0/L1][ref_idx]
+    /// Needed for temporal MVP: colPocDiff = ColPic.POC - ColPic.RefPicList[listCol][refIdxCol]
+    pub ref_poc: [[i32; MAX_NUM_REF_PICS]; 2],
 }
 
 impl DpbEntry {
@@ -50,6 +53,7 @@ impl DpbEntry {
             mv_info: vec![PbMotion::UNAVAILABLE; pu_count],
             mv_stride: pu_width,
             pred_mode_map: vec![PredMode::Intra; pu_count],
+            ref_poc: [[0i32; MAX_NUM_REF_PICS]; 2],
         }
     }
 

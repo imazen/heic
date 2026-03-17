@@ -2237,6 +2237,19 @@ impl<'a> SliceContext<'a> {
 
     /// Build an MvContext for merge/AMVP candidate derivation
     fn build_mv_context<'c>(&'c self, col: Option<&'c CollocatedFrame<'c>>) -> MvContext<'c> {
+        // NoBackwardPredFlag (H.265 7-55): true when all ref POCs <= currPOC
+        let no_backward_pred_flag = {
+            let mut all_before = true;
+            for list in 0..2usize {
+                for i in 0..self.ref_pic_lists.num_ref_idx_active[list] as usize {
+                    if self.ref_pic_lists.poc[list][i] > self.curr_poc {
+                        all_before = false;
+                    }
+                }
+            }
+            all_before
+        };
+
         MvContext {
             mv_info: &self.mv_info,
             pred_mode: &self.pred_mode_map,
@@ -2250,6 +2263,8 @@ impl<'a> SliceContext<'a> {
             log2_parallel_merge_level: self.pps.log2_parallel_merge_level_minus2 + 2,
             collocated: col,
             ctb_size: self.sps.ctb_size(),
+            no_backward_pred_flag,
+            collocated_from_l0_flag: self.header.collocated_from_l0_flag,
         }
     }
 
@@ -2559,26 +2574,35 @@ impl<'a> SliceContext<'a> {
         Ok(idc)
     }
 
-    /// Decode ref_idx (contexts 23-24 + bypass)
+    /// Decode ref_idx (truncated unary, contexts 23-24 + bypass)
+    ///
+    /// Binarization: truncated unary with cMax = num_active - 1
+    /// - Bin 0: context REF_IDX
+    /// - Bin 1: context REF_IDX + 1
+    /// - Bins 2+: bypass
     fn decode_ref_idx(&mut self, num_active: u8) -> Result<i8> {
         if num_active <= 1 {
             return Ok(0);
         }
-        let ctx0 = context::REF_IDX;
-        let first = self.cabac.decode_bin(&mut self.ctx[ctx0])?;
-        if first == 0 {
-            se_trace("ref_idx", 0, &self.cabac);
-            return Ok(0);
+        let c_max = num_active as i8 - 1;
+
+        // First bin (context-coded)
+        let first = self.cabac.decode_bin(&mut self.ctx[context::REF_IDX])?;
+        if first == 0 || c_max == 1 {
+            let idx = if first == 0 { 0 } else { 1 };
+            se_trace("ref_idx", idx, &self.cabac);
+            return Ok(idx as i8);
         }
-        let ctx1 = context::REF_IDX + 1;
-        let second = self.cabac.decode_bin(&mut self.ctx[ctx1])?;
-        if second == 0 {
-            se_trace("ref_idx", 1, &self.cabac);
-            return Ok(1);
+        // Second bin (context-coded)
+        let second = self.cabac.decode_bin(&mut self.ctx[context::REF_IDX + 1])?;
+        if second == 0 || c_max == 2 {
+            let idx = if second == 0 { 1 } else { 2 };
+            se_trace("ref_idx", idx, &self.cabac);
+            return Ok(idx as i8);
         }
         // Remaining bins are bypass (truncated unary)
         let mut idx = 2i8;
-        while idx < num_active as i8 - 1 {
+        while idx < c_max {
             let bit = self.cabac.decode_bypass()?;
             if bit == 0 {
                 break;

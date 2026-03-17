@@ -175,6 +175,11 @@ pub struct MvContext<'a> {
     pub collocated: Option<&'a CollocatedFrame<'a>>,
     /// CTB size for temporal MVP position validation
     pub ctb_size: u32,
+    /// NoBackwardPredFlag: true when all reference pictures have POC <= currPOC
+    /// (H.265 8.5.3.2.9 — selects collocated MV for bi-predicted blocks)
+    pub no_backward_pred_flag: bool,
+    /// collocated_from_l0_flag from slice header (H.265 8.5.3.2.9)
+    pub collocated_from_l0_flag: bool,
 }
 
 impl MvContext<'_> {
@@ -321,7 +326,7 @@ pub fn derive_merge_candidates(
 
     // Temporal MVP candidate
     if count < max
-        && let Some(tmvp) = derive_temporal_candidate(ctx, xp, yp, w, h)
+        && let Some(tmvp) = derive_temporal_candidate_merge(ctx, xp, yp, w, h)
     {
         cand[count] = tmvp;
         count += 1;
@@ -361,9 +366,13 @@ pub fn derive_merge_candidates(
     cand
 }
 
-/// Derive AMVP candidates (H.265 8.5.3.2.6)
+/// Derive AMVP candidates (H.265 8.5.3.2.6 + 8.5.3.2.7)
 ///
 /// Returns exactly 2 MVP candidates for the given reference list.
+///
+/// This follows the spec structure exactly:
+/// - 8.5.3.2.7: derive spatial candidates (A and B)
+/// - 8.5.3.2.6: build mvpListLX from A, B, temporal, zero padding
 pub fn derive_amvp_candidates(
     ctx: &MvContext<'_>,
     xp: u32,
@@ -373,120 +382,197 @@ pub fn derive_amvp_candidates(
     ref_idx: i8,
     list_idx: u8,
 ) -> [MotionVector; 2] {
-    let mut mvp = [MotionVector::ZERO; 2];
-    let mut mvp_count = 0usize;
+    let x = list_idx as usize; // current list index
+    let y = 1 - x; // opposite list index
 
-    let target_poc = if (list_idx as usize) < 2
-        && (ref_idx as usize) < ctx.ref_pic_lists.num_ref_idx_active[list_idx as usize] as usize
+    let target_poc = if x < 2
+        && (ref_idx as usize) < ctx.ref_pic_lists.num_ref_idx_active[x] as usize
     {
-        ctx.ref_pic_lists.poc[list_idx as usize][ref_idx as usize]
+        ctx.ref_pic_lists.poc[x][ref_idx as usize]
     } else {
         ctx.curr_poc
     };
 
-    // Candidate A: left neighbors (A0, A1)
+    // ── 8.5.3.2.7: Spatial candidate derivation ──────────────────────
+
+    let mut avail_flag_a = false;
+    let mut avail_flag_b = false;
+    let mut mv_a = MotionVector::ZERO;
+    let mut mv_b = MotionVector::ZERO;
+
+    // --- A candidates (left neighbors) ---
+
+    // Step 1: positions
     let a0 = (xp as i32 - 1, yp as i32 + h as i32);
     let a1 = (xp as i32 - 1, yp as i32 + h as i32 - 1);
-    let mut is_scaled_flag = false;
 
-    // Try same-POC match first
+    // Steps 3-4: availability
+    let a0_avail = ctx.is_inter(a0.0, a0.1);
+    let a1_avail = ctx.is_inter(a1.0, a1.1);
+
+    // Step 5: isScaledFlagLX — set if ANY A neighbor is inter, regardless of match
+    let is_scaled_flag = a0_avail || a1_avail;
+
+    // Step 6: unscaled A (same POC match, same list X first, then opposite list Y)
     for &(ax, ay) in &[a0, a1] {
-        if ctx.is_inter(ax, ay) {
+        if !avail_flag_a && ctx.is_inter(ax, ay) {
             let m = ctx.get_motion(ax, ay);
-            if let Some(mv) = extract_mv_for_ref(&m, list_idx, target_poc, ctx) {
-                mvp[0] = mv;
-                mvp_count = 1;
-                is_scaled_flag = true;
-                break;
+            if m.pred_flag[x] && m.ref_idx[x] >= 0 {
+                let ref_poc = ctx.ref_pic_lists.poc[x][m.ref_idx[x] as usize];
+                if ref_poc == target_poc {
+                    avail_flag_a = true;
+                    mv_a = m.mv[x];
+                    continue;
+                }
             }
-        }
-    }
-    // Try scaled match (different POC)
-    if mvp_count == 0 {
-        for &(ax, ay) in &[a0, a1] {
-            if ctx.is_inter(ax, ay) {
-                let m = ctx.get_motion(ax, ay);
-                if let Some(mv) = extract_mv_scaled(&m, target_poc, ctx) {
-                    mvp[0] = mv;
-                    mvp_count = 1;
-                    is_scaled_flag = true;
-                    break;
+            if m.pred_flag[y] && m.ref_idx[y] >= 0 {
+                let ref_poc = ctx.ref_pic_lists.poc[y][m.ref_idx[y] as usize];
+                if ref_poc == target_poc {
+                    avail_flag_a = true;
+                    mv_a = m.mv[y];
                 }
             }
         }
     }
 
-    // Candidate B: above neighbors (B0, B1, B2)
+    // Step 7: scaled A (different POC, same list X first, then opposite list Y)
+    // Only runs if step 6 found nothing.
+    if !avail_flag_a {
+        for &(ax, ay) in &[a0, a1] {
+            if avail_flag_a {
+                break;
+            }
+            if ctx.is_inter(ax, ay) {
+                let m = ctx.get_motion(ax, ay);
+                // Try same list X first
+                if m.pred_flag[x] && m.ref_idx[x] >= 0 {
+                    avail_flag_a = true;
+                    mv_a = m.mv[x];
+                    // Scale by POC distance
+                    let ref_poc = ctx.ref_pic_lists.poc[x][m.ref_idx[x] as usize];
+                    let dist_src = ctx.curr_poc - ref_poc;
+                    let dist_dst = ctx.curr_poc - target_poc;
+                    if dist_src != 0 && dist_src != dist_dst {
+                        mv_a = scale_mv(mv_a, dist_src, dist_dst);
+                    }
+                } else if m.pred_flag[y] && m.ref_idx[y] >= 0 {
+                    avail_flag_a = true;
+                    mv_a = m.mv[y];
+                    // Scale by POC distance
+                    let ref_poc = ctx.ref_pic_lists.poc[y][m.ref_idx[y] as usize];
+                    let dist_src = ctx.curr_poc - ref_poc;
+                    let dist_dst = ctx.curr_poc - target_poc;
+                    if dist_src != 0 && dist_src != dist_dst {
+                        mv_a = scale_mv(mv_a, dist_src, dist_dst);
+                    }
+                }
+            }
+        }
+    }
+
+    // --- B candidates (above neighbors) ---
+
+    // Step 1: positions
     let b0 = (xp as i32 + w as i32, yp as i32 - 1);
     let b1 = (xp as i32 + w as i32 - 1, yp as i32 - 1);
     let b2 = (xp as i32 - 1, yp as i32 - 1);
 
+    // Step 3: unscaled B (same POC match) — ALWAYS runs regardless of isScaledFlagLX
+    for &(bx, by) in &[b0, b1, b2] {
+        if !avail_flag_b && ctx.is_inter(bx, by) {
+            let m = ctx.get_motion(bx, by);
+            if m.pred_flag[x] && m.ref_idx[x] >= 0 {
+                let ref_poc = ctx.ref_pic_lists.poc[x][m.ref_idx[x] as usize];
+                if ref_poc == target_poc {
+                    avail_flag_b = true;
+                    mv_b = m.mv[x];
+                    continue;
+                }
+            }
+            if m.pred_flag[y] && m.ref_idx[y] >= 0 {
+                let ref_poc = ctx.ref_pic_lists.poc[y][m.ref_idx[y] as usize];
+                if ref_poc == target_poc {
+                    avail_flag_b = true;
+                    mv_b = m.mv[y];
+                }
+            }
+        }
+    }
+
+    // Step 4: if no A neighbor was inter (isScaledFlagLX==0) and B found, copy B→A
+    if !is_scaled_flag && avail_flag_b {
+        avail_flag_a = true;
+        mv_a = mv_b;
+    }
+
+    // Step 5: scaled B — only when isScaledFlagLX==0
     if !is_scaled_flag {
-        // No A candidate: try same-POC B
-        for &(bx, by) in &[b0, b1, b2] {
-            if ctx.is_inter(bx, by) {
-                let m = ctx.get_motion(bx, by);
-                if let Some(mv) = extract_mv_for_ref(&m, list_idx, target_poc, ctx) {
-                    if mvp_count == 0 {
-                        mvp[0] = mv;
-                        mvp_count = 1;
-                    } else if mv != mvp[0] {
-                        mvp[1] = mv;
-                        mvp_count = 2;
-                    }
-                    break;
-                }
-            }
-        }
-    }
+        avail_flag_b = false;
+        // mv_b is reset implicitly — we set it below if found
 
-    // B with scaling (if A was found, B must be different and scaled)
-    if mvp_count < 2 {
         for &(bx, by) in &[b0, b1, b2] {
+            if avail_flag_b {
+                break;
+            }
             if ctx.is_inter(bx, by) {
                 let m = ctx.get_motion(bx, by);
-                let mv_opt = if is_scaled_flag {
-                    extract_mv_scaled(&m, target_poc, ctx)
-                } else {
-                    extract_mv_for_ref(&m, list_idx, target_poc, ctx)
-                        .or_else(|| extract_mv_scaled(&m, target_poc, ctx))
-                };
-                if let Some(mv) = mv_opt
-                    && (mvp_count == 0 || mv != mvp[0])
-                {
-                    mvp[mvp_count] = mv;
-                    mvp_count += 1;
-                    if mvp_count >= 2 {
-                        break;
+                // Try same list X first
+                if m.pred_flag[x] && m.ref_idx[x] >= 0 {
+                    avail_flag_b = true;
+                    mv_b = m.mv[x];
+                    let ref_poc = ctx.ref_pic_lists.poc[x][m.ref_idx[x] as usize];
+                    let dist_src = ctx.curr_poc - ref_poc;
+                    let dist_dst = ctx.curr_poc - target_poc;
+                    if dist_src != 0 && dist_src != dist_dst {
+                        mv_b = scale_mv(mv_b, dist_src, dist_dst);
+                    }
+                } else if m.pred_flag[y] && m.ref_idx[y] >= 0 {
+                    avail_flag_b = true;
+                    mv_b = m.mv[y];
+                    let ref_poc = ctx.ref_pic_lists.poc[y][m.ref_idx[y] as usize];
+                    let dist_src = ctx.curr_poc - ref_poc;
+                    let dist_dst = ctx.curr_poc - target_poc;
+                    if dist_src != 0 && dist_src != dist_dst {
+                        mv_b = scale_mv(mv_b, dist_src, dist_dst);
                     }
                 }
             }
         }
     }
 
-    // Temporal MVP candidate for AMVP (if < 2 candidates)
-    if mvp_count < 2
-        && let Some(tmvp) = derive_temporal_candidate(ctx, xp, yp, w, h)
-    {
-        let tmv = if list_idx == 0 && tmvp.pred_flag[0] {
-            tmvp.mv[0]
-        } else if list_idx == 1 && tmvp.pred_flag[1] {
-            tmvp.mv[1]
-        } else if tmvp.pred_flag[0] {
-            tmvp.mv[0]
-        } else {
-            tmvp.mv[1]
-        };
-        if mvp_count == 0 || tmv != mvp[0] {
-            mvp[mvp_count] = tmv;
+    // ── 8.5.3.2.6: Build MVP list ───────────────────────────────────
+
+    let mut mvp = [MotionVector::ZERO; 2];
+    let mut mvp_count = 0usize;
+
+    // Step 2: if both A and B found and A != B, skip temporal MVP
+    let skip_temporal = avail_flag_a && avail_flag_b && mv_a != mv_b;
+
+    // Step 3: construct list
+    if avail_flag_a {
+        mvp[mvp_count] = mv_a;
+        mvp_count += 1;
+        if avail_flag_b && mv_a != mv_b {
+            mvp[mvp_count] = mv_b;
             mvp_count += 1;
         }
+    } else if avail_flag_b {
+        mvp[mvp_count] = mv_b;
+        mvp_count += 1;
+    }
+
+    // Temporal MVP candidate (skipped if both A and B found with different MVs)
+    if mvp_count < 2
+        && !skip_temporal
+        && let Some(tmv) = derive_temporal_candidate_amvp(ctx, xp, yp, w, h, x, ref_idx)
+        && (mvp_count == 0 || tmv != mvp[0])
+    {
+        mvp[mvp_count] = tmv;
+        mvp_count += 1;
     }
     let _ = mvp_count;
 
-    // Pad with zero MVs
-    // (mvp is already initialized to ZERO, so nothing to do)
-
+    // Pad with zero MVs (already initialized to ZERO)
     mvp
 }
 
@@ -510,50 +596,57 @@ pub fn scale_mv(mv: MotionVector, dist_src: i32, dist_dst: i32) -> MotionVector 
     }
 }
 
-// ── Temporal MVP derivation (H.265 8.5.3.2.7) ──────────────────────────
+// ── Temporal MVP derivation (H.265 8.5.3.2.8 + 8.5.3.2.9) ─────────────
 
-/// Derive temporal motion vector candidate from collocated frame
-fn derive_temporal_candidate(
+/// Find the collocated PU position for temporal MVP (H.265 8.5.3.2.8)
+///
+/// Returns (col_x, col_y) of the collocated block, already aligned to 16-pixel grid.
+/// Returns None if no collocated frame or position is invalid.
+fn find_collocated_position(
     ctx: &MvContext<'_>,
     xp: u32,
     yp: u32,
     w: u32,
     h: u32,
-) -> Option<PbMotion> {
+) -> Option<(u32, u32)> {
+    ctx.collocated.as_ref()?;
+
+    // Step 1: try bottom-right corner (xPb+nPbW, yPb+nPbH)
+    let br_x = xp + w;
+    let br_y = yp + h;
+
+    let ctb = ctx.ctb_size;
+    let same_ctu_row = (br_y / ctb) == (yp / ctb);
+    let in_bounds = br_x < ctx.pic_width && br_y < ctx.pic_height;
+
+    if same_ctu_row && in_bounds {
+        // Apply 16-pixel grid alignment: (xColBr >> 4) << 4
+        Some(((br_x >> 4) << 4, (br_y >> 4) << 4))
+    } else {
+        // Step 2: center of PU
+        let cx = xp + (w >> 1);
+        let cy = yp + (h >> 1);
+        Some(((cx >> 4) << 4, (cy >> 4) << 4))
+    }
+}
+
+/// Derive collocated motion vector for one reference list (H.265 8.5.3.2.9)
+///
+/// Given a collocated block, select the appropriate MV and scale it for list X with refIdxLX.
+fn derive_collocated_mv(
+    ctx: &MvContext<'_>,
+    col_x: u32,
+    col_y: u32,
+    target_list: usize,
+    ref_idx_lx: i8,
+) -> Option<MotionVector> {
     let col = ctx.collocated.as_ref()?;
 
-    // Try bottom-right corner first, aligned to 16-pixel grid
-    let br_x = ((xp + w) & !15) as i32;
-    let br_y = ((yp + h) & !15) as i32;
-
-    // Bottom-right must be in same CTU row and within picture bounds
-    let ctb = ctx.ctb_size as i32;
-    let same_ctu_row = (br_y / ctb) == (yp as i32 / ctb);
-    let in_bounds = br_x >= 0
-        && br_y >= 0
-        && (br_x as u32) < ctx.pic_width
-        && (br_y as u32) < ctx.pic_height;
-
-    let col_pos = if same_ctu_row && in_bounds {
-        (br_x, br_y)
-    } else {
-        // Fallback: center of PU, aligned to 16-pixel grid
-        let cx = ((xp + w / 2) & !15) as i32;
-        let cy = ((yp + h / 2) & !15) as i32;
-        (cx, cy)
-    };
-
-    // Get motion from collocated frame at col_pos
-    let col_x = col_pos.0.clamp(0, ctx.pic_width as i32 - 1) as u32;
-    let col_y = col_pos.1.clamp(0, ctx.pic_height as i32 - 1) as u32;
     let pu_x = col_x / col.min_pu_size;
     let pu_y = col_y / col.min_pu_size;
     let col_idx = (pu_y * col.pu_stride + pu_x) as usize;
 
-    if col_idx >= col.mv_info.len() {
-        return None;
-    }
-    if col_idx >= col.pred_mode.len() {
+    if col_idx >= col.mv_info.len() || col_idx >= col.pred_mode.len() {
         return None;
     }
 
@@ -567,39 +660,78 @@ fn derive_temporal_candidate(
 
     let col_motion = &col.mv_info[col_idx];
 
-    // Try to derive a scaled MV from the collocated block
-    // For each list, scale the collocated MV by POC distance ratio
+    // Select mvCol, refIdxCol, listCol per H.265 8.5.3.2.9
+    let (mv_col, list_col, ref_idx_col) = if !col_motion.pred_flag[0] {
+        // Only L1 predicted
+        (col_motion.mv[1], 1usize, col_motion.ref_idx[1])
+    } else if !col_motion.pred_flag[1] {
+        // Only L0 predicted
+        (col_motion.mv[0], 0usize, col_motion.ref_idx[0])
+    } else {
+        // Both L0 and L1 predicted
+        if ctx.no_backward_pred_flag {
+            // NoBackwardPredFlag=1: use same list as target (X)
+            (
+                col_motion.mv[target_list],
+                target_list,
+                col_motion.ref_idx[target_list],
+            )
+        } else {
+            // Use N = collocated_from_l0_flag (N=1 when flag is true, N=0 when false)
+            let n = ctx.collocated_from_l0_flag as usize;
+            (col_motion.mv[n], n, col_motion.ref_idx[n])
+        }
+    };
+
+    if ref_idx_col < 0 || ref_idx_col as usize >= MAX_NUM_REF_PICS {
+        return None;
+    }
+
+    // Get POC distances
+    let col_ref_poc = col.ref_poc[list_col][ref_idx_col as usize];
+    let col_poc_diff = col.poc - col_ref_poc;
+
+    let target_ref_poc = if (ref_idx_lx as usize)
+        < ctx.ref_pic_lists.num_ref_idx_active[target_list] as usize
+    {
+        ctx.ref_pic_lists.poc[target_list][ref_idx_lx as usize]
+    } else {
+        return None;
+    };
+    let curr_poc_diff = ctx.curr_poc - target_ref_poc;
+
+    // Scale if POC distances differ
+    if col_poc_diff == curr_poc_diff {
+        Some(mv_col)
+    } else {
+        Some(scale_mv(mv_col, col_poc_diff, curr_poc_diff))
+    }
+}
+
+/// Derive temporal motion vector candidate for merge mode (H.265 8.5.3.2.2)
+///
+/// Returns a PbMotion with temporal MVPs for L0 (refIdx=0) and L1 (refIdx=0).
+fn derive_temporal_candidate_merge(
+    ctx: &MvContext<'_>,
+    xp: u32,
+    yp: u32,
+    w: u32,
+    h: u32,
+) -> Option<PbMotion> {
+    let (col_x, col_y) = find_collocated_position(ctx, xp, yp, w, h)?;
     let mut result = PbMotion::UNAVAILABLE;
 
     for target_list in 0..2usize {
         if target_list == 1 && !ctx.is_b_slice {
             continue;
         }
-        let num_active = ctx.ref_pic_lists.num_ref_idx_active[target_list];
-        if num_active == 0 {
+        if ctx.ref_pic_lists.num_ref_idx_active[target_list] == 0 {
             continue;
         }
-        let target_ref_poc = ctx.ref_pic_lists.poc[target_list][0];
-
-        // Find a valid MV in the collocated block
-        for col_list in 0..2usize {
-            if !col_motion.pred_flag[col_list] || col_motion.ref_idx[col_list] < 0 {
-                continue;
-            }
-            let col_ref_idx = col_motion.ref_idx[col_list] as usize;
-            if col_ref_idx >= MAX_NUM_REF_PICS {
-                continue;
-            }
-            let col_ref_poc = col.ref_poc[col_list][col_ref_idx];
-
-            let dist_col = col.poc - col_ref_poc;
-            let dist_curr = ctx.curr_poc - target_ref_poc;
-
-            let scaled = scale_mv(col_motion.mv[col_list], dist_col, dist_curr);
+        if let Some(mv) = derive_collocated_mv(ctx, col_x, col_y, target_list, 0) {
             result.pred_flag[target_list] = true;
             result.ref_idx[target_list] = 0;
-            result.mv[target_list] = scaled;
-            break; // Use first valid collocated MV
+            result.mv[target_list] = mv;
         }
     }
 
@@ -610,6 +742,22 @@ fn derive_temporal_candidate(
     }
 }
 
+/// Derive temporal motion vector for AMVP (H.265 8.5.3.2.8)
+///
+/// Returns a single MV for list `target_list` with reference index `ref_idx_lx`.
+fn derive_temporal_candidate_amvp(
+    ctx: &MvContext<'_>,
+    xp: u32,
+    yp: u32,
+    w: u32,
+    h: u32,
+    target_list: usize,
+    ref_idx_lx: i8,
+) -> Option<MotionVector> {
+    let (col_x, col_y) = find_collocated_position(ctx, xp, yp, w, h)?;
+    derive_collocated_mv(ctx, col_x, col_y, target_list, ref_idx_lx)
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 /// Check if two PbMotion entries are identical (same pred flags, ref indices, MVs)
@@ -618,47 +766,6 @@ fn motion_eq(a: &PbMotion, b: &PbMotion) -> bool {
         && a.ref_idx == b.ref_idx
         && a.mv[0] == b.mv[0]
         && a.mv[1] == b.mv[1]
-}
-
-/// Extract MV from a neighbor for AMVP: same list, same POC (unscaled)
-fn extract_mv_for_ref(
-    m: &PbMotion,
-    list_idx: u8,
-    target_poc: i32,
-    ctx: &MvContext<'_>,
-) -> Option<MotionVector> {
-    // Check same list first
-    let li = list_idx as usize;
-    if m.pred_flag[li] && m.ref_idx[li] >= 0 {
-        let ref_poc = ctx.ref_pic_lists.poc[li][m.ref_idx[li] as usize];
-        if ref_poc == target_poc {
-            return Some(m.mv[li]);
-        }
-    }
-    // Check opposite list
-    let oi = 1 - li;
-    if m.pred_flag[oi] && m.ref_idx[oi] >= 0 {
-        let ref_poc = ctx.ref_pic_lists.poc[oi][m.ref_idx[oi] as usize];
-        if ref_poc == target_poc {
-            return Some(m.mv[oi]);
-        }
-    }
-    None
-}
-
-/// Extract MV from a neighbor with POC scaling
-fn extract_mv_scaled(m: &PbMotion, target_poc: i32, ctx: &MvContext<'_>) -> Option<MotionVector> {
-    for li in 0..2 {
-        if m.pred_flag[li] && m.ref_idx[li] >= 0 {
-            let ref_poc = ctx.ref_pic_lists.poc[li][m.ref_idx[li] as usize];
-            let dist_src = ctx.curr_poc - ref_poc;
-            let dist_dst = ctx.curr_poc - target_poc;
-            if dist_src != 0 {
-                return Some(scale_mv(m.mv[li], dist_src, dist_dst));
-            }
-        }
-    }
-    None
 }
 
 /// Check if this is the second PU of a vertical split (for A1 discard)

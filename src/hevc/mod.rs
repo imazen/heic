@@ -252,6 +252,8 @@ struct CurrentPicture {
     /// Accumulated motion/pred mode from all slices
     pred_mode_map: Vec<slice::PredMode>,
     mv_info: Vec<inter::PbMotion>,
+    /// Reference picture list POCs for this picture's slice (needed for collocated MV derivation)
+    ref_poc: [[i32; inter::MAX_NUM_REF_PICS]; 2],
 }
 
 impl VideoDecoder {
@@ -301,6 +303,7 @@ impl VideoDecoder {
             let mut entry = DpbEntry::new(clone_frame_for_ref(&pic.frame), poc, min_pu);
             entry.mv_info = pic.mv_info;
             entry.pred_mode_map = pic.pred_mode_map;
+            entry.ref_poc = pic.ref_poc;
             entry.is_output = true;
 
             // Evict non-reference, already-output frames before inserting
@@ -394,6 +397,7 @@ impl VideoDecoder {
                 slice_type: slice_header.slice_type,
                 pred_mode_map: alloc::vec![slice::PredMode::Intra; pu_count],
                 mv_info: alloc::vec![inter::PbMotion::UNAVAILABLE; pu_count],
+                ref_poc: [[0i32; inter::MAX_NUM_REF_PICS]; 2],
             });
         } else {
             // Continuation slice: use current picture's POC
@@ -429,6 +433,12 @@ impl VideoDecoder {
         } else {
             RefPicLists::default()
         };
+
+        // Store the ref_poc on the current picture for later DPB insertion
+        // (needed for temporal MVP derivation when this picture is the collocated frame)
+        if let Some(ref mut pic) = self.current_pic {
+            pic.ref_poc = ref_pic_lists.poc;
+        }
 
         // Collect only the REFERENCED frames from DPB (avoid cloning unused slots)
         let ref_frames: Vec<Option<DecodedFrame>> = if !slice_header.slice_type.is_intra() {
@@ -488,7 +498,9 @@ impl VideoDecoder {
                         pu_stride: entry.mv_stride,
                         min_pu_size: min_pu,
                         poc: entry.poc,
-                        ref_poc: ref_pic_lists.poc,
+                        // Use the collocated frame's own ref_poc, NOT the current slice's.
+                        // This is critical for temporal MVP: colPocDiff = ColPic.POC - ColPic.RefPicList[listCol][refIdxCol]
+                        ref_poc: entry.ref_poc,
                     }
                 })
             } else {
@@ -506,6 +518,7 @@ impl VideoDecoder {
         let slice_data = &nal.payload[data_offset..];
         let mut ctx = ctu::SliceContext::new(&sps, &pps, &slice_header, slice_data)?;
         ctx.curr_poc = curr_poc;
+
         ctx.ref_pic_lists = ref_pic_lists;
         ctx.ref_frames = ref_frames;
         ctx.collocated_data = collocated_data;

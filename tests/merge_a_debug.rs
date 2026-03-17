@@ -409,3 +409,127 @@ fn walkdir(dir: &Path) -> Vec<std::path::PathBuf> {
     }
     r
 }
+
+#[test]
+#[ignore]
+fn trace_merge_a_mvs() {
+    let merge_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("conformance/vectors/MERGE_A_TI_3");
+    let bit = walkdir(&merge_dir).into_iter().find(|p| p.extension().is_some_and(|e| e == "bit"));
+    let bit = match bit { Some(b) => b, None => { eprintln!("SKIP"); return; } };
+
+    let data = std::fs::read(&bit).unwrap();
+    let mut decoder = heic_decoder::VideoDecoder::new(16);
+    decoder.mv_trace_next_inter = true;
+    let _ = decoder.decode_annex_b(&data).unwrap();
+}
+
+#[test]
+#[ignore]
+fn debug_poc2_nofilter() {
+    let merge_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("conformance/vectors/MERGE_A_TI_3");
+    let bit = walkdir(&merge_dir).into_iter().find(|p| p.extension().is_some_and(|e| e == "bit"));
+    let bit = match bit { Some(b) => b, None => { eprintln!("SKIP"); return; } };
+    let ref_path = Path::new("/tmp/merge_a_nofilter.yuv");
+    if !ref_path.exists() { eprintln!("SKIP"); return; }
+
+    let data = std::fs::read(&bit).unwrap();
+    let mut decoder = heic_decoder::VideoDecoder::new(16);
+    decoder.disable_loop_filters = true;
+    let frames = decoder.decode_annex_b(&data).unwrap();
+
+    let ref_data = std::fs::read(ref_path).unwrap();
+    let w = 416u32; let h = 240u32;
+    let luma_size = (w * h) as usize;
+    let frame_size = luma_size + 2 * ((w/2) * (h/2)) as usize;
+
+    // Check decode order (should be: I(0), B(4), B(2), B(1), B(3), B(6), B(5), B(7))
+    eprintln!("Decode result: {} frames", frames.len());
+    for (i, f) in frames.iter().enumerate() {
+        eprintln!("  frames[{i}]: w={} h={} y_plane_len={}", f.width, f.height, f.y_plane.len());
+    }
+
+    // Check POC=2 in detail
+    let fi = 2;
+    let stride = frames[fi].width as usize;
+    let ref_y: Vec<u16> = ref_data[fi*frame_size..fi*frame_size+luma_size].iter().map(|&b| b as u16).collect();
+
+    // Check if pixel (0,0) differs
+    eprintln!("POC=2 debug:");
+    eprintln!("  frame dims: {}x{} stride={stride}", frames[fi].width, frames[fi].height);
+    eprintln!("  pixel(0,0): ours={} ref={}", frames[fi].y_plane[0], ref_y[0]);
+    eprintln!("  pixel(1,0): ours={} ref={}", frames[fi].y_plane[1], ref_y[1]);
+    eprintln!("  pixel(0,1): ours={} ref={}", frames[fi].y_plane[stride], ref_y[w as usize]);
+
+    // Check what fraction of the image is zero (might indicate uninitialized)
+    let zeros = frames[fi].y_plane.iter().take(luma_size).filter(|&&v| v == 0).count();
+    let uninit = frames[fi].y_plane.iter().take(luma_size).filter(|&&v| v == u16::MAX).count();
+    eprintln!("  zeros={zeros} uninit(0xFFFF)={uninit}");
+
+    // First 10 diffs and first 10 matches
+    let mut diffs = Vec::new();
+    let mut matches = Vec::new();
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let ov = frames[fi].y_plane[y * stride + x];
+            let rv = ref_y[y * w as usize + x];
+            if ov != rv && diffs.len() < 10 {
+                diffs.push((x, y, ov, rv));
+            }
+            if ov == rv && matches.len() < 10 {
+                matches.push((x, y, ov));
+            }
+        }
+    }
+    eprintln!("  First 10 diffs:");
+    for (x, y, ov, rv) in &diffs {
+        eprintln!("    ({x:3},{y:3}) ours={ov:3} ref={rv:3} diff={:+}", *ov as i32 - *rv as i32);
+    }
+    eprintln!("  First 10 matches:");
+    for (x, y, v) in &matches {
+        eprintln!("    ({x:3},{y:3}) val={v:3}");
+    }
+
+    // Check per-CTU-column accuracy
+    let ctu_size = 64u32;
+    let num_ctu_cols = w.div_ceil(ctu_size) as usize;
+    let num_ctu_rows = h.div_ceil(ctu_size) as usize;
+    for ctu_row in 0..num_ctu_rows {
+        let mut row_report = String::new();
+        for ctu_col in 0..num_ctu_cols {
+            let x0 = ctu_col as u32 * ctu_size;
+            let y0 = ctu_row as u32 * ctu_size;
+            let x1 = (x0 + ctu_size).min(w);
+            let y1 = (y0 + ctu_size).min(h);
+            let mut exact_ctu = 0u32;
+            let total_ctu = (x1 - x0) * (y1 - y0);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let ov = frames[fi].y_plane[y as usize * stride + x as usize];
+                    let rv = ref_y[y as usize * w as usize + x as usize];
+                    if ov == rv { exact_ctu += 1; }
+                }
+            }
+            let pct = 100.0 * exact_ctu as f64 / total_ctu as f64;
+            row_report += &format!(" {pct:5.1}");
+        }
+        eprintln!("  CTU row {ctu_row}: {row_report}");
+    }
+
+    // Histogram of differences
+    let mut hist = std::collections::HashMap::new();
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let ov = frames[fi].y_plane[y * stride + x];
+            let rv = ref_y[y * w as usize + x];
+            let d = ov as i32 - rv as i32;
+            *hist.entry(d).or_insert(0u32) += 1;
+        }
+    }
+    eprintln!("  Unique diff values: {}", hist.len());
+    let mut by_count: Vec<_> = hist.iter().collect();
+    by_count.sort_by(|a, b| b.1.cmp(a.1));
+    eprintln!("  Top 10 diffs by frequency:");
+    for (d, cnt) in by_count.iter().take(10) {
+        eprintln!("    diff={d:+4}: {cnt} pixels");
+    }
+}
