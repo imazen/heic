@@ -199,13 +199,14 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 - Inter prediction (P/B slices) on `inter-prediction` branch:
   - Full pipeline: syntax parsing, merge/AMVP/TMVP, scalar MC, DPB, VideoDecoder
   - Conformance: 48/48 vectors decode without crash, 1 pixel-exact (I-only)
-  - P-frame quality (girlshy WPP): 39.8dB, 92% pixel-exact (R0:98% R1:88% R2:85% R3:100%)
-  - Fixed: CBF tracking for deblocking bS=2, DST/DCT for inter 4x4 TUs, chroma MC shifts (4→6), skip/no-residual CU boundary marking, WPP entry point offsets + CABAC reinit, cu_skip_flag cross-CTB-row context derivation, deblocking TB/PB edge distinction + bS=1 for CBF (was bS=2) + PB boundary marking
-  - MC filter verified correct via unit tests (constant ref, gradient, bi-pred)
-  - Slice data offset verified correct (data_offset=12 for girlshy P-frame, matches dec265)
-  - IMPORTANT: dec265 reference YUV is in DECODE ORDER, not display order. Use ffmpeg to generate display-order reference for comparison.
-  - Remaining issues: B-frames still ~17-20dB — inter prediction errors that compound across reference chain; deblocking now correct (MERGE_A Fr4: 97.1% exact with filter, 3.3% without — deblocking is helping, not hurting)
-  - SSIMULACRA2: I-frame 100.00, MERGE_A worst -662, AMVP_A worst -163
+  - P-frame quality (girlshy WPP): 39.8dB, 93.5% pixel-exact (R0:100% R1:90% R2:86% R3:100%)
+  - CABAC verified BIT-EXACT vs dec265 (all 28 CTU byte positions match for MERGE_A)
+  - Unfiltered I-frame verified 100% pixel-exact vs dec265 (proves CABAC + transform correct)
+  - MERGE_A first B-frame (POC=4): 97.1% pixel-exact (36.4dB), remaining 2.9% at deblocking boundaries
+  - Fixed: CBF tracking for deblocking bS=2, DST/DCT for inter 4x4 TUs, chroma MC shifts (4→6), skip/no-residual CU boundary marking, WPP entry point offsets + CABAC reinit, cu_skip_flag cross-CTB-row context derivation, deblocking TB/PB edge distinction with separate bS derivation, bi-pred cross-list bS comparison
+  - IMPORTANT: dec265 reference YUV is in DECODE ORDER, not display order. Use ffmpeg for display-order reference.
+  - Remaining: B-frames compound deblocking diffs through reference chain (2.9% per frame → ~15-20dB after 3+ refs). Last frame of MERGE_A has UNINIT from pred_mode_map error accumulation.
+  - SSIMULACRA2: I-frame 100.00, AMVP_A avg -31 (Fr1: 96), MERGE_A avg -170 (Fr4: 31)
   - Deferred: SIMD MC (Phase 7), weighted prediction application
 - 4:4:4 chroma: decodes correctly (61.9dB), but no SIMD color conversion path (uses scalar)
 - Dependent slice segments: not supported (2 vectors fail)
