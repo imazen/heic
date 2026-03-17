@@ -10,10 +10,15 @@ use super::color_convert;
 /// for reference sample availability (H.265 8.4.4.2.2).
 pub(crate) const UNINIT_SAMPLE: u16 = u16::MAX;
 
-/// Deblocking edge flags per 4x4 block
+/// Deblocking edge flags per 4x4 block — transform block boundary (vertical)
 pub(crate) const DEBLOCK_FLAG_VERT: u8 = 1;
-/// Horizontal edge flag
+/// Transform block boundary (horizontal)
 pub(crate) const DEBLOCK_FLAG_HORIZ: u8 = 2;
+/// Prediction block boundary (vertical) — distinct from transform boundary
+/// Used for bS derivation: CBF check only applies at transform block edges (H.265 8.7.2.4)
+pub(crate) const DEBLOCK_PB_EDGE_VERT: u8 = 4;
+/// Prediction block boundary (horizontal)
+pub(crate) const DEBLOCK_PB_EDGE_HORIZ: u8 = 8;
 
 /// Decoded video frame with YCbCr plane data.
 ///
@@ -136,6 +141,50 @@ impl DecodedFrame {
                 let idx = (by * self.deblock_stride + bx + i) as usize;
                 if idx < self.deblock_flags.len() {
                     self.deblock_flags[idx] |= DEBLOCK_FLAG_HORIZ;
+                }
+            }
+        }
+    }
+
+    /// Mark a prediction block boundary (H.265 8.7.2.3)
+    ///
+    /// For non-2Nx2N inter partition modes, the internal PB boundary must be marked
+    /// separately from transform block boundaries. The bS derivation (8.7.2.4) checks
+    /// CBF only at transform block edges, not at PB-only edges.
+    pub(crate) fn mark_pb_boundary(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        vertical: bool,
+    ) {
+        if vertical {
+            // Mark vertical PB edge at column x, spanning height rows from y
+            if x == 0 {
+                return;
+            }
+            let bx = x / 4;
+            let by = y / 4;
+            let bs = height / 4;
+            for j in 0..bs {
+                let idx = ((by + j) * self.deblock_stride + bx) as usize;
+                if idx < self.deblock_flags.len() {
+                    self.deblock_flags[idx] |= DEBLOCK_PB_EDGE_VERT;
+                }
+            }
+        } else {
+            // Mark horizontal PB edge at row y, spanning width columns from x
+            if y == 0 {
+                return;
+            }
+            let bx = x / 4;
+            let by = y / 4;
+            let bs = width / 4;
+            for i in 0..bs {
+                let idx = (by * self.deblock_stride + bx + i) as usize;
+                if idx < self.deblock_flags.len() {
+                    self.deblock_flags[idx] |= DEBLOCK_PB_EDGE_HORIZ;
                 }
             }
         }

@@ -103,6 +103,57 @@ fn partition_to_pu_list(
     }
 }
 
+/// Mark prediction block boundaries for deblocking (H.265 8.7.2.3)
+///
+/// For inter CUs with non-2Nx2N partitioning, the internal PB boundary must be
+/// marked so the deblocking filter can derive boundary strength. These are marked
+/// separately from transform block boundaries because the CBF check in bS derivation
+/// (bS=1 for non-zero coefficients) only applies at transform block edges.
+fn mark_pb_boundaries(
+    frame: &mut DecodedFrame,
+    part_mode: PartMode,
+    x0: u32,
+    y0: u32,
+    cb_size: u32,
+) {
+    let half = cb_size / 2;
+    let quarter = cb_size / 4;
+    match part_mode {
+        PartMode::Part2Nx2N => {
+            // No internal PB boundary
+        }
+        PartMode::PartNx2N => {
+            // Vertical PB edge at x0 + half
+            frame.mark_pb_boundary(x0 + half, y0, cb_size, cb_size, true);
+        }
+        PartMode::Part2NxN => {
+            // Horizontal PB edge at y0 + half
+            frame.mark_pb_boundary(x0, y0 + half, cb_size, cb_size, false);
+        }
+        PartMode::PartNxN => {
+            // Both vertical and horizontal PB edges at center
+            frame.mark_pb_boundary(x0 + half, y0, cb_size, cb_size, true);
+            frame.mark_pb_boundary(x0, y0 + half, cb_size, cb_size, false);
+        }
+        PartMode::PartnLx2N => {
+            // Vertical PB edge at x0 + quarter
+            frame.mark_pb_boundary(x0 + quarter, y0, cb_size, cb_size, true);
+        }
+        PartMode::PartnRx2N => {
+            // Vertical PB edge at x0 + 3*quarter
+            frame.mark_pb_boundary(x0 + half + quarter, y0, cb_size, cb_size, true);
+        }
+        PartMode::Part2NxnU => {
+            // Horizontal PB edge at y0 + quarter
+            frame.mark_pb_boundary(x0, y0 + quarter, cb_size, cb_size, false);
+        }
+        PartMode::Part2NxnD => {
+            // Horizontal PB edge at y0 + 3*quarter
+            frame.mark_pb_boundary(x0, y0 + half + quarter, cb_size, cb_size, false);
+        }
+    }
+}
+
 fn chroma_qp_mapping(qp_i: i32) -> i32 {
     // Table 8-10: qPi to QpC mapping
     // For qPi 0-29, QpC = qPi
@@ -1164,6 +1215,11 @@ impl<'a> SliceContext<'a> {
                 self.apply_mc(&motion, px, py, pw, ph, frame);
             }
             pu_list_is_merge = any_merge;
+
+            // Mark prediction block boundaries for deblocking (H.265 8.7.2.3)
+            // Internal PB edges are distinct from TB edges; CBF check doesn't apply at PB-only edges
+            mark_pb_boundaries(frame, part_mode, x0, y0, cb_size);
+
             // Inter CUs use DC for intra modes (unused in transform path)
             (IntraPredMode::Dc, IntraPredMode::Dc)
         };

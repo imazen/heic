@@ -5,7 +5,10 @@
 //! prediction mode, reference pictures, and motion vector differences.
 
 use super::inter::PbMotion;
-use super::picture::{DEBLOCK_FLAG_HORIZ, DEBLOCK_FLAG_VERT, DecodedFrame};
+use super::picture::{
+    DEBLOCK_FLAG_HORIZ, DEBLOCK_FLAG_VERT, DEBLOCK_PB_EDGE_HORIZ, DEBLOCK_PB_EDGE_VERT,
+    DecodedFrame,
+};
 use super::slice::PredMode;
 
 /// Beta prime values for deblocking filter (Table 8-12)
@@ -32,7 +35,16 @@ static TC_PRIME: [u16; 54] = [
 ///
 /// For I-slices (inter_ctx is None), bS=2 always.
 /// For P/B slices, bS depends on prediction mode, ref pics, and MVs.
-fn compute_bs(x: u32, y: u32, vertical: bool, inter_ctx: &Option<&InterDeblockCtx<'_>>) -> i32 {
+///
+/// `is_transform_edge`: true if this edge is a transform block boundary (not just PB).
+/// The CBF check (bS=1 for non-zero coefficients) only applies at transform block edges.
+fn compute_bs(
+    x: u32,
+    y: u32,
+    vertical: bool,
+    is_transform_edge: bool,
+    inter_ctx: &Option<&InterDeblockCtx<'_>>,
+) -> i32 {
     let ctx = match inter_ctx {
         Some(c) => c,
         None => return 2, // I-slice: always bS=2
@@ -63,18 +75,23 @@ fn compute_bs(x: u32, y: u32, vertical: bool, inter_ctx: &Option<&InterDeblockCt
         return 2;
     }
 
-    // Check CBF (non-zero coefficients at this TU boundary)
-    let get_cbf = |sx: u32, sy: u32| -> bool {
-        let idx = (sy / 4 * ctx.cbf_map_stride + sx / 4) as usize;
-        if idx < ctx.cbf_map.len() {
-            ctx.cbf_map[idx]
-        } else {
-            false
-        }
-    };
+    // bS=1: CBF check — only at transform block edges (H.265 8.7.2.4)
+    // "if the block edge is also a transform block edge and the sample p0 or q0
+    //  is in a luma transform block which contains one or more non-zero transform
+    //  coefficient levels, bS is set equal to 1"
+    if is_transform_edge {
+        let get_cbf = |sx: u32, sy: u32| -> bool {
+            let idx = (sy / 4 * ctx.cbf_map_stride + sx / 4) as usize;
+            if idx < ctx.cbf_map.len() {
+                ctx.cbf_map[idx]
+            } else {
+                false
+            }
+        };
 
-    if get_cbf(px, py) || get_cbf(qx, qy) {
-        return 2;
+        if get_cbf(px, py) || get_cbf(qx, qy) {
+            return 1;
+        }
     }
 
     // bS=1: different reference pictures or MV difference >= 1 integer pel (4 quarter-pel)
@@ -122,10 +139,12 @@ fn compute_bs(x: u32, y: u32, vertical: bool, inter_ctx: &Option<&InterDeblockCt
         // Both uni-predicted (or both have same count of 1)
         // Check: different reference pictures or MV difference >= 4
         for list in 0..2 {
-            if mv_p.pred_flag[list] && mv_q.pred_flag[list] {
-                if mv_p.ref_idx[list] != mv_q.ref_idx[list] || mv_diff_ge4(mv_p.mv[list], mv_q.mv[list]) {
-                    return 1;
-                }
+            if mv_p.pred_flag[list]
+                && mv_q.pred_flag[list]
+                && (mv_p.ref_idx[list] != mv_q.ref_idx[list]
+                    || mv_diff_ge4(mv_p.mv[list], mv_q.mv[list]))
+            {
+                return 1;
             }
         }
         // Also check if they use different lists (e.g., P uses L0 only, Q uses L1 only)
@@ -187,6 +206,10 @@ pub fn apply_deblocking_filter(
     let width = frame.width;
     let height = frame.height;
 
+    // Edge masks: check both transform block edges and prediction block edges
+    let vert_edge_mask = DEBLOCK_FLAG_VERT | DEBLOCK_PB_EDGE_VERT;
+    let horiz_edge_mask = DEBLOCK_FLAG_HORIZ | DEBLOCK_PB_EDGE_HORIZ;
+
     // Pass 1: Vertical edges
     // Process at 8-sample intervals in x, 4-sample intervals in y
     let mut x = 8u32;
@@ -196,20 +219,34 @@ pub fn apply_deblocking_filter(
             let bx = x / 4;
             let by = y / 4;
             let idx = (by * frame.deblock_stride + bx) as usize;
-            if idx < frame.deblock_flags.len()
-                && (frame.deblock_flags[idx] & DEBLOCK_FLAG_VERT) != 0
-            {
-                // Get QP on both sides
-                let qp_q = frame.qp_map[idx] as i32;
-                let qp_p = if bx > 0 {
-                    frame.qp_map[(by * frame.deblock_stride + bx - 1) as usize] as i32
-                } else {
-                    qp_q
-                };
+            if idx < frame.deblock_flags.len() {
+                let flags = frame.deblock_flags[idx];
+                if (flags & vert_edge_mask) != 0 {
+                    // Is this a transform block edge? (affects CBF check in bS derivation)
+                    let is_tb_edge = (flags & DEBLOCK_FLAG_VERT) != 0;
 
-                let bs = compute_bs(x, y, true, &inter_ctx);
-                if bs > 0 {
-                    filter_edge_luma(frame, x, y, true, qp_p, qp_q, beta_offset, tc_offset, bs);
+                    // Get QP on both sides
+                    let qp_q = frame.qp_map[idx] as i32;
+                    let qp_p = if bx > 0 {
+                        frame.qp_map[(by * frame.deblock_stride + bx - 1) as usize] as i32
+                    } else {
+                        qp_q
+                    };
+
+                    let bs = compute_bs(x, y, true, is_tb_edge, &inter_ctx);
+                    if bs > 0 {
+                        filter_edge_luma(
+                            frame,
+                            x,
+                            y,
+                            true,
+                            qp_p,
+                            qp_q,
+                            beta_offset,
+                            tc_offset,
+                            bs,
+                        );
+                    }
                 }
             }
             y += 4;
@@ -226,19 +263,32 @@ pub fn apply_deblocking_filter(
             let bx = x / 4;
             let by = y / 4;
             let idx = (by * frame.deblock_stride + bx) as usize;
-            if idx < frame.deblock_flags.len()
-                && (frame.deblock_flags[idx] & DEBLOCK_FLAG_HORIZ) != 0
-            {
-                let qp_q = frame.qp_map[idx] as i32;
-                let qp_p = if by > 0 {
-                    frame.qp_map[((by - 1) * frame.deblock_stride + bx) as usize] as i32
-                } else {
-                    qp_q
-                };
+            if idx < frame.deblock_flags.len() {
+                let flags = frame.deblock_flags[idx];
+                if (flags & horiz_edge_mask) != 0 {
+                    let is_tb_edge = (flags & DEBLOCK_FLAG_HORIZ) != 0;
 
-                let bs = compute_bs(x, y, false, &inter_ctx);
-                if bs > 0 {
-                    filter_edge_luma(frame, x, y, false, qp_p, qp_q, beta_offset, tc_offset, bs);
+                    let qp_q = frame.qp_map[idx] as i32;
+                    let qp_p = if by > 0 {
+                        frame.qp_map[((by - 1) * frame.deblock_stride + bx) as usize] as i32
+                    } else {
+                        qp_q
+                    };
+
+                    let bs = compute_bs(x, y, false, is_tb_edge, &inter_ctx);
+                    if bs > 0 {
+                        filter_edge_luma(
+                            frame,
+                            x,
+                            y,
+                            false,
+                            qp_p,
+                            qp_q,
+                            beta_offset,
+                            tc_offset,
+                            bs,
+                        );
+                    }
                 }
             }
             x += 4;
@@ -468,6 +518,9 @@ fn apply_chroma_deblocking(
     let x_step_horiz = 4 * sub_x; // luma x step for horizontal edges (8 for 4:2:0)
     let y_step_horiz = 8 * sub_y; // luma y step for horizontal edges (16 for 4:2:0)
 
+    let vert_edge_mask = DEBLOCK_FLAG_VERT | DEBLOCK_PB_EDGE_VERT;
+    let horiz_edge_mask = DEBLOCK_FLAG_HORIZ | DEBLOCK_PB_EDGE_HORIZ;
+
     // Pass 1: Vertical edges
     let mut x = x_step_vert;
     while x < width {
@@ -477,10 +530,11 @@ fn apply_chroma_deblocking(
             let by = y / 4;
             let idx = (by * frame.deblock_stride + bx) as usize;
             if idx < frame.deblock_flags.len()
-                && (frame.deblock_flags[idx] & DEBLOCK_FLAG_VERT) != 0
+                && (frame.deblock_flags[idx] & vert_edge_mask) != 0
             {
+                let is_tb_edge = (frame.deblock_flags[idx] & DEBLOCK_FLAG_VERT) != 0;
                 // Chroma only filters at bS=2
-                let bs = compute_bs(x, y, true, inter_ctx);
+                let bs = compute_bs(x, y, true, is_tb_edge, inter_ctx);
                 if bs < 2 {
                     y += y_step_vert;
                     continue;
@@ -554,9 +608,10 @@ fn apply_chroma_deblocking(
             let by = y / 4;
             let idx = (by * frame.deblock_stride + bx) as usize;
             if idx < frame.deblock_flags.len()
-                && (frame.deblock_flags[idx] & DEBLOCK_FLAG_HORIZ) != 0
+                && (frame.deblock_flags[idx] & horiz_edge_mask) != 0
             {
-                let bs = compute_bs(x, y, false, inter_ctx);
+                let is_tb_edge = (frame.deblock_flags[idx] & DEBLOCK_FLAG_HORIZ) != 0;
+                let bs = compute_bs(x, y, false, is_tb_edge, inter_ctx);
                 if bs < 2 {
                     x += x_step_horiz;
                     continue;
