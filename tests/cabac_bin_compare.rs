@@ -101,8 +101,7 @@ fn parse_last_batch(stderr: &str, max_bins: usize) -> Vec<BinEntry> {
 
 /// Get bin trace from dec265 (only traces first B-frame)
 fn get_dec265_bins(bitstream: &Path, max_bins: usize) -> Vec<BinEntry> {
-    let dec265_trace =
-        Path::new("/home/lilith/work/heic/libde265-src/build-trace/dec265/dec265");
+    let dec265_trace = Path::new("/home/lilith/work/heic/libde265-src/build-trace/dec265/dec265");
     assert!(
         dec265_trace.exists(),
         "dec265 trace build not found at {}",
@@ -146,8 +145,10 @@ fn get_our_bins(bitstream: &Path, max_bins: usize) -> Vec<BinEntry> {
 
     // Also print any SLICE_DATA/CTX lines for debugging
     for line in stderr.lines() {
-        if line.starts_with("SLICE_DATA") || line.starts_with("SLICE_QP")
-            || line.starts_with("CTX") || line.starts_with("CTU-CK")
+        if line.starts_with("SLICE_DATA")
+            || line.starts_with("SLICE_QP")
+            || line.starts_with("CTX")
+            || line.starts_with("CTU-CK")
         {
             eprintln!("  [ours] {line}");
         }
@@ -175,7 +176,10 @@ fn compare_merge_a_bins() {
 
     eprintln!("\n=== Getting our bins... ===");
     let our_bins = get_our_bins(bitstream, max_bins);
-    eprintln!("  Got {} bins from our decoder (last batch)", our_bins.len());
+    eprintln!(
+        "  Got {} bins from our decoder (last batch)",
+        our_bins.len()
+    );
 
     if dec265_bins.is_empty() {
         panic!("No bins captured from dec265");
@@ -185,7 +189,10 @@ fn compare_merge_a_bins() {
     }
 
     // Print first 3 bins from each to confirm they're from B-frame
-    eprintln!("\n  dec265 first 3: {:?}", &dec265_bins[..3.min(dec265_bins.len())]);
+    eprintln!(
+        "\n  dec265 first 3: {:?}",
+        &dec265_bins[..3.min(dec265_bins.len())]
+    );
     eprintln!("  ours first 3:   {:?}", &our_bins[..3.min(our_bins.len())]);
 
     // Compare bin by bin
@@ -226,17 +233,33 @@ fn compare_merge_a_bins() {
                 "OK".to_string()
             } else {
                 let mut s = "DIFF".to_string();
-                if !kind_ok { s += " KIND"; }
-                if !range_ok { s += " RANGE"; }
-                if !bin_ok { s += " BIN"; }
-                if !bp_ok { s += " BP"; }
+                if !kind_ok {
+                    s += " KIND";
+                }
+                if !range_ok {
+                    s += " RANGE";
+                }
+                if !bin_ok {
+                    s += " BIN";
+                }
+                if !bp_ok {
+                    s += " BP";
+                }
                 s
             };
             eprintln!(
                 "B{:<4} | {:>4} {:>6} {:>8} {:>3} {:>4} | {:>4} {:>6} {:>8} {:>3} {:>4} | {}",
                 i,
-                d.kind, d.range, d_val, d.bin_val, d.byte_pos,
-                o.kind, o.range, o_val, o.bin_val, o.byte_pos,
+                d.kind,
+                d.range,
+                d_val,
+                d.bin_val,
+                d.byte_pos,
+                o.kind,
+                o.range,
+                o_val,
+                o.bin_val,
+                o.byte_pos,
                 status
             );
         }
@@ -265,10 +288,14 @@ fn compare_merge_a_bins() {
 
         // Analyze the divergence
         if d.kind != o.kind {
-            eprintln!("    -> BIN TYPE MISMATCH: dec265 decoded a {} bin, we decoded a {} bin",
+            eprintln!(
+                "    -> BIN TYPE MISMATCH: dec265 decoded a {} bin, we decoded a {} bin",
                 if d.kind == 'c' { "context" } else { "bypass" },
-                if o.kind == 'c' { "context" } else { "bypass" });
-            eprintln!("    -> This suggests different syntax element parsing (wrong branch, missing/extra SE)");
+                if o.kind == 'c' { "context" } else { "bypass" }
+            );
+            eprintln!(
+                "    -> This suggests different syntax element parsing (wrong branch, missing/extra SE)"
+            );
         } else if d.range != o.range || d.byte_pos != o.byte_pos {
             eprintln!("    -> CABAC engine state diverged: ranges/byte-positions differ");
             if d.bin_val != o.bin_val {
@@ -276,10 +303,18 @@ fn compare_merge_a_bins() {
             }
         } else if d.bin_val != o.bin_val {
             eprintln!("    -> Same CABAC state but different decoded value!");
-            eprintln!("    -> This suggests different context model selection (wrong context index)");
+            eprintln!(
+                "    -> This suggests different context model selection (wrong context index)"
+            );
             if d.kind == 'c' {
-                eprintln!("    -> dec265 post-decode context: s={:?} m={:?}", d.state, d.mps);
-                eprintln!("    -> our pre-decode context:     s={:?} m={:?}", o.state, o.mps);
+                eprintln!(
+                    "    -> dec265 post-decode context: s={:?} m={:?}",
+                    d.state, d.mps
+                );
+                eprintln!(
+                    "    -> our pre-decode context:     s={:?} m={:?}",
+                    o.state, o.mps
+                );
             }
         }
 
@@ -291,12 +326,30 @@ fn compare_merge_a_bins() {
         for i in 0..compare_count {
             let d = &dec265_bins[i];
             let o = &our_bins[i];
-            let ok = d.kind == o.kind && d.range == o.range && d.bin_val == o.bin_val && d.byte_pos == o.byte_pos;
-            writeln!(f, "B{} {} {} {:?} {:?} {:?} {} {} | {} {:?} {:?} {:?} {} {} | {}",
-                i, d.kind, d.range, d.value, d.state, d.mps, d.bin_val, d.byte_pos,
-                o.range, o.value, o.state, o.mps, o.bin_val, o.byte_pos,
+            let ok = d.kind == o.kind
+                && d.range == o.range
+                && d.bin_val == o.bin_val
+                && d.byte_pos == o.byte_pos;
+            writeln!(
+                f,
+                "B{} {} {} {:?} {:?} {:?} {} {} | {} {:?} {:?} {:?} {} {} | {}",
+                i,
+                d.kind,
+                d.range,
+                d.value,
+                d.state,
+                d.mps,
+                d.bin_val,
+                d.byte_pos,
+                o.range,
+                o.value,
+                o.state,
+                o.mps,
+                o.bin_val,
+                o.byte_pos,
                 if ok { "OK" } else { "DIFF" }
-            ).unwrap();
+            )
+            .unwrap();
         }
         eprintln!("\n  Full comparison written to {out_path}");
     } else {

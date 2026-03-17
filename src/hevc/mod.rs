@@ -319,10 +319,7 @@ impl VideoDecoder {
 
     /// Decode a slice NAL unit. Returns a frame only when a NEW picture starts
     /// (the previously accumulated picture is returned).
-    fn decode_slice_nal(
-        &mut self,
-        nal: &bitstream::NalUnit<'_>,
-    ) -> Result<Option<DecodedFrame>> {
+    fn decode_slice_nal(&mut self, nal: &bitstream::NalUnit<'_>) -> Result<Option<DecodedFrame>> {
         // Clone SPS/PPS to avoid borrow conflicts with &mut self
         let sps = self
             .sps
@@ -392,8 +389,7 @@ impl VideoDecoder {
             let frame = create_frame(&sps);
             let min_pu = ((1u32 << sps.log2_min_cb_size()) / 2).max(1);
             let pu_stride = sps.pic_width_in_luma_samples.div_ceil(min_pu);
-            let pu_count =
-                (pu_stride * sps.pic_height_in_luma_samples.div_ceil(min_pu)) as usize;
+            let pu_count = (pu_stride * sps.pic_height_in_luma_samples.div_ceil(min_pu)) as usize;
             self.current_pic = Some(CurrentPicture {
                 frame,
                 poc: curr_poc,
@@ -541,12 +537,21 @@ impl VideoDecoder {
             #[cfg(feature = "std")]
             {
                 let first_bytes: Vec<u8> = slice_data.iter().take(8).copied().collect();
-                eprintln!("SLICE_DATA: type={:?} data_offset={} first_bytes={:02x?} total_len={} entry_points={:?}",
-                    slice_header.slice_type, data_offset, first_bytes, slice_data.len(),
-                    slice_header.entry_point_offsets);
-                eprintln!("SLICE_QP: {} cabac_init_flag={} sao_luma={} sao_chroma={}",
-                    slice_header.slice_qp_y, slice_header.cabac_init_flag,
-                    slice_header.slice_sao_luma_flag, slice_header.slice_sao_chroma_flag);
+                eprintln!(
+                    "SLICE_DATA: type={:?} data_offset={} first_bytes={:02x?} total_len={} entry_points={:?}",
+                    slice_header.slice_type,
+                    data_offset,
+                    first_bytes,
+                    slice_data.len(),
+                    slice_header.entry_point_offsets
+                );
+                eprintln!(
+                    "SLICE_QP: {} cabac_init_flag={} sao_luma={} sao_chroma={}",
+                    slice_header.slice_qp_y,
+                    slice_header.cabac_init_flag,
+                    slice_header.slice_sao_luma_flag,
+                    slice_header.slice_sao_chroma_flag
+                );
                 // Print context checksum matching dec265's CTU-CK format
                 let mut cksum: u64 = 0;
                 for c in ctx.ctx.iter() {
@@ -554,7 +559,10 @@ impl VideoDecoder {
                     cksum += s as u64 * 3 + m as u64;
                 }
                 let (bp, _, _) = ctx.cabac.get_position();
-                eprintln!("CTX-INIT: bp={} ck={} (dec265 CTU-CK should match)", bp, cksum);
+                eprintln!(
+                    "CTX-INIT: bp={} ck={} (dec265 CTU-CK should match)",
+                    bp, cksum
+                );
                 // Print specific context states for debugging
                 let (s154, m154) = ctx.ctx[154].get_state();
                 let (s155, m155) = ctx.ctx[155].get_state();

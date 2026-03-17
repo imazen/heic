@@ -286,8 +286,8 @@ pub fn derive_merge_candidates(
     }
 
     // B0: above-right corner
-    let b0_avail = ctx.is_inter(b0_pos.0, b0_pos.1)
-        && !ctx.same_merge_region(xp, yp, b0_pos.0, b0_pos.1);
+    let b0_avail =
+        ctx.is_inter(b0_pos.0, b0_pos.1) && !ctx.same_merge_region(xp, yp, b0_pos.0, b0_pos.1);
     if b0_avail && count < max {
         let b0_motion = ctx.get_motion(b0_pos.0, b0_pos.1);
         if !b1_avail || !motion_eq(&cand[count - 1], &b0_motion) {
@@ -297,8 +297,8 @@ pub fn derive_merge_candidates(
     }
 
     // A0: left-bottom corner
-    let a0_avail = ctx.is_inter(a0_pos.0, a0_pos.1)
-        && !ctx.same_merge_region(xp, yp, a0_pos.0, a0_pos.1);
+    let a0_avail =
+        ctx.is_inter(a0_pos.0, a0_pos.1) && !ctx.same_merge_region(xp, yp, a0_pos.0, a0_pos.1);
     if a0_avail && count < max {
         let a0_motion = ctx.get_motion(a0_pos.0, a0_pos.1);
         let a1_idx = if a1_avail { Some(0) } else { None };
@@ -311,8 +311,8 @@ pub fn derive_merge_candidates(
 
     // B2: above-left corner (only if < 4 candidates so far)
     if count < 4 && count < max {
-        let b2_avail = ctx.is_inter(b2_pos.0, b2_pos.1)
-            && !ctx.same_merge_region(xp, yp, b2_pos.0, b2_pos.1);
+        let b2_avail =
+            ctx.is_inter(b2_pos.0, b2_pos.1) && !ctx.same_merge_region(xp, yp, b2_pos.0, b2_pos.1);
         if b2_avail {
             let b2_motion = ctx.get_motion(b2_pos.0, b2_pos.1);
             let dup = (a1_avail && motion_eq(&cand[0], &b2_motion))
@@ -385,13 +385,12 @@ pub fn derive_amvp_candidates(
     let x = list_idx as usize; // current list index
     let y = 1 - x; // opposite list index
 
-    let target_poc = if x < 2
-        && (ref_idx as usize) < ctx.ref_pic_lists.num_ref_idx_active[x] as usize
-    {
-        ctx.ref_pic_lists.poc[x][ref_idx as usize]
-    } else {
-        ctx.curr_poc
-    };
+    let target_poc =
+        if x < 2 && (ref_idx as usize) < ctx.ref_pic_lists.num_ref_idx_active[x] as usize {
+            ctx.ref_pic_lists.poc[x][ref_idx as usize]
+        } else {
+            ctx.curr_poc
+        };
 
     // ── 8.5.3.2.7: Spatial candidate derivation ──────────────────────
 
@@ -637,7 +636,6 @@ fn collocated_positions(
     (bottom_right, center)
 }
 
-
 /// Derive collocated motion vector for one reference list (H.265 8.5.3.2.9)
 ///
 /// Given a collocated block, select the appropriate MV and scale it for list X with refIdxLX.
@@ -699,13 +697,12 @@ fn derive_collocated_mv(
     let col_ref_poc = col.ref_poc[list_col][ref_idx_col as usize];
     let col_poc_diff = col.poc - col_ref_poc;
 
-    let target_ref_poc = if (ref_idx_lx as usize)
-        < ctx.ref_pic_lists.num_ref_idx_active[target_list] as usize
-    {
-        ctx.ref_pic_lists.poc[target_list][ref_idx_lx as usize]
-    } else {
-        return None;
-    };
+    let target_ref_poc =
+        if (ref_idx_lx as usize) < ctx.ref_pic_lists.num_ref_idx_active[target_list] as usize {
+            ctx.ref_pic_lists.poc[target_list][ref_idx_lx as usize]
+        } else {
+            return None;
+        };
     let curr_poc_diff = ctx.curr_poc - target_ref_poc;
 
     // Scale if POC distances differ
@@ -787,10 +784,7 @@ fn derive_temporal_candidate_amvp(
 
 /// Check if two PbMotion entries are identical (same pred flags, ref indices, MVs)
 fn motion_eq(a: &PbMotion, b: &PbMotion) -> bool {
-    a.pred_flag == b.pred_flag
-        && a.ref_idx == b.ref_idx
-        && a.mv[0] == b.mv[0]
-        && a.mv[1] == b.mv[1]
+    a.pred_flag == b.pred_flag && a.ref_idx == b.ref_idx && a.mv[0] == b.mv[0] && a.mv[1] == b.mv[1]
 }
 
 /// Check if this is the second PU of a vertical split (for A1 discard)
@@ -853,8 +847,8 @@ fn derive_combined_bipred_inplace(
             continue;
         }
         // Different POCs or different MVs
-        let same = cand[l0i].ref_idx[0] == cand[l1i].ref_idx[1]
-            && cand[l0i].mv[0] == cand[l1i].mv[1];
+        let same =
+            cand[l0i].ref_idx[0] == cand[l1i].ref_idx[1] && cand[l0i].mv[0] == cand[l1i].mv[1];
         if same {
             continue;
         }

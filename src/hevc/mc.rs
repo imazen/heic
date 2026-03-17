@@ -13,7 +13,7 @@ use super::picture::DecodedFrame;
 /// HEVC luma interpolation filter coefficients (Table 8-5)
 /// 4 fractional positions (0=integer, 1=quarter, 2=half, 3=three-quarter) with 8 taps
 const LUMA_FILTER: [[i16; 8]; 4] = [
-    [0, 0, 0, 64, 0, 0, 0, 0],       // integer
+    [0, 0, 0, 64, 0, 0, 0, 0],        // integer
     [-1, 4, -10, 58, 17, -5, 1, 0],   // quarter-pel
     [-1, 4, -11, 40, 40, -11, 4, -1], // half-pel
     [0, 1, -5, 17, 58, -10, 4, -1],   // three-quarter-pel
@@ -22,7 +22,7 @@ const LUMA_FILTER: [[i16; 8]; 4] = [
 /// HEVC chroma interpolation filter coefficients (Table 8-6)
 /// 8 fractional positions with 4 taps
 const CHROMA_FILTER: [[i16; 4]; 8] = [
-    [0, 64, 0, 0],   // integer
+    [0, 64, 0, 0],    // integer
     [-2, 58, 10, -2], // 1/8
     [-4, 54, 16, -2], // 2/8
     [-6, 46, 28, -4], // 3/8
@@ -52,7 +52,13 @@ pub struct McBlock {
 /// The MV is in quarter-pel units.
 /// If `bi_pred` is true, outputs at intermediate precision (shifted left by 6)
 /// for subsequent bi-prediction blending. Otherwise outputs final pixel values.
-pub fn mc_luma(ref_frame: &DecodedFrame, mv: MotionVector, blk: &McBlock, pred: &mut [i16], bi_pred: bool) {
+pub fn mc_luma(
+    ref_frame: &DecodedFrame,
+    mv: MotionVector,
+    blk: &McBlock,
+    pred: &mut [i16],
+    bi_pred: bool,
+) {
     let ref_plane = &ref_frame.y_plane;
     let stride = ref_frame.width as i32;
     let pic_w = ref_frame.width as i32;
@@ -134,7 +140,8 @@ pub fn mc_luma(ref_frame: &DecodedFrame, mv: MotionVector, blk: &McBlock, pred: 
                 let mut sum = 0i32;
                 for k in 0..8i32 {
                     let sx = (int_x + i + k - 3).clamp(0, pic_w - 1);
-                    sum += ref_plane[(sy * stride + sx) as usize] as i32 * coeff_h[k as usize] as i32;
+                    sum +=
+                        ref_plane[(sy * stride + sx) as usize] as i32 * coeff_h[k as usize] as i32;
                 }
                 tmp[(j * tmp_w + i) as usize] = sum;
             }
@@ -150,11 +157,10 @@ pub fn mc_luma(ref_frame: &DecodedFrame, mv: MotionVector, blk: &McBlock, pred: 
                 for i in 0..w as i32 {
                     let mut sum = 0i64;
                     for k in 0..8i32 {
-                        sum += tmp[((j + k) * tmp_w + i) as usize] as i64
-                            * coeff_v[k as usize] as i64;
+                        sum +=
+                            tmp[((j + k) * tmp_w + i) as usize] as i64 * coeff_v[k as usize] as i64;
                     }
-                    pred[(j as u32 * w + i as u32) as usize] =
-                        (sum >> shift2) as i16;
+                    pred[(j as u32 * w + i as u32) as usize] = (sum >> shift2) as i16;
                 }
             }
         } else {
@@ -165,8 +171,8 @@ pub fn mc_luma(ref_frame: &DecodedFrame, mv: MotionVector, blk: &McBlock, pred: 
                 for i in 0..w as i32 {
                     let mut sum = 0i64;
                     for k in 0..8i32 {
-                        sum += tmp[((j + k) * tmp_w + i) as usize] as i64
-                            * coeff_v[k as usize] as i64;
+                        sum +=
+                            tmp[((j + k) * tmp_w + i) as usize] as i64 * coeff_v[k as usize] as i64;
                     }
                     pred[(j as u32 * w + i as u32) as usize] =
                         (((sum + total_offset) >> total_shift) as i32).clamp(0, max_val) as i16;
@@ -194,7 +200,13 @@ pub struct ChromaRef<'a> {
 ///
 /// `mv` is the *luma* MV in quarter-pel units. Chroma MV is derived internally.
 /// If `bi_pred` is true, outputs at intermediate precision for bi-prediction blending.
-pub fn mc_chroma(cref: &ChromaRef<'_>, mv: MotionVector, blk: &McBlock, pred: &mut [i16], bi_pred: bool) {
+pub fn mc_chroma(
+    cref: &ChromaRef<'_>,
+    mv: MotionVector,
+    blk: &McBlock,
+    pred: &mut [i16],
+    bi_pred: bool,
+) {
     let cmv_x = if cref.sub_x > 1 {
         mv.x as i32
     } else {
@@ -299,8 +311,8 @@ pub fn mc_chroma(cref: &ChromaRef<'_>, mv: MotionVector, blk: &McBlock, pred: &m
                 for i in 0..w as i32 {
                     let mut sum = 0i64;
                     for k in 0..4i32 {
-                        sum += tmp[((j + k) * tmp_w + i) as usize] as i64
-                            * coeff_v[k as usize] as i64;
+                        sum +=
+                            tmp[((j + k) * tmp_w + i) as usize] as i64 * coeff_v[k as usize] as i64;
                     }
                     pred[(j as u32 * w + i as u32) as usize] = (sum >> shift2) as i16;
                 }
@@ -312,8 +324,8 @@ pub fn mc_chroma(cref: &ChromaRef<'_>, mv: MotionVector, blk: &McBlock, pred: &m
                 for i in 0..w as i32 {
                     let mut sum = 0i64;
                     for k in 0..4i32 {
-                        sum += tmp[((j + k) * tmp_w + i) as usize] as i64
-                            * coeff_v[k as usize] as i64;
+                        sum +=
+                            tmp[((j + k) * tmp_w + i) as usize] as i64 * coeff_v[k as usize] as i64;
                     }
                     pred[(j as u32 * w + i as u32) as usize] =
                         (((sum + total_offset) >> total_shift) as i32).clamp(0, max_val) as i16;
@@ -324,12 +336,7 @@ pub fn mc_chroma(cref: &ChromaRef<'_>, mv: MotionVector, blk: &McBlock, pred: &m
 }
 
 /// Blend uni-prediction samples into a frame plane
-pub fn blend_uni(
-    pred: &[i16],
-    plane: &mut [u16],
-    plane_stride: usize,
-    blk: &McBlock,
-) {
+pub fn blend_uni(pred: &[i16], plane: &mut [u16], plane_stride: usize, blk: &McBlock) {
     for j in 0..blk.h {
         for i in 0..blk.w {
             let src_idx = (j * blk.w + i) as usize;
@@ -370,12 +377,7 @@ pub fn blend_bi(
 }
 
 /// Add residual to prediction samples in-place
-pub fn add_residual_inter(
-    plane: &mut [u16],
-    plane_stride: usize,
-    residual: &[i16],
-    blk: &McBlock,
-) {
+pub fn add_residual_inter(plane: &mut [u16], plane_stride: usize, residual: &[i16], blk: &McBlock) {
     let max_val = (1i32 << blk.bit_depth) - 1;
     for j in 0..blk.h {
         for i in 0..blk.w {
@@ -433,13 +435,23 @@ mod tests {
     #[test]
     fn test_mc_luma_vpel_constant() {
         let mut frame = DecodedFrame::with_params(16, 16, 8, 1);
-        for p in &mut frame.y_plane { *p = 100; }
+        for p in &mut frame.y_plane {
+            *p = 100;
+        }
         let mut pred = vec![0i16; 4 * 4];
-        let blk = McBlock { xp: 4, yp: 4, w: 4, h: 4, bit_depth: 8 };
+        let blk = McBlock {
+            xp: 4,
+            yp: 4,
+            w: 4,
+            h: 4,
+            bit_depth: 8,
+        };
         // MV = (0, 1) quarter-pel → frac_y=1, int_y=4
         mc_luma(&frame, MotionVector { x: 0, y: 1 }, &blk, &mut pred, false);
         // All pixels should be 100 (constant input)
-        for &v in &pred { assert_eq!(v, 100, "constant ref should give exact value"); }
+        for &v in &pred {
+            assert_eq!(v, 100, "constant ref should give exact value");
+        }
     }
 
     /// Test quarter-pel H filter with a known gradient.
@@ -453,7 +465,13 @@ mod tests {
             }
         }
         let mut pred = vec![0i16; 1];
-        let blk = McBlock { xp: 4, yp: 4, w: 1, h: 1, bit_depth: 8 };
+        let blk = McBlock {
+            xp: 4,
+            yp: 4,
+            w: 1,
+            h: 1,
+            bit_depth: 8,
+        };
         // MV = (0, 0) → should give pixel at (4,4) = 64
         mc_luma(&frame, MotionVector::ZERO, &blk, &mut pred, false);
         assert_eq!(pred[0], 64);
@@ -462,7 +480,9 @@ mod tests {
         // Half-pel of gradient: should be close to average of 64 and 80 = 72
         // Exact: filter[-1,4,-11,40,40,-11,4,-1] applied to [16,32,48,64,80,96,112,128]
         #[allow(clippy::identity_op, clippy::neg_multiply)]
-        let expected = (-1*16 + 4*32 - 11*48 + 40*64 + 40*80 - 11*96 + 4*112 - 1*128 + 32) >> 6;
+        let expected =
+            (-1 * 16 + 4 * 32 - 11 * 48 + 40 * 64 + 40 * 80 - 11 * 96 + 4 * 112 - 1 * 128 + 32)
+                >> 6;
         assert_eq!(pred[0], expected as i16, "half-pel horizontal");
     }
 
@@ -470,10 +490,18 @@ mod tests {
     #[test]
     fn test_mc_luma_bipred_blend() {
         let mut frame = DecodedFrame::with_params(16, 16, 8, 1);
-        for p in &mut frame.y_plane { *p = 100; }
+        for p in &mut frame.y_plane {
+            *p = 100;
+        }
         let mut pred0 = vec![0i16; 1];
         let mut pred1 = vec![0i16; 1];
-        let blk = McBlock { xp: 4, yp: 4, w: 1, h: 1, bit_depth: 8 };
+        let blk = McBlock {
+            xp: 4,
+            yp: 4,
+            w: 1,
+            h: 1,
+            bit_depth: 8,
+        };
         // Integer position bi-pred: both predict same pixel
         mc_luma(&frame, MotionVector::ZERO, &blk, &mut pred0, true);
         mc_luma(&frame, MotionVector::ZERO, &blk, &mut pred1, true);

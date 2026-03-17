@@ -104,8 +104,7 @@ fn ensure_reference_yuv(name: &str, bitstream: &Path) -> Option<PathBuf> {
 
     // Also check if the vector shipped with a .yuv
     for entry in walkdir(&top_dir) {
-        if entry.extension().is_some_and(|e| e == "yuv")
-            && !entry.to_string_lossy().contains("md5")
+        if entry.extension().is_some_and(|e| e == "yuv") && !entry.to_string_lossy().contains("md5")
         {
             return Some(entry);
         }
@@ -328,7 +327,8 @@ fn run_conformance_test(name: &str) {
     let mut total_diff_pixels = 0usize;
 
     for i in 0..compare_count {
-        let (psnr, num_diff, max_diff) = compare_y_planes(&our_frames[i], &ref_frames[i], width, height);
+        let (psnr, num_diff, max_diff) =
+            compare_y_planes(&our_frames[i], &ref_frames[i], width, height);
         worst_psnr = worst_psnr.min(psnr);
         total_diff_pixels += num_diff;
         if num_diff > 0 {
@@ -439,60 +439,201 @@ fn girlshy() {
 }
 
 // Inter prediction vectors
-#[test] fn amvp_a()   { run_conformance_test("AMVP_A_MTK_4"); }
-#[test] fn amvp_b()   { run_conformance_test("AMVP_B_MTK_4"); }
-#[test] fn amvp_c()   { run_conformance_test("AMVP_C_Samsung_7"); }
-#[test] fn merge_a()  { run_conformance_test("MERGE_A_TI_3"); }
-#[test] fn merge_b()  { run_conformance_test("MERGE_B_TI_3"); }
-#[test] fn merge_c()  { run_conformance_test("MERGE_C_TI_3"); }
-#[test] fn merge_d()  { run_conformance_test("MERGE_D_TI_3"); }
-#[test] fn merge_e()  { run_conformance_test("MERGE_E_TI_3"); }
-#[test] fn merge_f()  { run_conformance_test("MERGE_F_MTK_4"); }
-#[test] fn tmvp_a()   { run_conformance_test("TMVP_A_MS_3"); }
-#[test] fn amp_a()    { run_conformance_test("AMP_A_Samsung_7"); }
-#[test] fn amp_b()    { run_conformance_test("AMP_B_Samsung_7"); }
-#[test] fn amp_d()    { run_conformance_test("AMP_D_Hisilicon_3"); }
-#[test] fn pmerge_a() { run_conformance_test("PMERGE_A_TI_3"); }
-#[test] fn pmerge_b() { run_conformance_test("PMERGE_B_TI_3"); }
-#[test] fn pmerge_c() { run_conformance_test("PMERGE_C_TI_3"); }
-#[test] fn mvclip_a() { run_conformance_test("MVCLIP_A_qualcomm_3"); }
-#[test] fn mvdl1zero() { run_conformance_test("MVDL1ZERO_A_docomo_4"); }
+#[test]
+fn amvp_a() {
+    run_conformance_test("AMVP_A_MTK_4");
+}
+#[test]
+fn amvp_b() {
+    run_conformance_test("AMVP_B_MTK_4");
+}
+#[test]
+fn amvp_c() {
+    run_conformance_test("AMVP_C_Samsung_7");
+}
+#[test]
+fn merge_a() {
+    run_conformance_test("MERGE_A_TI_3");
+}
+#[test]
+fn merge_b() {
+    run_conformance_test("MERGE_B_TI_3");
+}
+#[test]
+fn merge_c() {
+    run_conformance_test("MERGE_C_TI_3");
+}
+#[test]
+fn merge_d() {
+    run_conformance_test("MERGE_D_TI_3");
+}
+#[test]
+fn merge_e() {
+    run_conformance_test("MERGE_E_TI_3");
+}
+#[test]
+fn merge_f() {
+    run_conformance_test("MERGE_F_MTK_4");
+}
+#[test]
+fn tmvp_a() {
+    run_conformance_test("TMVP_A_MS_3");
+}
+#[test]
+fn amp_a() {
+    run_conformance_test("AMP_A_Samsung_7");
+}
+#[test]
+fn amp_b() {
+    run_conformance_test("AMP_B_Samsung_7");
+}
+#[test]
+fn amp_d() {
+    run_conformance_test("AMP_D_Hisilicon_3");
+}
+#[test]
+fn pmerge_a() {
+    run_conformance_test("PMERGE_A_TI_3");
+}
+#[test]
+fn pmerge_b() {
+    run_conformance_test("PMERGE_B_TI_3");
+}
+#[test]
+fn pmerge_c() {
+    run_conformance_test("PMERGE_C_TI_3");
+}
+#[test]
+fn mvclip_a() {
+    run_conformance_test("MVCLIP_A_qualcomm_3");
+}
+#[test]
+fn mvdl1zero() {
+    run_conformance_test("MVDL1ZERO_A_docomo_4");
+}
 
 // Reference picture sets
-#[test] fn rps_a()    { run_conformance_test("RPS_A_docomo_5"); }
-#[test] fn rps_b()    { run_conformance_test("RPS_B_qualcomm_5"); }
-#[test] fn rps_c()    { run_conformance_test("RPS_C_ericsson_5"); }
-#[test] fn rap_a()    { run_conformance_test("RAP_A_docomo_6"); }
-#[test] fn rap_b()    { run_conformance_test("RAP_B_Bossen_2"); }
+#[test]
+fn rps_a() {
+    run_conformance_test("RPS_A_docomo_5");
+}
+#[test]
+fn rps_b() {
+    run_conformance_test("RPS_B_qualcomm_5");
+}
+#[test]
+fn rps_c() {
+    run_conformance_test("RPS_C_ericsson_5");
+}
+#[test]
+fn rap_a() {
+    run_conformance_test("RAP_A_docomo_6");
+}
+#[test]
+fn rap_b() {
+    run_conformance_test("RAP_B_Bossen_2");
+}
 
 // Deblocking & SAO
-#[test] fn dblk_a()   { run_conformance_test("DBLK_A_SONY_3"); }
-#[test] fn dblk_b()   { run_conformance_test("DBLK_B_SONY_3"); }
-#[test] fn dblk_d()   { run_conformance_test("DBLK_D_VIXS_2"); }
-#[test] fn sao_a()    { run_conformance_test("SAO_A_MediaTek_4"); }
-#[test] fn sao_b()    { run_conformance_test("SAO_B_MediaTek_5"); }
+#[test]
+fn dblk_a() {
+    run_conformance_test("DBLK_A_SONY_3");
+}
+#[test]
+fn dblk_b() {
+    run_conformance_test("DBLK_B_SONY_3");
+}
+#[test]
+fn dblk_d() {
+    run_conformance_test("DBLK_D_VIXS_2");
+}
+#[test]
+fn sao_a() {
+    run_conformance_test("SAO_A_MediaTek_4");
+}
+#[test]
+fn sao_b() {
+    run_conformance_test("SAO_B_MediaTek_5");
+}
 
 // Weighted prediction
-#[test] fn wp_a()     { run_conformance_test("WP_A_Toshiba_3"); }
-#[test] fn wp_b()     { run_conformance_test("WP_B_Toshiba_3"); }
+#[test]
+fn wp_a() {
+    run_conformance_test("WP_A_Toshiba_3");
+}
+#[test]
+fn wp_b() {
+    run_conformance_test("WP_B_Toshiba_3");
+}
 
 // Intra & transform (should pass — existing I-slice support)
-#[test] fn ipred_a()  { run_conformance_test("IPRED_A_Qualcomm_3"); }
-#[test] fn ipred_b()  { run_conformance_test("IPRED_B_Nokia_3"); }
-#[test] fn rqt_a()    { run_conformance_test("RQT_A_HHI_4"); }
-#[test] fn rqt_b()    { run_conformance_test("RQT_B_HHI_4"); }
-#[test] fn sdh_a()    { run_conformance_test("SDH_A_Orange_4"); }
-#[test] fn slist_a()  { run_conformance_test("SLIST_A_Sony_5"); }
+#[test]
+fn ipred_a() {
+    run_conformance_test("IPRED_A_Qualcomm_3");
+}
+#[test]
+fn ipred_b() {
+    run_conformance_test("IPRED_B_Nokia_3");
+}
+#[test]
+fn rqt_a() {
+    run_conformance_test("RQT_A_HHI_4");
+}
+#[test]
+fn rqt_b() {
+    run_conformance_test("RQT_B_HHI_4");
+}
+#[test]
+fn sdh_a() {
+    run_conformance_test("SDH_A_Orange_4");
+}
+#[test]
+fn slist_a() {
+    run_conformance_test("SLIST_A_Sony_5");
+}
 
 // CABAC init, structure, misc
-#[test] fn cainit_a() { run_conformance_test("CAINIT_A_SHARP_4"); }
-#[test] fn cainit_b() { run_conformance_test("CAINIT_B_SHARP_4"); }
-#[test] fn struct_a() { run_conformance_test("STRUCT_A_Samsung_7"); }
-#[test] fn struct_b() { run_conformance_test("STRUCT_B_Samsung_7"); }
-#[test] fn confwin_a() { run_conformance_test("CONFWIN_A_Sony_1"); }
-#[test] fn deltaqp_a() { run_conformance_test("DELTAQP_A_BRCM_4"); }
-#[test] fn slices_a() { run_conformance_test("SLICES_A_Rovi_3"); }
-#[test] fn tiles_a()  { run_conformance_test("TILES_A_Cisco_2"); }
-#[test] fn tiles_b()  { run_conformance_test("TILES_B_Cisco_1"); }
-#[test] fn poc_a()    { run_conformance_test("POC_A_Bossen_3"); }
-#[test] fn wpp_a()    { run_conformance_test("WPP_A_ericsson_MAIN_2"); }
+#[test]
+fn cainit_a() {
+    run_conformance_test("CAINIT_A_SHARP_4");
+}
+#[test]
+fn cainit_b() {
+    run_conformance_test("CAINIT_B_SHARP_4");
+}
+#[test]
+fn struct_a() {
+    run_conformance_test("STRUCT_A_Samsung_7");
+}
+#[test]
+fn struct_b() {
+    run_conformance_test("STRUCT_B_Samsung_7");
+}
+#[test]
+fn confwin_a() {
+    run_conformance_test("CONFWIN_A_Sony_1");
+}
+#[test]
+fn deltaqp_a() {
+    run_conformance_test("DELTAQP_A_BRCM_4");
+}
+#[test]
+fn slices_a() {
+    run_conformance_test("SLICES_A_Rovi_3");
+}
+#[test]
+fn tiles_a() {
+    run_conformance_test("TILES_A_Cisco_2");
+}
+#[test]
+fn tiles_b() {
+    run_conformance_test("TILES_B_Cisco_1");
+}
+#[test]
+fn poc_a() {
+    run_conformance_test("POC_A_Bossen_3");
+}
+#[test]
+fn wpp_a() {
+    run_conformance_test("WPP_A_ericsson_MAIN_2");
+}

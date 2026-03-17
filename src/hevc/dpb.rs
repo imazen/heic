@@ -9,7 +9,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::inter::{PbMotion, MAX_NUM_REF_PICS};
+use super::inter::{MAX_NUM_REF_PICS, PbMotion};
 use super::picture::DecodedFrame;
 use super::slice::PredMode;
 
