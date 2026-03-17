@@ -100,6 +100,7 @@ extern crate alloc;
 
 whereat::define_at_crate_info!();
 
+mod auxiliary;
 mod decode;
 mod error;
 #[doc(hidden)]
@@ -115,6 +116,10 @@ pub use codec::{
     HeicDecodeJob, HeicDecoder as HeicZenDecoder, HeicDecoderConfig, HeicStreamDecoder,
 };
 
+pub use auxiliary::{
+    AuxiliaryImageDescriptor, AuxiliaryImageType, DepthMap, DepthRepresentationInfo,
+    DepthRepresentationType,
+};
 pub use error::{HeicError, HevcError, ProbeError, Result};
 pub use hevc::{DecodedFrame, VideoDecoder};
 
@@ -309,6 +314,10 @@ pub struct ImageInfo {
     pub video_full_range: bool,
     /// Whether the file contains an ICC profile (in colr box)
     pub has_icc_profile: bool,
+    /// Whether the file contains a depth auxiliary image
+    pub has_depth: bool,
+    /// Whether the file contains an HDR gain map auxiliary image
+    pub has_gain_map: bool,
 }
 
 /// Adjust dimensions for transforms that the decoder will apply.
@@ -394,6 +403,22 @@ impl ImageInfo {
         });
         let has_thumbnail = !container.find_thumbnails(primary_item.id).is_empty();
 
+        // Check for depth auxiliary image
+        let has_depth = !container
+            .find_auxiliary_items(primary_item.id, "urn:mpeg:hevc:2015:auxid:2")
+            .is_empty()
+            || !container
+                .find_auxiliary_items(
+                    primary_item.id,
+                    "urn:mpeg:mpegB:cicp:systems:auxiliary:depth",
+                )
+                .is_empty();
+
+        // Check for HDR gain map
+        let has_gain_map = !container
+            .find_auxiliary_items(primary_item.id, "urn:com:apple:photo:2020:aux:hdrgainmap")
+            .is_empty();
+
         // Extract CICP from colr nclx box on the primary item
         let (color_primaries, transfer_characteristics, matrix_coefficients, video_full_range) =
             match &primary_item.color_info {
@@ -440,6 +465,8 @@ impl ImageInfo {
                 matrix_coefficients,
                 video_full_range,
                 has_icc_profile,
+                has_depth,
+                has_gain_map,
             });
         }
 
@@ -477,6 +504,8 @@ impl ImageInfo {
                 matrix_coefficients,
                 video_full_range,
                 has_icc_profile,
+                has_depth,
+                has_gain_map,
             });
         }
 
@@ -504,6 +533,8 @@ impl ImageInfo {
             matrix_coefficients,
             video_full_range,
             has_icc_profile,
+            has_depth,
+            has_gain_map,
         })
     }
 
@@ -731,6 +762,83 @@ impl DecoderConfig {
         layout: PixelLayout,
     ) -> Result<Option<DecodeOutput>> {
         decode::decode_thumbnail(data, layout)
+    }
+
+    /// List all auxiliary images linked to the primary image.
+    ///
+    /// Returns descriptors for each auxiliary image, including its type,
+    /// item ID, and dimensions (if known).
+    ///
+    /// Common auxiliary types include alpha planes, depth maps, portrait
+    /// effect mattes, and HDR gain maps.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HEIF container is malformed.
+    pub fn auxiliary_images(&self, data: &[u8]) -> Result<Vec<AuxiliaryImageDescriptor>> {
+        decode::list_auxiliary_images(data)
+    }
+
+    /// List the types of all auxiliary images present.
+    ///
+    /// Convenience wrapper around [`auxiliary_images`](Self::auxiliary_images)
+    /// that returns just the type enum values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HEIF container is malformed.
+    pub fn auxiliary_types(&self, data: &[u8]) -> Result<Vec<AuxiliaryImageType>> {
+        Ok(decode::list_auxiliary_images(data)?
+            .into_iter()
+            .map(|d| d.aux_type)
+            .collect())
+    }
+
+    /// Check if the primary image has a depth auxiliary image.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HEIF container is malformed.
+    pub fn has_depth(&self, data: &[u8]) -> Result<bool> {
+        decode::has_depth(data)
+    }
+
+    /// Decode the depth map auxiliary image.
+    ///
+    /// Returns the depth pixels as grayscale u16 samples (luma plane)
+    /// along with width, height, bit depth, and depth representation info.
+    ///
+    /// iPhone depth maps are typically monochrome HEVC at lower resolution
+    /// than the primary image. The depth representation info describes
+    /// how to interpret the pixel values (inverse Z, disparity, etc.).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file has no depth map, the depth item
+    /// cannot be located, or HEVC decoding fails.
+    pub fn decode_depth(&self, data: &[u8]) -> Result<DepthMap> {
+        decode::decode_depth(data)
+    }
+
+    /// Decode a specific auxiliary image by item ID.
+    ///
+    /// Use [`auxiliary_images`](Self::auxiliary_images) to discover item IDs,
+    /// then decode individual auxiliary images with this method.
+    ///
+    /// The output follows the same pixel layout as the primary image decoder.
+    /// For monochrome auxiliary images (depth, mattes), the R/G/B channels
+    /// will all contain the luma value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the item ID is invalid or decoding fails.
+    pub fn decode_auxiliary(
+        &self,
+        data: &[u8],
+        item_id: u32,
+        layout: PixelLayout,
+    ) -> Result<DecodeOutput> {
+        decode::decode_auxiliary_item(data, item_id, layout)
     }
 }
 

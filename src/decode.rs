@@ -1455,3 +1455,162 @@ pub(crate) fn extract_xmp<'a>(data: &'a [u8]) -> Result<Option<Cow<'a, [u8]>>> {
 
     Ok(None)
 }
+
+/// List all auxiliary images linked to the primary item.
+pub(crate) fn list_auxiliary_images(data: &[u8]) -> Result<Vec<crate::AuxiliaryImageDescriptor>> {
+    use crate::auxiliary::AuxiliaryImageType;
+
+    let container = heif::parse(data, &Unstoppable)?;
+    let primary_item = container
+        .primary_item()
+        .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
+
+    let aux_items = container.find_all_auxiliary_items(primary_item.id);
+
+    let mut result = Vec::new();
+    for (item_id, urn) in aux_items {
+        let aux_type = AuxiliaryImageType::from_urn(&urn);
+        let item = container.get_item(item_id);
+        let dimensions = item.and_then(|it| it.dimensions);
+        result.push(crate::AuxiliaryImageDescriptor {
+            aux_type,
+            item_id,
+            dimensions,
+        });
+    }
+
+    Ok(result)
+}
+
+/// Check if the primary image has a depth auxiliary image.
+pub(crate) fn has_depth(data: &[u8]) -> Result<bool> {
+    let container = heif::parse(data, &Unstoppable)?;
+    let primary_item = container
+        .primary_item()
+        .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
+
+    let depth_ids = container.find_auxiliary_items(primary_item.id, "urn:mpeg:hevc:2015:auxid:2");
+    if !depth_ids.is_empty() {
+        return Ok(true);
+    }
+    let depth_ids = container.find_auxiliary_items(
+        primary_item.id,
+        "urn:mpeg:mpegB:cicp:systems:auxiliary:depth",
+    );
+    Ok(!depth_ids.is_empty())
+}
+
+/// Decode the depth map auxiliary image.
+pub(crate) fn decode_depth(data: &[u8]) -> Result<crate::DepthMap> {
+    use crate::auxiliary::{AuxiliaryImageType, parse_depth_representation_info};
+
+    let container = heif::parse(data, &Unstoppable)?;
+    let primary_item = container
+        .primary_item()
+        .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
+
+    // Find depth auxiliary item (try MPEG URN first, then CICP URN)
+    let depth_id = container
+        .find_auxiliary_items(primary_item.id, "urn:mpeg:hevc:2015:auxid:2")
+        .first()
+        .copied()
+        .or_else(|| {
+            container
+                .find_auxiliary_items(
+                    primary_item.id,
+                    "urn:mpeg:mpegB:cicp:systems:auxiliary:depth",
+                )
+                .first()
+                .copied()
+        })
+        .ok_or_else(|| at!(HeicError::InvalidData("no depth auxiliary image found")))?;
+
+    let depth_item = container
+        .get_item(depth_id)
+        .ok_or_else(|| at!(HeicError::InvalidData("depth item not found")))?;
+
+    // Parse depth representation info from auxC subtype data
+    let depth_info = depth_item
+        .auxiliary_type_property
+        .as_ref()
+        .map(|atp| {
+            let _ = AuxiliaryImageType::from_urn(&atp.aux_type); // validates it's depth
+            parse_depth_representation_info(&atp.subtype_data)
+        })
+        .unwrap_or_default();
+
+    // Decode the depth image using the same item decode pipeline
+    let frame = decode_item(
+        &container,
+        &depth_item,
+        0,
+        &Limits::default(),
+        &Unstoppable,
+        None,
+    )?;
+
+    let width = frame.cropped_width();
+    let height = frame.cropped_height();
+    let bit_depth = frame.bit_depth;
+
+    // Extract the Y (luma) plane as the grayscale depth data
+    let total_pixels = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| at!(HeicError::LimitExceeded("depth map dimensions overflow")))?;
+
+    let mut depth_data = Vec::new();
+    depth_data
+        .try_reserve(total_pixels)
+        .map_err(|_| at!(HeicError::OutOfMemory))?;
+
+    let y_start = frame.crop_top;
+    let x_start = frame.crop_left;
+    for y in 0..height {
+        for x in 0..width {
+            let src_idx = ((y_start + y) * frame.width + (x_start + x)) as usize;
+            depth_data.push(frame.y_plane[src_idx]);
+        }
+    }
+
+    Ok(crate::DepthMap {
+        data: depth_data,
+        width,
+        height,
+        bit_depth,
+        depth_info,
+    })
+}
+
+/// Decode a specific auxiliary image by item ID to grayscale u16 pixels.
+///
+/// This is a general-purpose decoder for any auxiliary image item,
+/// returning the luma plane as u16 samples.
+pub(crate) fn decode_auxiliary_item(
+    data: &[u8],
+    item_id: u32,
+    layout: PixelLayout,
+) -> Result<DecodeOutput> {
+    let container = heif::parse(data, &Unstoppable)?;
+    let item = container
+        .get_item(item_id)
+        .ok_or_else(|| at!(HeicError::InvalidData("auxiliary item not found")))?;
+
+    let frame = decode_item(&container, &item, 0, &Limits::default(), &Unstoppable, None)?;
+
+    let width = frame.cropped_width();
+    let height = frame.cropped_height();
+
+    let pixels = match layout {
+        PixelLayout::Rgb8 => frame.to_rgb(),
+        PixelLayout::Rgba8 => frame.to_rgba(),
+        PixelLayout::Bgr8 => frame.to_bgr(),
+        PixelLayout::Bgra8 => frame.to_bgra(),
+    };
+
+    Ok(DecodeOutput {
+        data: pixels,
+        width,
+        height,
+        layout,
+    })
+}

@@ -336,10 +336,23 @@ pub enum ItemProperty {
     Rotation(ImageRotation),
     /// Image mirror (imir)
     Mirror(ImageMirror),
-    /// Auxiliary type (auxC)
-    AuxiliaryType(String),
+    /// Auxiliary type (auxC) — URN string + optional subtype data
+    AuxiliaryType(AuxiliaryTypeProperty),
     /// Unknown property
     Unknown,
+}
+
+/// Parsed `auxC` (auxiliary type) property box.
+///
+/// Contains the null-terminated URN string that identifies the auxiliary type
+/// and any additional subtype data bytes that follow.
+#[derive(Debug, Clone)]
+pub struct AuxiliaryTypeProperty {
+    /// Auxiliary type URN (e.g., `urn:mpeg:hevc:2015:auxid:2` for depth)
+    pub aux_type: String,
+    /// Subtype data bytes following the null-terminated URN.
+    /// For depth images, this contains the depth representation info.
+    pub subtype_data: Vec<u8>,
 }
 
 /// Item property association

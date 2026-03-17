@@ -195,7 +195,13 @@ fn main() {
                 if let Some(aux_item) = container.get_item(aid) {
                     eprintln!(
                         "  Item #{}: type={:?} dims={:?} aux_type={:?}",
-                        aid, aux_item.item_type, aux_item.dimensions, aux_item.auxiliary_type
+                        aid,
+                        aux_item.item_type,
+                        aux_item.dimensions,
+                        aux_item
+                            .auxiliary_type_property
+                            .as_ref()
+                            .map(|p| &p.aux_type)
                     );
                 }
             }
@@ -210,7 +216,13 @@ fn main() {
                 if let Some(gm_item) = container.get_item(gid) {
                     eprintln!(
                         "  Item #{}: type={:?} dims={:?} aux_type={:?}",
-                        gid, gm_item.item_type, gm_item.dimensions, gm_item.auxiliary_type
+                        gid,
+                        gm_item.item_type,
+                        gm_item.dimensions,
+                        gm_item
+                            .auxiliary_type_property
+                            .as_ref()
+                            .map(|p| &p.aux_type)
                     );
                 }
             }

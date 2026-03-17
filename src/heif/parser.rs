@@ -118,8 +118,9 @@ pub struct Item {
     pub transforms: Vec<Transform>,
     /// Color info from colr box (nclx or ICC)
     pub color_info: Option<ColorInfo>,
-    /// Auxiliary type URI (from auxC property, e.g. "urn:mpeg:hevc:2015:auxid:1" for alpha)
-    pub auxiliary_type: Option<String>,
+    /// Auxiliary type property (from auxC box), containing the URN string
+    /// and optional subtype data (e.g., depth representation info).
+    pub auxiliary_type_property: Option<super::boxes::AuxiliaryTypeProperty>,
 }
 
 impl<'a> HeifContainer<'a> {
@@ -145,7 +146,7 @@ impl<'a> HeifContainer<'a> {
         let mut mirror = None;
         let mut transforms = Vec::new();
         let mut color_info = None;
-        let mut auxiliary_type = None;
+        let mut auxiliary_type_property = None;
 
         if let Some(assoc) = assoc {
             for &(prop_idx, _essential) in &assoc.properties {
@@ -176,8 +177,8 @@ impl<'a> HeifContainer<'a> {
                         ItemProperty::ColorInfo(ci) => {
                             color_info = Some(ci.clone());
                         }
-                        ItemProperty::AuxiliaryType(s) => {
-                            auxiliary_type = Some(s.clone());
+                        ItemProperty::AuxiliaryType(atp) => {
+                            auxiliary_type_property = Some(atp.clone());
                         }
                         _ => {}
                     }
@@ -196,7 +197,7 @@ impl<'a> HeifContainer<'a> {
             mirror,
             transforms,
             color_info,
-            auxiliary_type,
+            auxiliary_type_property,
         })
     }
 
@@ -293,8 +294,8 @@ impl<'a> HeifContainer<'a> {
             .filter(|r| r.reference_type == FourCC::AUXL && r.to_item_ids.contains(&target_item_id))
             .filter_map(|r| {
                 let item = self.get_item(r.from_item_id)?;
-                if let Some(ref aux_type) = item.auxiliary_type
-                    && aux_type.starts_with(aux_type_prefix)
+                if let Some(ref atp) = item.auxiliary_type_property
+                    && atp.aux_type.starts_with(aux_type_prefix)
                 {
                     return Some(r.from_item_id);
                 }
@@ -309,6 +310,22 @@ impl<'a> HeifContainer<'a> {
             .iter()
             .filter(|r| r.from_item_id == from_item_id && r.reference_type == ref_type)
             .flat_map(|r| r.to_item_ids.iter().copied())
+            .collect()
+    }
+
+    /// Find all auxiliary items that reference a given target item.
+    ///
+    /// Returns `(item_id, auxiliary_type_urn)` pairs for all items linked
+    /// via `auxl` references to `target_item_id`.
+    pub fn find_all_auxiliary_items(&self, target_item_id: u32) -> Vec<(u32, String)> {
+        self.item_references
+            .iter()
+            .filter(|r| r.reference_type == FourCC::AUXL && r.to_item_ids.contains(&target_item_id))
+            .filter_map(|r| {
+                let item = self.get_item(r.from_item_id)?;
+                let urn = item.auxiliary_type_property.as_ref()?.aux_type.clone();
+                Some((r.from_item_id, urn))
+            })
             .collect()
     }
 
@@ -880,9 +897,10 @@ fn parse_imir(imir: &Box<'_>) -> Result<ImageMirror> {
     })
 }
 
-fn parse_auxc(auxc: &Box<'_>) -> Result<String> {
+fn parse_auxc(auxc: &Box<'_>) -> Result<super::boxes::AuxiliaryTypeProperty> {
     let content = auxc.content;
     // auxC is a full box: version/flags (4 bytes) + null-terminated UTF-8 aux_type string
+    // + optional subtype data bytes after the null terminator
     if content.len() < 5 {
         return Err(at!(HeicError::InvalidContainer("auxC too short")));
     }
@@ -895,7 +913,18 @@ fn parse_auxc(auxc: &Box<'_>) -> Result<String> {
         return Err(at!(HeicError::InvalidContainer("auxC string too long")));
     }
     let aux_type = str::from_utf8(&data[..end]).unwrap_or("").to_string();
-    Ok(aux_type)
+
+    // Subtype data is everything after the null terminator
+    let subtype_data = if end < data.len() {
+        data[end + 1..].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    Ok(super::boxes::AuxiliaryTypeProperty {
+        aux_type,
+        subtype_data,
+    })
 }
 
 fn parse_ispe(ispe: &Box<'_>) -> Result<ImageSpatialExtents> {

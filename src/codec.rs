@@ -634,6 +634,8 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
                 matrix_coefficients: 2,
                 video_full_range: false,
                 has_icc_profile: false,
+                has_depth: false,
+                has_gain_map: false,
             }),
             container.as_ref(),
             width,

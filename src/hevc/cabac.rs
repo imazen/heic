@@ -574,13 +574,13 @@ pub static INIT_VALUES_P: [u8; context::NUM_CONTEXTS] = [
     154, 139, 154, 154, // PREV_INTRA_LUMA_PRED_FLAG (1)
     154, // INTRA_CHROMA_PRED_MODE (1)
     152, // INTER_PRED_IDC (5)
-    95, 79, 63, 31, 31, // MERGE_FLAG (1)
+    95, 79, 63, 31, 31,  // MERGE_FLAG (1)
     110, // MERGE_IDX (1)
     122, // MVP_LX_FLAG (1)
     168, // REF_IDX (2)
     153, 153, // ABS_MVD_GREATER01_FLAG (2) — [0]=greater0, [1]=greater1
     140, 198, // RQT_ROOT_CBF (1) — repurposed from old ABS_MVD_GREATER1_FLAG slot
-    79, // SPLIT_TRANSFORM_FLAG (3)
+    79,  // SPLIT_TRANSFORM_FLAG (3)
     124, 138, 94, // CBF_LUMA (2)
     153, 111, // CBF_CBCR (5) — 4 from cbf_chroma + 1 default
     149, 107, 167, 154, 154, // TRANSFORM_SKIP_FLAG (2)
@@ -619,13 +619,13 @@ pub static INIT_VALUES_B: [u8; context::NUM_CONTEXTS] = [
     154, 139, 154, 154, // PREV_INTRA_LUMA_PRED_FLAG (1)
     183, // INTRA_CHROMA_PRED_MODE (1)
     152, // INTER_PRED_IDC (5)
-    95, 79, 63, 31, 31, // MERGE_FLAG (1)
+    95, 79, 63, 31, 31,  // MERGE_FLAG (1)
     154, // MERGE_IDX (1)
     137, // MVP_LX_FLAG (1)
     168, // REF_IDX (2)
     153, 153, // ABS_MVD_GREATER01_FLAG (2) — [0]=greater0, [1]=greater1
     169, 198, // RQT_ROOT_CBF (1) — repurposed from old ABS_MVD_GREATER1_FLAG slot
-    79, // SPLIT_TRANSFORM_FLAG (3)
+    79,  // SPLIT_TRANSFORM_FLAG (3)
     224, 167, 122, // CBF_LUMA (2)
     153, 111, // CBF_CBCR (5) — 4 from cbf_chroma + 1 default
     149, 92, 167, 154, 154, // TRANSFORM_SKIP_FLAG (2)
