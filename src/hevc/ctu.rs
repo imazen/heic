@@ -2298,8 +2298,9 @@ impl<'a> SliceContext<'a> {
             let idx = (coding.merge_idx as usize).min(cand_list.len() - 1);
             let mut motion = cand_list[idx];
 
-            // H.265 8.5.3.1.1 step 9: for small PUs (nPbW+nPbH==12), disable L1
-            if pw + ph == 12 {
+            // H.265 8.5.3.2.2 step 10: for small bi-predicted PUs (nPbW+nPbH==12),
+            // disable L1 only when BOTH L0 and L1 are active
+            if pw + ph == 12 && motion.pred_flag[0] && motion.pred_flag[1] {
                 motion.pred_flag[1] = false;
                 motion.ref_idx[1] = -1;
             }

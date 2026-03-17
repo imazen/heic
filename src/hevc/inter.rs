@@ -598,20 +598,24 @@ pub fn scale_mv(mv: MotionVector, dist_src: i32, dist_dst: i32) -> MotionVector 
 
 // ── Temporal MVP derivation (H.265 8.5.3.2.8 + 8.5.3.2.9) ─────────────
 
-/// Find the collocated PU position for temporal MVP (H.265 8.5.3.2.8)
+/// Compute the two collocated PU positions for temporal MVP (H.265 8.5.3.2.8)
 ///
-/// Returns (col_x, col_y) of the collocated block, already aligned to 16-pixel grid.
-/// Returns None if no collocated frame or position is invalid.
-fn find_collocated_position(
+/// Returns (bottom_right, center) positions, each aligned to 16-pixel grid.
+/// bottom_right is None if the position is out of bounds or in a different CTB row.
+/// center is always Some when a collocated frame exists.
+#[allow(clippy::type_complexity)]
+fn collocated_positions(
     ctx: &MvContext<'_>,
     xp: u32,
     yp: u32,
     w: u32,
     h: u32,
-) -> Option<(u32, u32)> {
-    ctx.collocated.as_ref()?;
+) -> (Option<(u32, u32)>, Option<(u32, u32)>) {
+    if ctx.collocated.is_none() {
+        return (None, None);
+    }
 
-    // Step 1: try bottom-right corner (xPb+nPbW, yPb+nPbH)
+    // Step 1: bottom-right corner (xPb+nPbW, yPb+nPbH)
     let br_x = xp + w;
     let br_y = yp + h;
 
@@ -619,16 +623,20 @@ fn find_collocated_position(
     let same_ctu_row = (br_y / ctb) == (yp / ctb);
     let in_bounds = br_x < ctx.pic_width && br_y < ctx.pic_height;
 
-    if same_ctu_row && in_bounds {
-        // Apply 16-pixel grid alignment: (xColBr >> 4) << 4
+    let bottom_right = if same_ctu_row && in_bounds {
         Some(((br_x >> 4) << 4, (br_y >> 4) << 4))
     } else {
-        // Step 2: center of PU
-        let cx = xp + (w >> 1);
-        let cy = yp + (h >> 1);
-        Some(((cx >> 4) << 4, (cy >> 4) << 4))
-    }
+        None
+    };
+
+    // Step 2: center of PU (always available as fallback)
+    let cx = xp + (w >> 1);
+    let cy = yp + (h >> 1);
+    let center = Some(((cx >> 4) << 4, (cy >> 4) << 4));
+
+    (bottom_right, center)
 }
+
 
 /// Derive collocated motion vector for one reference list (H.265 8.5.3.2.9)
 ///
@@ -711,6 +719,8 @@ fn derive_collocated_mv(
 /// Derive temporal motion vector candidate for merge mode (H.265 8.5.3.2.2)
 ///
 /// Returns a PbMotion with temporal MVPs for L0 (refIdx=0) and L1 (refIdx=0).
+///
+/// Per H.265 8.5.3.2.8: tries bottom-right corner first, then center of PU.
 fn derive_temporal_candidate_merge(
     ctx: &MvContext<'_>,
     xp: u32,
@@ -718,33 +728,40 @@ fn derive_temporal_candidate_merge(
     w: u32,
     h: u32,
 ) -> Option<PbMotion> {
-    let (col_x, col_y) = find_collocated_position(ctx, xp, yp, w, h)?;
-    let mut result = PbMotion::UNAVAILABLE;
+    let (br, ctr) = collocated_positions(ctx, xp, yp, w, h);
 
-    for target_list in 0..2usize {
-        if target_list == 1 && !ctx.is_b_slice {
-            continue;
+    // Try bottom-right first, then center (H.265 8.5.3.2.8 step 1 & fallback)
+    for col_pos in [br, ctr].into_iter().flatten() {
+        let (col_x, col_y) = col_pos;
+        let mut result = PbMotion::UNAVAILABLE;
+
+        for target_list in 0..2usize {
+            if target_list == 1 && !ctx.is_b_slice {
+                continue;
+            }
+            if ctx.ref_pic_lists.num_ref_idx_active[target_list] == 0 {
+                continue;
+            }
+            if let Some(mv) = derive_collocated_mv(ctx, col_x, col_y, target_list, 0) {
+                result.pred_flag[target_list] = true;
+                result.ref_idx[target_list] = 0;
+                result.mv[target_list] = mv;
+            }
         }
-        if ctx.ref_pic_lists.num_ref_idx_active[target_list] == 0 {
-            continue;
-        }
-        if let Some(mv) = derive_collocated_mv(ctx, col_x, col_y, target_list, 0) {
-            result.pred_flag[target_list] = true;
-            result.ref_idx[target_list] = 0;
-            result.mv[target_list] = mv;
+
+        if result.pred_flag[0] || result.pred_flag[1] {
+            return Some(result);
         }
     }
 
-    if result.pred_flag[0] || result.pred_flag[1] {
-        Some(result)
-    } else {
-        None
-    }
+    None
 }
 
 /// Derive temporal motion vector for AMVP (H.265 8.5.3.2.8)
 ///
 /// Returns a single MV for list `target_list` with reference index `ref_idx_lx`.
+///
+/// Per H.265 8.5.3.2.8: tries bottom-right corner first, then center of PU.
 fn derive_temporal_candidate_amvp(
     ctx: &MvContext<'_>,
     xp: u32,
@@ -754,8 +771,16 @@ fn derive_temporal_candidate_amvp(
     target_list: usize,
     ref_idx_lx: i8,
 ) -> Option<MotionVector> {
-    let (col_x, col_y) = find_collocated_position(ctx, xp, yp, w, h)?;
-    derive_collocated_mv(ctx, col_x, col_y, target_list, ref_idx_lx)
+    let (br, ctr) = collocated_positions(ctx, xp, yp, w, h);
+
+    // Try bottom-right first, then center (H.265 8.5.3.2.8 step 1 & fallback)
+    for col_pos in [br, ctr].into_iter().flatten() {
+        let (col_x, col_y) = col_pos;
+        if let Some(mv) = derive_collocated_mv(ctx, col_x, col_y, target_list, ref_idx_lx) {
+            return Some(mv);
+        }
+    }
+    None
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────

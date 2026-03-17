@@ -51,20 +51,20 @@ fn check_merge_a_nofilter() {
         eprintln!("  POC={fi} (nofilter): {exact2}/{luma_size} exact ({:.1}%) max={max_diff2}", 100.0 * exact2 as f64 / luma_size as f64);
     }
 
-    // Detailed diff analysis for POC=4
-    eprintln!("\nPOC=4 unfiltered diff analysis:");
-    let ref_f4_nf: Vec<u16> = ref_data[4*frame_size..4*frame_size+luma_size].iter().map(|&b| b as u16).collect();
-    let stride3 = frames[4].width as usize;
+    // Detailed diff analysis for POC=1
+    eprintln!("\nPOC=1 unfiltered diff analysis:");
+    let ref_f2_nf: Vec<u16> = ref_data[frame_size..frame_size+luma_size].iter().map(|&b| b as u16).collect();
+    let stride3 = frames[1].width as usize;
     let mut by_region = std::collections::HashMap::new();
     let mut first_diffs: Vec<(usize,usize,u16,u16)> = Vec::new();
     for y in 0..h as usize {
         for x in 0..w as usize {
-            let ov = frames[4].y_plane[y * stride3 + x];
-            let rv = ref_f4_nf[y * w as usize + x];
+            let ov = frames[1].y_plane[y * stride3 + x];
+            let rv = ref_f2_nf[y * w as usize + x];
             if ov != rv {
                 let region = (x / 64, y / 64);
                 *by_region.entry(region).or_insert(0u32) += 1;
-                if first_diffs.len() < 20 { first_diffs.push((x, y, ov, rv)); }
+                if first_diffs.len() < 40 { first_diffs.push((x, y, ov, rv)); }
             }
         }
     }
@@ -74,7 +74,7 @@ fn check_merge_a_nofilter() {
     for ((rx, ry), count) in &regions {
         eprintln!("    CTU({},{}) = {} diffs", rx*64, ry*64, count);
     }
-    eprintln!("  First 20 diff pixels:");
+    eprintln!("  First 40 diff pixels:");
     for (x, y, ov, rv) in &first_diffs {
         eprintln!("    ({x:3},{y:3}) ours={ov:3} ref={rv:3} diff={:+}", *ov as i32 - *rv as i32);
     }
@@ -420,6 +420,20 @@ fn trace_merge_a_mvs() {
     let data = std::fs::read(&bit).unwrap();
     let mut decoder = heic_decoder::VideoDecoder::new(16);
     decoder.mv_trace_next_inter = true;
+    let _ = decoder.decode_annex_b(&data).unwrap();
+}
+
+#[test]
+#[ignore]
+fn trace_poc2_mvs() {
+    let merge_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("conformance/vectors/MERGE_A_TI_3");
+    let bit = walkdir(&merge_dir).into_iter().find(|p| p.extension().is_some_and(|e| e == "bit"));
+    let bit = match bit { Some(b) => b, None => { eprintln!("SKIP"); return; } };
+
+    let data = std::fs::read(&bit).unwrap();
+    let mut decoder = heic_decoder::VideoDecoder::new(16);
+    decoder.disable_loop_filters = true;
+    decoder.mv_trace_poc = 1;
     let _ = decoder.decode_annex_b(&data).unwrap();
 }
 

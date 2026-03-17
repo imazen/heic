@@ -240,6 +240,8 @@ pub struct VideoDecoder {
     current_pic: Option<CurrentPicture>,
     /// Enable MV tracing for the next inter frame
     pub mv_trace_next_inter: bool,
+    /// Enable MV tracing for a specific POC (-1 = disabled)
+    pub mv_trace_poc: i32,
     /// Disable deblocking and SAO for all frames (for debugging)
     pub disable_loop_filters: bool,
 }
@@ -268,6 +270,7 @@ impl VideoDecoder {
             last_decoded_poc: 0,
             current_pic: None,
             mv_trace_next_inter: false,
+            mv_trace_poc: -1,
             disable_loop_filters: false,
         }
     }
@@ -523,9 +526,12 @@ impl VideoDecoder {
         ctx.ref_frames = ref_frames;
         ctx.collocated_data = collocated_data;
 
-        if self.mv_trace_next_inter && !slice_header.slice_type.is_intra() {
+        let trace_this_poc = self.mv_trace_poc >= 0 && curr_poc == self.mv_trace_poc;
+        if (self.mv_trace_next_inter || trace_this_poc) && !slice_header.slice_type.is_intra() {
             ctx.mv_trace = true;
-            self.mv_trace_next_inter = false;
+            if !trace_this_poc {
+                self.mv_trace_next_inter = false;
+            }
             // Reset SE counter so we trace from the start of this inter frame
             ctu::SE_COUNTER.store(0, core::sync::atomic::Ordering::Relaxed);
             // Reset bin trace counter for per-bin comparison
