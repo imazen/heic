@@ -296,9 +296,9 @@ impl<'a> CabacDecoder<'a> {
             let bin_num = 1000 - self.bin_trace_count;
             self.bin_trace_count -= 1;
             eprintln!(
-                "B{} c r={} v={} s={} m={} b={} bp={} bn={}",
+                "B{} c r={} v={} s={} m={} b={} bp={}",
                 bin_num,
-                self.range, self.value, ctx.state, ctx.mps, bin_val, self.byte_pos, self.bits_needed
+                self.range, self.value, ctx.state, ctx.mps, bin_val, self.byte_pos
             );
         }
 

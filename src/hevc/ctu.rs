@@ -2351,9 +2351,9 @@ impl<'a> SliceContext<'a> {
     }
 
     /// Decode inter_pred_idc (contexts 15-19)
-    fn decode_inter_pred_idc(&mut self, ct_depth: u8, cb_size: u32) -> Result<u8> {
-        // For small blocks (nPbW + nPbH == 12), only L0/L1 allowed (1 bin)
-        if cb_size == 8 {
+    fn decode_inter_pred_idc(&mut self, ct_depth: u8, pu_w: u32, pu_h: u32) -> Result<u8> {
+        // For small blocks (nPbW + nPbH == 12, i.e. 4x8 or 8x4), only L0/L1 (1 bin)
+        if pu_w + pu_h == 12 {
             let ctx_idx = context::INTER_PRED_IDC + 4; // ctx 19
             let val = self.cabac.decode_bin(&mut self.ctx[ctx_idx])?;
             se_trace("inter_pred_idc", val as i64, &self.cabac);
@@ -2492,7 +2492,7 @@ impl<'a> SliceContext<'a> {
         _x0: u32,
         _y0: u32,
         w: u32,
-        _h: u32,
+        h: u32,
         ct_depth: u8,
         merge: bool,
     ) -> Result<PbMotionCoding> {
@@ -2513,7 +2513,7 @@ impl<'a> SliceContext<'a> {
         // AMVP mode
         let is_b = self.header.slice_type == SliceType::B;
         if is_b {
-            coding.inter_pred_idc = self.decode_inter_pred_idc(ct_depth, w)?;
+            coding.inter_pred_idc = self.decode_inter_pred_idc(ct_depth, w, h)?;
         } else {
             coding.inter_pred_idc = 1; // P-slice: always L0
         }
