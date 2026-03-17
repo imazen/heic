@@ -133,8 +133,10 @@ impl ContextModel {
     /// Initialize context for a given slice QP
     /// Per H.265 Table 9-5: preCtxState = Clip3(1,126, ((m * Clip3(0,51,SliceQPY))>>4) + n)
     pub fn init(&mut self, init_value: u8, slice_qp: i32) {
-        let m = (init_value >> 4) as i32 * 5 - 45;
-        let n = ((init_value & 15) << 3) as i32 - 16;
+        let slope_idx = (init_value >> 4) as i32;
+        let offset_idx = (init_value & 15) as i32;
+        let m = slope_idx * 5 - 45;
+        let n = (offset_idx << 3) - 16;
 
         let init_state = ((m * slice_qp.clamp(0, 51)) >> 4) + n;
         let init_state = init_state.clamp(1, 126);
@@ -148,6 +150,13 @@ impl ContextModel {
         }
     }
 }
+
+/// Per-bin trace counter (reset per frame, trace when > 0)
+#[cfg(feature = "std")]
+pub static BIN_TRACE_COUNTER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Per-bin trace limit (0 = disabled)
+#[cfg(feature = "std")]
+pub static BIN_TRACE_LIMIT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// CABAC decoder (libde265-compatible implementation)
 ///
@@ -218,6 +227,11 @@ impl<'a> CabacDecoder<'a> {
         Ok(decoder)
     }
 
+    /// Seek to a specific byte position in the data (for WPP substream boundaries)
+    pub fn seek_to(&mut self, byte_pos: usize) {
+        self.byte_pos = byte_pos.min(self.data.len());
+    }
+
     /// Reinitialize CABAC decoder at current bitstream position (byte alignment).
     /// Used for WPP substream boundaries and tile boundaries.
     /// Equivalent to libde265's init_CABAC_decoder_2().
@@ -259,6 +273,11 @@ impl<'a> CabacDecoder<'a> {
 
     /// Decode a single bin using context model
     pub fn decode_bin(&mut self, ctx: &mut ContextModel) -> Result<u8> {
+        #[cfg(feature = "std")]
+        let pre_state = ctx.state;
+        #[cfg(feature = "std")]
+        let pre_mps = ctx.mps;
+
         self.bin_counter += 1;
         let q_range_idx = (self.range >> 6) & 3;
         let lps_range = LPS_TABLE[ctx.state as usize][q_range_idx as usize] as u32;
@@ -288,6 +307,17 @@ impl<'a> CabacDecoder<'a> {
         // Renormalize
         self.renormalize()?;
 
+        #[cfg(feature = "std")]
+        if BIN_TRACE_LIMIT.load(core::sync::atomic::Ordering::Relaxed) > 0 {
+            let count = BIN_TRACE_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            let limit = BIN_TRACE_LIMIT.load(core::sync::atomic::Ordering::Relaxed);
+            if count < limit {
+                // Log POST-decode range/value to match dec265's format
+                eprintln!("B{} c r={} v={} s={} m={} b={} bp={}",
+                    count, self.range, self.value, pre_state, pre_mps, bin_val, self.byte_pos);
+            }
+        }
+
         Ok(bin_val)
     }
 
@@ -314,6 +344,16 @@ impl<'a> CabacDecoder<'a> {
         } else {
             0
         };
+
+        #[cfg(feature = "std")]
+        if BIN_TRACE_LIMIT.load(core::sync::atomic::Ordering::Relaxed) > 0 {
+            let count = BIN_TRACE_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            let limit = BIN_TRACE_LIMIT.load(core::sync::atomic::Ordering::Relaxed);
+            if count < limit {
+                eprintln!("B{} x r={} b={} bp={}",
+                    count, self.range, bin_val, self.byte_pos);
+            }
+        }
 
         Ok(bin_val)
     }

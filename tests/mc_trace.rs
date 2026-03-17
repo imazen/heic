@@ -131,6 +131,24 @@ fn trace_girlshy_p_frame_mvs() {
 
 #[test]
 #[ignore]
+fn compare_cabac_bins() {
+    let bitstream = Path::new("/home/lilith/work/heic/libde265-src/testdata/girlshy.h265");
+    if !bitstream.exists() {
+        eprintln!("SKIP: girlshy.h265 not found");
+        return;
+    }
+
+    let data = std::fs::read(bitstream).unwrap();
+    let mut decoder = heic_decoder::VideoDecoder::new(16);
+    // Enable per-bin tracing for the first inter frame
+    decoder.mv_trace_next_inter = true;  // this resets SE counter; we also need bin trace
+    // Enable bin trace: first 200 bins
+    heic_decoder::cabac_bin_trace(200);
+    let _ = decoder.decode_annex_b(&data).unwrap();
+}
+
+#[test]
+#[ignore]
 fn trace_girlshy_frame1() {
     let bitstream = Path::new("/home/lilith/work/heic/libde265-src/testdata/girlshy.h265");
     if !bitstream.exists() {

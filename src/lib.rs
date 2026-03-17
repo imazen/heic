@@ -118,6 +118,13 @@ pub use codec::{
 pub use error::{HeicError, HevcError, ProbeError, Result};
 pub use hevc::{DecodedFrame, VideoDecoder};
 
+/// Enable per-bin CABAC trace for the next `limit` bins (0 = disable)
+#[cfg(feature = "std")]
+pub fn cabac_bin_trace(limit: u32) {
+    hevc::cabac::BIN_TRACE_LIMIT.store(limit, core::sync::atomic::Ordering::Relaxed);
+    hevc::cabac::BIN_TRACE_COUNTER.store(0, core::sync::atomic::Ordering::Relaxed);
+}
+
 // Re-export Stop and Unstoppable for ergonomics
 pub use enough::{Stop, StopReason, Unstoppable};
 

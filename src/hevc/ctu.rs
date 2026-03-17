@@ -401,15 +401,48 @@ impl<'a> SliceContext<'a> {
         // WPP: saved context models from CTB column 1 of previous row
         let mut wpp_saved_ctx: Option<[super::cabac::ContextModel; context::NUM_CONTEXTS]> = None;
 
+        // WPP: compute absolute byte offsets for each substream entry point
+        // Entry point offsets are relative: substream N starts at sum(offsets[0..N]) bytes
+        // from the end of the first substream (which starts at byte 0 of slice data)
+        let mut wpp_entry_byte_offsets = Vec::new();
+        if wpp && !self.header.entry_point_offsets.is_empty() {
+            // The first substream starts at byte 0 of slice data.
+            // After the first substream ends, the next substream starts at the first
+            // entry point offset. We need to track absolute positions.
+            // However, we can't know the first substream's end from the header alone.
+            // Instead, after decoding each row, we use the entry_point_offset to jump
+            // to the correct byte position for the next substream.
+            let mut cumulative = 0u32;
+            for &offset in &self.header.entry_point_offsets {
+                cumulative += offset;
+                wpp_entry_byte_offsets.push(cumulative);
+            }
+        }
+        let mut wpp_substream_idx = 0usize;
+
         loop {
             // WPP: at start of each new row (ctb_x==0, ctb_y>0), restore saved context
+            // and reinitialize CABAC at the substream entry point
             if wpp
                 && self.ctb_x == 0
                 && self.ctb_y > 0
                 && pic_width_in_ctbs > 1
-                && let Some(saved) = wpp_saved_ctx
             {
-                self.ctx = saved;
+                if let Some(saved) = wpp_saved_ctx {
+                    self.ctx = saved;
+                }
+                // Reinitialize CABAC at the substream entry point
+                if wpp_substream_idx < wpp_entry_byte_offsets.len() {
+                    let target_byte = wpp_entry_byte_offsets[wpp_substream_idx] as usize;
+                    #[cfg(feature = "std")]
+                    if self.mv_trace {
+                        eprintln!("WPP_REINIT: row={} substream={} seek_to={} (was {})",
+                            self.ctb_y, wpp_substream_idx, target_byte, self.cabac.get_position().0);
+                    }
+                    self.cabac.seek_to(target_byte);
+                    self.cabac.reinit();
+                    wpp_substream_idx += 1;
+                }
             }
 
             // Decode one CTU

@@ -4,7 +4,7 @@
 //! for decoding HEIC still images.
 
 pub(crate) mod bitstream;
-mod cabac;
+pub(crate) mod cabac;
 pub(crate) mod color_convert;
 mod ctu;
 mod deblock;
@@ -512,6 +512,17 @@ impl VideoDecoder {
             self.mv_trace_next_inter = false;
             // Reset SE counter so we trace from the start of this inter frame
             ctu::SE_COUNTER.store(0, core::sync::atomic::Ordering::Relaxed);
+            // Reset bin trace counter for per-bin comparison
+            #[cfg(feature = "std")]
+            cabac::BIN_TRACE_COUNTER.store(0, core::sync::atomic::Ordering::Relaxed);
+            // Dump first bytes of slice data for verification
+            #[cfg(feature = "std")]
+            {
+                let first_bytes: Vec<u8> = slice_data.iter().take(8).copied().collect();
+                eprintln!("SLICE_DATA: type={:?} data_offset={} first_bytes={:02x?} total_len={} entry_points={:?}",
+                    slice_header.slice_type, data_offset, first_bytes, slice_data.len(),
+                    slice_header.entry_point_offsets);
+            }
         }
 
         ctx.decode_slice(&mut pic.frame)?;

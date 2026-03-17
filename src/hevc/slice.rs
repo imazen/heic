@@ -3,6 +3,7 @@
 //! This module handles parsing of slice segment headers (H.265 spec 7.3.6)
 //! and orchestrates CTU decoding for each slice.
 
+use alloc::vec::Vec;
 use super::bitstream::{BitstreamReader, NalUnit};
 use super::params::{Pps, Sps};
 use super::refpic;
@@ -221,6 +222,8 @@ pub struct SliceHeader {
 
     /// Number of entry point offsets (for tiles/WPP)
     pub num_entry_point_offsets: u32,
+    /// Entry point byte offsets for substream boundaries
+    pub entry_point_offsets: Vec<u32>,
 
     /// Active short-term RPS index (into SPS short_term_rps, or inline)
     pub short_term_ref_pic_set_idx: u8,
@@ -563,14 +566,15 @@ impl SliceHeader {
         };
 
         // Entry point offsets (tiles/WPP)
+        let mut entry_point_offsets = Vec::new();
         let num_entry_point_offsets =
             if pps.tiles_enabled_flag || pps.entropy_coding_sync_enabled_flag {
                 let n = reader.read_ue()?;
                 if n > 0 {
-                    // Skip the actual offset values for now
                     let offset_len = reader.read_ue()? as u8 + 1;
                     for _ in 0..n {
-                        reader.read_bits(offset_len)?;
+                        let offset = reader.read_bits(offset_len)? + 1; // offset_minus1 + 1
+                        entry_point_offsets.push(offset);
                     }
                 }
                 n
@@ -619,6 +623,7 @@ impl SliceHeader {
                 slice_tc_offset_div2,
                 slice_loop_filter_across_slices_enabled_flag,
                 num_entry_point_offsets,
+                entry_point_offsets,
                 short_term_ref_pic_set_idx,
                 inline_short_term_rps,
                 slice_temporal_mvp_enabled_flag,
