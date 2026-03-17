@@ -25,7 +25,24 @@ use zencodec::{
 };
 use zenpixels::{Cicp, ColorPrimaries, PixelBuffer, PixelDescriptor, TransferFunction};
 
+use crate::auxiliary::AuxiliaryImageType;
 use crate::error::HeicError;
+
+/// Metadata about auxiliary images in a HEIC file.
+///
+/// This is attached to the zencodec [`DecodeOutput::extensions()`] when the
+/// decoded HEIC file contains auxiliary images (depth maps, gain maps, etc.).
+///
+/// Access via `output.extensions().get::<HeicAuxiliaryInfo>()`.
+#[derive(Debug, Clone)]
+pub struct HeicAuxiliaryInfo {
+    /// Whether the file contains a depth auxiliary image.
+    pub has_depth: bool,
+    /// Whether the file contains an HDR gain map auxiliary image.
+    pub has_gain_map: bool,
+    /// Types of all auxiliary images present.
+    pub auxiliary_types: alloc::vec::Vec<AuxiliaryImageType>,
+}
 
 // ── Threading helpers ────────────────────────────────────────────────────
 
@@ -641,7 +658,27 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
             width,
             height,
         );
-        Ok(DecodeOutput::new(buf, info))
+        let mut output = DecodeOutput::new(buf, info);
+
+        // Attach auxiliary image metadata as an extension if available.
+        if let Some(ref pi) = probe_info {
+            let aux_types = if let Some(ref c) = container {
+                let primary_id = c.primary_item_id;
+                c.find_all_auxiliary_items(primary_id)
+                    .into_iter()
+                    .map(|(_id, urn)| AuxiliaryImageType::from_urn(&urn))
+                    .collect()
+            } else {
+                alloc::vec::Vec::new()
+            };
+            output.extensions_mut().insert(HeicAuxiliaryInfo {
+                has_depth: pi.has_depth,
+                has_gain_map: pi.has_gain_map,
+                auxiliary_types: aux_types,
+            });
+        }
+
+        Ok(output)
     }
 }
 

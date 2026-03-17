@@ -113,7 +113,8 @@ mod codec;
 
 #[cfg(feature = "zencodec")]
 pub use codec::{
-    HeicDecodeJob, HeicDecoder as HeicZenDecoder, HeicDecoderConfig, HeicStreamDecoder,
+    HeicAuxiliaryInfo, HeicDecodeJob, HeicDecoder as HeicZenDecoder, HeicDecoderConfig,
+    HeicStreamDecoder,
 };
 
 pub use auxiliary::{
