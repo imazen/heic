@@ -199,16 +199,23 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 - Inter prediction (P/B slices) on `inter-prediction` branch:
   - Full pipeline: syntax parsing, merge/AMVP/TMVP, scalar MC, DPB, VideoDecoder
   - Conformance: 48/48 vectors decode without crash, 1 pixel-exact (I-only)
-  - P-frame quality (girlshy WPP): 39.8dB, 93.5% pixel-exact (R0:100% R1:90% R2:86% R3:100%)
   - CABAC verified BIT-EXACT vs dec265 (all 28 CTU byte positions match for MERGE_A)
-  - Unfiltered I-frame verified 100% pixel-exact vs dec265 (proves CABAC + transform correct)
-  - MERGE_A first B-frame (POC=4): 97.1% pixel-exact (36.4dB), remaining 2.9% = 2.6% MC + 0.3% cascading deblock
-  - Deblocking filter verified CORRECT: 0/3307 edges where identical input pixels produce different decisions (confirmed vs dec265 trace)
-  - Fixed: CBF tracking for deblocking bS=2, DST/DCT for inter 4x4 TUs, chroma MC shifts (4→6), skip/no-residual CU boundary marking, WPP entry point offsets + CABAC reinit, cu_skip_flag cross-CTB-row context derivation, deblocking TB/PB edge distinction with separate bS derivation, bi-pred cross-list bS comparison, bi-pred H+V MC rounding offset (was adding +32 in V-pass intermediate, spec says pure truncation)
-  - IMPORTANT: dec265 reference YUV is in DISPLAY ORDER (not decode order). Both -o and --disable-deblocking outputs are display-ordered.
-  - Remaining MC errors: ~2576 pixels in POC=4 (uni-pred from L1), concentrated in specific PU regions with large diffs (up to +18). Likely MV derivation or reference list issue for L1 uni-prediction. The errors compound through reference chain for later frames.
-  - Deblock trace infrastructure: `enable_deblock_trace()` dumps all edge parameters to /tmp/our_deblock_trace.txt (matching dec265 format)
-  - SSIMULACRA2: I-frame 100.00, AMVP_A avg -31 (Fr1: 96), MERGE_A avg -170 (Fr4: 31)
+  - Unfiltered I-frame: 100% pixel-exact vs dec265
+  - MERGE_A B-frame quality (nofilter vs dec265):
+    - POC=4 (I→B): 100% pixel-exact (refs only I-frame)
+    - POC=2: 95.6% exact, POC=1: 94.4%, POC=3: 90.5%
+    - POC=5-7: 60-67% (error propagation from earlier frames)
+  - MERGE_A filtered (vs dec265 reference_display.yuv):
+    - Fr0(I): inf dB, Fr4: 78.6dB (100% exact, max=3)
+    - Fr2: 33.5dB (94.9%), Fr1: 34.9dB (94.0%), Fr3: 28.2dB (89.7%)
+  - Fixed bugs:
+    - ref_idx decode: truncated unary consumed extra CABAC bin when num_active>=2 (CABAC desync)
+    - AMVP: isScaledFlagLX, B-candidate always-run, same-list-first ordering
+    - Temporal MVP: collocated MV selection (NoBackwardPredFlag, col_from_l0_flag), per-list derivation, collocated frame ref_poc stored in DPB
+    - Earlier: CBF tracking for deblocking bS=2, DST/DCT for inter 4x4 TUs, chroma MC shifts (4→6), skip/no-residual CU boundary marking, WPP entry point offsets + CABAC reinit, cu_skip_flag cross-CTB-row context derivation, deblocking TB/PB edge distinction with separate bS derivation, bi-pred cross-list bS comparison, bi-pred H+V MC rounding offset
+  - Remaining ~5% errors in POC=2: concentrated in specific CTUs, likely AMVP candidate derivation subtlety (PB availability checks) or MC filter edge cases
+  - IMPORTANT: dec265 reference YUV is in DISPLAY ORDER (not decode order)
+  - Deblock trace infrastructure: `enable_deblock_trace()` dumps all edge parameters to /tmp/our_deblock_trace.txt
   - Deferred: SIMD MC (Phase 7), weighted prediction application
 - 4:4:4 chroma: decodes correctly (61.9dB), but no SIMD color conversion path (uses scalar)
 - Dependent slice segments: not supported (2 vectors fail)
