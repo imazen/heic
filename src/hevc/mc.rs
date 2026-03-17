@@ -192,7 +192,8 @@ pub struct ChromaRef<'a> {
 /// Perform chroma motion compensation for one PU
 ///
 /// `mv` is the *luma* MV in quarter-pel units. Chroma MV is derived internally.
-pub fn mc_chroma(cref: &ChromaRef<'_>, mv: MotionVector, blk: &McBlock, pred: &mut [i16]) {
+/// If `bi_pred` is true, outputs at intermediate precision for bi-prediction blending.
+pub fn mc_chroma(cref: &ChromaRef<'_>, mv: MotionVector, blk: &McBlock, pred: &mut [i16], bi_pred: bool) {
     let cmv_x = if cref.sub_x > 1 {
         mv.x as i32
     } else {
@@ -208,7 +209,6 @@ pub fn mc_chroma(cref: &ChromaRef<'_>, mv: MotionVector, blk: &McBlock, pred: &m
     let c_w = cref.stride as i32;
     let c_h = cref.height as i32;
     let (w, h) = (blk.w, blk.h);
-    let max_val = (1i32 << blk.bit_depth) - 1;
 
     let int_x = (blk.xp as i32) + (cmv_x >> 3);
     let int_y = (blk.yp as i32) + (cmv_y >> 3);
@@ -217,6 +217,8 @@ pub fn mc_chroma(cref: &ChromaRef<'_>, mv: MotionVector, blk: &McBlock, pred: &m
 
     let shift1 = blk.bit_depth as i32 - 8 + 4;
     let offset1 = 1i32 << (shift1 - 1);
+    let max_val = (1i32 << blk.bit_depth) - 1;
+    let internal_shift = 14 - blk.bit_depth as i32;
 
     let fetch = |sx: i32, sy: i32| -> i32 {
         let sx = sx.clamp(0, c_w - 1);
@@ -232,7 +234,12 @@ pub fn mc_chroma(cref: &ChromaRef<'_>, mv: MotionVector, blk: &McBlock, pred: &m
     if frac_x == 0 && frac_y == 0 {
         for j in 0..h as i32 {
             for i in 0..w as i32 {
-                pred[(j as u32 * w + i as u32) as usize] = fetch(int_x + i, int_y + j) as i16;
+                let val = fetch(int_x + i, int_y + j);
+                pred[(j as u32 * w + i as u32) as usize] = if bi_pred {
+                    (val << internal_shift) as i16
+                } else {
+                    val as i16
+                };
             }
         }
     } else if frac_y == 0 {
@@ -243,8 +250,11 @@ pub fn mc_chroma(cref: &ChromaRef<'_>, mv: MotionVector, blk: &McBlock, pred: &m
                 for k in 0..4i32 {
                     sum += fetch(int_x + i + k - 1, int_y + j) * coeff[k as usize] as i32;
                 }
-                pred[(j as u32 * w + i as u32) as usize] =
-                    ((sum + offset1) >> shift1).clamp(0, max_val) as i16;
+                pred[(j as u32 * w + i as u32) as usize] = if bi_pred {
+                    sum as i16
+                } else {
+                    ((sum + offset1) >> shift1).clamp(0, max_val) as i16
+                };
             }
         }
     } else if frac_x == 0 {
@@ -255,8 +265,11 @@ pub fn mc_chroma(cref: &ChromaRef<'_>, mv: MotionVector, blk: &McBlock, pred: &m
                 for k in 0..4i32 {
                     sum += fetch(int_x + i, int_y + j + k - 1) * coeff[k as usize] as i32;
                 }
-                pred[(j as u32 * w + i as u32) as usize] =
-                    ((sum + offset1) >> shift1).clamp(0, max_val) as i16;
+                pred[(j as u32 * w + i as u32) as usize] = if bi_pred {
+                    sum as i16
+                } else {
+                    ((sum + offset1) >> shift1).clamp(0, max_val) as i16
+                };
             }
         }
     } else {
@@ -277,17 +290,31 @@ pub fn mc_chroma(cref: &ChromaRef<'_>, mv: MotionVector, blk: &McBlock, pred: &m
 
         let coeff_v = &CHROMA_FILTER[frac_y];
         let shift2 = 4i32;
-        let total_shift = shift1 + shift2;
-        let total_offset = 1i64 << (total_shift - 1);
-        for j in 0..h as i32 {
-            for i in 0..w as i32 {
-                let mut sum = 0i64;
-                for k in 0..4i32 {
-                    sum += tmp[((j + k) * tmp_w + i) as usize] as i64
-                        * coeff_v[k as usize] as i64;
+        if bi_pred {
+            let offset2 = 1i64 << (shift2 - 1);
+            for j in 0..h as i32 {
+                for i in 0..w as i32 {
+                    let mut sum = 0i64;
+                    for k in 0..4i32 {
+                        sum += tmp[((j + k) * tmp_w + i) as usize] as i64
+                            * coeff_v[k as usize] as i64;
+                    }
+                    pred[(j as u32 * w + i as u32) as usize] = ((sum + offset2) >> shift2) as i16;
                 }
-                pred[(j as u32 * w + i as u32) as usize] =
-                    (((sum + total_offset) >> total_shift) as i32).clamp(0, max_val) as i16;
+            }
+        } else {
+            let total_shift = shift1 + shift2;
+            let total_offset = 1i64 << (total_shift - 1);
+            for j in 0..h as i32 {
+                for i in 0..w as i32 {
+                    let mut sum = 0i64;
+                    for k in 0..4i32 {
+                        sum += tmp[((j + k) * tmp_w + i) as usize] as i64
+                            * coeff_v[k as usize] as i64;
+                    }
+                    pred[(j as u32 * w + i as u32) as usize] =
+                        (((sum + total_offset) >> total_shift) as i32).clamp(0, max_val) as i16;
+                }
             }
         }
     }

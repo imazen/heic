@@ -2235,7 +2235,7 @@ impl<'a> SliceContext<'a> {
             let mut cpred1 = [0i16; 1024];
 
             for c_idx in 0..2u8 {
-                let mc_one_list = |rf: &DecodedFrame, mv: MotionVector, pred: &mut [i16]| {
+                let mc_one = |rf: &DecodedFrame, mv: MotionVector, pred: &mut [i16], bi: bool| {
                     let (plane, stride) = rf.plane(c_idx + 1);
                     let (_, c_height) = rf.chroma_dims();
                     let cref = ChromaRef {
@@ -2245,15 +2245,15 @@ impl<'a> SliceContext<'a> {
                         sub_x,
                         sub_y,
                     };
-                    mc::mc_chroma(&cref, mv, &cblk, pred);
+                    mc::mc_chroma(&cref, mv, &cblk, pred, bi);
                 };
 
                 let (plane_mut, plane_stride) = frame.plane_mut(c_idx + 1);
 
                 if is_bi {
                     if let (Some(r0), Some(r1)) = (ref_l0, ref_l1) {
-                        mc_one_list(r0, motion.mv[0], &mut cpred0[..cbuf_size]);
-                        mc_one_list(r1, motion.mv[1], &mut cpred1[..cbuf_size]);
+                        mc_one(r0, motion.mv[0], &mut cpred0[..cbuf_size], true);
+                        mc_one(r1, motion.mv[1], &mut cpred1[..cbuf_size], true);
                         mc::blend_bi(&cpred0[..cbuf_size], &cpred1[..cbuf_size], plane_mut, plane_stride, &cblk);
                     }
                 } else {
@@ -2263,7 +2263,7 @@ impl<'a> SliceContext<'a> {
                         (ref_l1, motion.mv[1])
                     };
                     if let Some(rf) = rf {
-                        mc_one_list(rf, mv, &mut cpred0[..cbuf_size]);
+                        mc_one(rf, mv, &mut cpred0[..cbuf_size], false);
                         mc::blend_uni(&cpred0[..cbuf_size], plane_mut, plane_stride, &cblk);
                     }
                 }
