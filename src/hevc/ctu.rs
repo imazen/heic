@@ -142,6 +142,8 @@ pub struct SliceContext<'a> {
     pub cu_transquant_bypass_flag: bool,
     /// Debug flag for current CTU
     debug_ctu: bool,
+    /// MV trace flag (dump all inter PU motion vectors)
+    pub mv_trace: bool,
     /// Debug: track chroma prediction calls
     #[allow(dead_code)]
     chroma_pred_count: u32,
@@ -344,6 +346,7 @@ impl<'a> SliceContext<'a> {
             cu_qp_delta: 0,
             cu_transquant_bypass_flag: false,
             debug_ctu: false,
+            mv_trace: false,
             chroma_pred_count: 0,
             ct_depth_map,
             ct_depth_map_stride,
@@ -902,6 +905,20 @@ impl<'a> SliceContext<'a> {
 
             self.store_mv_info(x0, y0, cb_size, cb_size, motion);
 
+            // Mark CU boundary and QP for deblocking (skip has no residual, so cbf=false)
+            frame.mark_tu_boundary(x0, y0, cb_size);
+            frame.store_block_qp(x0, y0, cb_size, self.current_qpy as i8);
+            self.store_cbf(x0, y0, cb_size, false);
+
+            if self.mv_trace {
+                #[cfg(feature = "std")]
+                eprintln!("MV_TRACE: SKIP ({},{}) {}x{} merge_idx={} L0=({},{})r{} L1=({},{})r{} pred=[{},{}]",
+                    x0, y0, cb_size, cb_size, coding.merge_idx,
+                    motion.mv[0].x, motion.mv[0].y, motion.ref_idx[0],
+                    motion.mv[1].x, motion.mv[1].y, motion.ref_idx[1],
+                    motion.pred_flag[0] as u8, motion.pred_flag[1] as u8);
+            }
+
             // Apply motion compensation (prediction → frame)
             self.apply_mc(&motion, x0, y0, cb_size, cb_size, frame);
             return Ok(());
@@ -1037,6 +1054,16 @@ impl<'a> SliceContext<'a> {
                     part_mode,
                 );
                 self.store_mv_info(px, py, pw, ph, motion);
+
+                if self.mv_trace {
+                    #[cfg(feature = "std")]
+                    eprintln!("MV_TRACE: INTER ({},{}) {}x{} merge={} idx={} L0=({},{})r{} L1=({},{})r{} pred=[{},{}]",
+                        px, py, pw, ph, coding.merge_flag as u8, coding.merge_idx,
+                        motion.mv[0].x, motion.mv[0].y, motion.ref_idx[0],
+                        motion.mv[1].x, motion.mv[1].y, motion.ref_idx[1],
+                        motion.pred_flag[0] as u8, motion.pred_flag[1] as u8);
+                }
+
                 self.apply_mc(&motion, px, py, pw, ph, frame);
             }
             pu_list_is_merge = any_merge;
@@ -1067,6 +1094,11 @@ impl<'a> SliceContext<'a> {
                     intra_split_flag,
                     frame,
                 )?;
+            } else {
+                // No residual: still need to mark CU boundary and QP for deblocking
+                frame.mark_tu_boundary(x0, y0, cb_size);
+                frame.store_block_qp(x0, y0, cb_size, self.current_qpy as i8);
+                self.store_cbf(x0, y0, cb_size, false);
             }
         } else if !self.cu_transquant_bypass_flag {
             // Intra: residual always present (rqt_root_cbf implied 1)
@@ -1386,6 +1418,9 @@ impl<'a> SliceContext<'a> {
         frame.mark_tu_boundary(x0, y0, tu_size);
         frame.store_block_qp(x0, y0, tu_size, self.current_qpy as i8);
 
+        // Store CBF for deblocking boundary strength (bS=2 at TU boundaries with coefficients)
+        self.store_cbf(x0, y0, tu_size, cbf_luma || cbf_cb || cbf_cr);
+
         // Look up intra mode at actual TU position (correct for NxN where sub-TUs differ)
         let actual_luma_mode = self.get_intra_mode_at(x0, y0);
         let sis = self.sps.strong_intra_smoothing_enabled_flag;
@@ -1535,6 +1570,7 @@ impl<'a> SliceContext<'a> {
 
         let size = 1usize << log2_size;
         let num_coeffs = size * size;
+        let is_intra_cu = self.get_pred_mode_at(x0, y0) == PredMode::Intra;
 
         // Dequantize coefficients in-place
         let coeffs = &mut coeff_buf.coeffs;
@@ -1564,7 +1600,7 @@ impl<'a> SliceContext<'a> {
 
         if let Some(sl) = scaling_list {
             // matrixId: intra Y=0, Cb=1, Cr=2; inter Y=3, Cb=4, Cr=5
-            let matrix_id = if self.get_pred_mode_at(x0, y0) == PredMode::Intra {
+            let matrix_id = if is_intra_cu {
                 c_idx
             } else {
                 c_idx + 3
@@ -1606,7 +1642,7 @@ impl<'a> SliceContext<'a> {
                 residual[i] = ((c + rnd) >> bd_shift) as i16;
             }
         } else {
-            let is_intra_4x4_luma = log2_size == 2 && c_idx == 0;
+            let is_intra_4x4_luma = log2_size == 2 && c_idx == 0 && is_intra_cu;
             transform::inverse_transform(coeffs, residual, size, bit_depth, is_intra_4x4_luma);
         }
 
@@ -2010,7 +2046,6 @@ impl<'a> SliceContext<'a> {
     }
 
     /// Store CBF (coded block flag) for a TU region at 4x4 granularity
-    #[allow(dead_code)] // Called when inter decode pipeline is wired up
     fn store_cbf(&mut self, x0: u32, y0: u32, size: u32, has_coeffs: bool) {
         let bx = x0 / 4;
         let by = y0 / 4;

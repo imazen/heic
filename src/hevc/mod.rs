@@ -235,6 +235,10 @@ pub struct VideoDecoder {
     last_decoded_poc: i32,
     /// Current picture being decoded (for multi-slice pictures)
     current_pic: Option<CurrentPicture>,
+    /// Enable MV tracing for the next inter frame
+    pub mv_trace_next_inter: bool,
+    /// Disable deblocking and SAO for all frames (for debugging)
+    pub disable_loop_filters: bool,
 }
 
 /// State for a picture being decoded across multiple slices
@@ -258,6 +262,8 @@ impl VideoDecoder {
             prev_poc_msb: 0,
             last_decoded_poc: 0,
             current_pic: None,
+            mv_trace_next_inter: false,
+            disable_loop_filters: false,
         }
     }
 
@@ -501,10 +507,19 @@ impl VideoDecoder {
         ctx.ref_frames = ref_frames;
         ctx.collocated_data = collocated_data;
 
+        if self.mv_trace_next_inter && !slice_header.slice_type.is_intra() {
+            ctx.mv_trace = true;
+            self.mv_trace_next_inter = false;
+            // Reset SE counter so we trace from the start of this inter frame
+            ctu::SE_COUNTER.store(0, core::sync::atomic::Ordering::Relaxed);
+        }
+
         ctx.decode_slice(&mut pic.frame)?;
 
-        // Apply loop filters
-        apply_loop_filters(&slice_header, &sps, &pps, &ctx, &mut pic.frame);
+        // Apply loop filters (unless disabled for debugging)
+        if !self.disable_loop_filters {
+            apply_loop_filters(&slice_header, &sps, &pps, &ctx, &mut pic.frame);
+        }
 
         // Copy motion/pred_mode data from slice context to picture
         let pm_len = pic.pred_mode_map.len().min(ctx.pred_mode_map.len());
