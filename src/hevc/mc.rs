@@ -144,7 +144,8 @@ pub fn mc_luma(ref_frame: &DecodedFrame, mv: MotionVector, blk: &McBlock, pred: 
         let shift2 = 6i32;
         if bi_pred {
             // For bi-pred: output at intermediate precision (shift by shift2 only)
-            let offset2 = 1i64 << (shift2 - 1);
+            // Per H.265 8.5.3.3.3.2: NO rounding offset at this stage.
+            // Rounding is applied later in the weighted prediction / averaging step.
             for j in 0..h as i32 {
                 for i in 0..w as i32 {
                     let mut sum = 0i64;
@@ -153,7 +154,7 @@ pub fn mc_luma(ref_frame: &DecodedFrame, mv: MotionVector, blk: &McBlock, pred: 
                             * coeff_v[k as usize] as i64;
                     }
                     pred[(j as u32 * w + i as u32) as usize] =
-                        ((sum + offset2) >> shift2) as i16;
+                        (sum >> shift2) as i16;
                 }
             }
         } else {
@@ -293,7 +294,7 @@ pub fn mc_chroma(cref: &ChromaRef<'_>, mv: MotionVector, blk: &McBlock, pred: &m
         let coeff_v = &CHROMA_FILTER[frac_y];
         let shift2 = 6i32; // H.265 spec shift2 = 6 (normalize 2nd filter pass)
         if bi_pred {
-            let offset2 = 1i64 << (shift2 - 1);
+            // Per H.265 8.5.3.3.3.2: NO rounding offset at this intermediate stage.
             for j in 0..h as i32 {
                 for i in 0..w as i32 {
                     let mut sum = 0i64;
@@ -301,7 +302,7 @@ pub fn mc_chroma(cref: &ChromaRef<'_>, mv: MotionVector, blk: &McBlock, pred: &m
                         sum += tmp[((j + k) * tmp_w + i) as usize] as i64
                             * coeff_v[k as usize] as i64;
                     }
-                    pred[(j as u32 * w + i as u32) as usize] = ((sum + offset2) >> shift2) as i16;
+                    pred[(j as u32 * w + i as u32) as usize] = (sum >> shift2) as i16;
                 }
             }
         } else {
@@ -460,6 +461,7 @@ mod tests {
         mc_luma(&frame, MotionVector { x: 2, y: 0 }, &blk, &mut pred, false);
         // Half-pel of gradient: should be close to average of 64 and 80 = 72
         // Exact: filter[-1,4,-11,40,40,-11,4,-1] applied to [16,32,48,64,80,96,112,128]
+        #[allow(clippy::identity_op, clippy::neg_multiply)]
         let expected = (-1*16 + 4*32 - 11*48 + 40*64 + 40*80 - 11*96 + 4*112 - 1*128 + 32) >> 6;
         assert_eq!(pred[0], expected as i16, "half-pel horizontal");
     }

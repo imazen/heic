@@ -11,6 +11,49 @@ use super::picture::{
 };
 use super::slice::PredMode;
 
+#[cfg(feature = "std")]
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(feature = "std")]
+static DEBLOCK_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Enable deblocking trace output (writes to /tmp/our_deblock_trace.txt)
+#[cfg(feature = "std")]
+pub fn enable_deblock_trace() {
+    DEBLOCK_TRACE_ENABLED.store(true, Ordering::Relaxed);
+}
+
+#[cfg(feature = "std")]
+fn deblock_trace_active() -> bool {
+    DEBLOCK_TRACE_ENABLED.load(Ordering::Relaxed)
+}
+
+#[cfg(feature = "std")]
+#[allow(clippy::too_many_arguments)]
+fn trace_edge(
+    vertical: bool, x: u32, y: u32, bs: i32, qp_p: i32, qp_q: i32,
+    beta: i32, tc: i32, de: i32, dep: i32, deq: i32, d: i32,
+    p0_0: i32, p1_0: i32, p2_0: i32, p3_0: i32,
+    q0_0: i32, q1_0: i32, q2_0: i32, q3_0: i32,
+    p0_3: i32, p1_3: i32, p2_3: i32, p3_3: i32,
+    q0_3: i32, q1_3: i32, q2_3: i32, q3_3: i32,
+) {
+    use std::io::Write;
+    use std::sync::Mutex;
+    use std::sync::LazyLock;
+    static TRACE_FILE: LazyLock<Mutex<std::fs::File>> = LazyLock::new(|| {
+        Mutex::new(std::fs::File::create("/tmp/our_deblock_trace.txt").unwrap())
+    });
+    let mut f = TRACE_FILE.lock().unwrap();
+    let _ = writeln!(f, "EDGE {} x={} y={} bS={} QP_P={} QP_Q={} qP_L={} beta={} tc={} dE={} dEp={} dEq={} d={} \
+        p[0]={{{},{},{},{}}} q[0]={{{},{},{},{}}} p[3]={{{},{},{},{}}} q[3]={{{},{},{},{}}}",
+        if vertical { 'V' } else { 'H' },
+        x, y, bs, qp_p, qp_q, (qp_q + qp_p + 1) >> 1, beta, tc,
+        de, dep, deq, d,
+        p0_0, p1_0, p2_0, p3_0, q0_0, q1_0, q2_0, q3_0,
+        p0_3, p1_3, p2_3, p3_3, q0_3, q1_3, q2_3, q3_3);
+}
+
 /// Beta prime values for deblocking filter (Table 8-12)
 /// Index 0-51 maps QP to beta prime threshold
 #[rustfmt::skip]
@@ -395,6 +438,12 @@ fn filter_edge_luma(
     let d = dpq0 + dpq3;
 
     if d >= beta {
+        #[cfg(feature = "std")]
+        if deblock_trace_active() {
+            trace_edge(vertical, x, y, bs, qp_p, qp_q, beta, tc, 0, 0, 0, d,
+                p0_0, p1_0, p2_0, p3_0, q0_0, q1_0, q2_0, q3_0,
+                p0_3, p1_3, p2_3, p3_3, q0_3, q1_3, q2_3, q3_3);
+        }
         return;
     }
 
@@ -410,6 +459,15 @@ fn filter_edge_luma(
     let strong = d_sam0 && d_sam3;
     let d_ep = dp < ((beta + (beta >> 1)) >> 3);
     let d_eq = dq < ((beta + (beta >> 1)) >> 3);
+
+    let de = if strong { 2 } else { 1 };
+
+    #[cfg(feature = "std")]
+    if deblock_trace_active() {
+        trace_edge(vertical, x, y, bs, qp_p, qp_q, beta, tc, de, d_ep as i32, d_eq as i32, d,
+            p0_0, p1_0, p2_0, p3_0, q0_0, q1_0, q2_0, q3_0,
+            p0_3, p1_3, p2_3, p3_3, q0_3, q1_3, q2_3, q3_3);
+    }
 
     // Apply filter for all 4 samples along the edge
     for k in 0..4usize {

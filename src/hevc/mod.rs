@@ -25,6 +25,9 @@ mod transforms;
 
 pub use picture::DecodedFrame;
 
+#[cfg(feature = "std")]
+pub use deblock::enable_deblock_trace;
+
 use crate::error::HevcError;
 use crate::heif::HevcDecoderConfig;
 use alloc::vec::Vec;

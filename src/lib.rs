@@ -118,6 +118,12 @@ pub use codec::{
 pub use error::{HeicError, HevcError, ProbeError, Result};
 pub use hevc::{DecodedFrame, VideoDecoder};
 
+/// Enable deblocking filter trace output (writes to /tmp/our_deblock_trace.txt)
+#[cfg(feature = "std")]
+pub fn enable_deblock_trace() {
+    hevc::enable_deblock_trace();
+}
+
 /// Enable per-bin CABAC trace for the next `limit` bins (0 = disable)
 #[cfg(feature = "std")]
 pub fn cabac_bin_trace(limit: u32) {
