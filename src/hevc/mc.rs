@@ -50,7 +50,9 @@ pub struct McBlock {
 ///
 /// Writes prediction samples into `pred` buffer (w*h i16 values).
 /// The MV is in quarter-pel units.
-pub fn mc_luma(ref_frame: &DecodedFrame, mv: MotionVector, blk: &McBlock, pred: &mut [i16]) {
+/// If `bi_pred` is true, outputs at intermediate precision (shifted left by 6)
+/// for subsequent bi-prediction blending. Otherwise outputs final pixel values.
+pub fn mc_luma(ref_frame: &DecodedFrame, mv: MotionVector, blk: &McBlock, pred: &mut [i16], bi_pred: bool) {
     let ref_plane = &ref_frame.y_plane;
     let stride = ref_frame.width as i32;
     let pic_w = ref_frame.width as i32;
@@ -62,17 +64,27 @@ pub fn mc_luma(ref_frame: &DecodedFrame, mv: MotionVector, blk: &McBlock, pred: 
     let frac_x = (mv.x as i32 & 3) as usize;
     let frac_y = (mv.y as i32 & 3) as usize;
 
+    // For uni-prediction: shift to final pixel value
+    // For bi-prediction: output at intermediate precision (pixel << 6) per H.265 8.5.3.3.3
     let shift1 = blk.bit_depth as i32 - 8 + 6;
     let offset1 = 1i32 << (shift1 - 1);
     let max_val = (1i32 << blk.bit_depth) - 1;
 
+    // For bi-pred: shift3 = 14 - bit_depth (left-shift to intermediate)
+    let internal_shift = 14 - blk.bit_depth as i32; // = 6 for 8-bit
+
     if frac_x == 0 && frac_y == 0 {
+        // Integer position: direct copy (or shift up for bi-pred)
         for j in 0..h as i32 {
             for i in 0..w as i32 {
                 let sx = (int_x + i).clamp(0, pic_w - 1);
                 let sy = (int_y + j).clamp(0, pic_h - 1);
-                pred[(j as u32 * w + i as u32) as usize] =
-                    ref_plane[(sy * stride + sx) as usize] as i16;
+                let val = ref_plane[(sy * stride + sx) as usize] as i32;
+                pred[(j as u32 * w + i as u32) as usize] = if bi_pred {
+                    (val << internal_shift) as i16
+                } else {
+                    val as i16
+                };
             }
         }
     } else if frac_y == 0 {
@@ -85,8 +97,11 @@ pub fn mc_luma(ref_frame: &DecodedFrame, mv: MotionVector, blk: &McBlock, pred: 
                     let sx = (int_x + i + k - 3).clamp(0, pic_w - 1);
                     sum += ref_plane[(sy * stride + sx) as usize] as i32 * coeff[k as usize] as i32;
                 }
-                pred[(j as u32 * w + i as u32) as usize] =
-                    ((sum + offset1) >> shift1).clamp(0, max_val) as i16;
+                pred[(j as u32 * w + i as u32) as usize] = if bi_pred {
+                    sum as i16 // Keep at filter precision (value << shift1)
+                } else {
+                    ((sum + offset1) >> shift1).clamp(0, max_val) as i16
+                };
             }
         }
     } else if frac_x == 0 {
@@ -99,8 +114,11 @@ pub fn mc_luma(ref_frame: &DecodedFrame, mv: MotionVector, blk: &McBlock, pred: 
                     let sy = (int_y + j + k - 3).clamp(0, pic_h - 1);
                     sum += ref_plane[(sy * stride + sx) as usize] as i32 * coeff[k as usize] as i32;
                 }
-                pred[(j as u32 * w + i as u32) as usize] =
-                    ((sum + offset1) >> shift1).clamp(0, max_val) as i16;
+                pred[(j as u32 * w + i as u32) as usize] = if bi_pred {
+                    sum as i16
+                } else {
+                    ((sum + offset1) >> shift1).clamp(0, max_val) as i16
+                };
             }
         }
     } else {
@@ -124,17 +142,34 @@ pub fn mc_luma(ref_frame: &DecodedFrame, mv: MotionVector, blk: &McBlock, pred: 
 
         let coeff_v = &LUMA_FILTER[frac_y];
         let shift2 = 6i32;
-        let total_shift = shift1 + shift2;
-        let total_offset = 1i64 << (total_shift - 1);
-        for j in 0..h as i32 {
-            for i in 0..w as i32 {
-                let mut sum = 0i64;
-                for k in 0..8i32 {
-                    sum += tmp[((j + k) * tmp_w + i) as usize] as i64
-                        * coeff_v[k as usize] as i64;
+        if bi_pred {
+            // For bi-pred: output at intermediate precision (shift by shift2 only)
+            let offset2 = 1i64 << (shift2 - 1);
+            for j in 0..h as i32 {
+                for i in 0..w as i32 {
+                    let mut sum = 0i64;
+                    for k in 0..8i32 {
+                        sum += tmp[((j + k) * tmp_w + i) as usize] as i64
+                            * coeff_v[k as usize] as i64;
+                    }
+                    pred[(j as u32 * w + i as u32) as usize] =
+                        ((sum + offset2) >> shift2) as i16;
                 }
-                pred[(j as u32 * w + i as u32) as usize] =
-                    (((sum + total_offset) >> total_shift) as i32).clamp(0, max_val) as i16;
+            }
+        } else {
+            // For uni-pred: full shift to pixel values
+            let total_shift = shift1 + shift2;
+            let total_offset = 1i64 << (total_shift - 1);
+            for j in 0..h as i32 {
+                for i in 0..w as i32 {
+                    let mut sum = 0i64;
+                    for k in 0..8i32 {
+                        sum += tmp[((j + k) * tmp_w + i) as usize] as i64
+                            * coeff_v[k as usize] as i64;
+                    }
+                    pred[(j as u32 * w + i as u32) as usize] =
+                        (((sum + total_offset) >> total_shift) as i32).clamp(0, max_val) as i16;
+                }
             }
         }
     }
@@ -276,7 +311,11 @@ pub fn blend_uni(
     }
 }
 
-/// Blend bi-prediction samples: average of L0 and L1 prediction
+/// Blend bi-prediction samples from intermediate-precision inputs
+///
+/// Inputs are at intermediate precision (pixel << (14 - bit_depth)).
+/// Per H.265 8.5.3.3.4: output = Clip((pred0 + pred1 + offset) >> shift, bit_depth)
+/// where shift = 15 - bit_depth, offset = 1 << (shift - 1).
 pub fn blend_bi(
     pred_l0: &[i16],
     pred_l1: &[i16],
@@ -285,12 +324,14 @@ pub fn blend_bi(
     blk: &McBlock,
 ) {
     let max_val = (1i32 << blk.bit_depth) - 1;
+    let shift = 15 - blk.bit_depth as i32; // 7 for 8-bit
+    let offset = 1i32 << (shift - 1); // 64 for 8-bit
     for j in 0..blk.h {
         for i in 0..blk.w {
             let src_idx = (j * blk.w + i) as usize;
             let dst_idx = (blk.yp + j) as usize * plane_stride + (blk.xp + i) as usize;
             if src_idx < pred_l0.len() && src_idx < pred_l1.len() && dst_idx < plane.len() {
-                let val = ((pred_l0[src_idx] as i32 + pred_l1[src_idx] as i32 + 1) >> 1)
+                let val = ((pred_l0[src_idx] as i32 + pred_l1[src_idx] as i32 + offset) >> shift)
                     .clamp(0, max_val);
                 plane[dst_idx] = val as u16;
             }
@@ -352,7 +393,7 @@ mod tests {
             h: 4,
             bit_depth: 8,
         };
-        mc_luma(&frame, MotionVector::ZERO, &blk, &mut pred);
+        mc_luma(&frame, MotionVector::ZERO, &blk, &mut pred, false);
         assert_eq!(pred[0], 18); // (2,2) = 2*8+2
         assert_eq!(pred[5], 27); // (3,3) = 3*8+3
     }

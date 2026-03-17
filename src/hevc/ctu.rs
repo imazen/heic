@@ -2196,8 +2196,8 @@ impl<'a> SliceContext<'a> {
         let pred1 = &mut pred_l1_buf[..buf_size];
 
         if is_bi && let Some(r0) = ref_l0 && let Some(r1) = ref_l1 {
-            mc::mc_luma(r0, motion.mv[0], &blk, pred0);
-            mc::mc_luma(r1, motion.mv[1], &blk, pred1);
+            mc::mc_luma(r0, motion.mv[0], &blk, pred0, true);
+            mc::mc_luma(r1, motion.mv[1], &blk, pred1, true);
             mc::blend_bi(pred0, pred1, &mut frame.y_plane, frame.width as usize, &blk);
         } else {
             let (ref_frame, mv) = if motion.pred_flag[0] {
@@ -2206,7 +2206,7 @@ impl<'a> SliceContext<'a> {
                 (ref_l1, motion.mv[1])
             };
             if let Some(rf) = ref_frame {
-                mc::mc_luma(rf, mv, &blk, pred0);
+                mc::mc_luma(rf, mv, &blk, pred0, false);
                 mc::blend_uni(pred0, &mut frame.y_plane, frame.width as usize, &blk);
             }
         }
