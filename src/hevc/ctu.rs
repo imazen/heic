@@ -2189,19 +2189,16 @@ impl<'a> SliceContext<'a> {
 
         let is_bi = motion.pred_flag[0] && motion.pred_flag[1];
 
-        // Luma MC
+        // Luma MC — use stack buffers (max 64x64 = 4096 samples)
+        let mut pred_l0_buf = [0i16; 4096];
+        let mut pred_l1_buf = [0i16; 4096];
+        let pred0 = &mut pred_l0_buf[..buf_size];
+        let pred1 = &mut pred_l1_buf[..buf_size];
+
         if is_bi && let Some(r0) = ref_l0 && let Some(r1) = ref_l1 {
-            let mut pred0 = vec![0i16; buf_size];
-            let mut pred1 = vec![0i16; buf_size];
-            mc::mc_luma(r0, motion.mv[0], &blk, &mut pred0);
-            mc::mc_luma(r1, motion.mv[1], &blk, &mut pred1);
-            mc::blend_bi(
-                &pred0,
-                &pred1,
-                &mut frame.y_plane,
-                frame.width as usize,
-                &blk,
-            );
+            mc::mc_luma(r0, motion.mv[0], &blk, pred0);
+            mc::mc_luma(r1, motion.mv[1], &blk, pred1);
+            mc::blend_bi(pred0, pred1, &mut frame.y_plane, frame.width as usize, &blk);
         } else {
             let (ref_frame, mv) = if motion.pred_flag[0] {
                 (ref_l0, motion.mv[0])
@@ -2209,9 +2206,8 @@ impl<'a> SliceContext<'a> {
                 (ref_l1, motion.mv[1])
             };
             if let Some(rf) = ref_frame {
-                let mut pred = vec![0i16; buf_size];
-                mc::mc_luma(rf, mv, &blk, &mut pred);
-                mc::blend_uni(&pred, &mut frame.y_plane, frame.width as usize, &blk);
+                mc::mc_luma(rf, mv, &blk, pred0);
+                mc::blend_uni(pred0, &mut frame.y_plane, frame.width as usize, &blk);
             }
         }
 
@@ -2235,6 +2231,8 @@ impl<'a> SliceContext<'a> {
                 bit_depth: self.sps.bit_depth_c(),
             };
             let cbuf_size = (cpw * cph) as usize;
+            let mut cpred0 = [0i16; 1024];
+            let mut cpred1 = [0i16; 1024];
 
             for c_idx in 0..2u8 {
                 let mc_one_list = |rf: &DecodedFrame, mv: MotionVector, pred: &mut [i16]| {
@@ -2254,11 +2252,9 @@ impl<'a> SliceContext<'a> {
 
                 if is_bi {
                     if let (Some(r0), Some(r1)) = (ref_l0, ref_l1) {
-                        let mut pred0 = vec![0i16; cbuf_size];
-                        let mut pred1 = vec![0i16; cbuf_size];
-                        mc_one_list(r0, motion.mv[0], &mut pred0);
-                        mc_one_list(r1, motion.mv[1], &mut pred1);
-                        mc::blend_bi(&pred0, &pred1, plane_mut, plane_stride, &cblk);
+                        mc_one_list(r0, motion.mv[0], &mut cpred0[..cbuf_size]);
+                        mc_one_list(r1, motion.mv[1], &mut cpred1[..cbuf_size]);
+                        mc::blend_bi(&cpred0[..cbuf_size], &cpred1[..cbuf_size], plane_mut, plane_stride, &cblk);
                     }
                 } else {
                     let (rf, mv) = if motion.pred_flag[0] {
@@ -2267,9 +2263,8 @@ impl<'a> SliceContext<'a> {
                         (ref_l1, motion.mv[1])
                     };
                     if let Some(rf) = rf {
-                        let mut pred = vec![0i16; cbuf_size];
-                        mc_one_list(rf, mv, &mut pred);
-                        mc::blend_uni(&pred, plane_mut, plane_stride, &cblk);
+                        mc_one_list(rf, mv, &mut cpred0[..cbuf_size]);
+                        mc::blend_uni(&cpred0[..cbuf_size], plane_mut, plane_stride, &cblk);
                     }
                 }
             }

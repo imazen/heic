@@ -166,8 +166,6 @@ pub struct CabacDecoder<'a> {
     bits_needed: i32,
     /// Bin counter for debug tracing
     bin_counter: u32,
-    /// Per-bin trace counter (0 = disabled, >0 = log bins)
-    pub bin_trace_count: u32,
 }
 
 #[allow(dead_code)]
@@ -201,7 +199,6 @@ impl<'a> CabacDecoder<'a> {
             value: 0,
             bits_needed: 8,
             bin_counter: 0,
-            bin_trace_count: 0,
         };
 
         // Initialize value (matching libde265 exactly)
@@ -291,17 +288,6 @@ impl<'a> CabacDecoder<'a> {
         // Renormalize
         self.renormalize()?;
 
-        #[cfg(feature = "std")]
-        if self.bin_trace_count > 0 {
-            let bin_num = 1000 - self.bin_trace_count;
-            self.bin_trace_count -= 1;
-            eprintln!(
-                "B{} c r={} v={} s={} m={} b={} bp={}",
-                bin_num,
-                self.range, self.value, ctx.state, ctx.mps, bin_val, self.byte_pos
-            );
-        }
-
         Ok(bin_val)
     }
 
@@ -328,16 +314,6 @@ impl<'a> CabacDecoder<'a> {
         } else {
             0
         };
-
-        #[cfg(feature = "std")]
-        if self.bin_trace_count > 0 {
-            let bin_num = 1000 - self.bin_trace_count;
-            self.bin_trace_count -= 1;
-            eprintln!(
-                "B{} x r={} b={} bp={} bn={}",
-                bin_num, self.range, bin_val, self.byte_pos, self.bits_needed
-            );
-        }
 
         Ok(bin_val)
     }
@@ -371,16 +347,6 @@ impl<'a> CabacDecoder<'a> {
         let max_val = (1u32 << n) - 1;
         let result = (self.value / scaled_range).min(max_val);
         self.value -= result * scaled_range;
-
-        #[cfg(feature = "std")]
-        if self.bin_trace_count > 0 {
-            let bin_num = 1000 - self.bin_trace_count;
-            self.bin_trace_count = self.bin_trace_count.saturating_sub(n as u32);
-            eprintln!(
-                "B{} xN({n}) r={} b={result} bp={} bn={}",
-                bin_num, self.range, self.byte_pos, self.bits_needed
-            );
-        }
 
         Ok(result)
     }

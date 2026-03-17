@@ -238,18 +238,13 @@ pub struct VideoDecoder {
 }
 
 /// State for a picture being decoded across multiple slices
-#[allow(dead_code)]
 struct CurrentPicture {
     frame: DecodedFrame,
     poc: i32,
     slice_type: slice::SliceType,
-    /// Accumulated slice contexts for deblocking/SAO
+    /// Accumulated motion/pred mode from all slices
     pred_mode_map: Vec<slice::PredMode>,
     mv_info: Vec<inter::PbMotion>,
-    cbf_map: Vec<bool>,
-    cbf_map_stride: u32,
-    pu_stride: u32,
-    min_pu_size: u32,
 }
 
 impl VideoDecoder {
@@ -390,10 +385,6 @@ impl VideoDecoder {
                 slice_type: slice_header.slice_type,
                 pred_mode_map: alloc::vec![slice::PredMode::Intra; pu_count],
                 mv_info: alloc::vec![inter::PbMotion::UNAVAILABLE; pu_count],
-                cbf_map: alloc::vec![false; (sps.pic_width_in_luma_samples.div_ceil(4) * sps.pic_height_in_luma_samples.div_ceil(4)) as usize],
-                cbf_map_stride: sps.pic_width_in_luma_samples.div_ceil(4),
-                pu_stride,
-                min_pu_size: min_pu,
             });
         } else {
             // Continuation slice: use current picture's POC
@@ -430,13 +421,27 @@ impl VideoDecoder {
             RefPicLists::default()
         };
 
-        // Collect reference frames from DPB
+        // Collect only the REFERENCED frames from DPB (avoid cloning unused slots)
         let ref_frames: Vec<Option<DecodedFrame>> = if !slice_header.slice_type.is_intra() {
             let max_dpb_slot = self.dpb.capacity();
+            // Determine which DPB slots are actually referenced
+            let mut needed = [false; 16]; // MAX_DPB_SIZE
+            for list in 0..2 {
+                for i in 0..ref_pic_lists.num_ref_idx_active[list] as usize {
+                    let di = ref_pic_lists.dpb_index[list][i];
+                    if di >= 0 && (di as usize) < needed.len() {
+                        needed[di as usize] = true;
+                    }
+                }
+            }
             let mut frames = Vec::with_capacity(max_dpb_slot);
             for slot in 0..max_dpb_slot {
-                if let Some(entry) = self.dpb.get(slot) {
-                    frames.push(Some(clone_frame_for_ref(&entry.frame)));
+                if slot < needed.len() && needed[slot] {
+                    if let Some(entry) = self.dpb.get(slot) {
+                        frames.push(Some(clone_frame_for_ref(&entry.frame)));
+                    } else {
+                        frames.push(None);
+                    }
                 } else {
                     frames.push(None);
                 }
