@@ -522,6 +522,22 @@ impl VideoDecoder {
                 eprintln!("SLICE_DATA: type={:?} data_offset={} first_bytes={:02x?} total_len={} entry_points={:?}",
                     slice_header.slice_type, data_offset, first_bytes, slice_data.len(),
                     slice_header.entry_point_offsets);
+                eprintln!("SLICE_QP: {} cabac_init_flag={} sao_luma={} sao_chroma={}",
+                    slice_header.slice_qp_y, slice_header.cabac_init_flag,
+                    slice_header.slice_sao_luma_flag, slice_header.slice_sao_chroma_flag);
+                // Print context checksum matching dec265's CTU-CK format
+                let mut cksum: u64 = 0;
+                for c in ctx.ctx.iter() {
+                    let (s, m) = c.get_state();
+                    cksum += s as u64 * 3 + m as u64;
+                }
+                let (bp, _, _) = ctx.cabac.get_position();
+                eprintln!("CTX-INIT: bp={} ck={} (dec265 CTU-CK should match)", bp, cksum);
+                // Print specific context states for debugging
+                let (s154, m154) = ctx.ctx[154].get_state();
+                let (s155, m155) = ctx.ctx[155].get_state();
+                eprintln!("CTX[154] SAO_MERGE: s={} m={}", s154, m154);
+                eprintln!("CTX[155] SAO_TYPE: s={} m={}", s155, m155);
             }
         }
 

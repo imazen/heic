@@ -13,6 +13,9 @@ use core::sync::atomic::{AtomicU32, Ordering};
 /// Set to true to enable verbose debug tracing to stderr
 const DEBUG_TRACE: bool = false;
 
+/// Set to true to enable WPP-specific debug tracing
+const WPP_TRACE: bool = false;
+
 /// Debug print macro gated behind DEBUG_TRACE const
 macro_rules! debug_trace {
     ($($arg:tt)*) => {
@@ -47,7 +50,7 @@ type Result<T> = core::result::Result<T, HevcError>;
 
 /// Global SE counter for syntax element tracing
 pub static SE_COUNTER: AtomicU32 = AtomicU32::new(0);
-pub const SE_TRACE_LIMIT: u32 = 0;
+pub const SE_TRACE_LIMIT: u32 = 50;
 
 /// Log a syntax element decode for differential testing.
 /// Set SE_TRACE_LIMIT > 0 to enable tracing.
@@ -180,6 +183,9 @@ pub struct SliceContext<'a> {
     residual_buf: [i16; 1024],
     /// Reusable scaling matrix buffer
     scaling_buf: [u8; 1024],
+    /// Rice parameter initialization states (H.265 StatCoeff[0..3])
+    /// Persists across TUs within a substream; saved/restored for WPP
+    pub stat_coeff: [u8; 4],
 
     // -- Inter prediction state --
     /// Prediction mode map at min_pu_size granularity (Intra/Inter/Skip)
@@ -365,6 +371,7 @@ impl<'a> SliceContext<'a> {
             sao_map: SaoMap::new(sps.pic_width_in_ctbs(), sps.pic_height_in_ctbs()),
             residual_buf: [0i16; 1024],
             scaling_buf: [16u8; 1024],
+            stat_coeff: [0u8; 4],
             pred_mode_map: vec![PredMode::Intra; pu_map_size],
             mv_info: vec![PbMotion::UNAVAILABLE; pu_map_size],
             cbf_map: vec![
@@ -402,16 +409,11 @@ impl<'a> SliceContext<'a> {
         let mut wpp_saved_ctx: Option<[super::cabac::ContextModel; context::NUM_CONTEXTS]> = None;
 
         // WPP: compute absolute byte offsets for each substream entry point
-        // Entry point offsets are relative: substream N starts at sum(offsets[0..N]) bytes
-        // from the end of the first substream (which starts at byte 0 of slice data)
+        // Entry point offsets specify the length of each substream in bytes.
+        // substream 0 starts at byte 0, substream 1 starts at entry_point_offsets[0],
+        // substream 2 starts at entry_point_offsets[0] + entry_point_offsets[1], etc.
         let mut wpp_entry_byte_offsets = Vec::new();
         if wpp && !self.header.entry_point_offsets.is_empty() {
-            // The first substream starts at byte 0 of slice data.
-            // After the first substream ends, the next substream starts at the first
-            // entry point offset. We need to track absolute positions.
-            // However, we can't know the first substream's end from the header alone.
-            // Instead, after decoding each row, we use the entry_point_offset to jump
-            // to the correct byte position for the next substream.
             let mut cumulative = 0u32;
             for &offset in &self.header.entry_point_offsets {
                 cumulative += offset;
@@ -419,6 +421,15 @@ impl<'a> SliceContext<'a> {
             }
         }
         let mut wpp_substream_idx = 0usize;
+
+        // WPP: saved StatCoeff (rice parameter init states) from CTB column 1
+        let mut wpp_saved_stat_coeff: Option<[u8; 4]> = None;
+
+        #[cfg(feature = "std")]
+        if WPP_TRACE && wpp {
+            eprintln!("WPP: slice type={:?} entry_point_offsets={:?} cumulative={:?}",
+                self.header.slice_type, self.header.entry_point_offsets, wpp_entry_byte_offsets);
+        }
 
         loop {
             // WPP: at start of each new row (ctb_x==0, ctb_y>0), restore saved context
@@ -428,14 +439,37 @@ impl<'a> SliceContext<'a> {
                 && self.ctb_y > 0
                 && pic_width_in_ctbs > 1
             {
+                #[cfg(feature = "std")]
+                let pre_seek_pos = {
+                    let (bp, _, _) = self.cabac.get_position();
+                    bp
+                };
+
                 if let Some(saved) = wpp_saved_ctx {
                     self.ctx = saved;
+                }
+                // Restore StatCoeff (rice parameter init states) for WPP
+                if let Some(saved_sc) = wpp_saved_stat_coeff {
+                    self.stat_coeff = saved_sc;
+                } else {
+                    // No saved state: reset to 0 per spec
+                    self.stat_coeff = [0; 4];
                 }
                 // Reinitialize CABAC at the substream entry point
                 if wpp_substream_idx < wpp_entry_byte_offsets.len() {
                     let target_byte = wpp_entry_byte_offsets[wpp_substream_idx] as usize;
                     self.cabac.seek_to(target_byte);
                     self.cabac.reinit();
+                    #[cfg(feature = "std")]
+                    if WPP_TRACE {
+                        let (post_pos, _, _) = self.cabac.get_position();
+                        let (r, v, bn) = self.cabac.get_state_extended();
+                        eprintln!("WPP: row {} seek {}→{} (entry={}) after_reinit_pos={} cabac(r={},v={},bn={})",
+                            self.ctb_y, pre_seek_pos, target_byte, target_byte, post_pos, r, v, bn);
+                        // Print first few context model states
+                        let ctx_sum: u32 = self.ctx.iter().map(|c| c.get_state().0 as u32).sum();
+                        eprintln!("WPP: row {} ctx_checksum={}", self.ctb_y, ctx_sum);
+                    }
                     wpp_substream_idx += 1;
                 }
             }
@@ -467,15 +501,24 @@ impl<'a> SliceContext<'a> {
             self.decode_ctu(x_ctb, y_ctb, frame)?;
             ctu_count += 1;
 
+            // WPP: save context models and StatCoeff after decoding CTB column 1
+            // Per H.265 9.3.2, storage happens after the CTU is decoded but before
+            // end_of_slice_segment_flag, matching libde265's ordering.
+            if wpp && self.ctb_x == 1 && self.ctb_y < pic_height_in_ctbs - 1 {
+                wpp_saved_ctx = Some(self.ctx);
+                wpp_saved_stat_coeff = Some(self.stat_coeff);
+                #[cfg(feature = "std")]
+                if WPP_TRACE {
+                    let (bp, _, _) = self.cabac.get_position();
+                    let ctx_sum: u32 = self.ctx.iter().map(|c| c.get_state().0 as u32).sum();
+                    eprintln!("WPP: save ctx at ({},{}) byte={} ctx_checksum={}",
+                        self.ctb_x, self.ctb_y, bp, ctx_sum);
+                }
+            }
+
             // Check for end of slice segment
             let end_of_slice = self.cabac.decode_terminate()?;
             se_trace("end_of_slice", end_of_slice as i64, &self.cabac);
-
-            // WPP: save context models after CTB column 1
-            // (must be after decode_terminate per H.265 9.3.2.6)
-            if wpp && self.ctb_x == 1 && self.ctb_y < pic_height_in_ctbs - 1 {
-                wpp_saved_ctx = Some(self.ctx);
-            }
 
             if end_of_slice != 0 {
                 debug_trace!(
@@ -497,10 +540,24 @@ impl<'a> SliceContext<'a> {
                 self.ctb_y += 1;
             }
 
-            // WPP: at row boundaries, decode end_of_sub_stream and reinit CABAC
+            // WPP: at row boundaries, decode end_of_subset_one_bit and byte-align
+            // This consumes the substream termination syntax before the next row
+            // starts fresh from the entry point.
             if wpp && self.ctb_y != prev_ctb_y {
+                #[cfg(feature = "std")]
+                let pre_eoss_pos = {
+                    let (bp, _, _) = self.cabac.get_position();
+                    bp
+                };
                 let _eoss = self.cabac.decode_terminate()?;
-                self.cabac.reinit();
+                #[cfg(feature = "std")]
+                if WPP_TRACE {
+                    let (bp, _, _) = self.cabac.get_position();
+                    eprintln!("WPP: end_of_subset at row boundary (row {} → {}): eoss={} byte {}→{}",
+                        prev_ctb_y, self.ctb_y, _eoss, pre_eoss_pos, bp);
+                }
+                // Note: no reinit here — the seek_to + reinit at the top of the
+                // loop handles CABAC reinitialization for the next substream.
             }
 
             // Check for end of picture
@@ -2347,20 +2404,22 @@ impl<'a> SliceContext<'a> {
         Ok(val)
     }
 
-    /// Derive context increment for cu_skip_flag from neighbors
+    /// Derive context increment for cu_skip_flag from neighbors (H.265 9.3.4.2.2)
+    /// Uses check_CTB_available logic: neighbor must be in picture, same slice, same tile
     fn derive_cu_skip_ctx(&self, x0: u32, y0: u32) -> usize {
         let mut ctx_inc = 0;
-        // Left neighbor
-        if x0 > 0 && self.get_pred_mode_at(x0 - 1, y0) == PredMode::Skip {
+        // Left neighbor: available if in picture bounds and same slice/tile
+        if self.is_neighbor_available(x0 as i32 - 1, y0 as i32)
+            && self.get_pred_mode_at(x0 - 1, y0) == PredMode::Skip
+        {
             ctx_inc += 1;
         }
-        // Above neighbor
-        if y0 > 0 {
-            let ctb_size = self.sps.ctb_size();
-            let ctb_y_start = (y0 / ctb_size) * ctb_size;
-            if y0 > ctb_y_start && self.get_pred_mode_at(x0, y0 - 1) == PredMode::Skip {
-                ctx_inc += 1;
-            }
+        // Above neighbor: available if in picture bounds and same slice/tile
+        // NOT restricted to same CTB row — the above CTB row is already decoded
+        if self.is_neighbor_available(x0 as i32, y0 as i32 - 1)
+            && self.get_pred_mode_at(x0, y0 - 1) == PredMode::Skip
+        {
+            ctx_inc += 1;
         }
         ctx_inc
     }

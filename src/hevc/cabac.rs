@@ -313,8 +313,8 @@ impl<'a> CabacDecoder<'a> {
             let limit = BIN_TRACE_LIMIT.load(core::sync::atomic::Ordering::Relaxed);
             if count < limit {
                 // Log POST-decode range/value to match dec265's format
-                eprintln!("B{} c r={} v={} s={} m={} b={} bp={}",
-                    count, self.range, self.value, pre_state, pre_mps, bin_val, self.byte_pos);
+                eprintln!("B{} c r={} v={} s={} m={} b={} bp={} bn={}",
+                    count, self.range, self.value, pre_state, pre_mps, bin_val, self.byte_pos, self.bits_needed);
             }
         }
 
@@ -350,8 +350,8 @@ impl<'a> CabacDecoder<'a> {
             let count = BIN_TRACE_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             let limit = BIN_TRACE_LIMIT.load(core::sync::atomic::Ordering::Relaxed);
             if count < limit {
-                eprintln!("B{} x r={} b={} bp={}",
-                    count, self.range, bin_val, self.byte_pos);
+                eprintln!("B{} x r={} b={} bp={} v={} bn={}",
+                    count, self.range, bin_val, self.byte_pos, self.value, self.bits_needed);
             }
         }
 
