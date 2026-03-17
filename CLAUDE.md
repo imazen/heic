@@ -199,11 +199,12 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 - Inter prediction (P/B slices) on `inter-prediction` branch:
   - Full pipeline: syntax parsing, merge/AMVP/TMVP, scalar MC, DPB, VideoDecoder
   - Conformance: 48/48 vectors decode without crash, 1 pixel-exact (I-only)
-  - Quality: ~18dB PSNR on inter frames (P-frame refs I-frame: 35% exact, max_diff=222)
-  - Fixed: CBF tracking for deblocking bS=2, DST/DCT for inter 4x4 TUs, chroma MC shifts (4→6), skip/no-residual CU boundary marking
+  - P-frame quality (girlshy, WPP stream, vs ffmpeg display-order ref): row 0 = 96% pixel-exact, rows 1-3 degraded by WPP substream handling
+  - Fixed: CBF tracking for deblocking bS=2, DST/DCT for inter 4x4 TUs, chroma MC shifts (4→6), skip/no-residual CU boundary marking, WPP entry point offsets + CABAC reinit at substream boundaries
   - MC filter verified correct via unit tests (constant ref, gradient, bi-pred)
-  - Investigation: errors appear at PU boundaries and accumulate across reference chain
-  - Primary suspect: CABAC byte position divergence — our first P-frame CTU consumes ~230 bytes vs dec265's ~30 bytes, despite I-frame being pixel-exact. Possible issue in slice data offset calculation or CABAC byte tracking.
+  - Slice data offset verified correct (data_offset=12 for girlshy P-frame, matches dec265)
+  - IMPORTANT: dec265 reference YUV is in DECODE ORDER, not display order. Use ffmpeg to generate display-order reference for comparison. Many apparent "18dB" quality issues were actually comparing wrong frames.
+  - Remaining issues: (1) WPP rows 1-3 still have errors despite correct CABAC reinit and context save/restore — possibly context save timing or end_of_slice interaction at WPP boundaries. (2) MERGE_A (no WPP) B-frames show genuine ~18dB quality issue — something in B-frame CABAC syntax parsing.
   - SSIMULACRA2: I-frame 100.00, MERGE_A worst -662, AMVP_A worst -163
   - Deferred: SIMD MC (Phase 7), weighted prediction application
 - 4:4:4 chroma: decodes correctly (61.9dB), but no SIMD color conversion path (uses scalar)

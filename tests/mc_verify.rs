@@ -122,6 +122,17 @@ fn verify_mc_first_pu() {
         eprintln!("  ref[{i}]: pixel(0,0) = {}", ref_data[i * frame_size]);
     }
 
+    // Check key pixel positions across CTU rows for frame 4
+    eprintln!("\n=== Frame 4 key pixels ===");
+    let stride4 = pframe.width as usize;
+    let positions = [(0u32,0u32), (0,64), (0,128), (0,192), (100,0), (100,64), (100,128)];
+    for &(x, y) in &positions {
+        if (y as usize) < pframe.height as usize && (x as usize) < stride4 {
+            let v = pframe.y_plane[y as usize * stride4 + x as usize];
+            eprintln!("  ({x},{y}): ours={v}");
+        }
+    }
+
     // First PU: (0,0) 32x32, MV=(-27,-52) from L0 (I-frame)
     eprintln!("\n=== Manual MC verification: PU (0,0) 32x32, MV=(-27,-52) ===");
     let mv_x: i16 = -27;

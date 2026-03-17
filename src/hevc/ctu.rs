@@ -434,11 +434,6 @@ impl<'a> SliceContext<'a> {
                 // Reinitialize CABAC at the substream entry point
                 if wpp_substream_idx < wpp_entry_byte_offsets.len() {
                     let target_byte = wpp_entry_byte_offsets[wpp_substream_idx] as usize;
-                    #[cfg(feature = "std")]
-                    if self.mv_trace {
-                        eprintln!("WPP_REINIT: row={} substream={} seek_to={} (was {})",
-                            self.ctb_y, wpp_substream_idx, target_byte, self.cabac.get_position().0);
-                    }
                     self.cabac.seek_to(target_byte);
                     self.cabac.reinit();
                     wpp_substream_idx += 1;
@@ -472,14 +467,15 @@ impl<'a> SliceContext<'a> {
             self.decode_ctu(x_ctb, y_ctb, frame)?;
             ctu_count += 1;
 
-            // WPP: save context models after CTB column 1
-            if wpp && self.ctb_x == 1 && self.ctb_y < pic_height_in_ctbs - 1 {
-                wpp_saved_ctx = Some(self.ctx);
-            }
-
             // Check for end of slice segment
             let end_of_slice = self.cabac.decode_terminate()?;
             se_trace("end_of_slice", end_of_slice as i64, &self.cabac);
+
+            // WPP: save context models after CTB column 1
+            // (must be after decode_terminate per H.265 9.3.2.6)
+            if wpp && self.ctb_x == 1 && self.ctb_y < pic_height_in_ctbs - 1 {
+                wpp_saved_ctx = Some(self.ctx);
+            }
 
             if end_of_slice != 0 {
                 debug_trace!(

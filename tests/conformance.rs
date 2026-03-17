@@ -111,23 +111,35 @@ fn ensure_reference_yuv(name: &str, bitstream: &Path) -> Option<PathBuf> {
         }
     }
 
-    if !Path::new(DEC265).exists() {
-        eprintln!("  dec265 not found, cannot generate reference");
-        return None;
-    }
-
-    eprintln!("  Generating reference YUV with dec265...");
-    let status = Command::new(DEC265)
+    // Use ffmpeg to generate display-ordered YUV reference
+    // (dec265 -o outputs in decode order, not display order!)
+    eprintln!("  Generating reference YUV with ffmpeg (display order)...");
+    let status = Command::new("ffmpeg")
+        .args(["-i"])
         .arg(bitstream)
-        .args(["-o", ref_path.to_str()?])
-        .arg("--quiet")
+        .args(["-pix_fmt", "yuv420p", "-f", "rawvideo", "-y"])
+        .arg(&ref_path)
+        .args(["-loglevel", "error"])
         .status()
         .ok()?;
 
     if status.success() && ref_path.exists() {
         Some(ref_path)
     } else {
-        eprintln!("  dec265 failed for {name}");
+        // Fallback to dec265
+        if Path::new(DEC265).exists() {
+            eprintln!("  ffmpeg failed, trying dec265 (WARNING: decode order)...");
+            let status = Command::new(DEC265)
+                .arg(bitstream)
+                .args(["-o", ref_path.to_str()?])
+                .arg("--quiet")
+                .status()
+                .ok()?;
+            if status.success() && ref_path.exists() {
+                return Some(ref_path);
+            }
+        }
+        eprintln!("  Failed to generate reference for {name}");
         None
     }
 }
@@ -363,12 +375,15 @@ fn girlshy() {
     eprintln!("\n=== girlshy ===");
     eprintln!("  {width}x{height}, {frame_types}");
 
-    // Generate reference YUV
-    let ref_path = PathBuf::from("/tmp/girlshy_ref.yuv");
+    // Generate reference YUV in display order using ffmpeg
+    let ref_path = PathBuf::from("/tmp/girlshy_ref_display.yuv");
     if !ref_path.exists() {
-        let _ = Command::new(DEC265)
+        let _ = Command::new("ffmpeg")
+            .args(["-i"])
             .arg(bitstream)
-            .args(["-o", "/tmp/girlshy_ref.yuv", "--quiet"])
+            .args(["-pix_fmt", "yuv420p", "-f", "rawvideo", "-y"])
+            .arg(&ref_path)
+            .args(["-loglevel", "error"])
             .status();
     }
 
