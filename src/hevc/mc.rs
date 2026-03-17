@@ -427,6 +427,63 @@ mod tests {
         assert_eq!(pred[5], 27); // (3,3) = 3*8+3
     }
 
+    /// Test quarter-pel vertical filtering against hand-calculated value.
+    /// Uses a constant reference (all pixels = 100) where output should be exactly 100.
+    #[test]
+    fn test_mc_luma_vpel_constant() {
+        let mut frame = DecodedFrame::with_params(16, 16, 8, 1);
+        for p in &mut frame.y_plane { *p = 100; }
+        let mut pred = vec![0i16; 4 * 4];
+        let blk = McBlock { xp: 4, yp: 4, w: 4, h: 4, bit_depth: 8 };
+        // MV = (0, 1) quarter-pel → frac_y=1, int_y=4
+        mc_luma(&frame, MotionVector { x: 0, y: 1 }, &blk, &mut pred, false);
+        // All pixels should be 100 (constant input)
+        for &v in &pred { assert_eq!(v, 100, "constant ref should give exact value"); }
+    }
+
+    /// Test quarter-pel H filter with a known gradient.
+    #[test]
+    fn test_mc_luma_hpel_gradient() {
+        let mut frame = DecodedFrame::with_params(16, 16, 8, 1);
+        // Fill with column gradient: pixel = x * 16
+        for y in 0..16u32 {
+            for x in 0..16u32 {
+                frame.y_plane[(y * 16 + x) as usize] = (x * 16) as u16;
+            }
+        }
+        let mut pred = vec![0i16; 1];
+        let blk = McBlock { xp: 4, yp: 4, w: 1, h: 1, bit_depth: 8 };
+        // MV = (0, 0) → should give pixel at (4,4) = 64
+        mc_luma(&frame, MotionVector::ZERO, &blk, &mut pred, false);
+        assert_eq!(pred[0], 64);
+        // MV = (2, 0) → half-pel horizontal at (4.5, 4)
+        mc_luma(&frame, MotionVector { x: 2, y: 0 }, &blk, &mut pred, false);
+        // Half-pel of gradient: should be close to average of 64 and 80 = 72
+        // Exact: filter[-1,4,-11,40,40,-11,4,-1] applied to [16,32,48,64,80,96,112,128]
+        let expected = (-1*16 + 4*32 - 11*48 + 40*64 + 40*80 - 11*96 + 4*112 - 1*128 + 32) >> 6;
+        assert_eq!(pred[0], expected as i16, "half-pel horizontal");
+    }
+
+    /// Test bi-pred blending with known intermediate values
+    #[test]
+    fn test_mc_luma_bipred_blend() {
+        let mut frame = DecodedFrame::with_params(16, 16, 8, 1);
+        for p in &mut frame.y_plane { *p = 100; }
+        let mut pred0 = vec![0i16; 1];
+        let mut pred1 = vec![0i16; 1];
+        let blk = McBlock { xp: 4, yp: 4, w: 1, h: 1, bit_depth: 8 };
+        // Integer position bi-pred: both predict same pixel
+        mc_luma(&frame, MotionVector::ZERO, &blk, &mut pred0, true);
+        mc_luma(&frame, MotionVector::ZERO, &blk, &mut pred1, true);
+        // Intermediate: 100 << 6 = 6400
+        assert_eq!(pred0[0], 6400);
+        assert_eq!(pred1[0], 6400);
+        // Blend: (6400 + 6400 + 64) >> 7 = 12864 >> 7 = 100
+        let mut plane = vec![0u16; 256];
+        blend_bi(&pred0, &pred1, &mut plane, 16, &blk);
+        assert_eq!(plane[4 * 16 + 4], 100);
+    }
+
     #[test]
     fn test_blend_uni() {
         let pred = [100i16, 200, 50, 150];
