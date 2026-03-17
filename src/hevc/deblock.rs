@@ -90,26 +90,47 @@ fn compute_bs(x: u32, y: u32, vertical: bool, inter_ctx: &Option<&InterDeblockCt
     let mv_p = get_mv(px, py);
     let mv_q = get_mv(qx, qy);
 
-    // Different number of active predictions
+    // H.265 8.7.2.4.5, Table 8-19: boundary strength for inter prediction
     let count_p = mv_p.pred_flag[0] as u8 + mv_p.pred_flag[1] as u8;
     let count_q = mv_q.pred_flag[0] as u8 + mv_q.pred_flag[1] as u8;
+
+    // Different number of motion vectors
     if count_p != count_q {
         return 1;
     }
 
-    // Different reference indices
-    if mv_p.ref_idx != mv_q.ref_idx {
-        return 1;
-    }
+    // Helper: check if MV difference >= 4 quarter-pel (1 integer sample)
+    let mv_diff_ge4 = |a: super::inter::MotionVector, b: super::inter::MotionVector| -> bool {
+        let dx = (a.x as i32 - b.x as i32).abs();
+        let dy = (a.y as i32 - b.y as i32).abs();
+        dx >= 4 || dy >= 4
+    };
 
-    // MV difference >= 4 quarter-pel (1 integer pel) in any component
-    for list in 0..2 {
-        if mv_p.pred_flag[list] {
-            let dx = (mv_p.mv[list].x as i32 - mv_q.mv[list].x as i32).abs();
-            let dy = (mv_p.mv[list].y as i32 - mv_q.mv[list].y as i32).abs();
-            if dx >= 4 || dy >= 4 {
-                return 1;
+    if count_p == 2 && count_q == 2 {
+        // Both bi-predicted: check same-list AND cross-list (Table 8-19)
+        // bS=1 if BOTH conditions are true (neither comparison gives "same")
+        let same_list_diff =
+            mv_p.ref_idx[0] != mv_q.ref_idx[0] || mv_diff_ge4(mv_p.mv[0], mv_q.mv[0])
+            || mv_p.ref_idx[1] != mv_q.ref_idx[1] || mv_diff_ge4(mv_p.mv[1], mv_q.mv[1]);
+        let cross_list_diff =
+            mv_p.ref_idx[0] != mv_q.ref_idx[1] || mv_diff_ge4(mv_p.mv[0], mv_q.mv[1])
+            || mv_p.ref_idx[1] != mv_q.ref_idx[0] || mv_diff_ge4(mv_p.mv[1], mv_q.mv[0]);
+        if same_list_diff && cross_list_diff {
+            return 1;
+        }
+    } else {
+        // Both uni-predicted (or both have same count of 1)
+        // Check: different reference pictures or MV difference >= 4
+        for list in 0..2 {
+            if mv_p.pred_flag[list] && mv_q.pred_flag[list] {
+                if mv_p.ref_idx[list] != mv_q.ref_idx[list] || mv_diff_ge4(mv_p.mv[list], mv_q.mv[list]) {
+                    return 1;
+                }
             }
+        }
+        // Also check if they use different lists (e.g., P uses L0 only, Q uses L1 only)
+        if count_p == 1 && count_q == 1 && mv_p.pred_flag[0] != mv_q.pred_flag[0] {
+            return 1; // Different prediction directions
         }
     }
 
