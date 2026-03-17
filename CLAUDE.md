@@ -199,9 +199,12 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 - Inter prediction (P/B slices) on `inter-prediction` branch:
   - Full pipeline: syntax parsing, merge/AMVP/TMVP, scalar MC, DPB, VideoDecoder
   - Conformance: 48/48 vectors decode without crash, 1 pixel-exact (I-only)
-  - Quality: ~14-17dB on early inter frames, UNINIT on some B-frames
-  - Root causes identified: CABAC init tables partially fixed, intra/inter TU prediction fixed
-  - Remaining: proper cbf_luma conditional for inter, B-frame DPB ordering, CABAC context selection accuracy
+  - Quality: ~18dB PSNR on inter frames (P-frame refs I-frame: 35% exact, max_diff=222)
+  - Fixed: CBF tracking for deblocking bS=2, DST/DCT for inter 4x4 TUs, chroma MC shifts (4→6), skip/no-residual CU boundary marking
+  - MC filter verified correct via unit tests (constant ref, gradient, bi-pred)
+  - Investigation: errors appear at PU boundaries and accumulate across reference chain
+  - Primary suspect: CABAC byte position divergence — our first P-frame CTU consumes ~230 bytes vs dec265's ~30 bytes, despite I-frame being pixel-exact. Possible issue in slice data offset calculation or CABAC byte tracking.
+  - SSIMULACRA2: I-frame 100.00, MERGE_A worst -662, AMVP_A worst -163
   - Deferred: SIMD MC (Phase 7), weighted prediction application
 - 4:4:4 chroma: decodes correctly (61.9dB), but no SIMD color conversion path (uses scalar)
 - Dependent slice segments: not supported (2 vectors fail)
