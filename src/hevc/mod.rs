@@ -251,10 +251,26 @@ struct CurrentPicture {
     frame: DecodedFrame,
     poc: i32,
     slice_type: slice::SliceType,
-    /// Accumulated motion/pred mode from all slices
-    pred_mode_map: Vec<slice::PredMode>,
-    mv_info: Vec<inter::PbMotion>,
+    /// Picture-level maps persisted across slices (ct_depth, intra modes, pred modes, etc.)
+    maps: Option<ctu::PictureMaps>,
     /// Reference picture list POCs for this picture's slice (needed for collocated MV derivation)
+    ref_poc: [[i32; inter::MAX_NUM_REF_PICS]; 2],
+    /// Deferred loop filter parameters (applied when picture is complete)
+    loop_filter: Option<LoopFilterParams>,
+}
+
+/// Parameters needed to apply loop filters after all slices are decoded
+struct LoopFilterParams {
+    deblocking_disabled: bool,
+    beta_offset: i32,
+    tc_offset: i32,
+    cb_qp_offset: i32,
+    cr_qp_offset: i32,
+    sao_luma: bool,
+    sao_chroma: bool,
+    ctb_size: u32,
+    is_intra_slice: bool,
+    /// Reference POC lists for inter deblocking bS derivation
     ref_poc: [[i32; inter::MAX_NUM_REF_PICS]; 2],
 }
 
@@ -297,15 +313,54 @@ impl VideoDecoder {
         }
     }
 
-    /// Finish the current picture: insert into DPB, return frame + POC
+    /// Finish the current picture: apply loop filters, insert into DPB, return frame + POC
     fn finish_current_picture(&mut self) -> Option<(i32, DecodedFrame)> {
-        let pic = self.current_pic.take()?;
+        let mut pic = self.current_pic.take()?;
         let poc = pic.poc;
+
+        // Apply deferred loop filters now that all slices are decoded
+        if !self.disable_loop_filters
+            && let (Some(lf), Some(maps)) = (&pic.loop_filter, &pic.maps)
+        {
+            if !lf.deblocking_disabled {
+                let inter_ctx = if !lf.is_intra_slice {
+                    let sps = self.sps.as_ref().unwrap();
+                    let min_pu = ((1u32 << sps.log2_min_cb_size()) / 2).max(1);
+                    let pu_stride = sps.pic_width_in_luma_samples.div_ceil(min_pu);
+                    Some(deblock::InterDeblockCtx {
+                        pred_mode: &maps.pred_mode_map,
+                        mv_info: &maps.mv_info,
+                        pu_stride,
+                        min_pu_size: min_pu,
+                        cbf_map: &maps.cbf_map,
+                        cbf_map_stride: maps.cbf_map_stride,
+                        ref_poc: lf.ref_poc,
+                    })
+                } else {
+                    None
+                };
+                deblock::apply_deblocking_filter(
+                    &mut pic.frame,
+                    lf.beta_offset,
+                    lf.tc_offset,
+                    lf.cb_qp_offset,
+                    lf.cr_qp_offset,
+                    inter_ctx.as_ref(),
+                );
+            }
+            if lf.sao_luma || lf.sao_chroma {
+                sao::apply_sao(&mut pic.frame, &maps.sao_map, lf.ctb_size);
+            }
+        }
+
         if let Some(sps) = &self.sps {
             let min_pu = ((1u32 << sps.log2_min_cb_size()) / 2).max(1);
             let mut entry = DpbEntry::new(clone_frame_for_ref(&pic.frame), poc, min_pu);
-            entry.mv_info = pic.mv_info;
-            entry.pred_mode_map = pic.pred_mode_map;
+            // Extract pred_mode_map and mv_info from picture maps if present
+            if let Some(maps) = pic.maps {
+                entry.mv_info = maps.mv_info;
+                entry.pred_mode_map = maps.pred_mode_map;
+            }
             entry.ref_poc = pic.ref_poc;
             entry.is_output = true;
 
@@ -319,10 +374,7 @@ impl VideoDecoder {
 
     /// Decode a slice NAL unit. Returns a frame only when a NEW picture starts
     /// (the previously accumulated picture is returned).
-    fn decode_slice_nal(
-        &mut self,
-        nal: &bitstream::NalUnit<'_>,
-    ) -> Result<Option<DecodedFrame>> {
+    fn decode_slice_nal(&mut self, nal: &bitstream::NalUnit<'_>) -> Result<Option<DecodedFrame>> {
         // Clone SPS/PPS to avoid borrow conflicts with &mut self
         let sps = self
             .sps
@@ -390,17 +442,13 @@ impl VideoDecoder {
 
             // Create new frame
             let frame = create_frame(&sps);
-            let min_pu = ((1u32 << sps.log2_min_cb_size()) / 2).max(1);
-            let pu_stride = sps.pic_width_in_luma_samples.div_ceil(min_pu);
-            let pu_count =
-                (pu_stride * sps.pic_height_in_luma_samples.div_ceil(min_pu)) as usize;
             self.current_pic = Some(CurrentPicture {
                 frame,
                 poc: curr_poc,
                 slice_type: slice_header.slice_type,
-                pred_mode_map: alloc::vec![slice::PredMode::Intra; pu_count],
-                mv_info: alloc::vec![inter::PbMotion::UNAVAILABLE; pu_count],
+                maps: None, // First slice will initialize maps; subsequent slices inherit them
                 ref_poc: [[0i32; inter::MAX_NUM_REF_PICS]; 2],
+                loop_filter: None,
             });
         } else {
             // Continuation slice: use current picture's POC
@@ -522,6 +570,15 @@ impl VideoDecoder {
         let mut ctx = ctu::SliceContext::new(&sps, &pps, &slice_header, slice_data)?;
         ctx.curr_poc = curr_poc;
 
+        // For continuation slices, inject maps from previous slices so that
+        // CABAC context derivation (split_cu_flag, intra mode prediction, QP
+        // prediction, deblocking) can see data from earlier slices.
+        if !slice_header.first_slice_segment_in_pic_flag
+            && let Some(maps) = pic.maps.take()
+        {
+            ctx.inject_picture_maps(maps);
+        }
+
         ctx.ref_pic_lists = ref_pic_lists;
         ctx.ref_frames = ref_frames;
         ctx.collocated_data = collocated_data;
@@ -541,12 +598,21 @@ impl VideoDecoder {
             #[cfg(feature = "std")]
             {
                 let first_bytes: Vec<u8> = slice_data.iter().take(8).copied().collect();
-                eprintln!("SLICE_DATA: type={:?} data_offset={} first_bytes={:02x?} total_len={} entry_points={:?}",
-                    slice_header.slice_type, data_offset, first_bytes, slice_data.len(),
-                    slice_header.entry_point_offsets);
-                eprintln!("SLICE_QP: {} cabac_init_flag={} sao_luma={} sao_chroma={}",
-                    slice_header.slice_qp_y, slice_header.cabac_init_flag,
-                    slice_header.slice_sao_luma_flag, slice_header.slice_sao_chroma_flag);
+                eprintln!(
+                    "SLICE_DATA: type={:?} data_offset={} first_bytes={:02x?} total_len={} entry_points={:?}",
+                    slice_header.slice_type,
+                    data_offset,
+                    first_bytes,
+                    slice_data.len(),
+                    slice_header.entry_point_offsets
+                );
+                eprintln!(
+                    "SLICE_QP: {} cabac_init_flag={} sao_luma={} sao_chroma={}",
+                    slice_header.slice_qp_y,
+                    slice_header.cabac_init_flag,
+                    slice_header.slice_sao_luma_flag,
+                    slice_header.slice_sao_chroma_flag
+                );
                 // Print context checksum matching dec265's CTU-CK format
                 let mut cksum: u64 = 0;
                 for c in ctx.ctx.iter() {
@@ -554,7 +620,10 @@ impl VideoDecoder {
                     cksum += s as u64 * 3 + m as u64;
                 }
                 let (bp, _, _) = ctx.cabac.get_position();
-                eprintln!("CTX-INIT: bp={} ck={} (dec265 CTU-CK should match)", bp, cksum);
+                eprintln!(
+                    "CTX-INIT: bp={} ck={} (dec265 CTU-CK should match)",
+                    bp, cksum
+                );
                 // Print specific context states for debugging
                 let (s154, m154) = ctx.ctx[154].get_state();
                 let (s155, m155) = ctx.ctx[155].get_state();
@@ -565,16 +634,24 @@ impl VideoDecoder {
 
         ctx.decode_slice(&mut pic.frame)?;
 
-        // Apply loop filters (unless disabled for debugging)
-        if !self.disable_loop_filters {
-            apply_loop_filters(&slice_header, &sps, &pps, &ctx, &mut pic.frame);
-        }
+        // Store loop filter parameters (deferred until all slices are decoded)
+        // Each slice may have different deblocking offsets; the last slice's
+        // parameters win (this matches the behavior for single-slice pictures).
+        pic.loop_filter = Some(LoopFilterParams {
+            deblocking_disabled: slice_header.slice_deblocking_filter_disabled_flag,
+            beta_offset: slice_header.slice_beta_offset_div2 as i32 * 2,
+            tc_offset: slice_header.slice_tc_offset_div2 as i32 * 2,
+            cb_qp_offset: pps.pps_cb_qp_offset as i32,
+            cr_qp_offset: pps.pps_cr_qp_offset as i32,
+            sao_luma: slice_header.slice_sao_luma_flag,
+            sao_chroma: slice_header.slice_sao_chroma_flag,
+            ctb_size: sps.ctb_size(),
+            is_intra_slice: slice_header.slice_type.is_intra(),
+            ref_poc: ctx.ref_pic_lists.poc,
+        });
 
-        // Copy motion/pred_mode data from slice context to picture
-        let pm_len = pic.pred_mode_map.len().min(ctx.pred_mode_map.len());
-        pic.pred_mode_map[..pm_len].copy_from_slice(&ctx.pred_mode_map[..pm_len]);
-        let mv_len = pic.mv_info.len().min(ctx.mv_info.len());
-        pic.mv_info[..mv_len].copy_from_slice(&ctx.mv_info[..mv_len]);
+        // Extract maps from slice context and store on picture for next slice
+        pic.maps = Some(ctx.extract_picture_maps());
 
         if !slice_header.slice_type.is_intra() {
             pic.slice_type = slice_header.slice_type;
