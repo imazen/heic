@@ -175,6 +175,106 @@ impl PixelLayout {
     }
 }
 
+/// Type of segmentation matte stored as an auxiliary image.
+///
+/// iPhone cameras store these as monochrome HEVC auxiliary images,
+/// identified by Apple-specific URN strings in the `auxC` box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum MatteType {
+    /// Full foreground/background segmentation mask.
+    ///
+    /// URN: `urn:com:apple:photo:2018:aux:portraiteffectsmatte`
+    Portrait,
+    /// Skin segmentation mask.
+    ///
+    /// URN: `urn:com:apple:photo:2019:aux:semanticskinmatte`
+    Skin,
+    /// Hair segmentation mask.
+    ///
+    /// URN: `urn:com:apple:photo:2019:aux:semantichairmatte`
+    Hair,
+    /// Teeth segmentation mask.
+    ///
+    /// URN: `urn:com:apple:photo:2019:aux:semanticteethmatte`
+    Teeth,
+    /// Glasses segmentation mask.
+    ///
+    /// URN: `urn:com:apple:photo:2020:aux:semanticglassesmatte`
+    Glasses,
+    /// Sky segmentation mask.
+    ///
+    /// URN: `urn:com:apple:photo:2020:aux:semanticskymatte`
+    Sky,
+}
+
+impl MatteType {
+    /// The auxiliary type URN for this matte type.
+    #[must_use]
+    pub const fn urn(self) -> &'static str {
+        match self {
+            Self::Portrait => "urn:com:apple:photo:2018:aux:portraiteffectsmatte",
+            Self::Skin => "urn:com:apple:photo:2019:aux:semanticskinmatte",
+            Self::Hair => "urn:com:apple:photo:2019:aux:semantichairmatte",
+            Self::Teeth => "urn:com:apple:photo:2019:aux:semanticteethmatte",
+            Self::Glasses => "urn:com:apple:photo:2020:aux:semanticglassesmatte",
+            Self::Sky => "urn:com:apple:photo:2020:aux:semanticskymatte",
+        }
+    }
+
+    /// All known matte types.
+    pub const ALL: &'static [MatteType] = &[
+        Self::Portrait,
+        Self::Skin,
+        Self::Hair,
+        Self::Teeth,
+        Self::Glasses,
+        Self::Sky,
+    ];
+
+    /// Parse a matte type from an auxiliary type URN string.
+    ///
+    /// Returns `None` if the URN doesn't match any known matte type.
+    #[must_use]
+    pub fn from_urn(urn: &str) -> Option<Self> {
+        Self::ALL.iter().find(|m| urn == m.urn()).copied()
+    }
+}
+
+impl core::fmt::Display for MatteType {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Portrait => write!(f, "portrait"),
+            Self::Skin => write!(f, "skin"),
+            Self::Hair => write!(f, "hair"),
+            Self::Teeth => write!(f, "teeth"),
+            Self::Glasses => write!(f, "glasses"),
+            Self::Sky => write!(f, "sky"),
+        }
+    }
+}
+
+/// Decoded segmentation matte from an iPhone photo.
+///
+/// Segmentation mattes are stored as monochrome auxiliary HEVC images.
+/// The Y plane is extracted and returned as 8-bit grayscale data where
+/// 0 = background and 255 = foreground.
+///
+/// These are typically lower resolution than the primary image
+/// (e.g., 2016x1512 for a 4032x3024 primary image).
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct SegmentationMatte {
+    /// Grayscale mask pixels (u8, 0=background, 255=foreground).
+    pub data: Vec<u8>,
+    /// Matte width in pixels.
+    pub width: u32,
+    /// Matte height in pixels.
+    pub height: u32,
+    /// What this matte segments.
+    pub matte_type: MatteType,
+}
+
 /// Resource limits for decoding.
 ///
 /// All fields default to `None` (no limit). Set limits to prevent
@@ -280,7 +380,7 @@ pub struct DecodeOutput {
 }
 
 /// Image metadata without full decode
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 #[must_use]
 pub struct ImageInfo {
     /// Image width in pixels
@@ -309,6 +409,15 @@ pub struct ImageInfo {
     pub video_full_range: bool,
     /// Whether the file contains an ICC profile (in colr box)
     pub has_icc_profile: bool,
+    /// Raw EXIF bytes (TIFF format, starting with byte-order mark `II` or `MM`).
+    ///
+    /// The HEIF 4-byte offset prefix is stripped. `None` if no EXIF metadata is present.
+    pub exif: Option<Vec<u8>>,
+    /// Raw XMP XML bytes. `None` if no XMP metadata is present.
+    pub xmp: Option<Vec<u8>>,
+    /// Raw ICC profile bytes from the `colr` box. `None` if the file uses nclx
+    /// color parameters or has no ICC profile.
+    pub icc_profile: Option<Vec<u8>>,
 }
 
 /// Adjust dimensions for transforms that the decoder will apply.
@@ -415,6 +524,14 @@ impl ImageInfo {
             Some(heif::ColorInfo::IccProfile(_))
         );
 
+        // Extract raw metadata bytes
+        let exif = Self::extract_exif_from_container(&container);
+        let xmp = Self::extract_xmp_from_container(&container);
+        let icc_profile = match &primary_item.color_info {
+            Some(heif::ColorInfo::IccProfile(icc)) => Some(icc.clone()),
+            _ => None,
+        };
+
         // Try to get info from HEVC config (fast path for direct HEVC items)
         if let Some(ref config) = primary_item.hevc_config
             && let Ok(hevc_info) = hevc::get_info_from_config(config)
@@ -440,6 +557,9 @@ impl ImageInfo {
                 matrix_coefficients,
                 video_full_range,
                 has_icc_profile,
+                exif,
+                xmp,
+                icc_profile,
             });
         }
 
@@ -477,6 +597,9 @@ impl ImageInfo {
                 matrix_coefficients,
                 video_full_range,
                 has_icc_profile,
+                exif,
+                xmp,
+                icc_profile,
             });
         }
 
@@ -504,6 +627,9 @@ impl ImageInfo {
             matrix_coefficients,
             video_full_range,
             has_icc_profile,
+            exif,
+            xmp,
+            icc_profile,
         })
     }
 
@@ -511,10 +637,48 @@ impl ImageInfo {
     ///
     /// Returns `None` if the dimensions would overflow `usize`.
     #[must_use]
-    pub fn output_buffer_size(self, layout: PixelLayout) -> Option<usize> {
+    pub fn output_buffer_size(&self, layout: PixelLayout) -> Option<usize> {
         (self.width as usize)
             .checked_mul(self.height as usize)?
             .checked_mul(layout.bytes_per_pixel())
+    }
+
+    /// Extract EXIF TIFF bytes from a pre-parsed HEIF container.
+    fn extract_exif_from_container(container: &heif::HeifContainer<'_>) -> Option<Vec<u8>> {
+        for info in &container.item_infos {
+            if info.item_type != FourCC(*b"Exif") {
+                continue;
+            }
+            let Ok(exif_data) = container.get_item_data(info.item_id) else {
+                continue;
+            };
+            if exif_data.len() < 4 {
+                continue;
+            }
+            let tiff_offset =
+                u32::from_be_bytes([exif_data[0], exif_data[1], exif_data[2], exif_data[3]])
+                    as usize;
+            let tiff_start = 4 + tiff_offset;
+            if tiff_start < exif_data.len() {
+                return Some(exif_data[tiff_start..].to_vec());
+            }
+        }
+        None
+    }
+
+    /// Extract XMP XML bytes from a pre-parsed HEIF container.
+    fn extract_xmp_from_container(container: &heif::HeifContainer<'_>) -> Option<Vec<u8>> {
+        for info in &container.item_infos {
+            if info.item_type == FourCC(*b"mime")
+                && (info.content_type.contains("xmp")
+                    || info.content_type.contains("rdf+xml")
+                    || info.content_type == "application/rdf+xml")
+                && let Ok(xmp_data) = container.get_item_data(info.item_id)
+            {
+                return Some(xmp_data.into_owned());
+            }
+        }
+        None
     }
 }
 
@@ -731,6 +895,38 @@ impl DecoderConfig {
         layout: PixelLayout,
     ) -> Result<Option<DecodeOutput>> {
         decode::decode_thumbnail(data, layout)
+    }
+
+    /// Decode all available segmentation mattes from a HEIC file.
+    ///
+    /// Searches for all known Apple auxiliary matte types (portrait, skin,
+    /// hair, teeth, glasses, sky) and decodes any that are present.
+    ///
+    /// Returns an empty `Vec` if no mattes are found.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HEIF container is malformed or matte
+    /// decoding fails.
+    pub fn decode_mattes(&self, data: &[u8]) -> Result<Vec<SegmentationMatte>> {
+        decode::decode_mattes(data)
+    }
+
+    /// Decode a specific segmentation matte type from a HEIC file.
+    ///
+    /// Returns `None` if the requested matte type is not present in
+    /// the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HEIF container is malformed or matte
+    /// decoding fails.
+    pub fn decode_matte(
+        &self,
+        data: &[u8],
+        matte_type: MatteType,
+    ) -> Result<Option<SegmentationMatte>> {
+        decode::decode_matte(data, matte_type)
     }
 }
 

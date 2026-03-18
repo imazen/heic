@@ -634,6 +634,9 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
                 matrix_coefficients: 2,
                 video_full_range: false,
                 has_icc_profile: false,
+                exif: None,
+                xmp: None,
+                icc_profile: None,
             }),
             container.as_ref(),
             width,
@@ -1165,33 +1168,36 @@ fn build_image_info_full(
         ));
     }
 
-    // Extract all metadata from the pre-parsed container
-    if let Some(container) = container {
-        let primary_item = container.primary_item();
+    // Use metadata bytes from the native ImageInfo (already extracted during probe)
+    if let Some(ref icc) = pi.icc_profile {
+        info = info.with_icc_profile(icc.clone());
+    }
+    if let Some(ref exif) = pi.exif {
+        info = info.with_exif(exif.clone());
+    }
+    if let Some(ref xmp) = pi.xmp {
+        info = info.with_xmp(xmp.clone());
+    }
 
-        // ICC profile from colr box
-        if pi.has_icc_profile
-            && let Some(ref item) = primary_item
+    // Fallback: if native ImageInfo didn't have metadata bytes
+    // (e.g., synthetic fallback probe_info), try the pre-parsed container.
+    if (pi.exif.is_none() || pi.xmp.is_none() || pi.icc_profile.is_none())
+        && let Some(container) = container
+    {
+        if pi.icc_profile.is_none()
+            && let Some(ref item) = container.primary_item()
             && let Some(crate::heif::ColorInfo::IccProfile(icc)) = &item.color_info
         {
             info = info.with_icc_profile(icc.clone());
         }
-
-        // HDR gain map (Apple format) — detection only, not exposed in ImageInfo
-        // TODO: re-add when zencodec adds gain map support to ImageInfo
-        // if let Some(ref item) = primary_item
-        //     && !container
-        //         .find_auxiliary_items(item.id, "urn:com:apple:photo:2020:aux:hdrgainmap")
-        //         .is_empty()
-        // { }
-
-        // EXIF extraction
-        if let Some(exif) = extract_exif_from_container(container) {
+        if pi.exif.is_none()
+            && let Some(exif) = extract_exif_from_container(container)
+        {
             info = info.with_exif(exif);
         }
-
-        // XMP extraction
-        if let Some(xmp) = extract_xmp_from_container(container) {
+        if pi.xmp.is_none()
+            && let Some(xmp) = extract_xmp_from_container(container)
+        {
             info = info.with_xmp(xmp);
         }
     }

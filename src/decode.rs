@@ -11,8 +11,8 @@ use whereat::at;
 use crate::error::check_stop;
 use crate::heif::{self, CleanAperture, ColorInfo, FourCC, ItemType, Transform};
 use crate::{
-    DecodeOutput, DecoderConfig, HdrGainMap, HeicError, Limits, PixelLayout, Result, floor_f64,
-    round_f64,
+    DecodeOutput, DecoderConfig, HdrGainMap, HeicError, Limits, MatteType, PixelLayout, Result,
+    SegmentationMatte, floor_f64, round_f64,
 };
 
 #[cfg(feature = "parallel")]
@@ -1454,4 +1454,91 @@ pub(crate) fn extract_xmp<'a>(data: &'a [u8]) -> Result<Option<Cow<'a, [u8]>>> {
     }
 
     Ok(None)
+}
+
+/// Decode a single auxiliary matte item to grayscale 8-bit pixels.
+///
+/// The Y plane of the decoded HEVC frame is extracted and scaled
+/// to 8-bit if the source bit depth is greater than 8.
+fn decode_aux_to_grayscale(
+    container: &heif::HeifContainer<'_>,
+    item_id: u32,
+) -> Result<(Vec<u8>, u32, u32)> {
+    let item = container
+        .get_item(item_id)
+        .ok_or_else(|| at!(HeicError::InvalidData("auxiliary item not found")))?;
+
+    let frame = decode_item(container, &item, 0, &Limits::default(), &Unstoppable, None)?;
+
+    let width = frame.cropped_width();
+    let height = frame.cropped_height();
+    let max_val = ((1u32 << frame.bit_depth) - 1) as u32;
+    let y_start = frame.crop_top;
+    let x_start = frame.crop_left;
+
+    let mut grayscale = Vec::with_capacity((width * height) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let src_idx = ((y_start + y) * frame.width + (x_start + x)) as usize;
+            let raw = frame.y_plane[src_idx] as u32;
+            // Scale to 8-bit
+            let val = if frame.bit_depth == 8 {
+                raw as u8
+            } else {
+                ((raw * 255 + max_val / 2) / max_val) as u8
+            };
+            grayscale.push(val);
+        }
+    }
+
+    Ok((grayscale, width, height))
+}
+
+/// Decode all available segmentation mattes from a HEIC file.
+pub(crate) fn decode_mattes(data: &[u8]) -> Result<Vec<SegmentationMatte>> {
+    let container = heif::parse(data, &Unstoppable)?;
+    let primary_item = container
+        .primary_item()
+        .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
+
+    let mut mattes = Vec::new();
+
+    for &matte_type in MatteType::ALL {
+        let aux_ids = container.find_auxiliary_items(primary_item.id, matte_type.urn());
+        if let Some(&aux_id) = aux_ids.first() {
+            let (pixels, width, height) = decode_aux_to_grayscale(&container, aux_id)?;
+            mattes.push(SegmentationMatte {
+                data: pixels,
+                width,
+                height,
+                matte_type,
+            });
+        }
+    }
+
+    Ok(mattes)
+}
+
+/// Decode a specific segmentation matte type from a HEIC file.
+pub(crate) fn decode_matte(
+    data: &[u8],
+    matte_type: MatteType,
+) -> Result<Option<SegmentationMatte>> {
+    let container = heif::parse(data, &Unstoppable)?;
+    let primary_item = container
+        .primary_item()
+        .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
+
+    let aux_ids = container.find_auxiliary_items(primary_item.id, matte_type.urn());
+    let Some(&aux_id) = aux_ids.first() else {
+        return Ok(None);
+    };
+
+    let (pixels, width, height) = decode_aux_to_grayscale(&container, aux_id)?;
+    Ok(Some(SegmentationMatte {
+        data: pixels,
+        width,
+        height,
+        matte_type,
+    }))
 }
