@@ -202,6 +202,7 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
   - CABAC verified BIT-EXACT vs dec265 (all 28 CTU byte positions match for MERGE_A)
   - MERGE_A unfiltered: ALL 8 frames 100% pixel-exact vs dec265 (POC 0-7)
   - Fixed bugs:
+    - interSplitFlag: missing forced TU split when max_transform_hierarchy_depth_inter==0 and PartMode!=2Nx2N (H.265 7.3.8.7). Caused CABAC desync in RQT_A B-frame.
     - Temporal MVP fallback: only tried one collocated position (bottom-right OR center), but H.265 8.5.3.2.8 requires trying bottom-right first, then falling back to center when collocated block is intra
     - Small PU L1 restriction: nPbW+nPbH==12 rule unconditionally disabled L1, but H.265 8.5.3.2.2 step 10 only disables L1 when both L0 and L1 are active (bi-prediction)
     - ref_idx decode: truncated unary consumed extra CABAC bin when num_active>=2 (CABAC desync)
@@ -232,7 +233,7 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 - DELTAQP_A: cu_qp_delta_enabled=1, multi-slice (5 slices per I-frame). All frames UNINIT including frame 0 (I-frame).
 - SDH_A: single-slice I+B. I-frame has 34% UNINIT, B-frame has 99% UNINIT.
 - SAO_B: tiles=1 (3x1), B-slices
-- RQT_A: single-slice I+B. I-frame pixel-exact, B-frame UNINIT.
+- RQT_A: FIXED — was missing interSplitFlag (H.265 7.3.8.7). Now 23.9dB (CABAC bit-exact, remaining diffs from deblock/SAO).
 - CONFWIN_A: single-slice P/B. I-frame ~12dB (no UNINIT), later P/B frames get UNINIT.
 - DBLK_A/B: multi-slice (4 slices per frame). ~12dB all frames, some have UNINIT.
 - MVDL1ZERO_A: multi-slice, 500-frame sequence. Most frames ~12dB, 3 have UNINIT.
