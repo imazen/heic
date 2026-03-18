@@ -150,7 +150,27 @@ fn compute_bs(
     let mv_p = get_mv(px, py);
     let mv_q = get_mv(qx, qy);
 
-    // H.265 8.7.2.4.5, Table 8-19: boundary strength for inter prediction
+    // H.265 8.7.2.4.5: resolve ref_idx to reference picture (POC)
+    // The spec compares actual reference pictures, not raw indices.
+    // Two blocks may have different ref_idx values that refer to the same picture.
+    let ref_poc = &ctx.ref_poc;
+    let resolve_ref = |pred_flag: bool, list: usize, ref_idx: i8| -> i32 {
+        if !pred_flag {
+            return -1; // No reference in this list
+        }
+        let idx = ref_idx as usize;
+        if idx < super::inter::MAX_NUM_REF_PICS {
+            ref_poc[list][idx]
+        } else {
+            -1
+        }
+    };
+
+    let ref_pic_p0 = resolve_ref(mv_p.pred_flag[0], 0, mv_p.ref_idx[0]);
+    let ref_pic_p1 = resolve_ref(mv_p.pred_flag[1], 1, mv_p.ref_idx[1]);
+    let ref_pic_q0 = resolve_ref(mv_q.pred_flag[0], 0, mv_q.ref_idx[0]);
+    let ref_pic_q1 = resolve_ref(mv_q.pred_flag[1], 1, mv_q.ref_idx[1]);
+
     let count_p = mv_p.pred_flag[0] as u8 + mv_p.pred_flag[1] as u8;
     let count_q = mv_q.pred_flag[0] as u8 + mv_q.pred_flag[1] as u8;
 
@@ -159,6 +179,21 @@ fn compute_bs(
         return 1;
     }
 
+    // Check if both blocks reference the same set of pictures
+    let same_pics = (ref_pic_p0 == ref_pic_q0 && ref_pic_p1 == ref_pic_q1)
+        || (ref_pic_p0 == ref_pic_q1 && ref_pic_p1 == ref_pic_q0);
+
+    if !same_pics {
+        return 1;
+    }
+
+    // Same reference pictures — now check MV differences
+    // Get MVs (zero if pred_flag is false, matching libde265 behavior)
+    let mv_p0 = if mv_p.pred_flag[0] { mv_p.mv[0] } else { super::inter::MotionVector::ZERO };
+    let mv_p1 = if mv_p.pred_flag[1] { mv_p.mv[1] } else { super::inter::MotionVector::ZERO };
+    let mv_q0 = if mv_q.pred_flag[0] { mv_q.mv[0] } else { super::inter::MotionVector::ZERO };
+    let mv_q1 = if mv_q.pred_flag[1] { mv_q.mv[1] } else { super::inter::MotionVector::ZERO };
+
     // Helper: check if MV difference >= 4 quarter-pel (1 integer sample)
     let mv_diff_ge4 = |a: super::inter::MotionVector, b: super::inter::MotionVector| -> bool {
         let dx = (a.x as i32 - b.x as i32).abs();
@@ -166,33 +201,28 @@ fn compute_bs(
         dx >= 4 || dy >= 4
     };
 
-    if count_p == 2 && count_q == 2 {
-        // Both bi-predicted: check same-list AND cross-list (Table 8-19)
-        // bS=1 if BOTH conditions are true (neither comparison gives "same")
-        let same_list_diff =
-            mv_p.ref_idx[0] != mv_q.ref_idx[0] || mv_diff_ge4(mv_p.mv[0], mv_q.mv[0])
-            || mv_p.ref_idx[1] != mv_q.ref_idx[1] || mv_diff_ge4(mv_p.mv[1], mv_q.mv[1]);
-        let cross_list_diff =
-            mv_p.ref_idx[0] != mv_q.ref_idx[1] || mv_diff_ge4(mv_p.mv[0], mv_q.mv[1])
-            || mv_p.ref_idx[1] != mv_q.ref_idx[0] || mv_diff_ge4(mv_p.mv[1], mv_q.mv[0]);
-        if same_list_diff && cross_list_diff {
-            return 1;
-        }
-    } else {
-        // Both uni-predicted (or both have same count of 1)
-        // Check: different reference pictures or MV difference >= 4
-        for list in 0..2 {
-            if mv_p.pred_flag[list]
-                && mv_q.pred_flag[list]
-                && (mv_p.ref_idx[list] != mv_q.ref_idx[list]
-                    || mv_diff_ge4(mv_p.mv[list], mv_q.mv[list]))
-            {
+    if ref_pic_p0 != ref_pic_p1 {
+        // Two different reference pictures
+        if ref_pic_p0 == ref_pic_q0 {
+            // Same order: P0↔Q0, P1↔Q1
+            if mv_diff_ge4(mv_p0, mv_q0) || mv_diff_ge4(mv_p1, mv_q1) {
+                return 1;
+            }
+        } else {
+            // Cross order: P0↔Q1, P1↔Q0
+            if mv_diff_ge4(mv_p0, mv_q1) || mv_diff_ge4(mv_p1, mv_q0) {
                 return 1;
             }
         }
-        // Also check if they use different lists (e.g., P uses L0 only, Q uses L1 only)
-        if count_p == 1 && count_q == 1 && mv_p.pred_flag[0] != mv_q.pred_flag[0] {
-            return 1; // Different prediction directions
+    } else {
+        // Same reference picture for both lists (refPicP0 == refPicP1)
+        // Must check BOTH orderings — bS=1 only if BOTH give MV difference
+        let same_order_diff =
+            mv_diff_ge4(mv_p0, mv_q0) || mv_diff_ge4(mv_p1, mv_q1);
+        let cross_order_diff =
+            mv_diff_ge4(mv_p0, mv_q1) || mv_diff_ge4(mv_p1, mv_q0);
+        if same_order_diff && cross_order_diff {
+            return 1;
         }
     }
 
@@ -230,6 +260,9 @@ pub struct InterDeblockCtx<'a> {
     pub cbf_map: &'a [bool],
     /// CBF map stride (width / 4)
     pub cbf_map_stride: u32,
+    /// Reference picture POCs per list [L0/L1][ref_idx] — needed to resolve
+    /// ref_idx to actual reference picture for bS derivation (H.265 8.7.2.4.5)
+    pub ref_poc: [[i32; super::inter::MAX_NUM_REF_PICS]; 2],
 }
 
 /// Apply the deblocking filter to a decoded frame.

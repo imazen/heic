@@ -691,6 +691,7 @@ fn apply_loop_filters(
                 min_pu_size: ctx.min_pu_size(),
                 cbf_map: &ctx.cbf_map,
                 cbf_map_stride: ctx.cbf_map_stride,
+                ref_poc: ctx.ref_pic_lists.poc,
             })
         } else {
             None
