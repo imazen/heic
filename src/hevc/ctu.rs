@@ -2534,10 +2534,33 @@ impl<'a> SliceContext<'a> {
 
     /// Get intra prediction mode of the left neighbor (x0-1, y0)
     ///
-    /// Returns DC if the left neighbor is outside the picture boundary.
+    /// Returns DC if the left neighbor is outside the picture boundary or in a different tile.
     fn get_neighbor_intra_mode_left(&self, x0: u32, y0: u32) -> IntraPredMode {
         if x0 == 0 {
             return IntraPredMode::Dc;
+        }
+        // Tile boundary: left neighbor in different tile → DC
+        if self.pps.tiles_enabled_flag {
+            let ctb_size = self.sps.ctb_size();
+            let left_ctb_x = (x0 - 1) / ctb_size;
+            let curr_ctb_x = x0 / ctb_size;
+            if left_ctb_x != curr_ctb_x {
+                let curr_tile = get_tile_id(
+                    &self.tile_col_bd,
+                    &self.tile_row_bd,
+                    curr_ctb_x,
+                    y0 / ctb_size,
+                );
+                let left_tile = get_tile_id(
+                    &self.tile_col_bd,
+                    &self.tile_row_bd,
+                    left_ctb_x,
+                    y0 / ctb_size,
+                );
+                if curr_tile != left_tile {
+                    return IntraPredMode::Dc;
+                }
+            }
         }
         self.get_intra_mode_at(x0 - 1, y0)
     }
@@ -3291,7 +3314,20 @@ impl<'a> SliceContext<'a> {
             * (1 << self.sps.log2_ctb_size());
         let first_qg_in_slice = slice_start_x == x_qg && slice_start_y == y_qg;
 
+        // H.265 8.6.1: first QG in tile also uses slice_qp_y
+        let first_qg_in_tile = self.pps.tiles_enabled_flag && {
+            let ctb_size = self.sps.ctb_size();
+            let ctb_x = x_qg as u32 / ctb_size;
+            let ctb_y = y_qg as u32 / ctb_size;
+            // Check if current CTB is the first CTB of its tile
+            self.tile_col_bd.windows(2).any(|w| w[0] == ctb_x)
+                && self.tile_row_bd.windows(2).any(|w| w[0] == ctb_y)
+                && (x_qg as u32).is_multiple_of(ctb_size)
+                && (y_qg as u32).is_multiple_of(ctb_size)
+        };
+
         let qp_y_pred = if first_qg_in_slice
+            || first_qg_in_tile
             || (first_in_ctb_row && self.pps.entropy_coding_sync_enabled_flag)
         {
             self.header.slice_qp_y
