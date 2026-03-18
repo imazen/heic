@@ -210,6 +210,9 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
     - Earlier: CBF tracking for deblocking bS=2, DST/DCT for inter 4x4 TUs, chroma MC shifts (4→6), skip/no-residual CU boundary marking, WPP entry point offsets + CABAC reinit, cu_skip_flag cross-CTB-row context derivation, deblocking TB/PB edge distinction with separate bS derivation, bi-pred cross-list bS comparison, bi-pred H+V MC rounding offset
   - IMPORTANT: dec265 reference YUV is in DISPLAY ORDER (not decode order)
   - Deblock trace infrastructure: `enable_deblock_trace()` dumps all edge parameters to /tmp/our_deblock_trace.txt
+  - Multi-slice: PictureMaps persistence across slices (ct_depth, intra modes, pred/mv, cbf, qp, sao)
+  - Loop filters deferred to picture completion (prevents intra ref corruption in multi-slice)
+  - Tile scan order: boundary detection, CABAC reinit at tile boundaries with entry point offsets
   - Deferred: SIMD MC (Phase 7), weighted prediction application
 - 4:4:4 chroma: decodes correctly (61.9dB), but no SIMD color conversion path (uses scalar)
 - Dependent slice segments: not supported (2 vectors fail)
@@ -217,6 +220,40 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 ## Known Bugs
 
 (none)
+
+## Investigation Notes
+
+### UNINIT pixel triage (conformance vectors with negative PSNR)
+
+10 vectors have UNINIT pixels (max_diff=65535 = UNINIT_SAMPLE sentinel).
+
+**Vectors analyzed:**
+- TILES_A/B: tiles_enabled=1 (5x5 non-uniform tiles), I-slices only. Tile CABAC reinit implemented.
+- DELTAQP_A: cu_qp_delta_enabled=1, multi-slice (5 slices per I-frame). All frames UNINIT including frame 0 (I-frame).
+- SDH_A: single-slice I+B. I-frame has 34% UNINIT, B-frame has 99% UNINIT.
+- SAO_B: tiles=1 (3x1), B-slices
+- RQT_A: single-slice I+B. I-frame pixel-exact, B-frame UNINIT.
+- CONFWIN_A: single-slice P/B. I-frame ~12dB (no UNINIT), later P/B frames get UNINIT.
+- DBLK_A/B: multi-slice (4 slices per frame). ~12dB all frames, some have UNINIT.
+- MVDL1ZERO_A: multi-slice, 500-frame sequence. Most frames ~12dB, 3 have UNINIT.
+
+**Root cause analysis:**
+- The dec265 CTU-CK checksum trace is ONLY printed for non-I slices (gated by `slice_type != I`), so earlier byte-position comparisons were between different frame types.
+- MERGE_A (pixel-exact) has `cu_qp_delta_enabled=0`, `transform_skip_enabled=1`, QP=32.
+- Failing I-frames (DELTAQP_A, SDH_A) have `cu_qp_delta_enabled=1` or different QP.
+- The CABAC init formula and context tables match libde265 for the contexts checked (split_cu_flag, SAO, CBF).
+- The CABAC engine init (range=510, value from first 2 bytes) matches libde265.
+- Data offset computation verified correct for DELTAQP_A IDR slice (1 byte header → data_offset=1).
+- First bin (split_cu_flag) verified manually: state=0,mps=0 at QP=26, LPS range=240, MPS threshold=34560, value=28334 → MPS (no split). This matches expected behavior for a flat-content first CTB.
+- The UNINIT pixels are genuine (u16::MAX in Y plane), meaning some CTBs' pixels are never written. The decoder doesn't error out.
+
+**Hypothesis:** The UNINIT appears to be from B/P frames referencing corrupted reference frames, not from I-frame decode failures. The I-frame first CTU decodes correctly (verified via SE trace). Need to compare more CTUs to find where decode diverges.
+
+**Infrastructure built:**
+- `PictureMaps` for cross-slice map persistence (ctu.rs)
+- Deferred loop filter application in `finish_current_picture` (mod.rs)
+- Tile boundary detection with CABAC reinit (ctu.rs)
+- `compute_tile_boundaries`, `build_tile_scan_order`, `get_tile_id` helpers
 
 ## Module Structure
 
