@@ -119,7 +119,7 @@ pub use codec::{
 
 pub use auxiliary::{
     AuxiliaryImageDescriptor, AuxiliaryImageType, DepthMap, DepthRepresentationInfo,
-    DepthRepresentationType,
+    DepthRepresentationType, SegmentationMatte,
 };
 pub use error::{HeicError, HevcError, ProbeError, Result};
 pub use hevc::{DecodedFrame, VideoDecoder};
@@ -286,7 +286,7 @@ pub struct DecodeOutput {
 }
 
 /// Image metadata without full decode
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 #[must_use]
 pub struct ImageInfo {
     /// Image width in pixels
@@ -319,6 +319,15 @@ pub struct ImageInfo {
     pub has_depth: bool,
     /// Whether the file contains an HDR gain map auxiliary image
     pub has_gain_map: bool,
+    /// Raw EXIF bytes (TIFF format, starting with byte-order mark `II` or `MM`).
+    ///
+    /// The HEIF 4-byte offset prefix is stripped. `None` if no EXIF metadata is present.
+    pub exif: Option<Vec<u8>>,
+    /// Raw XMP XML bytes. `None` if no XMP metadata is present.
+    pub xmp: Option<Vec<u8>>,
+    /// Raw ICC profile bytes from the `colr` box. `None` if the file uses nclx
+    /// color parameters or has no ICC profile.
+    pub icc_profile: Option<Vec<u8>>,
 }
 
 /// Adjust dimensions for transforms that the decoder will apply.
@@ -441,6 +450,14 @@ impl ImageInfo {
             Some(heif::ColorInfo::IccProfile(_))
         );
 
+        // Extract raw metadata bytes
+        let exif = Self::extract_exif_from_container(&container);
+        let xmp = Self::extract_xmp_from_container(&container);
+        let icc_profile = match &primary_item.color_info {
+            Some(heif::ColorInfo::IccProfile(icc)) => Some(icc.clone()),
+            _ => None,
+        };
+
         // Try to get info from HEVC config (fast path for direct HEVC items)
         if let Some(ref config) = primary_item.hevc_config
             && let Ok(hevc_info) = hevc::get_info_from_config(config)
@@ -468,6 +485,9 @@ impl ImageInfo {
                 has_icc_profile,
                 has_depth,
                 has_gain_map,
+                exif: exif.clone(),
+                xmp: xmp.clone(),
+                icc_profile: icc_profile.clone(),
             });
         }
 
@@ -507,6 +527,9 @@ impl ImageInfo {
                 has_icc_profile,
                 has_depth,
                 has_gain_map,
+                exif: exif.clone(),
+                xmp: xmp.clone(),
+                icc_profile: icc_profile.clone(),
             });
         }
 
@@ -536,7 +559,48 @@ impl ImageInfo {
             has_icc_profile,
             has_depth,
             has_gain_map,
+            exif,
+            xmp,
+            icc_profile,
         })
+    }
+
+    /// Extract EXIF TIFF bytes from a pre-parsed HEIF container.
+    fn extract_exif_from_container(container: &heif::HeifContainer<'_>) -> Option<Vec<u8>> {
+        for info in &container.item_infos {
+            if info.item_type != FourCC(*b"Exif") {
+                continue;
+            }
+            let Ok(exif_data) = container.get_item_data(info.item_id) else {
+                continue;
+            };
+            if exif_data.len() < 4 {
+                continue;
+            }
+            let tiff_offset =
+                u32::from_be_bytes([exif_data[0], exif_data[1], exif_data[2], exif_data[3]])
+                    as usize;
+            let tiff_start = 4 + tiff_offset;
+            if tiff_start < exif_data.len() {
+                return Some(exif_data[tiff_start..].to_vec());
+            }
+        }
+        None
+    }
+
+    /// Extract XMP XML bytes from a pre-parsed HEIF container.
+    fn extract_xmp_from_container(container: &heif::HeifContainer<'_>) -> Option<Vec<u8>> {
+        for info in &container.item_infos {
+            if info.item_type == FourCC(*b"mime")
+                && (info.content_type.contains("xmp")
+                    || info.content_type.contains("rdf+xml")
+                    || info.content_type == "application/rdf+xml")
+                && let Ok(xmp_data) = container.get_item_data(info.item_id)
+            {
+                return Some(xmp_data.into_owned());
+            }
+        }
+        None
     }
 
     /// Calculate the required output buffer size for a given pixel layout.
@@ -840,6 +904,39 @@ impl DecoderConfig {
         layout: PixelLayout,
     ) -> Result<DecodeOutput> {
         decode::decode_auxiliary_item(data, item_id, layout)
+    }
+
+    /// Decode all available segmentation mattes from a HEIC file.
+    ///
+    /// Looks for portrait, skin, hair, teeth, and glasses mattes stored
+    /// as monochrome HEVC auxiliary images and decodes each to an 8-bit
+    /// grayscale mask.
+    ///
+    /// Returns an empty `Vec` if no mattes are present.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HEIF container is malformed or matte
+    /// decoding fails.
+    pub fn decode_mattes(&self, data: &[u8]) -> Result<Vec<SegmentationMatte>> {
+        decode::decode_mattes(data)
+    }
+
+    /// Decode a specific segmentation matte type from a HEIC file.
+    ///
+    /// Returns `None` if the requested matte type is not present in
+    /// the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HEIF container is malformed or matte
+    /// decoding fails.
+    pub fn decode_matte(
+        &self,
+        data: &[u8],
+        matte_type: &AuxiliaryImageType,
+    ) -> Result<Option<SegmentationMatte>> {
+        decode::decode_matte(data, matte_type)
     }
 }
 

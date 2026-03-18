@@ -225,6 +225,24 @@ pub struct AuxiliaryImageDescriptor {
     pub dimensions: Option<(u32, u32)>,
 }
 
+/// A decoded segmentation matte from a HEIC file.
+///
+/// iPhone cameras store portrait mattes, skin/hair/teeth/glasses mattes
+/// as monochrome HEVC auxiliary images. Each matte is a grayscale mask
+/// scaled to 8-bit.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct SegmentationMatte {
+    /// Grayscale mask pixels (u8, 0 = background, 255 = foreground).
+    pub data: alloc::vec::Vec<u8>,
+    /// Matte width in pixels.
+    pub width: u32,
+    /// Matte height in pixels.
+    pub height: u32,
+    /// What this matte segments.
+    pub matte_type: AuxiliaryImageType,
+}
+
 /// Parse depth representation info from the auxC subtype bytes
 /// (the bytes after the null-terminated URN in the auxC box content).
 ///

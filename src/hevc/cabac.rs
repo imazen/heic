@@ -195,6 +195,11 @@ impl<'a> CabacDecoder<'a> {
         (self.byte_pos, self.data.len(), self.byte_pos as u32 * 8)
     }
 
+    /// Access the raw underlying data slice (for PCM sample reading)
+    pub fn raw_data(&self) -> &'a [u8] {
+        self.data
+    }
+
     /// Create a new CABAC decoder
     pub fn new(data: &'a [u8]) -> Result<Self> {
         if data.len() < 2 {

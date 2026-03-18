@@ -636,8 +636,7 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
         let container = crate::heif::parse(data, &enough::Unstoppable)
             .map_err(|e| e.into_inner())
             .ok();
-        let info = build_image_info_full(
-            &probe_info.unwrap_or(crate::ImageInfo {
+        let fallback_info = crate::ImageInfo {
                 width,
                 height,
                 has_alpha,
@@ -653,7 +652,13 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
                 has_icc_profile: false,
                 has_depth: false,
                 has_gain_map: false,
-            }),
+                exif: None,
+                xmp: None,
+                icc_profile: None,
+        };
+        let pi_ref = probe_info.as_ref().unwrap_or(&fallback_info);
+        let info = build_image_info_full(
+            pi_ref,
             container.as_ref(),
             width,
             height,

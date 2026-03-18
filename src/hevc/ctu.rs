@@ -256,6 +256,14 @@ pub struct SliceContext<'a> {
     pub ref_frames: Vec<Option<DecodedFrame>>,
     /// Collocated frame data for temporal MVP (owned copy from DPB)
     pub collocated_data: Option<OwnedCollocatedFrame>,
+
+    // -- Tile boundary info (for neighbor availability) --
+    /// Tile column boundaries: tile_col_bd[i] = first CTB column of tile column i.
+    /// Length = num_tile_cols + 1 (sentinel at end = pic_width_in_ctbs).
+    tile_col_bd: Vec<u32>,
+    /// Tile row boundaries: tile_row_bd[i] = first CTB row of tile row i.
+    /// Length = num_tile_rows + 1 (sentinel at end = pic_height_in_ctbs).
+    tile_row_bd: Vec<u32>,
 }
 
 /// Owned collocated frame data for temporal MVP (copied from DPB entry)
@@ -272,6 +280,127 @@ pub struct OwnedCollocatedFrame {
     pub poc: i32,
     /// Reference POCs from this frame's slice
     pub ref_poc: [[i32; inter::MAX_NUM_REF_PICS]; 2],
+}
+
+/// Maps that persist across slices within the same picture.
+///
+/// When multiple slices share a picture, CABAC context derivation for
+/// `split_cu_flag`, intra prediction, QP derivation, and deblocking all
+/// need data from previously-decoded slices. These maps are extracted
+/// from the SliceContext after each slice and injected into the next.
+pub struct PictureMaps {
+    /// CT depth map for split_cu_flag context (min_cb_size grid)
+    pub ct_depth_map: Vec<u8>,
+    pub ct_depth_map_stride: u32,
+    /// Intra luma prediction mode map (min_pu_size grid)
+    pub intra_mode_map: Vec<u8>,
+    pub intra_mode_map_stride: u32,
+    /// Intra chroma prediction mode map (min_pu_size grid)
+    pub intra_chroma_mode_map: Vec<u8>,
+    /// Prediction mode map (Intra/Inter/Skip) at min_pu_size grid
+    pub pred_mode_map: Vec<PredMode>,
+    /// Motion vector info at min_pu_size grid
+    pub mv_info: Vec<PbMotion>,
+    /// CBF map at 4x4 granularity for deblocking
+    pub cbf_map: Vec<bool>,
+    pub cbf_map_stride: u32,
+    /// QP map at min_tb_size granularity
+    pub qp_map: Vec<i8>,
+    pub qp_map_stride: u32,
+    /// SAO parameters per CTB
+    pub sao_map: SaoMap,
+}
+
+/// Compute tile column and row boundaries from PPS tile info.
+///
+/// Returns (col_bd, row_bd) where col_bd[i] is the first CTB column of tile column i,
+/// and col_bd[num_tile_cols] = pic_width_in_ctbs (sentinel). Same for rows.
+fn compute_tile_boundaries(
+    pps: &Pps,
+    pic_width_in_ctbs: u32,
+    pic_height_in_ctbs: u32,
+) -> (Vec<u32>, Vec<u32>) {
+    let tile_info = match &pps.tile_info {
+        Some(ti) => ti,
+        None => return (vec![0, pic_width_in_ctbs], vec![0, pic_height_in_ctbs]),
+    };
+
+    let num_cols = tile_info.num_tile_columns_minus1 as u32 + 1;
+    let num_rows = tile_info.num_tile_rows_minus1 as u32 + 1;
+
+    let col_bd = if tile_info.uniform_spacing_flag {
+        let mut bd = Vec::with_capacity(num_cols as usize + 1);
+        for i in 0..=num_cols {
+            bd.push((i * pic_width_in_ctbs) / num_cols);
+        }
+        bd
+    } else {
+        let mut bd = vec![0u32];
+        let mut pos = 0u32;
+        for &w in &tile_info.column_widths {
+            pos += w as u32 + 1;
+            bd.push(pos);
+        }
+        bd.push(pic_width_in_ctbs);
+        bd
+    };
+
+    let row_bd = if tile_info.uniform_spacing_flag {
+        let mut bd = Vec::with_capacity(num_rows as usize + 1);
+        for i in 0..=num_rows {
+            bd.push((i * pic_height_in_ctbs) / num_rows);
+        }
+        bd
+    } else {
+        let mut bd = vec![0u32];
+        let mut pos = 0u32;
+        for &h in &tile_info.row_heights {
+            pos += h as u32 + 1;
+            bd.push(pos);
+        }
+        bd.push(pic_height_in_ctbs);
+        bd
+    };
+
+    (col_bd, row_bd)
+}
+
+/// Build the tile scan order: returns a vec of (ctb_x, ctb_y) in tile-scan order.
+///
+/// H.265 6.5.1: tiles are scanned left→right, top→bottom.
+/// Within each tile, CTBs are scanned in raster order.
+fn build_tile_scan_order(col_bd: &[u32], row_bd: &[u32]) -> Vec<(u32, u32)> {
+    let num_cols = col_bd.len() - 1;
+    let num_rows = row_bd.len() - 1;
+    let mut scan = Vec::new();
+
+    for tr in 0..num_rows {
+        for tc in 0..num_cols {
+            // Raster scan within tile (tr, tc)
+            for cy in row_bd[tr]..row_bd[tr + 1] {
+                for cx in col_bd[tc]..col_bd[tc + 1] {
+                    scan.push((cx, cy));
+                }
+            }
+        }
+    }
+
+    scan
+}
+
+/// Get the tile ID for a given CTB position.
+/// Tile ID = tile_row * num_tile_cols + tile_col.
+fn get_tile_id(col_bd: &[u32], row_bd: &[u32], ctb_x: u32, ctb_y: u32) -> u32 {
+    let num_cols = (col_bd.len() - 1) as u32;
+    let tc = col_bd
+        .windows(2)
+        .position(|w| ctb_x >= w[0] && ctb_x < w[1])
+        .unwrap_or(0) as u32;
+    let tr = row_bd
+        .windows(2)
+        .position(|w| ctb_y >= w[0] && ctb_y < w[1])
+        .unwrap_or(0) as u32;
+    tr * num_cols + tc
 }
 
 impl<'a> SliceContext<'a> {
@@ -435,7 +564,61 @@ impl<'a> SliceContext<'a> {
             ref_pic_lists: RefPicLists::default(),
             ref_frames: Vec::new(),
             collocated_data: None,
+            tile_col_bd: if pps.tiles_enabled_flag {
+                let pic_w_ctbs = sps.pic_width_in_ctbs();
+                let pic_h_ctbs = sps.pic_height_in_ctbs();
+                compute_tile_boundaries(pps, pic_w_ctbs, pic_h_ctbs).0
+            } else {
+                vec![0, sps.pic_width_in_ctbs()]
+            },
+            tile_row_bd: if pps.tiles_enabled_flag {
+                let pic_w_ctbs = sps.pic_width_in_ctbs();
+                let pic_h_ctbs = sps.pic_height_in_ctbs();
+                compute_tile_boundaries(pps, pic_w_ctbs, pic_h_ctbs).1
+            } else {
+                vec![0, sps.pic_height_in_ctbs()]
+            },
         })
+    }
+
+    /// Inject picture-level maps from a previous slice into this slice context.
+    ///
+    /// This is called for continuation slices (not the first slice in a picture)
+    /// so that CABAC context derivation and neighbor lookups can see data from
+    /// previously-decoded slices within the same picture.
+    pub fn inject_picture_maps(&mut self, maps: PictureMaps) {
+        self.ct_depth_map = maps.ct_depth_map;
+        self.ct_depth_map_stride = maps.ct_depth_map_stride;
+        self.intra_mode_map = maps.intra_mode_map;
+        self.intra_mode_map_stride = maps.intra_mode_map_stride;
+        self.intra_chroma_mode_map = maps.intra_chroma_mode_map;
+        self.pred_mode_map = maps.pred_mode_map;
+        self.mv_info = maps.mv_info;
+        self.cbf_map = maps.cbf_map;
+        self.cbf_map_stride = maps.cbf_map_stride;
+        self.qp_map = maps.qp_map;
+        self.qp_map_stride = maps.qp_map_stride;
+        self.sao_map = maps.sao_map;
+    }
+
+    /// Extract picture-level maps from this slice context after decoding.
+    ///
+    /// The returned maps can be injected into the next slice's context.
+    pub fn extract_picture_maps(&mut self) -> PictureMaps {
+        PictureMaps {
+            ct_depth_map: core::mem::take(&mut self.ct_depth_map),
+            ct_depth_map_stride: self.ct_depth_map_stride,
+            intra_mode_map: core::mem::take(&mut self.intra_mode_map),
+            intra_mode_map_stride: self.intra_mode_map_stride,
+            intra_chroma_mode_map: core::mem::take(&mut self.intra_chroma_mode_map),
+            pred_mode_map: core::mem::take(&mut self.pred_mode_map),
+            mv_info: core::mem::take(&mut self.mv_info),
+            cbf_map: core::mem::take(&mut self.cbf_map),
+            cbf_map_stride: self.cbf_map_stride,
+            qp_map: core::mem::take(&mut self.qp_map),
+            qp_map_stride: self.qp_map_stride,
+            sao_map: core::mem::replace(&mut self.sao_map, SaoMap::new(0, 0)),
+        }
     }
 
     /// Decode all CTUs in the slice
@@ -446,7 +629,10 @@ impl<'a> SliceContext<'a> {
         let ctb_size = self.sps.ctb_size();
         let pic_width_in_ctbs = self.sps.pic_width_in_ctbs();
         let pic_height_in_ctbs = self.sps.pic_height_in_ctbs();
+        #[allow(unused)]
+        let tile_debug = false;
         let wpp = self.pps.entropy_coding_sync_enabled_flag;
+        let tiles = self.pps.tiles_enabled_flag;
 
         // Start from slice segment address
         let start_addr = self.header.slice_segment_address;
@@ -456,22 +642,79 @@ impl<'a> SliceContext<'a> {
         let mut ctu_count = 0u32;
         let total_ctus = pic_width_in_ctbs * pic_height_in_ctbs;
 
-        // WPP: saved context models from CTB column 1 of previous row
-        let mut wpp_saved_ctx: Option<[super::cabac::ContextModel; context::NUM_CONTEXTS]> = None;
+        // Tiles: compute tile column/row boundaries and tile scan order
+        // col_bd[i] = first CTB column of tile column i
+        // row_bd[i] = first CTB row of tile row i
+        let (tile_col_bd, tile_row_bd) = if tiles {
+            compute_tile_boundaries(self.pps, pic_width_in_ctbs, pic_height_in_ctbs)
+        } else {
+            (vec![0, pic_width_in_ctbs], vec![0, pic_height_in_ctbs])
+        };
 
-        // WPP: compute absolute byte offsets for each substream entry point
-        // Entry point offsets specify the length of each substream in bytes.
-        // substream 0 starts at byte 0, substream 1 starts at entry_point_offsets[0],
-        // substream 2 starts at entry_point_offsets[0] + entry_point_offsets[1], etc.
-        let mut wpp_entry_byte_offsets = Vec::new();
-        if wpp && !self.header.entry_point_offsets.is_empty() {
+        // Build CTB tile-scan order: CtbAddrTsToRs[ts] gives (ctb_x, ctb_y) in raster order
+        // Tile scan: tiles in raster, CTBs within each tile in raster
+        let tile_scan: Vec<(u32, u32)> = if tiles {
+            build_tile_scan_order(&tile_col_bd, &tile_row_bd)
+        } else {
+            // No tiles: simple raster scan
+            Vec::new()
+        };
+
+        // Build reverse mapping: given (ctb_x, ctb_y), what is the tile-scan index?
+        let tile_scan_idx: Vec<u32> = if tiles {
+            let mut idx = vec![0u32; (pic_width_in_ctbs * pic_height_in_ctbs) as usize];
+            for (ts, &(cx, cy)) in tile_scan.iter().enumerate() {
+                idx[(cy * pic_width_in_ctbs + cx) as usize] = ts as u32;
+            }
+            idx
+        } else {
+            Vec::new()
+        };
+
+        // For tiles: current tile-scan position (used to determine tile boundaries)
+        let mut tile_scan_pos = if tiles {
+            let rs = start_addr;
+            tile_scan_idx[rs as usize]
+        } else {
+            start_addr
+        };
+
+        #[cfg(feature = "std")]
+        if tile_debug {
+            eprintln!(
+                "TILE_DBG: slice start_addr={} tile_scan_pos={} tile_col_bd={:?} tile_row_bd={:?} entry_points={} offsets={:?} pic_ctbs={}x{}",
+                start_addr,
+                tile_scan_pos,
+                tile_col_bd,
+                tile_row_bd,
+                self.header.entry_point_offsets.len(),
+                self.header.entry_point_offsets,
+                pic_width_in_ctbs,
+                pic_height_in_ctbs
+            );
+        }
+
+        // Entry point byte offsets (for tiles and WPP)
+        let mut entry_byte_offsets = Vec::new();
+        if (tiles || wpp) && !self.header.entry_point_offsets.is_empty() {
             let mut cumulative = 0u32;
             for &offset in &self.header.entry_point_offsets {
                 cumulative += offset;
-                wpp_entry_byte_offsets.push(cumulative);
+                entry_byte_offsets.push(cumulative);
             }
         }
-        let mut wpp_substream_idx = 0usize;
+        let mut entry_idx = 0usize;
+
+        #[cfg(feature = "std")]
+        if tile_debug && !entry_byte_offsets.is_empty() {
+            eprintln!(
+                "TILE_DBG: cumulative entry offsets={:?}",
+                entry_byte_offsets
+            );
+        }
+
+        // WPP: saved context models from CTB column 1 of previous row
+        let mut wpp_saved_ctx: Option<[super::cabac::ContextModel; context::NUM_CONTEXTS]> = None;
 
         // WPP: saved StatCoeff (rice parameter init states) from CTB column 1
         let mut wpp_saved_stat_coeff: Option<[u8; 4]> = None;
@@ -480,7 +723,7 @@ impl<'a> SliceContext<'a> {
         if WPP_TRACE && wpp {
             eprintln!(
                 "WPP: slice type={:?} entry_point_offsets={:?} cumulative={:?}",
-                self.header.slice_type, self.header.entry_point_offsets, wpp_entry_byte_offsets
+                self.header.slice_type, self.header.entry_point_offsets, entry_byte_offsets
             );
         }
 
@@ -505,8 +748,8 @@ impl<'a> SliceContext<'a> {
                     self.stat_coeff = [0; 4];
                 }
                 // Reinitialize CABAC at the substream entry point
-                if wpp_substream_idx < wpp_entry_byte_offsets.len() {
-                    let target_byte = wpp_entry_byte_offsets[wpp_substream_idx] as usize;
+                if entry_idx < entry_byte_offsets.len() {
+                    let target_byte = entry_byte_offsets[entry_idx] as usize;
                     self.cabac.seek_to(target_byte);
                     self.cabac.reinit();
                     #[cfg(feature = "std")]
@@ -521,7 +764,7 @@ impl<'a> SliceContext<'a> {
                         let ctx_sum: u32 = self.ctx.iter().map(|c| c.get_state().0 as u32).sum();
                         eprintln!("WPP: row {} ctx_checksum={}", self.ctb_y, ctx_sum);
                     }
-                    wpp_substream_idx += 1;
+                    entry_idx += 1;
                 }
             }
 
@@ -582,6 +825,16 @@ impl<'a> SliceContext<'a> {
 
             // Check for end of slice segment
             let end_of_slice = self.cabac.decode_terminate()?;
+
+            #[cfg(feature = "std")]
+            if tile_debug && ctu_count <= 80 {
+                let (bp, _, _) = self.cabac.get_position();
+                let tile_id = get_tile_id(&tile_col_bd, &tile_row_bd, self.ctb_x, self.ctb_y);
+                eprintln!(
+                    "TILE_DBG: CTU {} at ({},{}) tile={} end_of_slice={} bp={}",
+                    ctu_count, self.ctb_x, self.ctb_y, tile_id, end_of_slice, bp
+                );
+            }
             se_trace("end_of_slice", end_of_slice as i64, &self.cabac);
 
             if end_of_slice != 0 {
@@ -594,14 +847,98 @@ impl<'a> SliceContext<'a> {
                 break;
             }
 
-            // Track previous row for WPP boundary detection
+            // Track previous position for boundary detection
+            let prev_ctb_x = self.ctb_x;
             let prev_ctb_y = self.ctb_y;
 
-            // Move to next CTB
-            self.ctb_x += 1;
-            if self.ctb_x >= pic_width_in_ctbs {
-                self.ctb_x = 0;
-                self.ctb_y += 1;
+            // Move to next CTB (tile scan order or raster scan)
+            tile_scan_pos += 1;
+            if tiles && (tile_scan_pos as usize) < tile_scan.len() {
+                let (nx, ny) = tile_scan[tile_scan_pos as usize];
+                self.ctb_x = nx;
+                self.ctb_y = ny;
+            } else if !tiles {
+                self.ctb_x += 1;
+                if self.ctb_x >= pic_width_in_ctbs {
+                    self.ctb_x = 0;
+                    self.ctb_y += 1;
+                }
+            } else {
+                // Past end of tile scan
+                break;
+            }
+
+            // Tiles: detect tile boundary and reinit CABAC
+            if tiles {
+                let prev_tile = get_tile_id(&tile_col_bd, &tile_row_bd, prev_ctb_x, prev_ctb_y);
+                let curr_tile = get_tile_id(&tile_col_bd, &tile_row_bd, self.ctb_x, self.ctb_y);
+                if curr_tile != prev_tile {
+                    // Decode end_of_subset_one_bit at tile boundary
+                    let _eoss = self.cabac.decode_terminate()?;
+
+                    #[cfg(feature = "std")]
+                    if tile_debug && ctu_count <= 120 {
+                        let (bp, _, _) = self.cabac.get_position();
+                        eprintln!(
+                            "TILE_DBG: tile boundary at CTU {} ({},{})->({},{}), tile {}→{}, eoss={}, cabac_pos={}, entry_idx={}",
+                            ctu_count,
+                            prev_ctb_x,
+                            prev_ctb_y,
+                            self.ctb_x,
+                            self.ctb_y,
+                            prev_tile,
+                            curr_tile,
+                            _eoss,
+                            bp,
+                            entry_idx
+                        );
+                    }
+
+                    // Reinitialize CABAC at the entry point for this tile
+                    if entry_idx < entry_byte_offsets.len() {
+                        let target_byte = entry_byte_offsets[entry_idx] as usize;
+                        self.cabac.seek_to(target_byte);
+                        self.cabac.reinit();
+                        entry_idx += 1;
+                    }
+
+                    // Reinitialize context models (same as slice-level init)
+                    {
+                        use super::cabac::{INIT_VALUES_B, INIT_VALUES_P};
+                        let init_table: &[u8; context::NUM_CONTEXTS] = match self.header.slice_type
+                        {
+                            SliceType::I => &INIT_VALUES,
+                            SliceType::P => {
+                                if self.header.cabac_init_flag {
+                                    &INIT_VALUES_B
+                                } else {
+                                    &INIT_VALUES_P
+                                }
+                            }
+                            SliceType::B => {
+                                if self.header.cabac_init_flag {
+                                    &INIT_VALUES_P
+                                } else {
+                                    &INIT_VALUES_B
+                                }
+                            }
+                        };
+                        for (i, init_val) in init_table.iter().enumerate() {
+                            self.ctx[i].init(*init_val, self.header.slice_qp_y);
+                        }
+                    }
+
+                    // Reset StatCoeff
+                    self.stat_coeff = [0; 4];
+
+                    // Reset QP state to slice QP (tile start = new QP prediction)
+                    self.current_qpy = self.header.slice_qp_y;
+                    self.last_qpy_in_prev_qg = self.header.slice_qp_y;
+                    self.current_qg_x = -1;
+                    self.current_qg_y = -1;
+                    self.is_cu_qp_delta_coded = false;
+                    self.cu_qp_delta = 0;
+                }
             }
 
             // WPP: at row boundaries, decode end_of_subset_one_bit and byte-align
@@ -630,6 +967,14 @@ impl<'a> SliceContext<'a> {
             if self.ctb_y >= pic_height_in_ctbs {
                 break;
             }
+        }
+
+        #[cfg(feature = "std")]
+        if tile_debug {
+            eprintln!(
+                "TILE_DBG: slice done, decoded {} CTUs (expected {}), entry_idx={}, last_pos=({},{})",
+                ctu_count, total_ctus, entry_idx, self.ctb_x, self.ctb_y
+            );
         }
 
         if DEBUG_TRACE {
@@ -667,26 +1012,32 @@ impl<'a> SliceContext<'a> {
         let mut sao_merge_left_flag = false;
         let mut sao_merge_up_flag = false;
 
-        // sao_merge_left_flag
+        // sao_merge_left_flag: available if left CTB is in same slice and same tile
         if x_ctb > 0 {
             let pic_width_ctbs = self.sps.pic_width_in_ctbs();
             let ctb_addr_rs = y_ctb * pic_width_ctbs + x_ctb;
-            let slice_addr_rs = 0u32;
+            let slice_addr_rs = self.header.slice_segment_address;
             let left_in_slice = ctb_addr_rs > slice_addr_rs;
-            if left_in_slice {
+            let left_in_tile = !self.pps.tiles_enabled_flag
+                || get_tile_id(&self.tile_col_bd, &self.tile_row_bd, x_ctb - 1, y_ctb)
+                    == get_tile_id(&self.tile_col_bd, &self.tile_row_bd, x_ctb, y_ctb);
+            if left_in_slice && left_in_tile {
                 let ctx_idx = context::SAO_MERGE_FLAG;
                 sao_merge_left_flag = self.cabac.decode_bin(&mut self.ctx[ctx_idx])? != 0;
                 se_trace("sao_merge_left", sao_merge_left_flag as i64, &self.cabac);
             }
         }
 
-        // sao_merge_up_flag
+        // sao_merge_up_flag: available if above CTB is in same slice and same tile
         if y_ctb > 0 && !sao_merge_left_flag {
             let pic_width_ctbs = self.sps.pic_width_in_ctbs();
             let ctb_addr_rs = y_ctb * pic_width_ctbs + x_ctb;
-            let slice_addr_rs = 0u32;
+            let slice_addr_rs = self.header.slice_segment_address;
             let up_in_slice = ctb_addr_rs >= pic_width_ctbs + slice_addr_rs;
-            if up_in_slice {
+            let up_in_tile = !self.pps.tiles_enabled_flag
+                || get_tile_id(&self.tile_col_bd, &self.tile_row_bd, x_ctb, y_ctb - 1)
+                    == get_tile_id(&self.tile_col_bd, &self.tile_row_bd, x_ctb, y_ctb);
+            if up_in_slice && up_in_tile {
                 let ctx_idx = context::SAO_MERGE_FLAG;
                 sao_merge_up_flag = self.cabac.decode_bin(&mut self.ctx[ctx_idx])? != 0;
                 se_trace("sao_merge_up", sao_merge_up_flag as i64, &self.cabac);
@@ -951,10 +1302,26 @@ impl<'a> SliceContext<'a> {
 
     /// Check if a neighbor position is available (within picture bounds)
     fn is_neighbor_available(&self, x: i32, y: i32) -> bool {
-        x >= 0
-            && y >= 0
-            && (x as u32) < self.sps.pic_width_in_luma_samples
-            && (y as u32) < self.sps.pic_height_in_luma_samples
+        if x < 0 || y < 0 {
+            return false;
+        }
+        let xu = x as u32;
+        let yu = y as u32;
+        if xu >= self.sps.pic_width_in_luma_samples || yu >= self.sps.pic_height_in_luma_samples {
+            return false;
+        }
+        // Tile boundary check: neighbor must be in the same tile as current CTB
+        if self.pps.tiles_enabled_flag {
+            let ctb_size = self.sps.ctb_size();
+            let nb_ctb_x = xu / ctb_size;
+            let nb_ctb_y = yu / ctb_size;
+            if get_tile_id(&self.tile_col_bd, &self.tile_row_bd, nb_ctb_x, nb_ctb_y)
+                != get_tile_id(&self.tile_col_bd, &self.tile_row_bd, self.ctb_x, self.ctb_y)
+            {
+                return false;
+            }
+        }
+        true
     }
 
     /// Decode split_cu_flag using CABAC
@@ -1046,6 +1413,29 @@ impl<'a> SliceContext<'a> {
 
         // Store prediction mode for the CU
         self.store_pred_mode(x0, y0, log2_cb_size, pred_mode);
+
+        // --- PCM mode (H.265 7.3.8.5) ---
+        // Check for pcm_flag when intra and CU size is within PCM range
+        if pred_mode == PredMode::Intra
+            && !cu_skip
+            && let Some(ref pcm) = self.sps.pcm_params
+        {
+            let log2_min_ipcm = pcm.log2_min_pcm_luma_coding_block_size_minus3 + 3;
+            let log2_max_ipcm = log2_min_ipcm + pcm.log2_diff_max_min_pcm_luma_coding_block_size;
+            if log2_cb_size >= log2_min_ipcm && log2_cb_size <= log2_max_ipcm {
+                let pcm_flag = self.cabac.decode_terminate()?;
+                se_trace("pcm_flag", pcm_flag as i64, &self.cabac);
+                if pcm_flag != 0 {
+                    // PCM mode: terminate CABAC, read raw samples, reinit
+                    self.decode_pcm_samples(x0, y0, log2_cb_size, frame)?;
+                    // Mark boundaries and QP for deblocking
+                    frame.mark_tu_boundary(x0, y0, cb_size);
+                    frame.store_block_qp(x0, y0, cb_size, self.current_qpy as i8);
+                    self.store_cbf(x0, y0, cb_size, false);
+                    return Ok(());
+                }
+            }
+        }
 
         // --- Skip mode: decode merge_idx only, no partition/residual ---
         if pred_mode == PredMode::Skip {
@@ -1246,6 +1636,10 @@ impl<'a> SliceContext<'a> {
             };
             if has_residual {
                 let intra_split_flag = false;
+                // H.265 7.3.8.7: interSplitFlag forces TU split when
+                // max_transform_hierarchy_depth_inter==0 and PartMode != 2Nx2N
+                let inter_split_flag = self.sps.max_transform_hierarchy_depth_inter == 0
+                    && part_mode != PartMode::Part2Nx2N;
                 self.decode_transform_tree(
                     x0,
                     y0,
@@ -1254,6 +1648,7 @@ impl<'a> SliceContext<'a> {
                     intra_luma_mode,
                     intra_chroma_mode,
                     intra_split_flag,
+                    inter_split_flag,
                     frame,
                 )?;
             } else {
@@ -1273,6 +1668,7 @@ impl<'a> SliceContext<'a> {
                 intra_luma_mode,
                 intra_chroma_mode,
                 intra_split_flag,
+                false, // inter_split_flag: not applicable to intra
                 frame,
             )?;
 
@@ -1303,6 +1699,7 @@ impl<'a> SliceContext<'a> {
         intra_luma_mode: IntraPredMode,
         intra_chroma_mode: IntraPredMode,
         intra_split_flag: bool,
+        inter_split_flag: bool,
         frame: &mut DecodedFrame,
     ) -> Result<()> {
         // For 4:2:0, start with root having chroma responsibility
@@ -1314,6 +1711,7 @@ impl<'a> SliceContext<'a> {
             intra_luma_mode,
             intra_chroma_mode,
             intra_split_flag,
+            inter_split_flag,
             true,
             true,
             frame,
@@ -1332,6 +1730,7 @@ impl<'a> SliceContext<'a> {
         intra_luma_mode: IntraPredMode,
         intra_chroma_mode: IntraPredMode,
         intra_split_flag: bool,
+        inter_split_flag: bool,
         cbf_cb_parent: bool,
         cbf_cr_parent: bool,
         frame: &mut DecodedFrame,
@@ -1357,7 +1756,7 @@ impl<'a> SliceContext<'a> {
         let debug_tt = self.debug_ctu;
 
         // Step 1: Determine if we should split
-        // Per H.265: decode split_transform_flag only when all conditions met AND
+        // Per H.265 7.3.8.7: decode split_transform_flag only when all conditions met AND
         // NOT (IntraSplitFlag && trafoDepth == 0)
         let split_transform = if log2_size <= log2_max_trafo_size
             && log2_size > log2_min_trafo_size
@@ -1369,8 +1768,13 @@ impl<'a> SliceContext<'a> {
             let flag = self.cabac.decode_bin(&mut self.ctx[ctx_idx])? != 0;
             se_trace("split_transform", flag as i64, &self.cabac);
             flag
-        } else if log2_size > log2_max_trafo_size || (intra_split_flag && trafo_depth == 0) {
-            true // Must split: larger than max OR IntraSplitFlag at depth 0
+        } else if log2_size > log2_max_trafo_size
+            || (intra_split_flag && trafo_depth == 0)
+            || (inter_split_flag && trafo_depth == 0)
+        {
+            // Must split: larger than max, IntraSplitFlag at depth 0,
+            // or interSplitFlag at depth 0 (H.265 7.3.8.7)
+            true
         } else {
             if debug_tt {
                 debug_trace!(
@@ -1426,6 +1830,7 @@ impl<'a> SliceContext<'a> {
                 intra_luma_mode,
                 intra_chroma_mode,
                 intra_split_flag,
+                inter_split_flag,
                 cbf_cb,
                 cbf_cr,
                 frame,
@@ -1438,6 +1843,7 @@ impl<'a> SliceContext<'a> {
                 intra_luma_mode,
                 intra_chroma_mode,
                 intra_split_flag,
+                inter_split_flag,
                 cbf_cb,
                 cbf_cr,
                 frame,
@@ -1450,6 +1856,7 @@ impl<'a> SliceContext<'a> {
                 intra_luma_mode,
                 intra_chroma_mode,
                 intra_split_flag,
+                inter_split_flag,
                 cbf_cb,
                 cbf_cr,
                 frame,
@@ -1462,6 +1869,7 @@ impl<'a> SliceContext<'a> {
                 intra_luma_mode,
                 intra_chroma_mode,
                 intra_split_flag,
+                inter_split_flag,
                 cbf_cb,
                 cbf_cr,
                 frame,
@@ -2126,10 +2534,33 @@ impl<'a> SliceContext<'a> {
 
     /// Get intra prediction mode of the left neighbor (x0-1, y0)
     ///
-    /// Returns DC if the left neighbor is outside the picture boundary.
+    /// Returns DC if the left neighbor is outside the picture boundary or in a different tile.
     fn get_neighbor_intra_mode_left(&self, x0: u32, y0: u32) -> IntraPredMode {
         if x0 == 0 {
             return IntraPredMode::Dc;
+        }
+        // Tile boundary: left neighbor in different tile → DC
+        if self.pps.tiles_enabled_flag {
+            let ctb_size = self.sps.ctb_size();
+            let left_ctb_x = (x0 - 1) / ctb_size;
+            let curr_ctb_x = x0 / ctb_size;
+            if left_ctb_x != curr_ctb_x {
+                let curr_tile = get_tile_id(
+                    &self.tile_col_bd,
+                    &self.tile_row_bd,
+                    curr_ctb_x,
+                    y0 / ctb_size,
+                );
+                let left_tile = get_tile_id(
+                    &self.tile_col_bd,
+                    &self.tile_row_bd,
+                    left_ctb_x,
+                    y0 / ctb_size,
+                );
+                if curr_tile != left_tile {
+                    return IntraPredMode::Dc;
+                }
+            }
         }
         self.get_intra_mode_at(x0 - 1, y0)
     }
@@ -2883,7 +3314,20 @@ impl<'a> SliceContext<'a> {
             * (1 << self.sps.log2_ctb_size());
         let first_qg_in_slice = slice_start_x == x_qg && slice_start_y == y_qg;
 
+        // H.265 8.6.1: first QG in tile also uses slice_qp_y
+        let first_qg_in_tile = self.pps.tiles_enabled_flag && {
+            let ctb_size = self.sps.ctb_size();
+            let ctb_x = x_qg as u32 / ctb_size;
+            let ctb_y = y_qg as u32 / ctb_size;
+            // Check if current CTB is the first CTB of its tile
+            self.tile_col_bd.windows(2).any(|w| w[0] == ctb_x)
+                && self.tile_row_bd.windows(2).any(|w| w[0] == ctb_y)
+                && (x_qg as u32).is_multiple_of(ctb_size)
+                && (y_qg as u32).is_multiple_of(ctb_size)
+        };
+
         let qp_y_pred = if first_qg_in_slice
+            || first_qg_in_tile
             || (first_in_ctb_row && self.pps.entropy_coding_sync_enabled_flag)
         {
             self.header.slice_qp_y
@@ -2954,5 +3398,150 @@ impl<'a> SliceContext<'a> {
         self.qp_cr = Self::chroma_qp_from_luma(qpi_cr) + qp_bd_offset_c;
 
         self.current_qpy = qpy;
+    }
+
+    /// Decode PCM samples (H.265 7.3.8.8)
+    ///
+    /// Reads raw (uncompressed) luma and chroma samples from the bitstream.
+    /// After pcm_flag=1 via decode_terminate(), the CABAC engine is terminated.
+    /// This function reads raw samples and reinitializes CABAC.
+    fn decode_pcm_samples(
+        &mut self,
+        x0: u32,
+        y0: u32,
+        log2_cb_size: u8,
+        frame: &mut DecodedFrame,
+    ) -> Result<()> {
+        let pcm = self.sps.pcm_params.as_ref().unwrap();
+        let pcm_bit_depth_luma = pcm.pcm_sample_bit_depth_luma_minus1 as u32 + 1;
+        let pcm_bit_depth_chroma = pcm.pcm_sample_bit_depth_chroma_minus1 as u32 + 1;
+
+        let cb_size = 1u32 << log2_cb_size;
+
+        // After decode_terminate(), CABAC is in a terminated state.
+        // Byte-align and get the current position for raw sample reading.
+        // The CABAC byte_pos is already at the right spot after terminate.
+        let mut byte_pos = self.cabac.get_position().0;
+
+        // Byte alignment for PCM (skip any remaining bits in current byte)
+        // After decode_terminate, the position is byte-aligned already
+        // but there may be pcm_alignment_zero_bits
+
+        // Read raw PCM luma samples
+        let data = self.cabac.raw_data();
+        let bit_depth_y = self.sps.bit_depth_y();
+        let stride = frame.width as usize;
+
+        // Use a simple bit reader on the raw data
+        let mut bit_offset = 0u32; // within current byte
+
+        // Helper: read N bits from data starting at byte_pos, bit_offset
+        let read_bits = |pos: &mut usize, bo: &mut u32, n: u32| -> u16 {
+            let mut val = 0u16;
+            for _ in 0..n {
+                if *pos < data.len() {
+                    let bit = (data[*pos] >> (7 - *bo)) & 1;
+                    val = (val << 1) | bit as u16;
+                    *bo += 1;
+                    if *bo >= 8 {
+                        *bo = 0;
+                        *pos += 1;
+                    }
+                }
+            }
+            val
+        };
+
+        // Read luma samples
+        for dy in 0..cb_size {
+            for dx in 0..cb_size {
+                let sample = read_bits(&mut byte_pos, &mut bit_offset, pcm_bit_depth_luma);
+                // Scale to bit_depth_y if needed
+                let px = x0 + dx;
+                let py = y0 + dy;
+                if px < frame.width && py < frame.height {
+                    let idx = py as usize * stride + px as usize;
+                    frame.y_plane[idx] = if pcm_bit_depth_luma < bit_depth_y as u32 {
+                        sample << (bit_depth_y as u32 - pcm_bit_depth_luma)
+                    } else {
+                        sample >> (pcm_bit_depth_luma - bit_depth_y as u32)
+                    };
+                }
+            }
+        }
+
+        // Read chroma samples (4:2:0)
+        let (chroma_w, chroma_h) = match self.sps.chroma_format_idc {
+            0 => (0, 0),
+            1 => (cb_size / 2, cb_size / 2),
+            2 => (cb_size / 2, cb_size),
+            3 => (cb_size, cb_size),
+            _ => (cb_size / 2, cb_size / 2),
+        };
+        let chroma_stride = match self.sps.chroma_format_idc {
+            0 => 0,
+            1 => frame.width.div_ceil(2) as usize,
+            2 => frame.width.div_ceil(2) as usize,
+            3 => frame.width as usize,
+            _ => frame.width.div_ceil(2) as usize,
+        };
+        let bit_depth_c = self.sps.bit_depth_c();
+
+        // Cb
+        let cx0 = match self.sps.chroma_format_idc {
+            1 | 2 => x0 / 2,
+            _ => x0,
+        };
+        let cy0 = match self.sps.chroma_format_idc {
+            1 => y0 / 2,
+            _ => y0,
+        };
+        for dy in 0..chroma_h {
+            for dx in 0..chroma_w {
+                let sample = read_bits(&mut byte_pos, &mut bit_offset, pcm_bit_depth_chroma);
+                let px = cx0 + dx;
+                let py = cy0 + dy;
+                if (px as usize) < chroma_stride && py < frame.height.div_ceil(2) {
+                    let idx = py as usize * chroma_stride + px as usize;
+                    if idx < frame.cb_plane.len() {
+                        frame.cb_plane[idx] = if pcm_bit_depth_chroma < bit_depth_c as u32 {
+                            sample << (bit_depth_c as u32 - pcm_bit_depth_chroma)
+                        } else {
+                            sample >> (pcm_bit_depth_chroma - bit_depth_c as u32)
+                        };
+                    }
+                }
+            }
+        }
+
+        // Cr
+        for dy in 0..chroma_h {
+            for dx in 0..chroma_w {
+                let sample = read_bits(&mut byte_pos, &mut bit_offset, pcm_bit_depth_chroma);
+                let px = cx0 + dx;
+                let py = cy0 + dy;
+                if (px as usize) < chroma_stride && py < frame.height.div_ceil(2) {
+                    let idx = py as usize * chroma_stride + px as usize;
+                    if idx < frame.cr_plane.len() {
+                        frame.cr_plane[idx] = if pcm_bit_depth_chroma < bit_depth_c as u32 {
+                            sample << (bit_depth_c as u32 - pcm_bit_depth_chroma)
+                        } else {
+                            sample >> (pcm_bit_depth_chroma - bit_depth_c as u32)
+                        };
+                    }
+                }
+            }
+        }
+
+        // Byte-align for CABAC reinit
+        if bit_offset > 0 {
+            byte_pos += 1;
+        }
+
+        // Reinitialize CABAC at the current byte position
+        self.cabac.seek_to(byte_pos);
+        self.cabac.reinit();
+
+        Ok(())
     }
 }

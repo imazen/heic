@@ -637,3 +637,90 @@ fn poc_a() {
 fn wpp_a() {
     run_conformance_test("WPP_A_ericsson_MAIN_2");
 }
+
+/// Debug test: dump detailed diff locations for MERGE_A to find deblocking issues
+#[test]
+fn merge_a_deblock_debug() {
+    let name = "MERGE_A_TI_3";
+    let bitstream = match ensure_vector(name) {
+        Some(b) => b,
+        None => {
+            eprintln!("SKIP");
+            return;
+        }
+    };
+    let (width, height) = get_dimensions(&bitstream).unwrap();
+    let ref_yuv = match ensure_reference_yuv(name, &bitstream) {
+        Some(r) => r,
+        None => {
+            eprintln!("SKIP: no ref");
+            return;
+        }
+    };
+
+    let data = std::fs::read(&bitstream).unwrap();
+    let mut decoder = heic_decoder::VideoDecoder::new(16);
+    let frames = decoder.decode_annex_b(&data).unwrap();
+    let ref_frames = load_reference_yuv(&ref_yuv, width, height);
+
+    for frame_idx in 0..frames.len().min(ref_frames.len()) {
+        let f = &frames[frame_idx];
+        let cw = f.cropped_width();
+        let ch = f.cropped_height();
+        let stride = f.width as usize;
+        let mut our_y = Vec::new();
+        for y in f.crop_top..(f.height - f.crop_bottom) {
+            let start = y as usize * stride + f.crop_left as usize;
+            our_y.extend_from_slice(&f.y_plane[start..start + cw as usize]);
+        }
+        let ref_y = &ref_frames[frame_idx];
+
+        let mut diffs: Vec<(u32, u32, i32)> = Vec::new();
+        let len = (width * height) as usize;
+        for i in 0..len.min(our_y.len()).min(ref_y.len()) {
+            let d = our_y[i] as i32 - ref_y[i] as i32;
+            if d != 0 {
+                diffs.push((i as u32 % width, i as u32 / width, d));
+            }
+        }
+
+        if diffs.is_empty() {
+            eprintln!("Frame {frame_idx}: EXACT");
+            continue;
+        }
+
+        let max_abs = diffs.iter().map(|d| d.2.abs()).max().unwrap();
+        eprintln!(
+            "Frame {frame_idx}: {} diffs, max_abs={max_abs}",
+            diffs.len()
+        );
+
+        // Group diffs by nearest edge
+        for (x, y, d) in &diffs {
+            // For each diff pixel, identify which deblocking edge could be responsible:
+            // Vertical edges at multiples of 8 affect pixels in range [edge-3, edge+3]
+            // Horizontal edges at multiples of 8 affect pixels in range [edge-3, edge+3]
+            let vert_edge = (*x / 8) * 8; // nearest lower vert edge
+            let vert_edge_hi = vert_edge + 8; // nearest upper vert edge
+            let horiz_edge = (*y / 8) * 8;
+            let horiz_edge_hi = horiz_edge + 8;
+
+            let near_vert = if (*x as i32 - vert_edge as i32).abs() <= 3 {
+                Some(vert_edge)
+            } else if (vert_edge_hi as i32 - *x as i32).abs() <= 3 {
+                Some(vert_edge_hi)
+            } else {
+                None
+            };
+            let near_horiz = if (*y as i32 - horiz_edge as i32).abs() <= 3 {
+                Some(horiz_edge)
+            } else if (horiz_edge_hi as i32 - *y as i32).abs() <= 3 {
+                Some(horiz_edge_hi)
+            } else {
+                None
+            };
+
+            eprintln!("  ({x},{y}) diff={d:+} vert_edge={near_vert:?} horiz_edge={near_horiz:?}");
+        }
+    }
+}
