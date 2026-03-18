@@ -472,3 +472,317 @@ fn test_image_info_matches_decoded_dimensions() {
         info.height, decoded.height
     );
 }
+
+fn portrait_matte_heic() -> String {
+    format!(
+        "{}/test-images/openize-heic-net/Openize.Heic.Tests/TestsData/samples/iphone_portrait_photo.heic",
+        heic_base_dir()
+    )
+}
+
+fn mattes_heic() -> String {
+    format!(
+        "{}/test-images/openize-heic-net/Openize.Heic.Tests/TestsData/samples/iphone_iOS18_tmap+MatteMaps.heic",
+        heic_base_dir()
+    )
+}
+
+// ---------------------------------------------------------------------------
+// MatteType URN parsing
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_matte_type_from_urn() {
+    use heic_decoder::MatteType;
+
+    assert_eq!(
+        MatteType::from_urn("urn:com:apple:photo:2018:aux:portraiteffectsmatte"),
+        Some(MatteType::Portrait)
+    );
+    assert_eq!(
+        MatteType::from_urn("urn:com:apple:photo:2019:aux:semanticskinmatte"),
+        Some(MatteType::Skin)
+    );
+    assert_eq!(
+        MatteType::from_urn("urn:com:apple:photo:2019:aux:semantichairmatte"),
+        Some(MatteType::Hair)
+    );
+    assert_eq!(
+        MatteType::from_urn("urn:com:apple:photo:2019:aux:semanticteethmatte"),
+        Some(MatteType::Teeth)
+    );
+    assert_eq!(
+        MatteType::from_urn("urn:com:apple:photo:2020:aux:semanticglassesmatte"),
+        Some(MatteType::Glasses)
+    );
+    assert_eq!(
+        MatteType::from_urn("urn:com:apple:photo:2020:aux:semanticskymatte"),
+        Some(MatteType::Sky)
+    );
+    assert_eq!(MatteType::from_urn("urn:unknown:type"), None);
+    assert_eq!(MatteType::from_urn(""), None);
+}
+
+#[test]
+fn test_matte_type_urn_roundtrip() {
+    use heic_decoder::MatteType;
+    for &mt in MatteType::ALL {
+        assert_eq!(MatteType::from_urn(mt.urn()), Some(mt));
+    }
+}
+
+#[test]
+fn test_matte_type_display() {
+    use heic_decoder::MatteType;
+    assert_eq!(format!("{}", MatteType::Portrait), "portrait");
+    assert_eq!(format!("{}", MatteType::Skin), "skin");
+    assert_eq!(format!("{}", MatteType::Sky), "sky");
+}
+
+// ---------------------------------------------------------------------------
+// Matte extraction
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_decode_matte_none_in_landscape() {
+    // example.heic: no portrait mattes
+    let data = std::fs::read(example_heic()).expect("read");
+    let decoder = DecoderConfig::new();
+    let matte = decoder
+        .decode_matte(&data, heic_decoder::MatteType::Portrait)
+        .expect("decode_matte");
+    assert!(
+        matte.is_none(),
+        "example.heic should not have portrait matte"
+    );
+}
+
+#[test]
+fn test_decode_mattes_empty_for_landscape() {
+    let data = std::fs::read(example_heic()).expect("read");
+    let decoder = DecoderConfig::new();
+    let mattes = decoder.decode_mattes(&data).expect("decode_mattes");
+    assert!(
+        mattes.is_empty(),
+        "example.heic should have no mattes, got {}",
+        mattes.len()
+    );
+}
+
+#[test]
+#[ignore] // Requires iPhone portrait photo with mattes; needs full HEVC decode
+fn test_decode_mattes_multiple() {
+    // iphone_iOS18_tmap+MatteMaps.heic has skin, sky, and portrait mattes
+    let data = std::fs::read(mattes_heic()).expect("read mattes HEIC");
+    let decoder = DecoderConfig::new();
+    let mattes = decoder.decode_mattes(&data).expect("decode_mattes");
+
+    println!("Found {} mattes:", mattes.len());
+    for m in &mattes {
+        println!(
+            "  {} matte: {}x{}, {} bytes",
+            m.matte_type,
+            m.width,
+            m.height,
+            m.data.len()
+        );
+        // Validate pixel count
+        assert_eq!(
+            m.data.len(),
+            (m.width * m.height) as usize,
+            "{} matte pixel count mismatch",
+            m.matte_type
+        );
+        // Check non-trivial data: not all zeros
+        let nonzero = m.data.iter().any(|&v| v > 0);
+        assert!(nonzero, "{} matte is all zeros", m.matte_type);
+    }
+
+    // Should have at least portrait and skin mattes
+    let has_portrait = mattes
+        .iter()
+        .any(|m| m.matte_type == heic_decoder::MatteType::Portrait);
+    let has_skin = mattes
+        .iter()
+        .any(|m| m.matte_type == heic_decoder::MatteType::Skin);
+    assert!(has_portrait, "should have portrait matte");
+    assert!(has_skin, "should have skin matte");
+}
+
+#[test]
+#[ignore] // Requires iPhone portrait photo with mattes; needs full HEVC decode
+fn test_decode_specific_matte() {
+    let data = std::fs::read(mattes_heic()).expect("read");
+    let decoder = DecoderConfig::new();
+
+    let portrait = decoder
+        .decode_matte(&data, heic_decoder::MatteType::Portrait)
+        .expect("decode_matte")
+        .expect("should have portrait matte");
+
+    assert!(portrait.width > 0 && portrait.height > 0);
+    assert_eq!(
+        portrait.data.len(),
+        (portrait.width * portrait.height) as usize
+    );
+    assert_eq!(portrait.matte_type, heic_decoder::MatteType::Portrait);
+    println!(
+        "Portrait matte: {}x{}, {} bytes",
+        portrait.width,
+        portrait.height,
+        portrait.data.len()
+    );
+
+    // No glasses matte in this file
+    let glasses = decoder
+        .decode_matte(&data, heic_decoder::MatteType::Glasses)
+        .expect("decode_matte");
+    assert!(glasses.is_none(), "should not have glasses matte");
+}
+
+// ---------------------------------------------------------------------------
+// EXIF/XMP/ICC byte extraction via ImageInfo
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_image_info_exif_bytes() {
+    let data = std::fs::read(iphone_heic()).expect("read");
+    let info = heic_decoder::ImageInfo::from_bytes(&data).expect("probe");
+
+    assert!(info.has_exif, "should report has_exif=true");
+    let exif = info.exif.expect("should have EXIF bytes");
+    assert!(exif.len() > 8, "EXIF data too short: {} bytes", exif.len());
+    assert!(
+        &exif[..2] == b"II" || &exif[..2] == b"MM",
+        "EXIF should start with TIFF byte order mark, got {:02x?}",
+        &exif[..2]
+    );
+    println!(
+        "ImageInfo EXIF: {} bytes, byte order: {}",
+        exif.len(),
+        if exif[0] == b'I' {
+            "little-endian"
+        } else {
+            "big-endian"
+        }
+    );
+}
+
+#[test]
+fn test_image_info_exif_bytes_none() {
+    // example.heic has no EXIF
+    let data = std::fs::read(example_heic()).expect("read");
+    let info = heic_decoder::ImageInfo::from_bytes(&data).expect("probe");
+    assert!(!info.has_exif);
+    assert!(
+        info.exif.is_none(),
+        "example.heic should have no EXIF bytes"
+    );
+}
+
+#[test]
+fn test_image_info_xmp_bytes() {
+    let data = std::fs::read(iphone_heic()).expect("read");
+    let info = heic_decoder::ImageInfo::from_bytes(&data).expect("probe");
+
+    assert!(info.has_xmp, "should report has_xmp=true");
+    if let Some(xmp) = &info.xmp {
+        let start = std::str::from_utf8(&xmp[..xmp.len().min(100)]).unwrap_or("(non-utf8)");
+        println!(
+            "ImageInfo XMP: {} bytes, starts with: {:?}",
+            xmp.len(),
+            start
+        );
+    }
+}
+
+#[test]
+fn test_image_info_icc_profile_bytes() {
+    // iPhone HEIC may use nclx rather than ICC profile.
+    let data = std::fs::read(iphone_heic()).expect("read");
+    let info = heic_decoder::ImageInfo::from_bytes(&data).expect("probe");
+
+    if info.has_icc_profile {
+        let icc = info
+            .icc_profile
+            .as_ref()
+            .expect("has_icc_profile=true but icc_profile is None");
+        assert!(icc.len() > 32, "ICC profile too short: {} bytes", icc.len());
+        println!("ICC profile: {} bytes", icc.len());
+    } else {
+        assert!(
+            info.icc_profile.is_none(),
+            "has_icc_profile=false but icc_profile is Some"
+        );
+        println!("No ICC profile (uses nclx color parameters)");
+    }
+}
+
+#[test]
+fn test_image_info_exif_matches_extract_exif() {
+    // The bytes from ImageInfo::exif should match DecoderConfig::extract_exif()
+    let data = std::fs::read(iphone_heic()).expect("read");
+    let info = heic_decoder::ImageInfo::from_bytes(&data).expect("probe");
+    let decoder = DecoderConfig::new();
+    let extracted = decoder.extract_exif(&data).expect("extract_exif");
+
+    match (&info.exif, extracted.as_deref()) {
+        (Some(from_info), Some(from_extract)) => {
+            assert_eq!(
+                from_info.as_slice(),
+                from_extract,
+                "ImageInfo.exif and extract_exif() should return identical bytes"
+            );
+        }
+        (None, None) => {} // both absent, fine
+        _ => panic!(
+            "ImageInfo.exif={} but extract_exif()={}",
+            info.exif.is_some(),
+            extracted.is_some()
+        ),
+    }
+}
+
+#[test]
+fn test_image_info_icc_matches_extract_icc() {
+    let data = std::fs::read(iphone_heic()).expect("read");
+    let info = heic_decoder::ImageInfo::from_bytes(&data).expect("probe");
+    let decoder = DecoderConfig::new();
+    let extracted = decoder.extract_icc(&data).expect("extract_icc");
+
+    match (&info.icc_profile, &extracted) {
+        (Some(from_info), Some(from_extract)) => {
+            assert_eq!(
+                from_info, from_extract,
+                "ImageInfo.icc_profile and extract_icc() should return identical bytes"
+            );
+        }
+        (None, None) => {}
+        _ => panic!(
+            "ImageInfo.icc_profile={} but extract_icc()={}",
+            info.icc_profile.is_some(),
+            extracted.is_some()
+        ),
+    }
+}
+
+#[test]
+fn test_portrait_image_info_metadata() {
+    let data = std::fs::read(portrait_matte_heic()).expect("read");
+    let info = heic_decoder::ImageInfo::from_bytes(&data).expect("probe");
+
+    println!(
+        "Portrait photo: {}x{}, has_exif={}, has_xmp={}, has_icc={}",
+        info.width, info.height, info.has_exif, info.has_xmp, info.has_icc_profile
+    );
+    println!(
+        "  exif: {} bytes, xmp: {} bytes, icc: {} bytes",
+        info.exif.as_ref().map_or(0, |v| v.len()),
+        info.xmp.as_ref().map_or(0, |v| v.len()),
+        info.icc_profile.as_ref().map_or(0, |v| v.len()),
+    );
+
+    // Portrait photo should have EXIF at minimum
+    assert!(info.has_exif, "portrait photo should have EXIF");
+    assert!(info.exif.is_some(), "portrait photo should have EXIF bytes");
+}
