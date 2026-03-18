@@ -1269,7 +1269,10 @@ fn decode_alpha_plane(
     Some(alpha_plane)
 }
 
-/// Decode gain map from Apple HDR HEIC
+/// Decode gain map from Apple HDR HEIC.
+///
+/// Returns the grayscale gain map pixels scaled to 8-bit, along with
+/// the source bit depth and any XMP metadata associated with the gain map item.
 pub(crate) fn decode_gain_map(data: &[u8]) -> Result<HdrGainMap> {
     let container = heif::parse(data, &Unstoppable)?;
     let primary_item = container
@@ -1299,25 +1302,59 @@ pub(crate) fn decode_gain_map(data: &[u8]) -> Result<HdrGainMap> {
 
     let width = frame.cropped_width();
     let height = frame.cropped_height();
-    let max_val = ((1u32 << frame.bit_depth) - 1) as f32;
+    let bit_depth = frame.bit_depth;
 
-    let mut float_data = Vec::with_capacity((width * height) as usize);
+    // Extract Y plane as grayscale, scale to 8-bit if needed
+    let total_pixels = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| at!(HeicError::LimitExceeded("gain map dimensions overflow")))?;
+
+    let max_val = ((1u32 << bit_depth) - 1) as u32;
     let y_start = frame.crop_top;
     let x_start = frame.crop_left;
+
+    let mut grayscale = Vec::new();
+    grayscale
+        .try_reserve(total_pixels)
+        .map_err(|_| at!(HeicError::OutOfMemory))?;
 
     for y in 0..height {
         for x in 0..width {
             let src_idx = ((y_start + y) * frame.width + (x_start + x)) as usize;
-            let raw = frame.y_plane[src_idx] as f32;
-            float_data.push(raw / max_val);
+            let raw = frame.y_plane[src_idx] as u32;
+            let val = if bit_depth == 8 {
+                raw as u8
+            } else {
+                ((raw * 255 + max_val / 2) / max_val) as u8
+            };
+            grayscale.push(val);
         }
     }
 
+    // Extract XMP metadata associated with the gain map item (if any)
+    let xmp = container
+        .find_xmp_for_item(gainmap_id)
+        .map(|cow| cow.into_owned());
+
     Ok(HdrGainMap {
-        data: float_data,
+        data: grayscale,
         width,
         height,
+        bit_depth,
+        xmp,
     })
+}
+
+/// Check if the primary image has an HDR gain map auxiliary image.
+pub(crate) fn has_gain_map(data: &[u8]) -> Result<bool> {
+    let container = heif::parse(data, &Unstoppable)?;
+    let primary_item = container
+        .primary_item()
+        .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
+
+    let gainmap_ids =
+        container.find_auxiliary_items(primary_item.id, "urn:com:apple:photo:2020:aux:hdrgainmap");
+    Ok(!gainmap_ids.is_empty())
 }
 
 /// Apply clean aperture (clap box) crop to a decoded frame
@@ -1666,11 +1703,26 @@ pub(crate) fn decode_mattes(data: &[u8]) -> Result<Vec<crate::SegmentationMatte>
         .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
 
     let matte_urns: &[(AuxiliaryImageType, &str)] = &[
-        (AuxiliaryImageType::PortraitMatte, AuxiliaryImageType::PortraitMatte.urn()),
-        (AuxiliaryImageType::SkinMatte, AuxiliaryImageType::SkinMatte.urn()),
-        (AuxiliaryImageType::HairMatte, AuxiliaryImageType::HairMatte.urn()),
-        (AuxiliaryImageType::TeethMatte, AuxiliaryImageType::TeethMatte.urn()),
-        (AuxiliaryImageType::GlassesMatte, AuxiliaryImageType::GlassesMatte.urn()),
+        (
+            AuxiliaryImageType::PortraitMatte,
+            AuxiliaryImageType::PortraitMatte.urn(),
+        ),
+        (
+            AuxiliaryImageType::SkinMatte,
+            AuxiliaryImageType::SkinMatte.urn(),
+        ),
+        (
+            AuxiliaryImageType::HairMatte,
+            AuxiliaryImageType::HairMatte.urn(),
+        ),
+        (
+            AuxiliaryImageType::TeethMatte,
+            AuxiliaryImageType::TeethMatte.urn(),
+        ),
+        (
+            AuxiliaryImageType::GlassesMatte,
+            AuxiliaryImageType::GlassesMatte.urn(),
+        ),
     ];
 
     let mut mattes = Vec::new();

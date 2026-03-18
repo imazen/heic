@@ -616,23 +616,36 @@ impl ImageInfo {
 
 /// HDR gain map data extracted from an auxiliary image.
 ///
-/// The gain map can be used with the Apple HDR formula to reconstruct HDR:
+/// The gain map is a grayscale image (typically lower resolution than the
+/// primary) used with the Apple HDR or ISO 21496-1 formula to reconstruct HDR:
 /// ```text
 /// sdr_linear = sRGB_EOTF(sdr_pixel)
 /// gainmap_linear = sRGB_EOTF(gainmap_pixel)
 /// scale = 1.0 + (headroom - 1.0) * gainmap_linear
 /// hdr_linear = sdr_linear * scale
 /// ```
-/// Where `headroom` comes from EXIF maker notes (tags 0x0021 and 0x0030).
+/// Where `headroom` and other parameters come from the XMP metadata
+/// (ISO 21496-1 / Apple HDR namespaces). Parse the [`xmp`](Self::xmp)
+/// field with `ultrahdr-core` or similar to extract those parameters.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct HdrGainMap {
-    /// Gain map pixel data normalized to 0.0-1.0
-    pub data: Vec<f32>,
-    /// Gain map width in pixels
+    /// Grayscale gain map pixels (u8).
+    ///
+    /// For sources with `bit_depth > 8`, values are scaled to 8-bit.
+    /// Length is `width * height`.
+    pub data: Vec<u8>,
+    /// Gain map width in pixels.
     pub width: u32,
-    /// Gain map height in pixels
+    /// Gain map height in pixels.
     pub height: u32,
+    /// Significant bits per sample in the source HEVC stream (typically 8).
+    pub bit_depth: u8,
+    /// Raw XMP bytes from the gain map item (contains ISO 21496-1 metadata).
+    ///
+    /// Callers parse this with `ultrahdr-core`'s XMP parser or similar.
+    /// `None` if no XMP metadata is associated with the gain map item.
+    pub xmp: Option<Vec<u8>>,
 }
 
 /// Decoder configuration. Reusable across multiple decode operations.
@@ -745,10 +758,23 @@ impl DecoderConfig {
         luma_bytes + chroma_bytes + output_bytes + deblock_bytes
     }
 
+    /// Check if the primary image has an HDR gain map auxiliary image.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HEIF container is malformed.
+    pub fn has_gain_map(&self, data: &[u8]) -> Result<bool> {
+        decode::has_gain_map(data)
+    }
+
     /// Decode the HDR gain map from an Apple HDR HEIC file.
     ///
-    /// Returns the raw gain map pixel data normalized to 0.0-1.0.
+    /// Returns the grayscale gain map pixels (scaled to 8-bit), the source
+    /// bit depth, and any XMP metadata associated with the gain map item.
     /// The gain map is typically lower resolution than the primary image.
+    ///
+    /// The XMP metadata contains ISO 21496-1 / Apple HDR parameters needed
+    /// to apply the gain map. Parse it with `ultrahdr-core` or similar.
     ///
     /// # Errors
     ///

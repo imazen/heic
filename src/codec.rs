@@ -637,32 +637,27 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
             .map_err(|e| e.into_inner())
             .ok();
         let fallback_info = crate::ImageInfo {
-                width,
-                height,
-                has_alpha,
-                bit_depth: 8,
-                chroma_format: 1,
-                has_exif: false,
-                has_xmp: false,
-                has_thumbnail: false,
-                color_primaries: 2,
-                transfer_characteristics: 2,
-                matrix_coefficients: 2,
-                video_full_range: false,
-                has_icc_profile: false,
-                has_depth: false,
-                has_gain_map: false,
-                exif: None,
-                xmp: None,
-                icc_profile: None,
-        };
-        let pi_ref = probe_info.as_ref().unwrap_or(&fallback_info);
-        let info = build_image_info_full(
-            pi_ref,
-            container.as_ref(),
             width,
             height,
-        );
+            has_alpha,
+            bit_depth: 8,
+            chroma_format: 1,
+            has_exif: false,
+            has_xmp: false,
+            has_thumbnail: false,
+            color_primaries: 2,
+            transfer_characteristics: 2,
+            matrix_coefficients: 2,
+            video_full_range: false,
+            has_icc_profile: false,
+            has_depth: false,
+            has_gain_map: false,
+            exif: None,
+            xmp: None,
+            icc_profile: None,
+        };
+        let pi_ref = probe_info.as_ref().unwrap_or(&fallback_info);
+        let info = build_image_info_full(pi_ref, container.as_ref(), width, height);
         let mut output = DecodeOutput::new(buf, info);
 
         // Attach auxiliary image metadata as an extension if available.
@@ -681,6 +676,13 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
                 has_gain_map: pi.has_gain_map,
                 auxiliary_types: aux_types,
             });
+
+            // Decode and attach the HDR gain map if present.
+            if pi.has_gain_map {
+                if let Ok(gain_map) = crate::decode::decode_gain_map(data) {
+                    output.extensions_mut().insert(gain_map);
+                }
+            }
         }
 
         Ok(output)

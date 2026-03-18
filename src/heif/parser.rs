@@ -340,6 +340,39 @@ impl<'a> HeifContainer<'a> {
             .map(|r| r.from_item_id)
             .collect()
     }
+
+    /// Find XMP metadata items that describe a specific item.
+    ///
+    /// In HEIC files, XMP metadata for auxiliary images (like gain maps) is
+    /// stored as a separate `mime` item linked via a `cdsc` (content describes)
+    /// reference pointing to the target item.
+    ///
+    /// Returns the raw XMP bytes if found, `None` otherwise.
+    pub fn find_xmp_for_item(&self, target_item_id: u32) -> Option<Cow<'a, [u8]>> {
+        // Find mime/XMP items that have a cdsc reference to the target item
+        for r in &self.item_references {
+            if r.reference_type != FourCC::CDSC {
+                continue;
+            }
+            if !r.to_item_ids.contains(&target_item_id) {
+                continue;
+            }
+            // r.from_item_id is the metadata item describing target_item_id
+            let Some(info) = self.item_infos.iter().find(|i| i.item_id == r.from_item_id) else {
+                continue;
+            };
+            if info.item_type != FourCC(*b"mime") {
+                continue;
+            }
+            if !info.content_type.contains("xmp") && !info.content_type.contains("rdf+xml") {
+                continue;
+            }
+            if let Ok(data) = self.get_item_data(r.from_item_id) {
+                return Some(data);
+            }
+        }
+        None
+    }
 }
 
 /// Parse a HEIF container

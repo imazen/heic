@@ -60,6 +60,8 @@ impl FourCC {
     pub const IMIR: Self = Self(*b"imir");
     /// Thumbnail reference
     pub const THMB: Self = Self(*b"thmb");
+    /// Content describes reference (metadata item → image it describes)
+    pub const CDSC: Self = Self(*b"cdsc");
 
     /// Create from bytes
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
