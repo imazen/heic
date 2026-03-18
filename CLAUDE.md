@@ -155,6 +155,9 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 - SIMD-accelerated IDST 4x4 via archmage SSE4.1 (3.77x vs scalar)
 - SIMD residual add (u16+i16→clamped u16) and dequantize via archmage AVX2
 - Tile-parallel grid decoding via rayon (optional `parallel` feature)
+- PCM mode support (H.265 7.3.8.8) — raw sample read + CABAC reinit
+- Tile-aware CABAC context derivation (split_cu_flag, cu_skip_flag, SAO merge, intra MPM)
+- Tile boundary QP prediction reset (H.265 8.6.1) and context/StatCoeff reinit
 
 ### Current Quality (RGB comparison vs libheif)
 - 103/162 test files decode successfully
@@ -200,8 +203,14 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
   - Full pipeline: syntax parsing, merge/AMVP/TMVP, scalar MC, DPB, VideoDecoder
   - Conformance: 48/48 vectors decode without crash, 1 pixel-exact (I-only)
   - CABAC verified BIT-EXACT vs dec265 (all 28 CTU byte positions match for MERGE_A)
-  - MERGE_A unfiltered: ALL 8 frames 100% pixel-exact vs dec265 (POC 0-7)
+  - MERGE_A: frames 1-7 small deblocking diffs (29-349 pixels, max_abs 2-6), frame 0 exact
+  - SAO_B (3x1 tiles): 12.9dB (all frames decode, no UNINIT)
   - Fixed bugs:
+    - Tile boundary CABAC context: split_cu_flag, cu_skip_flag, SAO merge left/up now check same-tile availability (matching libde265 6.4.1)
+    - Tile QP reset: QP prediction, is_cu_qp_delta_coded, StatCoeff reset at tile boundaries
+    - Intra MPM tile awareness: get_neighbor_intra_mode_left returns DC for cross-tile neighbors
+    - PCM mode: pcm_flag decode via decode_terminate, raw sample read, CABAC reinit (H.265 7.3.8.8)
+    - SAO merge slice check: uses actual slice_segment_address instead of hardcoded 0
     - interSplitFlag: missing forced TU split when max_transform_hierarchy_depth_inter==0 and PartMode!=2Nx2N (H.265 7.3.8.7). Caused CABAC desync in RQT_A B-frame.
     - Temporal MVP fallback: only tried one collocated position (bottom-right OR center), but H.265 8.5.3.2.8 requires trying bottom-right first, then falling back to center when collocated block is intra
     - Small PU L1 restriction: nPbW+nPbH==12 rule unconditionally disabled L1, but H.265 8.5.3.2.2 step 10 only disables L1 when both L0 and L1 are active (bi-prediction)
@@ -214,6 +223,7 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
   - Multi-slice: PictureMaps persistence across slices (ct_depth, intra modes, pred/mv, cbf, qp, sao)
   - Loop filters deferred to picture completion (prevents intra ref corruption in multi-slice)
   - Tile scan order: boundary detection, CABAC reinit at tile boundaries with entry point offsets
+  - Remaining UNINIT vectors: TILES_A/B (complex tile CABAC desync within tiles), DELTAQP_A (PCM + complex content), DBLK_A/B (multi-slice inter desync), SDH_A (cu_qp_delta desync), MVDL1ZERO (scattered inter desync)
   - Deferred: SIMD MC (Phase 7), weighted prediction application
 - 4:4:4 chroma: decodes correctly (61.9dB), but no SIMD color conversion path (uses scalar)
 - Dependent slice segments: not supported (2 vectors fail)
