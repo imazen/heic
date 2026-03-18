@@ -31,27 +31,75 @@ fn deblock_trace_active() -> bool {
 #[cfg(feature = "std")]
 #[allow(clippy::too_many_arguments)]
 fn trace_edge(
-    vertical: bool, x: u32, y: u32, bs: i32, qp_p: i32, qp_q: i32,
-    beta: i32, tc: i32, de: i32, dep: i32, deq: i32, d: i32,
-    p0_0: i32, p1_0: i32, p2_0: i32, p3_0: i32,
-    q0_0: i32, q1_0: i32, q2_0: i32, q3_0: i32,
-    p0_3: i32, p1_3: i32, p2_3: i32, p3_3: i32,
-    q0_3: i32, q1_3: i32, q2_3: i32, q3_3: i32,
+    vertical: bool,
+    x: u32,
+    y: u32,
+    bs: i32,
+    qp_p: i32,
+    qp_q: i32,
+    beta: i32,
+    tc: i32,
+    de: i32,
+    dep: i32,
+    deq: i32,
+    d: i32,
+    p0_0: i32,
+    p1_0: i32,
+    p2_0: i32,
+    p3_0: i32,
+    q0_0: i32,
+    q1_0: i32,
+    q2_0: i32,
+    q3_0: i32,
+    p0_3: i32,
+    p1_3: i32,
+    p2_3: i32,
+    p3_3: i32,
+    q0_3: i32,
+    q1_3: i32,
+    q2_3: i32,
+    q3_3: i32,
 ) {
     use std::io::Write;
-    use std::sync::Mutex;
     use std::sync::LazyLock;
-    static TRACE_FILE: LazyLock<Mutex<std::fs::File>> = LazyLock::new(|| {
-        Mutex::new(std::fs::File::create("/tmp/our_deblock_trace.txt").unwrap())
-    });
+    use std::sync::Mutex;
+    static TRACE_FILE: LazyLock<Mutex<std::fs::File>> =
+        LazyLock::new(|| Mutex::new(std::fs::File::create("/tmp/our_deblock_trace.txt").unwrap()));
     let mut f = TRACE_FILE.lock().unwrap();
-    let _ = writeln!(f, "EDGE {} x={} y={} bS={} QP_P={} QP_Q={} qP_L={} beta={} tc={} dE={} dEp={} dEq={} d={} \
+    let _ = writeln!(
+        f,
+        "EDGE {} x={} y={} bS={} QP_P={} QP_Q={} qP_L={} beta={} tc={} dE={} dEp={} dEq={} d={} \
         p[0]={{{},{},{},{}}} q[0]={{{},{},{},{}}} p[3]={{{},{},{},{}}} q[3]={{{},{},{},{}}}",
         if vertical { 'V' } else { 'H' },
-        x, y, bs, qp_p, qp_q, (qp_q + qp_p + 1) >> 1, beta, tc,
-        de, dep, deq, d,
-        p0_0, p1_0, p2_0, p3_0, q0_0, q1_0, q2_0, q3_0,
-        p0_3, p1_3, p2_3, p3_3, q0_3, q1_3, q2_3, q3_3);
+        x,
+        y,
+        bs,
+        qp_p,
+        qp_q,
+        (qp_q + qp_p + 1) >> 1,
+        beta,
+        tc,
+        de,
+        dep,
+        deq,
+        d,
+        p0_0,
+        p1_0,
+        p2_0,
+        p3_0,
+        q0_0,
+        q1_0,
+        q2_0,
+        q3_0,
+        p0_3,
+        p1_3,
+        p2_3,
+        p3_3,
+        q0_3,
+        q1_3,
+        q2_3,
+        q3_3
+    );
 }
 
 /// Beta prime values for deblocking filter (Table 8-12)
@@ -189,10 +237,26 @@ fn compute_bs(
 
     // Same reference pictures — now check MV differences
     // Get MVs (zero if pred_flag is false, matching libde265 behavior)
-    let mv_p0 = if mv_p.pred_flag[0] { mv_p.mv[0] } else { super::inter::MotionVector::ZERO };
-    let mv_p1 = if mv_p.pred_flag[1] { mv_p.mv[1] } else { super::inter::MotionVector::ZERO };
-    let mv_q0 = if mv_q.pred_flag[0] { mv_q.mv[0] } else { super::inter::MotionVector::ZERO };
-    let mv_q1 = if mv_q.pred_flag[1] { mv_q.mv[1] } else { super::inter::MotionVector::ZERO };
+    let mv_p0 = if mv_p.pred_flag[0] {
+        mv_p.mv[0]
+    } else {
+        super::inter::MotionVector::ZERO
+    };
+    let mv_p1 = if mv_p.pred_flag[1] {
+        mv_p.mv[1]
+    } else {
+        super::inter::MotionVector::ZERO
+    };
+    let mv_q0 = if mv_q.pred_flag[0] {
+        mv_q.mv[0]
+    } else {
+        super::inter::MotionVector::ZERO
+    };
+    let mv_q1 = if mv_q.pred_flag[1] {
+        mv_q.mv[1]
+    } else {
+        super::inter::MotionVector::ZERO
+    };
 
     // Helper: check if MV difference >= 4 quarter-pel (1 integer sample)
     let mv_diff_ge4 = |a: super::inter::MotionVector, b: super::inter::MotionVector| -> bool {
@@ -217,10 +281,8 @@ fn compute_bs(
     } else {
         // Same reference picture for both lists (refPicP0 == refPicP1)
         // Must check BOTH orderings — bS=1 only if BOTH give MV difference
-        let same_order_diff =
-            mv_diff_ge4(mv_p0, mv_q0) || mv_diff_ge4(mv_p1, mv_q1);
-        let cross_order_diff =
-            mv_diff_ge4(mv_p0, mv_q1) || mv_diff_ge4(mv_p1, mv_q0);
+        let same_order_diff = mv_diff_ge4(mv_p0, mv_q0) || mv_diff_ge4(mv_p1, mv_q1);
+        let cross_order_diff = mv_diff_ge4(mv_p0, mv_q1) || mv_diff_ge4(mv_p1, mv_q0);
         if same_order_diff && cross_order_diff {
             return 1;
         }
@@ -311,17 +373,7 @@ pub fn apply_deblocking_filter(
 
                     let bs = compute_bs(x, y, true, is_tb_edge, &inter_ctx);
                     if bs > 0 {
-                        filter_edge_luma(
-                            frame,
-                            x,
-                            y,
-                            true,
-                            qp_p,
-                            qp_q,
-                            beta_offset,
-                            tc_offset,
-                            bs,
-                        );
+                        filter_edge_luma(frame, x, y, true, qp_p, qp_q, beta_offset, tc_offset, bs);
                     }
                 }
             }
@@ -473,9 +525,10 @@ fn filter_edge_luma(
     if d >= beta {
         #[cfg(feature = "std")]
         if deblock_trace_active() {
-            trace_edge(vertical, x, y, bs, qp_p, qp_q, beta, tc, 0, 0, 0, d,
-                p0_0, p1_0, p2_0, p3_0, q0_0, q1_0, q2_0, q3_0,
-                p0_3, p1_3, p2_3, p3_3, q0_3, q1_3, q2_3, q3_3);
+            trace_edge(
+                vertical, x, y, bs, qp_p, qp_q, beta, tc, 0, 0, 0, d, p0_0, p1_0, p2_0, p3_0, q0_0,
+                q1_0, q2_0, q3_0, p0_3, p1_3, p2_3, p3_3, q0_3, q1_3, q2_3, q3_3,
+            );
         }
         return;
     }
@@ -497,9 +550,36 @@ fn filter_edge_luma(
 
     #[cfg(feature = "std")]
     if deblock_trace_active() {
-        trace_edge(vertical, x, y, bs, qp_p, qp_q, beta, tc, de, d_ep as i32, d_eq as i32, d,
-            p0_0, p1_0, p2_0, p3_0, q0_0, q1_0, q2_0, q3_0,
-            p0_3, p1_3, p2_3, p3_3, q0_3, q1_3, q2_3, q3_3);
+        trace_edge(
+            vertical,
+            x,
+            y,
+            bs,
+            qp_p,
+            qp_q,
+            beta,
+            tc,
+            de,
+            d_ep as i32,
+            d_eq as i32,
+            d,
+            p0_0,
+            p1_0,
+            p2_0,
+            p3_0,
+            q0_0,
+            q1_0,
+            q2_0,
+            q3_0,
+            p0_3,
+            p1_3,
+            p2_3,
+            p3_3,
+            q0_3,
+            q1_3,
+            q2_3,
+            q3_3,
+        );
     }
 
     // Apply filter for all 4 samples along the edge
@@ -620,9 +700,7 @@ fn apply_chroma_deblocking(
             let bx = x / 4;
             let by = y / 4;
             let idx = (by * frame.deblock_stride + bx) as usize;
-            if idx < frame.deblock_flags.len()
-                && (frame.deblock_flags[idx] & vert_edge_mask) != 0
-            {
+            if idx < frame.deblock_flags.len() && (frame.deblock_flags[idx] & vert_edge_mask) != 0 {
                 let is_tb_edge = (frame.deblock_flags[idx] & DEBLOCK_FLAG_VERT) != 0;
                 // Chroma only filters at bS=2
                 let bs = compute_bs(x, y, true, is_tb_edge, inter_ctx);
@@ -698,8 +776,7 @@ fn apply_chroma_deblocking(
             let bx = x / 4;
             let by = y / 4;
             let idx = (by * frame.deblock_stride + bx) as usize;
-            if idx < frame.deblock_flags.len()
-                && (frame.deblock_flags[idx] & horiz_edge_mask) != 0
+            if idx < frame.deblock_flags.len() && (frame.deblock_flags[idx] & horiz_edge_mask) != 0
             {
                 let is_tb_edge = (frame.deblock_flags[idx] & DEBLOCK_FLAG_HORIZ) != 0;
                 let bs = compute_bs(x, y, false, is_tb_edge, inter_ctx);

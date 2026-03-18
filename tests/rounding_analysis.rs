@@ -10,7 +10,10 @@ fn analyze_merge_a_rounding() {
     let bs = find_bit("conformance/vectors/MERGE_A_TI_3");
     let bs = match bs {
         Some(p) => p,
-        None => { eprintln!("SKIP: MERGE_A not downloaded"); return; }
+        None => {
+            eprintln!("SKIP: MERGE_A not downloaded");
+            return;
+        }
     };
 
     let ref_path = Path::new("conformance/vectors/MERGE_A_TI_3/reference.yuv");
@@ -30,7 +33,11 @@ fn analyze_merge_a_rounding() {
     let frame_size = luma_size + 2 * ((w / 2) * (h / 2)) as usize;
 
     eprintln!("=== MERGE_A Rounding Analysis ===");
-    eprintln!("Decoded {} frames, reference has {} frames\n", frames.len(), ref_data.len() / frame_size);
+    eprintln!(
+        "Decoded {} frames, reference has {} frames\n",
+        frames.len(),
+        ref_data.len() / frame_size
+    );
 
     // Frame 0: I-frame (should be exact)
     let our_y0 = crop_y(&frames[0], w, h);
@@ -40,7 +47,10 @@ fn analyze_merge_a_rounding() {
     // Frame 1: first inter frame
     if frames.len() > 1 {
         let our_y1 = crop_y(&frames[1], w, h);
-        let ref_y1: Vec<u16> = ref_data[frame_size..frame_size + luma_size].iter().map(|&b| b as u16).collect();
+        let ref_y1: Vec<u16> = ref_data[frame_size..frame_size + luma_size]
+            .iter()
+            .map(|&b| b as u16)
+            .collect();
         pixel_analysis(&our_y1, &ref_y1, w, h, "Frame 1 (inter)");
 
         // Check: pixels that match the I-frame exactly
@@ -51,12 +61,20 @@ fn analyze_merge_a_rounding() {
             let our_v = our_y1[i];
             let ref_v = ref_y1[i];
             let iframe_v = ref_y0[i];
-            if our_v == iframe_v { match_iframe += 1; }
-            if our_v != iframe_v { diff_from_iframe_ours += 1; }
-            if ref_v != iframe_v { diff_from_iframe_ref += 1; }
+            if our_v == iframe_v {
+                match_iframe += 1;
+            }
+            if our_v != iframe_v {
+                diff_from_iframe_ours += 1;
+            }
+            if ref_v != iframe_v {
+                diff_from_iframe_ref += 1;
+            }
         }
-        eprintln!("  Our pixels matching I-frame: {match_iframe}/{luma_size} ({:.1}%)",
-                  100.0 * match_iframe as f64 / luma_size as f64);
+        eprintln!(
+            "  Our pixels matching I-frame: {match_iframe}/{luma_size} ({:.1}%)",
+            100.0 * match_iframe as f64 / luma_size as f64
+        );
         eprintln!("  Our pixels differing from I-frame: {diff_from_iframe_ours}");
         eprintln!("  Ref pixels differing from I-frame: {diff_from_iframe_ref}");
 
@@ -71,15 +89,18 @@ fn analyze_merge_a_rounding() {
                 if our_y1[i] == ref_y0[i] {
                     actually_match += 1;
                 } else {
-                    let diff = (our_y1[i] as i32 - ref_y0[i] as i32).unsigned_abs().min(15) as usize;
+                    let diff =
+                        (our_y1[i] as i32 - ref_y0[i] as i32).unsigned_abs().min(15) as usize;
                     mismatch_diff_hist[diff] += 1;
                 }
             }
         }
         eprintln!("\n  Pixels where ref==I-frame (skip/zero-residual regions):");
         eprintln!("    Total: {should_match_count}");
-        eprintln!("    Ours also match: {actually_match} ({:.1}%)",
-                  100.0 * actually_match as f64 / should_match_count.max(1) as f64);
+        eprintln!(
+            "    Ours also match: {actually_match} ({:.1}%)",
+            100.0 * actually_match as f64 / should_match_count.max(1) as f64
+        );
         if should_match_count > actually_match {
             eprintln!("    Our mismatches in these regions:");
             for (d, c) in mismatch_diff_hist.iter().enumerate() {
@@ -96,16 +117,24 @@ fn analyze_merge_a_rounding() {
         for i in 0..luma_size.min(our_y1.len()).min(ref_y1.len()) {
             let err = our_y1[i] as i64 - ref_y1[i] as i64;
             error_sum += err;
-            if err > 0 { positive_errors += 1; }
-            if err < 0 { negative_errors += 1; }
+            if err > 0 {
+                positive_errors += 1;
+            }
+            if err < 0 {
+                negative_errors += 1;
+            }
         }
         let total_errors = positive_errors + negative_errors;
         eprintln!("\n  Signed error analysis (ours - ref):");
         eprintln!("    Mean error: {:.3}", error_sum as f64 / luma_size as f64);
-        eprintln!("    Positive (ours > ref): {positive_errors} ({:.1}%)",
-                  100.0 * positive_errors as f64 / total_errors.max(1) as f64);
-        eprintln!("    Negative (ours < ref): {negative_errors} ({:.1}%)",
-                  100.0 * negative_errors as f64 / total_errors.max(1) as f64);
+        eprintln!(
+            "    Positive (ours > ref): {positive_errors} ({:.1}%)",
+            100.0 * positive_errors as f64 / total_errors.max(1) as f64
+        );
+        eprintln!(
+            "    Negative (ours < ref): {negative_errors} ({:.1}%)",
+            100.0 * negative_errors as f64 / total_errors.max(1) as f64
+        );
 
         // Check: for the FIRST CU (0,0) 32x32, what fraction of pixels match?
         let mut cu00_exact = 0u32;
@@ -119,8 +148,10 @@ fn analyze_merge_a_rounding() {
                 }
             }
         }
-        eprintln!("\n  First CU (0,0) 32x32: {cu00_exact}/{cu00_total} exact ({:.1}%)",
-                  100.0 * cu00_exact as f64 / cu00_total as f64);
+        eprintln!(
+            "\n  First CU (0,0) 32x32: {cu00_exact}/{cu00_total} exact ({:.1}%)",
+            100.0 * cu00_exact as f64 / cu00_total as f64
+        );
 
         // Check per-CTU exact rate
         let ctb = 64u32;
@@ -152,18 +183,28 @@ fn pixel_analysis(ours: &[u16], reference: &[u16], _w: u32, _h: u32, name: &str)
     for i in 0..len {
         let a = ours[i];
         let b = reference[i];
-        if a == b { exact += 1; continue; }
+        if a == b {
+            exact += 1;
+            continue;
+        }
         let d = (a as i32 - b as i32).unsigned_abs().min(255) as usize;
         diff_hist[d] += 1;
     }
     let total_diff = len - exact;
-    eprintln!("{name}: {exact}/{len} exact ({:.1}%), {total_diff} different",
-              100.0 * exact as f64 / len as f64);
+    eprintln!(
+        "{name}: {exact}/{len} exact ({:.1}%), {total_diff} different",
+        100.0 * exact as f64 / len as f64
+    );
     if total_diff > 0 {
         let small: u32 = diff_hist[1..=3].iter().sum();
-        eprintln!("  diff=1: {}, diff=2: {}, diff=3: {}, small(1-3): {} ({:.1}%)",
-                  diff_hist[1], diff_hist[2], diff_hist[3], small,
-                  100.0 * small as f64 / total_diff as f64);
+        eprintln!(
+            "  diff=1: {}, diff=2: {}, diff=3: {}, small(1-3): {} ({:.1}%)",
+            diff_hist[1],
+            diff_hist[2],
+            diff_hist[3],
+            small,
+            100.0 * small as f64 / total_diff as f64
+        );
     }
     total_diff
 }
@@ -181,7 +222,9 @@ fn crop_y(frame: &heic_decoder::DecodedFrame, _w: u32, _h: u32) -> Vec<u16> {
 
 fn find_bit(dir: &str) -> Option<std::path::PathBuf> {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(dir);
-    walkdir(&dir).into_iter().find(|p| p.extension().is_some_and(|e| e == "bit"))
+    walkdir(&dir)
+        .into_iter()
+        .find(|p| p.extension().is_some_and(|e| e == "bit"))
 }
 
 fn walkdir(dir: &Path) -> Vec<std::path::PathBuf> {
@@ -189,7 +232,11 @@ fn walkdir(dir: &Path) -> Vec<std::path::PathBuf> {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for e in entries.flatten() {
             let p = e.path();
-            if p.is_dir() { r.extend(walkdir(&p)); } else { r.push(p); }
+            if p.is_dir() {
+                r.extend(walkdir(&p));
+            } else {
+                r.push(p);
+            }
         }
     }
     r

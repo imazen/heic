@@ -44,8 +44,10 @@ fn compare_nofilter() {
             }
         }
         let total = 316 * h;
-        eprintln!("Frame 0 sanity: our unfiltered vs dec265 FILTERED: {exact}/{total} ({:.1}%)",
-            100.0 * exact as f64 / total as f64);
+        eprintln!(
+            "Frame 0 sanity: our unfiltered vs dec265 FILTERED: {exact}/{total} ({:.1}%)",
+            100.0 * exact as f64 / total as f64
+        );
     }
 
     // First diff in unfiltered I-frame
@@ -58,7 +60,9 @@ fn compare_nofilter() {
                 let ov = frames[0].y_plane[y * stride + x];
                 if rv != ov {
                     let d = ov as i32 - rv as i32;
-                    eprintln!("First unfiltered I-frame diff: ({x},{y}) ours={ov} dec265={rv} diff={d:+}");
+                    eprintln!(
+                        "First unfiltered I-frame diff: ({x},{y}) ours={ov} dec265={rv} diff={d:+}"
+                    );
                     // Show 4x4 around it
                     let bx = (x / 4) * 4;
                     let by = (y / 4) * 4;
@@ -99,16 +103,24 @@ fn compare_nofilter() {
                 let ov = frames[fi].y_plane[y * stride + x];
                 let d = (ov as i32 - rv as i32).unsigned_abs() as u16;
                 count += 1;
-                if d == 0 { exact += 1; } else {
+                if d == 0 {
+                    exact += 1;
+                } else {
                     max_diff = max_diff.max(d);
                     sse += d as u64 * d as u64;
                 }
             }
         }
         let mse = sse as f64 / count as f64;
-        let psnr = if mse > 0.0 { 10.0 * (255.0 * 255.0 / mse).log10() } else { f64::INFINITY };
-        eprintln!("  Frame {fi}: PSNR={psnr:.1}dB, exact={exact}/{count} ({:.1}%), max_diff={max_diff}",
-            100.0 * exact as f64 / count as f64);
+        let psnr = if mse > 0.0 {
+            10.0 * (255.0 * 255.0 / mse).log10()
+        } else {
+            f64::INFINITY
+        };
+        eprintln!(
+            "  Frame {fi}: PSNR={psnr:.1}dB, exact={exact}/{count} ({:.1}%), max_diff={max_diff}",
+            100.0 * exact as f64 / count as f64
+        );
     }
 }
 
@@ -141,7 +153,7 @@ fn compare_cabac_bins() {
     let data = std::fs::read(bitstream).unwrap();
     let mut decoder = heic_decoder::VideoDecoder::new(16);
     // Enable per-bin tracing for the first inter frame
-    decoder.mv_trace_next_inter = true;  // this resets SE counter; we also need bin trace
+    decoder.mv_trace_next_inter = true; // this resets SE counter; we also need bin trace
     // Enable bin trace: first 200 bins
     heic_decoder::cabac_bin_trace(200);
     let _ = decoder.decode_annex_b(&data).unwrap();
@@ -251,8 +263,12 @@ fn trace_girlshy_frame1() {
                         if gy < h && gx < w {
                             let ref_val = ref_f4[(gy * w + gx) as usize];
                             let our_val = our_f4.y_plane[(gy as usize * stride4 + gx as usize)];
-                            if our_val != ref_val { all_exact = false; }
-                            if our_val == ref_val { all_bad = false; }
+                            if our_val != ref_val {
+                                all_exact = false;
+                            }
+                            if our_val == ref_val {
+                                all_bad = false;
+                            }
                         }
                     }
                 }
@@ -280,8 +296,16 @@ fn trace_girlshy_frame1() {
         }
         if let Some((x, y, ours, reference)) = first_diff_pos {
             let diff = ours as i32 - reference as i32;
-            eprintln!("First differing pixel in frame 4: ({x},{y}) ours={ours} ref={reference} diff={diff:+}");
-            eprintln!("  CTU ({},{}), local ({},{})", x / 64, y / 64, x % 64, y % 64);
+            eprintln!(
+                "First differing pixel in frame 4: ({x},{y}) ours={ours} ref={reference} diff={diff:+}"
+            );
+            eprintln!(
+                "  CTU ({},{}), local ({},{})",
+                x / 64,
+                y / 64,
+                x % 64,
+                y % 64
+            );
 
             // Show surrounding context: 8x8 block around the first diff
             let bx = (x / 8) * 8;
@@ -324,10 +348,14 @@ fn trace_girlshy_frame1() {
                         let d = ov as i32 - rv as i32;
                         eprintln!("    ({gx},{gy}) ours={ov} ref={rv} diff={d:+}");
                         diff_count += 1;
-                        if diff_count >= 20 { break; }
+                        if diff_count >= 20 {
+                            break;
+                        }
                     }
                 }
-                if diff_count >= 20 { break; }
+                if diff_count >= 20 {
+                    break;
+                }
             }
         }
 
@@ -335,7 +363,10 @@ fn trace_girlshy_frame1() {
         eprintln!("\n=== MC reverse-engineering for frame 4 pixel (0,0) ===");
         let our_val = our_f4.y_plane[0];
         let ref_val = ref_f4[0];
-        eprintln!("  Our: {our_val}, Ref: {ref_val}, I-frame: {}", our_f0.y_plane[0]);
+        eprintln!(
+            "  Our: {our_val}, Ref: {ref_val}, I-frame: {}",
+            our_f0.y_plane[0]
+        );
         // Check what value we'd get with zero MV uni-pred from I-frame
         eprintln!("  Zero MV uni-pred from I: {}", our_f0.y_plane[0]);
 
@@ -384,13 +415,19 @@ fn trace_girlshy_frame1() {
 
     // Are frame 0 and frame 1 in OUR decoder the same frame? (bug: duplicate I-frame)
     let mut same_count = 0u32;
-    for i in 0..luma_size.min(our_f0.y_plane.len()).min(our_f1.y_plane.len()) {
+    for i in 0..luma_size
+        .min(our_f0.y_plane.len())
+        .min(our_f1.y_plane.len())
+    {
         if our_f0.y_plane[i] == our_f1.y_plane[i] {
             same_count += 1;
         }
     }
-    eprintln!("\nFrame 0 vs Frame 1 identity check: {same_count}/{} same pixels ({:.1}%)",
-        luma_size, 100.0 * same_count as f64 / luma_size as f64);
+    eprintln!(
+        "\nFrame 0 vs Frame 1 identity check: {same_count}/{} same pixels ({:.1}%)",
+        luma_size,
+        100.0 * same_count as f64 / luma_size as f64
+    );
 
     // Per-frame PSNR for first 10 frames
     eprintln!("\n=== Per-frame Y-plane comparison (first 10 frames) ===");
@@ -415,15 +452,23 @@ fn trace_girlshy_frame1() {
                 let ref_val = ref_y[y * w as usize + x];
                 let our_val = our_y[y * stride + x];
                 let diff = (our_val as i32 - ref_val as i32).unsigned_abs() as u16;
-                if diff == 0 { exact += 1; } else {
+                if diff == 0 {
+                    exact += 1;
+                } else {
                     max_diff = max_diff.max(diff);
                     sse += (diff as u64) * (diff as u64);
                 }
             }
         }
         let mse = sse as f64 / luma_size as f64;
-        let psnr = if mse > 0.0 { 10.0 * (255.0 * 255.0 / mse).log10() } else { f64::INFINITY };
-        eprintln!("  Frame {fi}: PSNR={psnr:.1}dB, exact={exact}/{luma_size} ({:.1}%), max_diff={max_diff}",
-            100.0 * exact as f64 / luma_size as f64);
+        let psnr = if mse > 0.0 {
+            10.0 * (255.0 * 255.0 / mse).log10()
+        } else {
+            f64::INFINITY
+        };
+        eprintln!(
+            "  Frame {fi}: PSNR={psnr:.1}dB, exact={exact}/{luma_size} ({:.1}%), max_diff={max_diff}",
+            100.0 * exact as f64 / luma_size as f64
+        );
     }
 }

@@ -25,13 +25,19 @@ fn run_ssim2_test(vector_name: &str, w: u32, h: u32) {
     let bs = find_bit(&format!("conformance/vectors/{vector_name}"));
     let bs = match bs {
         Some(p) => p,
-        None => { eprintln!("SKIP: {vector_name} not downloaded"); return; }
+        None => {
+            eprintln!("SKIP: {vector_name} not downloaded");
+            return;
+        }
     };
 
     let ref_path = find_ref(&format!("conformance/vectors/{vector_name}"));
     let ref_path = match ref_path {
         Some(p) => p,
-        None => { eprintln!("SKIP: reference.yuv not found"); return; }
+        None => {
+            eprintln!("SKIP: reference.yuv not found");
+            return;
+        }
     };
 
     // Decode with our decoder
@@ -66,12 +72,14 @@ fn run_ssim2_test(vector_name: &str, w: u32, h: u32) {
         let ref_y_raw = &ref_data[ref_offset..ref_offset + luma_size];
 
         // Build grayscale images (expand Y to pseudo-RGB for SSIM2)
-        let our_pixels: Vec<[u8; 3]> = our_y.iter()
-            .map(|&v| { let b = v.min(255) as u8; [b, b, b] })
+        let our_pixels: Vec<[u8; 3]> = our_y
+            .iter()
+            .map(|&v| {
+                let b = v.min(255) as u8;
+                [b, b, b]
+            })
             .collect();
-        let ref_pixels: Vec<[u8; 3]> = ref_y_raw.iter()
-            .map(|&v| [v, v, v])
-            .collect();
+        let ref_pixels: Vec<[u8; 3]> = ref_y_raw.iter().map(|&v| [v, v, v]).collect();
 
         if our_pixels.len() != cw * ch || ref_pixels.len() != w as usize * h as usize {
             eprintln!("  Frame {i}: dimension mismatch");
@@ -144,14 +152,16 @@ fn crop_y(frame: &heic_decoder::DecodedFrame) -> Vec<u16> {
 
 fn find_bit(dir: &str) -> Option<std::path::PathBuf> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(dir);
-    walkdir(&dir).into_iter().find(|p| p.extension().is_some_and(|e| e == "bit"))
+    walkdir(&dir)
+        .into_iter()
+        .find(|p| p.extension().is_some_and(|e| e == "bit"))
 }
 
 fn find_ref(dir: &str) -> Option<std::path::PathBuf> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(dir);
-    walkdir(&dir).into_iter().find(|p| {
-        p.file_name().is_some_and(|n| n == "reference.yuv")
-    })
+    walkdir(&dir)
+        .into_iter()
+        .find(|p| p.file_name().is_some_and(|n| n == "reference.yuv"))
 }
 
 fn walkdir(dir: &Path) -> Vec<std::path::PathBuf> {
@@ -159,7 +169,11 @@ fn walkdir(dir: &Path) -> Vec<std::path::PathBuf> {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for e in entries.flatten() {
             let p = e.path();
-            if p.is_dir() { r.extend(walkdir(&p)); } else { r.push(p); }
+            if p.is_dir() {
+                r.extend(walkdir(&p));
+            } else {
+                r.push(p);
+            }
         }
     }
     r

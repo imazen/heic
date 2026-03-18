@@ -6,10 +6,21 @@ use std::path::Path;
 #[ignore]
 fn check_merge_a_nofilter() {
     let merge_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("conformance/vectors/MERGE_A_TI_3");
-    let bit = walkdir(&merge_dir).into_iter().find(|p| p.extension().is_some_and(|e| e == "bit"));
-    let bit = match bit { Some(b) => b, None => { eprintln!("SKIP"); return; } };
+    let bit = walkdir(&merge_dir)
+        .into_iter()
+        .find(|p| p.extension().is_some_and(|e| e == "bit"));
+    let bit = match bit {
+        Some(b) => b,
+        None => {
+            eprintln!("SKIP");
+            return;
+        }
+    };
     let ref_path = Path::new("/tmp/merge_a_nofilter.yuv");
-    if !ref_path.exists() { eprintln!("SKIP: generate nofilter ref first"); return; }
+    if !ref_path.exists() {
+        eprintln!("SKIP: generate nofilter ref first");
+        return;
+    }
 
     let data = std::fs::read(&bit).unwrap();
     let mut decoder = heic_decoder::VideoDecoder::new(16);
@@ -17,9 +28,10 @@ fn check_merge_a_nofilter() {
     let frames = decoder.decode_annex_b(&data).unwrap();
 
     let ref_data = std::fs::read(ref_path).unwrap();
-    let w = 416u32; let h = 240u32;
+    let w = 416u32;
+    let h = 240u32;
     let luma_size = (w * h) as usize;
-    let frame_size = luma_size + 2 * ((w/2) * (h/2)) as usize;
+    let frame_size = luma_size + 2 * ((w / 2) * (h / 2)) as usize;
 
     // Dec265 nofilter is in DISPLAY order (POC 0,1,2,3,4,5,6,7)
     eprintln!("=== MERGE_A no-filter comparison (our nofilter vs dec265 nofilter) ===");
@@ -29,14 +41,22 @@ fn check_merge_a_nofilter() {
     let mut exact = 0u32;
     for y in 0..h as usize {
         for x in 0..w as usize {
-            if frames[0].y_plane[y * stride + x] == ref_y[y * w as usize + x] { exact += 1; }
+            if frames[0].y_plane[y * stride + x] == ref_y[y * w as usize + x] {
+                exact += 1;
+            }
         }
     }
-    eprintln!("  I-frame (POC=0): {exact}/{luma_size} exact ({:.1}%)", 100.0 * exact as f64 / luma_size as f64);
+    eprintln!(
+        "  I-frame (POC=0): {exact}/{luma_size} exact ({:.1}%)",
+        100.0 * exact as f64 / luma_size as f64
+    );
 
     // Compare all frames
     for fi in 0..frames.len().min(ref_data.len() / frame_size) {
-        let ref_fi: Vec<u16> = ref_data[fi*frame_size..fi*frame_size+luma_size].iter().map(|&b| b as u16).collect();
+        let ref_fi: Vec<u16> = ref_data[fi * frame_size..fi * frame_size + luma_size]
+            .iter()
+            .map(|&b| b as u16)
+            .collect();
         let stride2 = frames[fi].width as usize;
         let mut exact2 = 0u32;
         let mut max_diff2 = 0u16;
@@ -45,18 +65,28 @@ fn check_merge_a_nofilter() {
                 let ov = frames[fi].y_plane[y * stride2 + x];
                 let rv = ref_fi[y * w as usize + x];
                 let d = (ov as i32 - rv as i32).unsigned_abs() as u16;
-                if d == 0 { exact2 += 1; } else { max_diff2 = max_diff2.max(d); }
+                if d == 0 {
+                    exact2 += 1;
+                } else {
+                    max_diff2 = max_diff2.max(d);
+                }
             }
         }
-        eprintln!("  POC={fi} (nofilter): {exact2}/{luma_size} exact ({:.1}%) max={max_diff2}", 100.0 * exact2 as f64 / luma_size as f64);
+        eprintln!(
+            "  POC={fi} (nofilter): {exact2}/{luma_size} exact ({:.1}%) max={max_diff2}",
+            100.0 * exact2 as f64 / luma_size as f64
+        );
     }
 
     // Detailed diff analysis for POC=1
     eprintln!("\nPOC=1 unfiltered diff analysis:");
-    let ref_f2_nf: Vec<u16> = ref_data[frame_size..frame_size+luma_size].iter().map(|&b| b as u16).collect();
+    let ref_f2_nf: Vec<u16> = ref_data[frame_size..frame_size + luma_size]
+        .iter()
+        .map(|&b| b as u16)
+        .collect();
     let stride3 = frames[1].width as usize;
     let mut by_region = std::collections::HashMap::new();
-    let mut first_diffs: Vec<(usize,usize,u16,u16)> = Vec::new();
+    let mut first_diffs: Vec<(usize, usize, u16, u16)> = Vec::new();
     for y in 0..h as usize {
         for x in 0..w as usize {
             let ov = frames[1].y_plane[y * stride3 + x];
@@ -64,24 +94,32 @@ fn check_merge_a_nofilter() {
             if ov != rv {
                 let region = (x / 64, y / 64);
                 *by_region.entry(region).or_insert(0u32) += 1;
-                if first_diffs.len() < 40 { first_diffs.push((x, y, ov, rv)); }
+                if first_diffs.len() < 40 {
+                    first_diffs.push((x, y, ov, rv));
+                }
             }
         }
     }
     eprintln!("  Diffs by 64x64 CTU:");
     let mut regions: Vec<_> = by_region.iter().collect();
-    regions.sort_by_key(|((rx,ry),_)| (*ry, *rx));
+    regions.sort_by_key(|((rx, ry), _)| (*ry, *rx));
     for ((rx, ry), count) in &regions {
-        eprintln!("    CTU({},{}) = {} diffs", rx*64, ry*64, count);
+        eprintln!("    CTU({},{}) = {} diffs", rx * 64, ry * 64, count);
     }
     eprintln!("  First 40 diff pixels:");
     for (x, y, ov, rv) in &first_diffs {
-        eprintln!("    ({x:3},{y:3}) ours={ov:3} ref={rv:3} diff={:+}", *ov as i32 - *rv as i32);
+        eprintln!(
+            "    ({x:3},{y:3}) ours={ov:3} ref={rv:3} diff={:+}",
+            *ov as i32 - *rv as i32
+        );
     }
 
     // Compare B-frame POC=4 (our frames[4] vs dec265 display index 4)
     if frames.len() > 4 && ref_data.len() >= 5 * frame_size {
-        let ref_f4: Vec<u16> = ref_data[4*frame_size..4*frame_size+luma_size].iter().map(|&b| b as u16).collect();
+        let ref_f4: Vec<u16> = ref_data[4 * frame_size..4 * frame_size + luma_size]
+            .iter()
+            .map(|&b| b as u16)
+            .collect();
         let stride = frames[4].width as usize;
         let mut exact = 0u32;
         let mut max_diff = 0u16;
@@ -91,16 +129,25 @@ fn check_merge_a_nofilter() {
                 let ov = frames[4].y_plane[y * stride + x];
                 let rv = ref_f4[y * w as usize + x];
                 let d = (ov as i32 - rv as i32).unsigned_abs() as u16;
-                if d == 0 { exact += 1; } else {
+                if d == 0 {
+                    exact += 1;
+                } else {
                     max_diff = max_diff.max(d);
-                    if first_diff.is_none() { first_diff = Some((x, y, ov, rv)); }
+                    if first_diff.is_none() {
+                        first_diff = Some((x, y, ov, rv));
+                    }
                 }
             }
         }
-        eprintln!("  B-frame POC=4 (nofilter): {exact}/{luma_size} exact ({:.1}%) max_diff={max_diff}",
-            100.0 * exact as f64 / luma_size as f64);
+        eprintln!(
+            "  B-frame POC=4 (nofilter): {exact}/{luma_size} exact ({:.1}%) max_diff={max_diff}",
+            100.0 * exact as f64 / luma_size as f64
+        );
         if let Some((x, y, ov, rv)) = first_diff {
-            eprintln!("    First diff: ({x},{y}) ours={ov} dec265={rv} diff={}", ov as i32 - rv as i32);
+            eprintln!(
+                "    First diff: ({x},{y}) ours={ov} dec265={rv} diff={}",
+                ov as i32 - rv as i32
+            );
         }
     }
 }
@@ -109,48 +156,84 @@ fn check_merge_a_nofilter() {
 #[ignore]
 fn check_merge_a_pixels() {
     let merge_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("conformance/vectors/MERGE_A_TI_3");
-    let bit = walkdir(&merge_dir).into_iter().find(|p| p.extension().is_some_and(|e| e == "bit"));
-    let bit = match bit { Some(b) => b, None => { eprintln!("SKIP"); return; } };
+    let bit = walkdir(&merge_dir)
+        .into_iter()
+        .find(|p| p.extension().is_some_and(|e| e == "bit"));
+    let bit = match bit {
+        Some(b) => b,
+        None => {
+            eprintln!("SKIP");
+            return;
+        }
+    };
     let ref_path = merge_dir.join("reference_display.yuv");
-    if !ref_path.exists() { eprintln!("SKIP: no display ref"); return; }
+    if !ref_path.exists() {
+        eprintln!("SKIP: no display ref");
+        return;
+    }
 
     let data = std::fs::read(&bit).unwrap();
     let mut decoder = heic_decoder::VideoDecoder::new(16);
     let frames = decoder.decode_annex_b(&data).unwrap();
 
     let ref_data = std::fs::read(&ref_path).unwrap();
-    let w = 416u32; let h = 240u32;
+    let w = 416u32;
+    let h = 240u32;
     let luma_size = (w * h) as usize;
-    let frame_size = luma_size + 2 * ((w/2) * (h/2)) as usize;
+    let frame_size = luma_size + 2 * ((w / 2) * (h / 2)) as usize;
 
-    eprintln!("Decoded {} frames, ref has {} frames", frames.len(), ref_data.len() / frame_size);
+    eprintln!(
+        "Decoded {} frames, ref has {} frames",
+        frames.len(),
+        ref_data.len() / frame_size
+    );
     for fi in 0..frames.len().min(8) {
         let our_px = frames[fi].y_plane[0];
         let ref_px = ref_data[fi * frame_size] as u16;
-        eprintln!("  frames[{fi}] pixel(0,0): ours={our_px} ref={ref_px} diff={}", our_px as i32 - ref_px as i32);
+        eprintln!(
+            "  frames[{fi}] pixel(0,0): ours={our_px} ref={ref_px} diff={}",
+            our_px as i32 - ref_px as i32
+        );
     }
     for fi in 0..frames.len().min(ref_data.len() / frame_size) {
         let f = &frames[fi];
         let stride = f.width as usize;
-        let ref_y: Vec<u16> = ref_data[fi*frame_size..fi*frame_size+luma_size].iter().map(|&b| b as u16).collect();
-        
-        let mut exact = 0u32; let mut max_diff = 0u16; let mut sse = 0u64;
+        let ref_y: Vec<u16> = ref_data[fi * frame_size..fi * frame_size + luma_size]
+            .iter()
+            .map(|&b| b as u16)
+            .collect();
+
+        let mut exact = 0u32;
+        let mut max_diff = 0u16;
+        let mut sse = 0u64;
         let mut first_diff = None;
         for y in 0..h as usize {
             for x in 0..w as usize {
                 let ov = f.y_plane[y * stride + x];
                 let rv = ref_y[y * w as usize + x];
                 let d = (ov as i32 - rv as i32).unsigned_abs() as u16;
-                if d == 0 { exact += 1; } else {
-                    max_diff = max_diff.max(d); sse += d as u64 * d as u64;
-                    if first_diff.is_none() { first_diff = Some((x, y, ov, rv)); }
+                if d == 0 {
+                    exact += 1;
+                } else {
+                    max_diff = max_diff.max(d);
+                    sse += d as u64 * d as u64;
+                    if first_diff.is_none() {
+                        first_diff = Some((x, y, ov, rv));
+                    }
                 }
             }
         }
         let mse = sse as f64 / luma_size as f64;
-        let psnr = if mse > 0.0 { 10.0 * (255.0*255.0/mse).log10() } else { f64::INFINITY };
+        let psnr = if mse > 0.0 {
+            10.0 * (255.0 * 255.0 / mse).log10()
+        } else {
+            f64::INFINITY
+        };
         let uninit = f.y_plane.iter().filter(|&&v| v == u16::MAX).count();
-        eprint!("  Fr{fi}: PSNR={psnr:6.1}dB exact={:5.1}% max={max_diff:3} uninit={uninit}", 100.0 * exact as f64 / luma_size as f64);
+        eprint!(
+            "  Fr{fi}: PSNR={psnr:6.1}dB exact={:5.1}% max={max_diff:3} uninit={uninit}",
+            100.0 * exact as f64 / luma_size as f64
+        );
         if let Some((x, y, ov, rv)) = first_diff {
             eprint!(" 1st_diff=({x},{y}) ours={ov} ref={rv}");
         }
@@ -165,8 +248,16 @@ fn trace_deblock_poc4() {
     let _ = std::fs::remove_file("/tmp/our_deblock_trace.txt");
 
     let merge_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("conformance/vectors/MERGE_A_TI_3");
-    let bit = walkdir(&merge_dir).into_iter().find(|p| p.extension().is_some_and(|e| e == "bit"));
-    let bit = match bit { Some(b) => b, None => { eprintln!("SKIP"); return; } };
+    let bit = walkdir(&merge_dir)
+        .into_iter()
+        .find(|p| p.extension().is_some_and(|e| e == "bit"));
+    let bit = match bit {
+        Some(b) => b,
+        None => {
+            eprintln!("SKIP");
+            return;
+        }
+    };
 
     let data = std::fs::read(&bit).unwrap();
 
@@ -184,14 +275,18 @@ fn trace_deblock_poc4() {
     let ref_path = merge_dir.join("reference_display.yuv");
     if ref_path.exists() {
         let ref_data = std::fs::read(&ref_path).unwrap();
-        let w = 416u32; let h = 240u32;
+        let w = 416u32;
+        let h = 240u32;
         let luma_size = (w * h) as usize;
-        let frame_size = luma_size + 2 * ((w/2) * (h/2)) as usize;
+        let frame_size = luma_size + 2 * ((w / 2) * (h / 2)) as usize;
 
         let fi = 4; // POC=4
         let f = &frames[fi];
         let stride = f.width as usize;
-        let ref_y: Vec<u16> = ref_data[fi*frame_size..fi*frame_size+luma_size].iter().map(|&b| b as u16).collect();
+        let ref_y: Vec<u16> = ref_data[fi * frame_size..fi * frame_size + luma_size]
+            .iter()
+            .map(|&b| b as u16)
+            .collect();
 
         let mut diffs = Vec::new();
         for y in 0..h as usize {
@@ -210,7 +305,9 @@ fn trace_deblock_poc4() {
         for (x, y, ov, rv, d) in diffs.iter().take(40) {
             let nearest_v = (*x / 8) * 8;
             let nearest_h = (*y / 8) * 8;
-            eprintln!("  ({x:3},{y:3}) ours={ov:3} ref={rv:3} diff={d:+3} near_vert_edge={nearest_v} near_horiz_edge={nearest_h}");
+            eprintln!(
+                "  ({x:3},{y:3}) ours={ov:3} ref={rv:3} diff={d:+3} near_vert_edge={nearest_v} near_horiz_edge={nearest_h}"
+            );
         }
     }
 }
@@ -219,8 +316,16 @@ fn trace_deblock_poc4() {
 #[ignore]
 fn dump_deblock_flags_poc4() {
     let merge_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("conformance/vectors/MERGE_A_TI_3");
-    let bit = walkdir(&merge_dir).into_iter().find(|p| p.extension().is_some_and(|e| e == "bit"));
-    let bit = match bit { Some(b) => b, None => { eprintln!("SKIP"); return; } };
+    let bit = walkdir(&merge_dir)
+        .into_iter()
+        .find(|p| p.extension().is_some_and(|e| e == "bit"));
+    let bit = match bit {
+        Some(b) => b,
+        None => {
+            eprintln!("SKIP");
+            return;
+        }
+    };
 
     let data = std::fs::read(&bit).unwrap();
     let mut decoder = heic_decoder::VideoDecoder::new(16);
@@ -233,7 +338,10 @@ fn dump_deblock_flags_poc4() {
     let stride = f.deblock_stride;
 
     eprintln!("Frame 4 deblock flags around x=368 (bx=92):");
-    eprintln!("  width={} height={} deblock_stride={}", f.width, f.height, stride);
+    eprintln!(
+        "  width={} height={} deblock_stride={}",
+        f.width, f.height, stride
+    );
     eprintln!("  deblock_flags len={}", f.deblock_flags.len());
 
     // Dump flags for bx=92 (x=368), by range [0..60] (y=0..240)
@@ -243,12 +351,15 @@ fn dump_deblock_flags_poc4() {
         if idx < f.deblock_flags.len() {
             let flags = f.deblock_flags[idx];
             if flags != 0 {
-                let vert = (flags & 1) != 0;  // DEBLOCK_FLAG_VERT
+                let vert = (flags & 1) != 0; // DEBLOCK_FLAG_VERT
                 let horiz = (flags & 2) != 0; // DEBLOCK_FLAG_HORIZ
-                let pb_vert = (flags & 4) != 0;  // DEBLOCK_PB_EDGE_VERT
+                let pb_vert = (flags & 4) != 0; // DEBLOCK_PB_EDGE_VERT
                 let pb_horiz = (flags & 8) != 0; // DEBLOCK_PB_EDGE_HORIZ
-                eprintln!("  bx={bx} by={by} (x={}, y={}) flags={flags:#04x} TB_V={vert} TB_H={horiz} PB_V={pb_vert} PB_H={pb_horiz}",
-                    bx * 4, by * 4);
+                eprintln!(
+                    "  bx={bx} by={by} (x={}, y={}) flags={flags:#04x} TB_V={vert} TB_H={horiz} PB_V={pb_vert} PB_H={pb_horiz}",
+                    bx * 4,
+                    by * 4
+                );
             }
         }
     }
@@ -264,8 +375,11 @@ fn dump_deblock_flags_poc4() {
             let horiz = (flags & 2) != 0;
             let pb_vert = (flags & 4) != 0;
             let pb_horiz = (flags & 8) != 0;
-            eprintln!("  bx={bx2} by={by} (x={}, y={}) flags={flags:#04x} TB_V={vert} TB_H={horiz} PB_V={pb_vert} PB_H={pb_horiz}",
-                bx2 * 4, by * 4);
+            eprintln!(
+                "  bx={bx2} by={by} (x={}, y={}) flags={flags:#04x} TB_V={vert} TB_H={horiz} PB_V={pb_vert} PB_H={pb_horiz}",
+                bx2 * 4,
+                by * 4
+            );
         }
     }
 }
@@ -274,16 +388,28 @@ fn dump_deblock_flags_poc4() {
 #[ignore]
 fn compare_filter_impact() {
     let merge_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("conformance/vectors/MERGE_A_TI_3");
-    let bit = walkdir(&merge_dir).into_iter().find(|p| p.extension().is_some_and(|e| e == "bit"));
-    let bit = match bit { Some(b) => b, None => { eprintln!("SKIP"); return; } };
+    let bit = walkdir(&merge_dir)
+        .into_iter()
+        .find(|p| p.extension().is_some_and(|e| e == "bit"));
+    let bit = match bit {
+        Some(b) => b,
+        None => {
+            eprintln!("SKIP");
+            return;
+        }
+    };
     let ref_nofilter_path = Path::new("/tmp/merge_a_nofilter.yuv");
     let ref_filtered_path = merge_dir.join("reference_display.yuv");
-    if !ref_nofilter_path.exists() || !ref_filtered_path.exists() { eprintln!("SKIP"); return; }
+    if !ref_nofilter_path.exists() || !ref_filtered_path.exists() {
+        eprintln!("SKIP");
+        return;
+    }
 
     let data = std::fs::read(&bit).unwrap();
-    let w = 416u32; let h = 240u32;
+    let w = 416u32;
+    let h = 240u32;
     let luma_size = (w * h) as usize;
-    let frame_size = luma_size + 2 * ((w/2) * (h/2)) as usize;
+    let frame_size = luma_size + 2 * ((w / 2) * (h / 2)) as usize;
 
     // Decode with filters
     let mut dec = heic_decoder::VideoDecoder::new(16);
@@ -300,8 +426,14 @@ fn compare_filter_impact() {
     // Compare POC=4 (display index 4)
     let fi = 4;
     let stride = filtered[fi].width as usize;
-    let ref_nf: Vec<u16> = ref_nofilter[fi*frame_size..fi*frame_size+luma_size].iter().map(|&b| b as u16).collect();
-    let ref_f: Vec<u16> = ref_filtered[fi*frame_size..fi*frame_size+luma_size].iter().map(|&b| b as u16).collect();
+    let ref_nf: Vec<u16> = ref_nofilter[fi * frame_size..fi * frame_size + luma_size]
+        .iter()
+        .map(|&b| b as u16)
+        .collect();
+    let ref_f: Vec<u16> = ref_filtered[fi * frame_size..fi * frame_size + luma_size]
+        .iter()
+        .map(|&b| b as u16)
+        .collect();
 
     let mut only_unfiltered = 0u32;
     let mut only_filtered = 0u32;
@@ -321,13 +453,13 @@ fn compare_filter_impact() {
 
             match (uf_diff, f_diff) {
                 (true, true) => both += 1,
-                (true, false) => only_unfiltered += 1,  // filtering fixed an error
+                (true, false) => only_unfiltered += 1, // filtering fixed an error
                 (false, true) => {
-                    only_filtered += 1;  // filtering introduced an error
+                    only_filtered += 1; // filtering introduced an error
                     if filter_introduced.len() < 30 {
-                        filter_introduced.push((x, y,
-                            uf_ours, uf_ref, // unfiltered: ours vs ref (should match)
-                            f_ours, f_ref,   // filtered: ours vs ref (differ)
+                        filter_introduced.push((
+                            x, y, uf_ours, uf_ref, // unfiltered: ours vs ref (should match)
+                            f_ours, f_ref, // filtered: ours vs ref (differ)
                         ));
                     }
                 }
@@ -341,18 +473,32 @@ fn compare_filter_impact() {
     eprintln!("  Only unfiltered differs (filtering fixed): {only_unfiltered}");
     eprintln!("  Only filtered differs (filtering introduced): {only_filtered}");
     eprintln!("  Neither differs: {neither}");
-    eprintln!("  Total diff unfiltered: {} ({:.1}%)", both + only_unfiltered, 100.0 * (both + only_unfiltered) as f64 / luma_size as f64);
-    eprintln!("  Total diff filtered: {} ({:.1}%)", both + only_filtered, 100.0 * (both + only_filtered) as f64 / luma_size as f64);
+    eprintln!(
+        "  Total diff unfiltered: {} ({:.1}%)",
+        both + only_unfiltered,
+        100.0 * (both + only_unfiltered) as f64 / luma_size as f64
+    );
+    eprintln!(
+        "  Total diff filtered: {} ({:.1}%)",
+        both + only_filtered,
+        100.0 * (both + only_filtered) as f64 / luma_size as f64
+    );
 
     if !filter_introduced.is_empty() {
         eprintln!("\nFirst 30 pixels where filtering introduced error:");
         for (x, y, uf_o, uf_r, f_o, f_r) in &filter_introduced {
             let nearest_vx = (*x / 8) * 8;
-            let dist_vx = (*x as i32 - nearest_vx as i32).abs().min((*x as i32 - nearest_vx as i32 - 8).abs());
+            let dist_vx = (*x as i32 - nearest_vx as i32)
+                .abs()
+                .min((*x as i32 - nearest_vx as i32 - 8).abs());
             let nearest_hy = (*y / 8) * 8;
-            let dist_hy = (*y as i32 - nearest_hy as i32).abs().min((*y as i32 - nearest_hy as i32 - 8).abs());
-            eprintln!("  ({x:3},{y:3}) unf_ours={uf_o:3} unf_ref={uf_r:3} (match!) filt_ours={f_o:3} filt_ref={f_r:3} diff={} dist_v={dist_vx} dist_h={dist_hy}",
-                *f_o as i32 - *f_r as i32);
+            let dist_hy = (*y as i32 - nearest_hy as i32)
+                .abs()
+                .min((*y as i32 - nearest_hy as i32 - 8).abs());
+            eprintln!(
+                "  ({x:3},{y:3}) unf_ours={uf_o:3} unf_ref={uf_r:3} (match!) filt_ours={f_o:3} filt_ref={f_r:3} diff={} dist_v={dist_vx} dist_h={dist_hy}",
+                *f_o as i32 - *f_r as i32
+            );
         }
     }
 }
@@ -361,8 +507,16 @@ fn compare_filter_impact() {
 #[ignore]
 fn dump_bs_derivation_poc4() {
     let merge_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("conformance/vectors/MERGE_A_TI_3");
-    let bit = walkdir(&merge_dir).into_iter().find(|p| p.extension().is_some_and(|e| e == "bit"));
-    let bit = match bit { Some(b) => b, None => { eprintln!("SKIP"); return; } };
+    let bit = walkdir(&merge_dir)
+        .into_iter()
+        .find(|p| p.extension().is_some_and(|e| e == "bit"));
+    let bit = match bit {
+        Some(b) => b,
+        None => {
+            eprintln!("SKIP");
+            return;
+        }
+    };
 
     let data = std::fs::read(&bit).unwrap();
 
@@ -394,8 +548,10 @@ fn dump_bs_derivation_poc4() {
         let qp0_p = f0.qp_map[idx_p];
         let qp4_p = f4.qp_map[idx_p];
 
-        eprintln!("  by={by} (y={}) I:flags={flags0:#04x} qp_q={qp0} qp_p={qp0_p} | B:flags={flags4:#04x} qp_q={qp4} qp_p={qp4_p}",
-            by * 4);
+        eprintln!(
+            "  by={by} (y={}) I:flags={flags0:#04x} qp_q={qp0} qp_p={qp0_p} | B:flags={flags4:#04x} qp_q={qp4} qp_p={qp4_p}",
+            by * 4
+        );
     }
 }
 
@@ -404,7 +560,11 @@ fn walkdir(dir: &Path) -> Vec<std::path::PathBuf> {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for e in entries.flatten() {
             let p = e.path();
-            if p.is_dir() { r.extend(walkdir(&p)); } else { r.push(p); }
+            if p.is_dir() {
+                r.extend(walkdir(&p));
+            } else {
+                r.push(p);
+            }
         }
     }
     r
@@ -414,8 +574,16 @@ fn walkdir(dir: &Path) -> Vec<std::path::PathBuf> {
 #[ignore]
 fn trace_merge_a_mvs() {
     let merge_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("conformance/vectors/MERGE_A_TI_3");
-    let bit = walkdir(&merge_dir).into_iter().find(|p| p.extension().is_some_and(|e| e == "bit"));
-    let bit = match bit { Some(b) => b, None => { eprintln!("SKIP"); return; } };
+    let bit = walkdir(&merge_dir)
+        .into_iter()
+        .find(|p| p.extension().is_some_and(|e| e == "bit"));
+    let bit = match bit {
+        Some(b) => b,
+        None => {
+            eprintln!("SKIP");
+            return;
+        }
+    };
 
     let data = std::fs::read(&bit).unwrap();
     let mut decoder = heic_decoder::VideoDecoder::new(16);
@@ -427,8 +595,16 @@ fn trace_merge_a_mvs() {
 #[ignore]
 fn trace_poc2_mvs() {
     let merge_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("conformance/vectors/MERGE_A_TI_3");
-    let bit = walkdir(&merge_dir).into_iter().find(|p| p.extension().is_some_and(|e| e == "bit"));
-    let bit = match bit { Some(b) => b, None => { eprintln!("SKIP"); return; } };
+    let bit = walkdir(&merge_dir)
+        .into_iter()
+        .find(|p| p.extension().is_some_and(|e| e == "bit"));
+    let bit = match bit {
+        Some(b) => b,
+        None => {
+            eprintln!("SKIP");
+            return;
+        }
+    };
 
     let data = std::fs::read(&bit).unwrap();
     let mut decoder = heic_decoder::VideoDecoder::new(16);
@@ -441,10 +617,21 @@ fn trace_poc2_mvs() {
 #[ignore]
 fn debug_poc2_nofilter() {
     let merge_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("conformance/vectors/MERGE_A_TI_3");
-    let bit = walkdir(&merge_dir).into_iter().find(|p| p.extension().is_some_and(|e| e == "bit"));
-    let bit = match bit { Some(b) => b, None => { eprintln!("SKIP"); return; } };
+    let bit = walkdir(&merge_dir)
+        .into_iter()
+        .find(|p| p.extension().is_some_and(|e| e == "bit"));
+    let bit = match bit {
+        Some(b) => b,
+        None => {
+            eprintln!("SKIP");
+            return;
+        }
+    };
     let ref_path = Path::new("/tmp/merge_a_nofilter.yuv");
-    if !ref_path.exists() { eprintln!("SKIP"); return; }
+    if !ref_path.exists() {
+        eprintln!("SKIP");
+        return;
+    }
 
     let data = std::fs::read(&bit).unwrap();
     let mut decoder = heic_decoder::VideoDecoder::new(16);
@@ -452,31 +639,62 @@ fn debug_poc2_nofilter() {
     let frames = decoder.decode_annex_b(&data).unwrap();
 
     let ref_data = std::fs::read(ref_path).unwrap();
-    let w = 416u32; let h = 240u32;
+    let w = 416u32;
+    let h = 240u32;
     let luma_size = (w * h) as usize;
-    let frame_size = luma_size + 2 * ((w/2) * (h/2)) as usize;
+    let frame_size = luma_size + 2 * ((w / 2) * (h / 2)) as usize;
 
     // Check decode order (should be: I(0), B(4), B(2), B(1), B(3), B(6), B(5), B(7))
     eprintln!("Decode result: {} frames", frames.len());
     for (i, f) in frames.iter().enumerate() {
-        eprintln!("  frames[{i}]: w={} h={} y_plane_len={}", f.width, f.height, f.y_plane.len());
+        eprintln!(
+            "  frames[{i}]: w={} h={} y_plane_len={}",
+            f.width,
+            f.height,
+            f.y_plane.len()
+        );
     }
 
     // Check POC=2 in detail
     let fi = 2;
     let stride = frames[fi].width as usize;
-    let ref_y: Vec<u16> = ref_data[fi*frame_size..fi*frame_size+luma_size].iter().map(|&b| b as u16).collect();
+    let ref_y: Vec<u16> = ref_data[fi * frame_size..fi * frame_size + luma_size]
+        .iter()
+        .map(|&b| b as u16)
+        .collect();
 
     // Check if pixel (0,0) differs
     eprintln!("POC=2 debug:");
-    eprintln!("  frame dims: {}x{} stride={stride}", frames[fi].width, frames[fi].height);
-    eprintln!("  pixel(0,0): ours={} ref={}", frames[fi].y_plane[0], ref_y[0]);
-    eprintln!("  pixel(1,0): ours={} ref={}", frames[fi].y_plane[1], ref_y[1]);
-    eprintln!("  pixel(0,1): ours={} ref={}", frames[fi].y_plane[stride], ref_y[w as usize]);
+    eprintln!(
+        "  frame dims: {}x{} stride={stride}",
+        frames[fi].width, frames[fi].height
+    );
+    eprintln!(
+        "  pixel(0,0): ours={} ref={}",
+        frames[fi].y_plane[0], ref_y[0]
+    );
+    eprintln!(
+        "  pixel(1,0): ours={} ref={}",
+        frames[fi].y_plane[1], ref_y[1]
+    );
+    eprintln!(
+        "  pixel(0,1): ours={} ref={}",
+        frames[fi].y_plane[stride], ref_y[w as usize]
+    );
 
     // Check what fraction of the image is zero (might indicate uninitialized)
-    let zeros = frames[fi].y_plane.iter().take(luma_size).filter(|&&v| v == 0).count();
-    let uninit = frames[fi].y_plane.iter().take(luma_size).filter(|&&v| v == u16::MAX).count();
+    let zeros = frames[fi]
+        .y_plane
+        .iter()
+        .take(luma_size)
+        .filter(|&&v| v == 0)
+        .count();
+    let uninit = frames[fi]
+        .y_plane
+        .iter()
+        .take(luma_size)
+        .filter(|&&v| v == u16::MAX)
+        .count();
     eprintln!("  zeros={zeros} uninit(0xFFFF)={uninit}");
 
     // First 10 diffs and first 10 matches
@@ -496,7 +714,10 @@ fn debug_poc2_nofilter() {
     }
     eprintln!("  First 10 diffs:");
     for (x, y, ov, rv) in &diffs {
-        eprintln!("    ({x:3},{y:3}) ours={ov:3} ref={rv:3} diff={:+}", *ov as i32 - *rv as i32);
+        eprintln!(
+            "    ({x:3},{y:3}) ours={ov:3} ref={rv:3} diff={:+}",
+            *ov as i32 - *rv as i32
+        );
     }
     eprintln!("  First 10 matches:");
     for (x, y, v) in &matches {
@@ -520,7 +741,9 @@ fn debug_poc2_nofilter() {
                 for x in x0..x1 {
                     let ov = frames[fi].y_plane[y as usize * stride + x as usize];
                     let rv = ref_y[y as usize * w as usize + x as usize];
-                    if ov == rv { exact_ctu += 1; }
+                    if ov == rv {
+                        exact_ctu += 1;
+                    }
                 }
             }
             let pct = 100.0 * exact_ctu as f64 / total_ctu as f64;

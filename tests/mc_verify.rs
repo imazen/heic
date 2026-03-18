@@ -5,9 +5,17 @@
 use std::path::Path;
 
 /// Manually compute luma MC for one pixel given reference frame, MV, and position
-fn manual_mc_luma_pixel(ref_y: &[u16], stride: usize, pic_w: i32, pic_h: i32,
-    px: i32, py: i32, mv_x: i16, mv_y: i16, bit_depth: u8) -> i16
-{
+fn manual_mc_luma_pixel(
+    ref_y: &[u16],
+    stride: usize,
+    pic_w: i32,
+    pic_h: i32,
+    px: i32,
+    py: i32,
+    mv_x: i16,
+    mv_y: i16,
+    bit_depth: u8,
+) -> i16 {
     let int_x = px + (mv_x as i32 >> 2);
     let int_y = py + (mv_y as i32 >> 2);
     let frac_x = (mv_x as i32 & 3) as usize;
@@ -54,8 +62,7 @@ fn manual_mc_luma_pixel(ref_y: &[u16], stride: usize, pic_w: i32, pic_h: i32,
         for ky in 0..8 {
             let mut sum = 0i32;
             for kx in 0..8 {
-                sum += fetch(int_x + kx as i32 - 3, int_y + ky as i32 - 3)
-                    * coeff_h[kx] as i32;
+                sum += fetch(int_x + kx as i32 - 3, int_y + ky as i32 - 3) * coeff_h[kx] as i32;
             }
             tmp[ky] = sum; // Keep at filter precision
         }
@@ -106,7 +113,8 @@ fn verify_mc_first_pu() {
     // Our frames are sorted by POC (display order): 0, 1, 2, 3, 4, ...
     // So our frames[4] (POC=4) = reference index 1 (P-frame, 2nd decoded)
     let ref_decode_idx = 1; // P-frame at POC=4 is 2nd decoded frame
-    let ref_f4: Vec<u16> = ref_data[ref_decode_idx * frame_size..ref_decode_idx * frame_size + luma_size]
+    let ref_f4: Vec<u16> = ref_data
+        [ref_decode_idx * frame_size..ref_decode_idx * frame_size + luma_size]
         .iter()
         .map(|&b| b as u16)
         .collect();
@@ -114,7 +122,10 @@ fn verify_mc_first_pu() {
     // Print pixel(0,0) for first 10 frames to determine ordering
     eprintln!("\n=== Our frames pixel(0,0) by POC ===");
     for (i, f) in frames.iter().enumerate().take(10) {
-        eprintln!("  frames[{i}] (coded {}x{}): pixel(0,0) = {}", f.width, f.height, f.y_plane[0]);
+        eprintln!(
+            "  frames[{i}] (coded {}x{}): pixel(0,0) = {}",
+            f.width, f.height, f.y_plane[0]
+        );
     }
     eprintln!("\n=== Reference YUV pixel(0,0) by index ===");
     let nref = ref_data.len() / frame_size;
@@ -125,7 +136,15 @@ fn verify_mc_first_pu() {
     // Check key pixel positions across CTU rows for frame 4
     eprintln!("\n=== Frame 4 key pixels ===");
     let stride4 = pframe.width as usize;
-    let positions = [(0u32,0u32), (0,64), (0,128), (0,192), (100,0), (100,64), (100,128)];
+    let positions = [
+        (0u32, 0u32),
+        (0, 64),
+        (0, 128),
+        (0, 192),
+        (100, 0),
+        (100, 64),
+        (100, 128),
+    ];
     for &(x, y) in &positions {
         if (y as usize) < pframe.height as usize && (x as usize) < stride4 {
             let v = pframe.y_plane[y as usize * stride4 + x as usize];
@@ -142,14 +161,16 @@ fn verify_mc_first_pu() {
     eprintln!("Pixel | I-frame | MC_pred | Our_out | Ref_out | Our-Ref | Our-MC(=residual)");
     for y in 0..4i32 {
         for x in 0..8i32 {
-            let mc_pred = manual_mc_luma_pixel(
-                &iframe.y_plane, stride, pic_w, pic_h, x, y, mv_x, mv_y, 8);
+            let mc_pred =
+                manual_mc_luma_pixel(&iframe.y_plane, stride, pic_w, pic_h, x, y, mv_x, mv_y, 8);
             let our_val = pframe.y_plane[y as usize * stride + x as usize];
             let ref_val = ref_f4[(y * 320 + x) as usize];
             let iframe_val = iframe.y_plane[y as usize * stride + x as usize];
             let our_ref_diff = our_val as i32 - ref_val as i32;
             let our_mc_diff = our_val as i32 - mc_pred as i32; // = our residual
-            eprintln!("({x},{y}) I={iframe_val:3} MC={mc_pred:3} O={our_val:3} R={ref_val:3} O-R={our_ref_diff:+3} residual={our_mc_diff:+3}");
+            eprintln!(
+                "({x},{y}) I={iframe_val:3} MC={mc_pred:3} O={our_val:3} R={ref_val:3} O-R={our_ref_diff:+3} residual={our_mc_diff:+3}"
+            );
         }
     }
 
@@ -164,12 +185,23 @@ fn verify_mc_first_pu() {
         for x in 60..64i32 {
             let gx = 32 + x; // global x (PU starts at 32)
             let mc_pred = manual_mc_luma_pixel(
-                &iframe.y_plane, stride, pic_w, pic_h, gx, y, mv_x2, mv_y2, 8);
+                &iframe.y_plane,
+                stride,
+                pic_w,
+                pic_h,
+                gx,
+                y,
+                mv_x2,
+                mv_y2,
+                8,
+            );
             let our_val = pframe.y_plane[y as usize * stride + gx as usize];
             let ref_val = ref_f4[(y * 320 + gx) as usize];
             let diff = our_val as i32 - ref_val as i32;
             let residual = our_val as i32 - mc_pred as i32;
-            eprintln!("({gx},{y}) MC={mc_pred:3} O={our_val:3} R={ref_val:3} O-R={diff:+3} res={residual:+3}");
+            eprintln!(
+                "({gx},{y}) MC={mc_pred:3} O={our_val:3} R={ref_val:3} O-R={diff:+3} res={residual:+3}"
+            );
         }
     }
 }

@@ -3,11 +3,11 @@
 //! This module handles parsing of slice segment headers (H.265 spec 7.3.6)
 //! and orchestrates CTU decoding for each slice.
 
-use alloc::vec::Vec;
 use super::bitstream::{BitstreamReader, NalUnit};
 use super::params::{Pps, Sps};
 use super::refpic;
 use crate::error::HevcError;
+use alloc::vec::Vec;
 
 type Result<T> = core::result::Result<T, HevcError>;
 

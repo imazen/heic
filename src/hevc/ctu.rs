@@ -1500,6 +1500,10 @@ impl<'a> SliceContext<'a> {
             };
             if has_residual {
                 let intra_split_flag = false;
+                // H.265 7.3.8.7: interSplitFlag forces TU split when
+                // max_transform_hierarchy_depth_inter==0 and PartMode != 2Nx2N
+                let inter_split_flag = self.sps.max_transform_hierarchy_depth_inter == 0
+                    && part_mode != PartMode::Part2Nx2N;
                 self.decode_transform_tree(
                     x0,
                     y0,
@@ -1508,6 +1512,7 @@ impl<'a> SliceContext<'a> {
                     intra_luma_mode,
                     intra_chroma_mode,
                     intra_split_flag,
+                    inter_split_flag,
                     frame,
                 )?;
             } else {
@@ -1527,6 +1532,7 @@ impl<'a> SliceContext<'a> {
                 intra_luma_mode,
                 intra_chroma_mode,
                 intra_split_flag,
+                false, // inter_split_flag: not applicable to intra
                 frame,
             )?;
 
@@ -1557,6 +1563,7 @@ impl<'a> SliceContext<'a> {
         intra_luma_mode: IntraPredMode,
         intra_chroma_mode: IntraPredMode,
         intra_split_flag: bool,
+        inter_split_flag: bool,
         frame: &mut DecodedFrame,
     ) -> Result<()> {
         // For 4:2:0, start with root having chroma responsibility
@@ -1568,6 +1575,7 @@ impl<'a> SliceContext<'a> {
             intra_luma_mode,
             intra_chroma_mode,
             intra_split_flag,
+            inter_split_flag,
             true,
             true,
             frame,
@@ -1586,6 +1594,7 @@ impl<'a> SliceContext<'a> {
         intra_luma_mode: IntraPredMode,
         intra_chroma_mode: IntraPredMode,
         intra_split_flag: bool,
+        inter_split_flag: bool,
         cbf_cb_parent: bool,
         cbf_cr_parent: bool,
         frame: &mut DecodedFrame,
@@ -1611,7 +1620,7 @@ impl<'a> SliceContext<'a> {
         let debug_tt = self.debug_ctu;
 
         // Step 1: Determine if we should split
-        // Per H.265: decode split_transform_flag only when all conditions met AND
+        // Per H.265 7.3.8.7: decode split_transform_flag only when all conditions met AND
         // NOT (IntraSplitFlag && trafoDepth == 0)
         let split_transform = if log2_size <= log2_max_trafo_size
             && log2_size > log2_min_trafo_size
@@ -1623,8 +1632,13 @@ impl<'a> SliceContext<'a> {
             let flag = self.cabac.decode_bin(&mut self.ctx[ctx_idx])? != 0;
             se_trace("split_transform", flag as i64, &self.cabac);
             flag
-        } else if log2_size > log2_max_trafo_size || (intra_split_flag && trafo_depth == 0) {
-            true // Must split: larger than max OR IntraSplitFlag at depth 0
+        } else if log2_size > log2_max_trafo_size
+            || (intra_split_flag && trafo_depth == 0)
+            || (inter_split_flag && trafo_depth == 0)
+        {
+            // Must split: larger than max, IntraSplitFlag at depth 0,
+            // or interSplitFlag at depth 0 (H.265 7.3.8.7)
+            true
         } else {
             if debug_tt {
                 debug_trace!(
@@ -1680,6 +1694,7 @@ impl<'a> SliceContext<'a> {
                 intra_luma_mode,
                 intra_chroma_mode,
                 intra_split_flag,
+                inter_split_flag,
                 cbf_cb,
                 cbf_cr,
                 frame,
@@ -1692,6 +1707,7 @@ impl<'a> SliceContext<'a> {
                 intra_luma_mode,
                 intra_chroma_mode,
                 intra_split_flag,
+                inter_split_flag,
                 cbf_cb,
                 cbf_cr,
                 frame,
@@ -1704,6 +1720,7 @@ impl<'a> SliceContext<'a> {
                 intra_luma_mode,
                 intra_chroma_mode,
                 intra_split_flag,
+                inter_split_flag,
                 cbf_cb,
                 cbf_cr,
                 frame,
@@ -1716,6 +1733,7 @@ impl<'a> SliceContext<'a> {
                 intra_luma_mode,
                 intra_chroma_mode,
                 intra_split_flag,
+                inter_split_flag,
                 cbf_cb,
                 cbf_cr,
                 frame,
