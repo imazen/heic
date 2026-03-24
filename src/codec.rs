@@ -164,7 +164,7 @@ impl zencodec::decode::DecoderConfig for HeicDecoderConfig {
 /// Per-operation HEIC decode job.
 pub struct HeicDecodeJob<'a> {
     config: &'a HeicDecoderConfig,
-    stop: Option<&'a dyn zencodec::enough::Stop>,
+    stop: Option<zencodec::StopToken>,
     limits: ResourceLimits,
 }
 
@@ -232,7 +232,7 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
     type StreamDec = HeicStreamDecoder;
     type FullFrameDec = Unsupported<HeicError>;
 
-    fn with_stop(mut self, stop: &'a dyn zencodec::enough::Stop) -> Self {
+    fn with_stop(mut self, stop: zencodec::StopToken) -> Self {
         self.stop = Some(stop);
         self
     }
@@ -283,7 +283,7 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
     }
 
     fn decoder(
-        self,
+        mut self,
         data: Cow<'a, [u8]>,
         preferred: &[PixelDescriptor],
     ) -> Result<HeicDecoder<'a>, HeicError> {
@@ -291,11 +291,12 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
             .check_input_size(data.len() as u64)
             .map_err(|e| HeicError::LimitExceeded(limit_exceeded_msg(e)))?;
         let thread_count = policy_to_threads(self.limits.threading());
+        let stop = self.stop.take();
         Ok(HeicDecoder {
             config: self.config,
             data,
             preferred: preferred.to_vec(),
-            stop: self.stop,
+            stop,
             limits: self.native_limits(),
             thread_count,
         })
@@ -375,7 +376,7 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
         if let Some(ref limits) = native_limits {
             req = req.with_limits(limits);
         }
-        if let Some(stop) = self.stop {
+        if let Some(ref stop) = self.stop {
             req = req.with_stop(stop);
         }
         if thread_count > 0 {
@@ -411,7 +412,7 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
             &data,
             preferred,
             self.native_limits().as_ref(),
-            self.stop,
+            self.stop.as_ref().map(|s| s as &dyn zencodec::enough::Stop),
             thread_count,
         )
     }
@@ -513,7 +514,7 @@ pub struct HeicDecoder<'a> {
     config: &'a HeicDecoderConfig,
     data: Cow<'a, [u8]>,
     preferred: alloc::vec::Vec<PixelDescriptor>,
-    stop: Option<&'a dyn zencodec::enough::Stop>,
+    stop: Option<zencodec::StopToken>,
     limits: Option<crate::Limits>,
     /// Thread count from threading policy (0 = unlimited/default).
     thread_count: usize,
@@ -543,7 +544,7 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
             if let Some(ref limits) = self.limits {
                 req = req.with_limits(limits);
             }
-            if let Some(stop) = self.stop {
+            if let Some(ref stop) = self.stop {
                 req = req.with_stop(stop);
             }
             if self.thread_count > 0 {
@@ -607,7 +608,7 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
             if let Some(ref limits) = self.limits {
                 req = req.with_limits(limits);
             }
-            if let Some(stop) = self.stop {
+            if let Some(ref stop) = self.stop {
                 req = req.with_stop(stop);
             }
             if self.thread_count > 0 {
