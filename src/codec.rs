@@ -257,7 +257,7 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
         let native = crate::ImageInfo::from_bytes(data).map_err(probe_error_to_heic)?;
         // Parse the HEIF container once and extract all metadata from it
         let container = crate::heif::parse(data, &enough::Unstoppable)
-            .map_err(|e| e.into_inner())
+            .map_err(|e| e.decompose().0)
             .ok();
         Ok(build_image_info_full(
             &native,
@@ -390,7 +390,7 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
             .begin(probe_width, probe_height, desc)
             .map_err(HeicError::Sink)?;
 
-        let (w, h) = req.decode_rows(&mut adapter).map_err(|e| e.into_inner())?;
+        let (w, h) = req.decode_rows(&mut adapter).map_err(|e| e.decompose().0)?;
         // Check for deferred sink errors from demand() calls
         adapter.take_deferred_error()?;
         // Flush the last strip that was written by the native decoder
@@ -550,7 +550,7 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
             if self.thread_count > 0 {
                 req = req.with_max_threads(self.thread_count);
             }
-            let frame = req.decode_yuv().map_err(|e| e.into_inner())?;
+            let frame = req.decode_yuv().map_err(|e| e.decompose().0)?;
 
             let has_alpha = frame.alpha_plane.is_some();
             let w = frame.cropped_width();
@@ -614,7 +614,7 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
             if self.thread_count > 0 {
                 req = req.with_max_threads(self.thread_count);
             }
-            let native_output = req.decode().map_err(|e| e.into_inner())?;
+            let native_output = req.decode().map_err(|e| e.decompose().0)?;
             let has_alpha =
                 layout == crate::PixelLayout::Rgba8 || layout == crate::PixelLayout::Bgra8;
             let w = native_output.width;
@@ -635,7 +635,7 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
         // Build ImageInfo with all available metadata.
         // Parse the HEIF container once for all metadata extraction.
         let container = crate::heif::parse(data, &enough::Unstoppable)
-            .map_err(|e| e.into_inner())
+            .map_err(|e| e.decompose().0)
             .ok();
         let fallback_info = crate::ImageInfo {
             width,
@@ -743,7 +743,7 @@ impl HeicStreamDecoder {
 
         // Parse container once for metadata extraction and grid init
         let container = crate::heif::parse(data, stop_ref)
-            .map_err(|e| e.into_inner())
+            .map_err(|e| e.decompose().0)
             .ok();
 
         // Build ImageInfo for the trait (uses pre-parsed container)
@@ -787,7 +787,7 @@ impl HeicStreamDecoder {
             if thread_count > 0 {
                 req = req.with_max_threads(thread_count);
             }
-            let frame = req.decode_yuv().map_err(|e| e.into_inner())?;
+            let frame = req.decode_yuv().map_err(|e| e.decompose().0)?;
             let has_alpha = frame.alpha_plane.is_some();
 
             let wants_alpha = negotiated == PixelDescriptor::RGBA16_SRGB;
@@ -847,7 +847,7 @@ impl HeicStreamDecoder {
             if thread_count > 0 {
                 req = req.with_max_threads(thread_count);
             }
-            let native_output = req.decode().map_err(|e| e.into_inner())?;
+            let native_output = req.decode().map_err(|e| e.decompose().0)?;
             let mut pb = raw_to_pixel_buffer(
                 native_output.data,
                 native_output.width,
@@ -895,7 +895,7 @@ impl HeicStreamDecoder {
         let container: &heif::HeifContainer<'_> = match pre_parsed {
             Some(c) => c,
             None => {
-                owned = heif::parse(data, stop).map_err(|e| e.into_inner())?;
+                owned = heif::parse(data, stop).map_err(|e| e.decompose().0)?;
                 &owned
             }
         };
@@ -924,7 +924,7 @@ impl HeicStreamDecoder {
         // Parse grid descriptor
         let grid_data = container
             .get_item_data(primary_item.id)
-            .map_err(|e| e.into_inner())?;
+            .map_err(|e| e.decompose().0)?;
         if grid_data.len() < 8 {
             return Err(HeicError::InvalidData("Grid descriptor too short"));
         }
@@ -951,7 +951,7 @@ impl HeicStreamDecoder {
 
         if let Some(lim) = limits {
             lim.check_dimensions(output_width, output_height)
-                .map_err(|e| e.into_inner())?;
+                .map_err(|e| e.decompose().0)?;
         }
 
         // Get tile info
@@ -990,7 +990,7 @@ impl HeicStreamDecoder {
                 container
                     .get_item_data(tid)
                     .map(|cow| cow.into_owned())
-                    .map_err(|e| e.into_inner())
+                    .map_err(|e| e.decompose().0)
             })
             .collect::<Result<_, _>>()?;
 

@@ -63,7 +63,7 @@
 //!
 //! Decode methods return [`Result<T>`], which is `core::result::Result<T, At<HeicError>>`.
 //! The [`At`] wrapper from the `whereat` crate attaches source location to errors
-//! for easier debugging. Use `.into_inner()` to unwrap the location and get the
+//! for easier debugging. Use `.decompose().0` to unwrap the location and get the
 //! underlying [`HeicError`].
 //!
 //! For probing, [`ImageInfo::from_bytes`] returns a separate [`ProbeError`] enum
@@ -385,7 +385,7 @@ impl ImageInfo {
         }
 
         let container = heif::parse(data, &Unstoppable)
-            .map_err(|e: At<HeicError>| ProbeError::Corrupt(e.into_inner()))?;
+            .map_err(|e: At<HeicError>| ProbeError::Corrupt(e.decompose().0))?;
 
         let primary_item = container
             .primary_item()
@@ -536,7 +536,7 @@ impl ImageInfo {
         // Fallback to reading image data
         let image_data = container
             .get_item_data(primary_item.id)
-            .map_err(|e: At<HeicError>| ProbeError::Corrupt(e.into_inner()))?;
+            .map_err(|e: At<HeicError>| ProbeError::Corrupt(e.decompose().0))?;
 
         let hevc_info =
             hevc::get_info(&image_data).map_err(|e| ProbeError::Corrupt(HeicError::from(e)))?;
