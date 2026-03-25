@@ -11,7 +11,7 @@
 //! | `DecodeJob<'a>` | [`HeicDecodeJob`] |
 //! | `Decode` | [`HeicDecoder`] |
 //! | `StreamingDecode` | [`HeicStreamDecoder`] |
-//! | `FullFrameDecoder` | `Unsupported<HeicError>` (HEIC has no animation) |
+//! | `AnimationFrameDecoder` | `Unsupported<HeicError>` (HEIC has no animation) |
 
 use alloc::borrow::Cow;
 
@@ -230,7 +230,7 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
     type Error = HeicError;
     type Dec = HeicDecoder<'a>;
     type StreamDec = HeicStreamDecoder;
-    type FullFrameDec = Unsupported<HeicError>;
+    type AnimationFrameDec = Unsupported<HeicError>;
 
     fn with_stop(mut self, stop: zencodec::StopToken) -> Self {
         self.stop = Some(stop);
@@ -417,7 +417,7 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
         )
     }
 
-    fn full_frame_decoder(
+    fn animation_frame_decoder(
         self,
         _data: Cow<'a, [u8]>,
         _preferred: &[PixelDescriptor],
@@ -1379,10 +1379,12 @@ mod tests {
     }
 
     #[test]
-    fn full_frame_decoder_returns_unsupported() {
+    fn animation_frame_decoder_returns_unsupported() {
         use zencodec::decode::{DecodeJob as _, DecoderConfig as _};
         let config = HeicDecoderConfig::new();
-        let result = config.job().full_frame_decoder(Cow::Borrowed(&[]), &[]);
+        let result = config
+            .job()
+            .animation_frame_decoder(Cow::Borrowed(&[]), &[]);
         assert!(result.is_err());
     }
 

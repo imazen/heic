@@ -6,6 +6,8 @@
 pub(crate) mod bitstream;
 pub(crate) mod cabac;
 pub(crate) mod color_convert;
+#[cfg(target_arch = "aarch64")]
+mod color_convert_neon;
 mod ctu;
 mod deblock;
 pub(crate) mod debug;
@@ -23,8 +25,6 @@ mod transform;
 mod transform_simd;
 #[cfg(target_arch = "aarch64")]
 mod transform_simd_neon;
-#[cfg(target_arch = "aarch64")]
-mod color_convert_neon;
 mod transforms;
 
 pub use picture::DecodedFrame;

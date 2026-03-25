@@ -50,14 +50,8 @@ pub(crate) fn idst4_neon(
     // j=0: 29*r0 + 74*r1 + 84*r2 + 55*r3
     let t0 = vshrq_n_s32::<7>(vaddq_s32(
         vaddq_s32(
-            vaddq_s32(
-                vmulq_n_s32(row0, 29),
-                vmulq_n_s32(row1, 74),
-            ),
-            vaddq_s32(
-                vmulq_n_s32(row2, 84),
-                vmulq_n_s32(row3, 55),
-            ),
+            vaddq_s32(vmulq_n_s32(row0, 29), vmulq_n_s32(row1, 74)),
+            vaddq_s32(vmulq_n_s32(row2, 84), vmulq_n_s32(row3, 55)),
         ),
         add1,
     ));
@@ -65,38 +59,23 @@ pub(crate) fn idst4_neon(
     // j=1: 55*r0 + 74*r1 - 29*r2 - 84*r3
     let t1 = vshrq_n_s32::<7>(vaddq_s32(
         vaddq_s32(
-            vaddq_s32(
-                vmulq_n_s32(row0, 55),
-                vmulq_n_s32(row1, 74),
-            ),
-            vaddq_s32(
-                vmulq_n_s32(row2, -29),
-                vmulq_n_s32(row3, -84),
-            ),
+            vaddq_s32(vmulq_n_s32(row0, 55), vmulq_n_s32(row1, 74)),
+            vaddq_s32(vmulq_n_s32(row2, -29), vmulq_n_s32(row3, -84)),
         ),
         add1,
     ));
 
     // j=2: 74*(r0 - r2 + r3)
     let t2 = vshrq_n_s32::<7>(vaddq_s32(
-        vmulq_n_s32(
-            vaddq_s32(vsubq_s32(row0, row2), row3),
-            74,
-        ),
+        vmulq_n_s32(vaddq_s32(vsubq_s32(row0, row2), row3), 74),
         add1,
     ));
 
     // j=3: 84*r0 - 74*r1 + 55*r2 - 29*r3
     let t3 = vshrq_n_s32::<7>(vaddq_s32(
         vaddq_s32(
-            vaddq_s32(
-                vmulq_n_s32(row0, 84),
-                vmulq_n_s32(row1, -74),
-            ),
-            vaddq_s32(
-                vmulq_n_s32(row2, 55),
-                vmulq_n_s32(row3, -29),
-            ),
+            vaddq_s32(vmulq_n_s32(row0, 84), vmulq_n_s32(row1, -74)),
+            vaddq_s32(vmulq_n_s32(row2, 55), vmulq_n_s32(row3, -29)),
         ),
         add1,
     ));
@@ -124,14 +103,8 @@ pub(crate) fn idst4_neon(
     let o0 = vshlq_s32(
         vaddq_s32(
             vaddq_s32(
-                vaddq_s32(
-                    vmulq_n_s32(r0, 29),
-                    vmulq_n_s32(r1, 74),
-                ),
-                vaddq_s32(
-                    vmulq_n_s32(r2, 84),
-                    vmulq_n_s32(r3, 55),
-                ),
+                vaddq_s32(vmulq_n_s32(r0, 29), vmulq_n_s32(r1, 74)),
+                vaddq_s32(vmulq_n_s32(r2, 84), vmulq_n_s32(r3, 55)),
             ),
             add2,
         ),
@@ -141,14 +114,8 @@ pub(crate) fn idst4_neon(
     let o1 = vshlq_s32(
         vaddq_s32(
             vaddq_s32(
-                vaddq_s32(
-                    vmulq_n_s32(r0, 55),
-                    vmulq_n_s32(r1, 74),
-                ),
-                vaddq_s32(
-                    vmulq_n_s32(r2, -29),
-                    vmulq_n_s32(r3, -84),
-                ),
+                vaddq_s32(vmulq_n_s32(r0, 55), vmulq_n_s32(r1, 74)),
+                vaddq_s32(vmulq_n_s32(r2, -29), vmulq_n_s32(r3, -84)),
             ),
             add2,
         ),
@@ -156,27 +123,15 @@ pub(crate) fn idst4_neon(
     );
 
     let o2 = vshlq_s32(
-        vaddq_s32(
-            vmulq_n_s32(
-                vaddq_s32(vsubq_s32(r0, r2), r3),
-                74,
-            ),
-            add2,
-        ),
+        vaddq_s32(vmulq_n_s32(vaddq_s32(vsubq_s32(r0, r2), r3), 74), add2),
         neg_shift2,
     );
 
     let o3 = vshlq_s32(
         vaddq_s32(
             vaddq_s32(
-                vaddq_s32(
-                    vmulq_n_s32(r0, 84),
-                    vmulq_n_s32(r1, -74),
-                ),
-                vaddq_s32(
-                    vmulq_n_s32(r2, 55),
-                    vmulq_n_s32(r3, -29),
-                ),
+                vaddq_s32(vmulq_n_s32(r0, 84), vmulq_n_s32(r1, -74)),
+                vaddq_s32(vmulq_n_s32(r2, 55), vmulq_n_s32(r3, -29)),
             ),
             add2,
         ),
@@ -294,9 +249,7 @@ fn interleave_madd_neon(
     let interleaved_hi = vzip2q_s16(ra, rb);
 
     // Create coefficient vector: [ca, cb, ca, cb, ca, cb, ca, cb]
-    let coeff_lo = vreinterpretq_s16_s32(vdupq_n_s32(
-        (ca as i32 & 0xFFFF) | ((cb as i32) << 16),
-    ));
+    let coeff_lo = vreinterpretq_s16_s32(vdupq_n_s32((ca as i32 & 0xFFFF) | ((cb as i32) << 16)));
 
     // Widening multiply + pairwise add for each half
     let prod_lo_lo = vmull_s16(vget_low_s16(interleaved_lo), vget_low_s16(coeff_lo));
@@ -574,7 +527,10 @@ pub(crate) fn dequantize_neon(
         // Pack back to i16 with saturation
         let result = vcombine_s16(vqmovn_s32(shifted_lo), vqmovn_s32(shifted_hi));
 
-        vst1q_s16((&mut coeffs[offset..offset + 8]).try_into().unwrap(), result);
+        vst1q_s16(
+            (&mut coeffs[offset..offset + 8]).try_into().unwrap(),
+            result,
+        );
     }
 
     // Scalar remainder

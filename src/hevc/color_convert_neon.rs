@@ -10,7 +10,7 @@
 use archmage::prelude::*;
 
 #[cfg(target_arch = "aarch64")]
-use safe_unaligned_simd::aarch64::{vld1q_u16, vld1_u16, vst1q_s32};
+use safe_unaligned_simd::aarch64::{vld1_u16, vld1q_u16, vst1q_s32};
 
 /// NEON YCbCr->RGB conversion -- processes 8 pixels per iteration
 #[cfg(target_arch = "aarch64")]
@@ -66,8 +66,23 @@ pub(crate) fn convert_420_to_rgb_neon(
         // Scalar prefix: handle odd x_start
         for x in x_start..x_simd_start.min(x_end) {
             super::color_convert::scalar_pixel(
-                y_plane, cb_plane, cr_plane, y_row, c_row, x as usize, shift, y_bias,
-                y_scale, cr_r, cb_g, cr_g, cb_b, rnd, shr, rgb, &mut out_idx,
+                y_plane,
+                cb_plane,
+                cr_plane,
+                y_row,
+                c_row,
+                x as usize,
+                shift,
+                y_bias,
+                y_scale,
+                cr_r,
+                cb_g,
+                cr_g,
+                cb_b,
+                rnd,
+                shr,
+                rgb,
+                &mut out_idx,
             );
         }
 
@@ -78,29 +93,17 @@ pub(crate) fn convert_420_to_rgb_neon(
             let cx = x / 2;
 
             // Load 8 Y values (u16) -> zero-extend to 8xi32 (2x int32x4_t)
-            let y_raw = vld1q_u16(
-                y_plane[y_row + x..y_row + x + 8].try_into().unwrap(),
-            );
+            let y_raw = vld1q_u16(y_plane[y_row + x..y_row + x + 8].try_into().unwrap());
             let mut y_lo = vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(y_raw)));
             let mut y_hi = vreinterpretq_s32_u32(vmovl_u16(vget_high_u16(y_raw)));
 
             // Load 4 Cb/Cr values, duplicate each for 4:2:0 -> 8xi32
-            let cb_raw = vld1_u16(
-                cb_plane[c_row + cx..c_row + cx + 4].try_into().unwrap(),
-            );
-            let cr_raw = vld1_u16(
-                cr_plane[c_row + cx..c_row + cx + 4].try_into().unwrap(),
-            );
+            let cb_raw = vld1_u16(cb_plane[c_row + cx..c_row + cx + 4].try_into().unwrap());
+            let cr_raw = vld1_u16(cr_plane[c_row + cx..c_row + cx + 4].try_into().unwrap());
             // Duplicate each chroma sample: [a,b,c,d] -> [a,a,b,b,c,c,d,d]
             // vzip1/vzip2 on 64-bit registers gives [a,a,b,b] and [c,c,d,d]
-            let cb_dup_full = vcombine_u16(
-                vzip1_u16(cb_raw, cb_raw),
-                vzip2_u16(cb_raw, cb_raw),
-            );
-            let cr_dup_full = vcombine_u16(
-                vzip1_u16(cr_raw, cr_raw),
-                vzip2_u16(cr_raw, cr_raw),
-            );
+            let cb_dup_full = vcombine_u16(vzip1_u16(cb_raw, cb_raw), vzip2_u16(cb_raw, cb_raw));
+            let cr_dup_full = vcombine_u16(vzip1_u16(cr_raw, cr_raw), vzip2_u16(cr_raw, cr_raw));
 
             let mut cb_lo = vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(cb_dup_full)));
             let mut cb_hi = vreinterpretq_s32_u32(vmovl_u16(vget_high_u16(cb_dup_full)));
@@ -202,8 +205,23 @@ pub(crate) fn convert_420_to_rgb_neon(
         // Scalar tail: remaining 0-7 pixels
         for x in x_simd_end..x_end {
             super::color_convert::scalar_pixel(
-                y_plane, cb_plane, cr_plane, y_row, c_row, x as usize, shift, y_bias,
-                y_scale, cr_r, cb_g, cr_g, cb_b, rnd, shr, rgb, &mut out_idx,
+                y_plane,
+                cb_plane,
+                cr_plane,
+                y_row,
+                c_row,
+                x as usize,
+                shift,
+                y_bias,
+                y_scale,
+                cr_r,
+                cb_g,
+                cr_g,
+                cb_b,
+                rnd,
+                shr,
+                rgb,
+                &mut out_idx,
             );
         }
     }
