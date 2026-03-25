@@ -1,3 +1,5 @@
+> **Historical.** The CABAC decoding bug described here has been fully resolved. Current SSIM2 scores are 91+ for example.heic.
+
 # CABAC Debug Handoff Document
 
 **Created:** 2026-01-22
