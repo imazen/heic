@@ -23,7 +23,7 @@ fn analyze_merge_a_rounding() {
     }
 
     let data = std::fs::read(&bs).unwrap();
-    let mut decoder = heic_decoder::VideoDecoder::new(16);
+    let mut decoder = heic::VideoDecoder::new(16);
     let frames = decoder.decode_annex_b(&data).unwrap();
 
     let ref_data = std::fs::read(ref_path).unwrap();
@@ -209,7 +209,7 @@ fn pixel_analysis(ours: &[u16], reference: &[u16], _w: u32, _h: u32, name: &str)
     total_diff
 }
 
-fn crop_y(frame: &heic_decoder::DecodedFrame, _w: u32, _h: u32) -> Vec<u16> {
+fn crop_y(frame: &heic::DecodedFrame, _w: u32, _h: u32) -> Vec<u16> {
     let cw = frame.cropped_width();
     let stride = frame.width as usize;
     let mut out = Vec::with_capacity((cw * frame.cropped_height()) as usize);

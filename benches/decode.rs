@@ -1,7 +1,7 @@
 // Criterion benchmarks for HEIC decode performance
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use heic_decoder::{DecoderConfig, ImageInfo, PixelLayout};
+use heic::{DecoderConfig, ImageInfo, PixelLayout};
 
 fn heic_base_dir() -> String {
     std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into())

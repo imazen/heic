@@ -90,7 +90,7 @@ impl PixelStats {
 }
 
 fn compare_pixels(
-    ours: &heic_decoder::DecodeOutput,
+    ours: &heic::DecodeOutput,
     reference: &heic_wasm_rs::DecodedImage,
 ) -> Option<PixelStats> {
     if ours.width != reference.width || ours.height != reference.height {
@@ -143,7 +143,7 @@ fn main() {
     });
 
     // Load decoders
-    let our_decoder = heic_decoder::DecoderConfig::new();
+    let our_decoder = heic::DecoderConfig::new();
     let wasm_path = format!("{}/wasm-module/heic_decoder.wasm", heic_base_dir());
     let wasm_decoder = heic_wasm_rs::HeicDecoder::from_file(std::path::Path::new(&wasm_path))
         .expect("Failed to load WASM decoder");
@@ -182,7 +182,7 @@ fn main() {
             Err(_) => continue,
         };
 
-        let our_result = our_decoder.decode(&data, heic_decoder::PixelLayout::Rgba8);
+        let our_result = our_decoder.decode(&data, heic::PixelLayout::Rgba8);
         let ref_result = wasm_decoder.decode(&data);
 
         let our_ok = our_result.is_ok();

@@ -42,7 +42,7 @@ fn main() {
         !name.starts_with("uncompressed_")
     });
 
-    let decoder = heic_decoder::DecoderConfig::new();
+    let decoder = heic::DecoderConfig::new();
 
     let mut ok = 0u32;
     let mut container_err = 0u32;

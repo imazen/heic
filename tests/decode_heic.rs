@@ -1,6 +1,6 @@
 //! Integration tests for HEIC decoding
 
-use heic_decoder::DecoderConfig;
+use heic::DecoderConfig;
 
 fn heic_base_dir() -> String {
     std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into())
@@ -21,7 +21,7 @@ fn iphone_heic() -> String {
 fn test_get_info() {
     let data = std::fs::read(example_heic()).expect("Failed to read test file");
 
-    let info = heic_decoder::ImageInfo::from_bytes(&data).expect("Failed to get info");
+    let info = heic::ImageInfo::from_bytes(&data).expect("Failed to get info");
     println!("Decoded info: {}x{}", info.width, info.height);
 
     // example.heic is 1280x854 (cropped from 1280x856 via conformance window)
@@ -36,7 +36,7 @@ fn test_decode() {
     let decoder = DecoderConfig::new();
 
     let image = decoder
-        .decode(&data, heic_decoder::PixelLayout::Rgb8)
+        .decode(&data, heic::PixelLayout::Rgb8)
         .expect("Failed to decode");
 
     // example.heic is 1280x854 (cropped from 1280x856 via conformance window)
@@ -359,7 +359,7 @@ fn test_extract_exif_none() {
 fn test_image_info_no_exif() {
     // example.heic: no EXIF, non-grid — probe should work
     let data = std::fs::read(example_heic()).expect("read");
-    let info = heic_decoder::ImageInfo::from_bytes(&data).expect("probe");
+    let info = heic::ImageInfo::from_bytes(&data).expect("probe");
     assert!(!info.has_exif, "example.heic should not have EXIF");
     assert!(!info.has_xmp, "example.heic should not have XMP");
     println!(
@@ -372,7 +372,7 @@ fn test_image_info_no_exif() {
 fn test_image_info_grid_with_exif() {
     // iPhone HEIC: grid image with EXIF + XMP
     let data = std::fs::read(iphone_heic()).expect("read");
-    let info = heic_decoder::ImageInfo::from_bytes(&data).expect("probe grid image");
+    let info = heic::ImageInfo::from_bytes(&data).expect("probe grid image");
     assert!(info.has_exif, "iPhone HEIC should have EXIF");
     assert!(info.has_xmp, "iPhone HEIC should have XMP");
     // Post-transform dimensions: iPhone photo is 4032x3024 raw but has irot 90°
@@ -406,7 +406,7 @@ fn test_decode_thumbnail() {
     let data = std::fs::read(example_heic()).expect("read");
     let decoder = DecoderConfig::new();
     let thumb = decoder
-        .decode_thumbnail(&data, heic_decoder::PixelLayout::Rgb8)
+        .decode_thumbnail(&data, heic::PixelLayout::Rgb8)
         .expect("decode_thumbnail");
     let thumb = thumb.expect("example.heic should have a thumbnail");
     // Thumbnail should be 320x212 per the container dump
@@ -424,7 +424,7 @@ fn test_decode_thumbnail() {
 #[test]
 fn test_image_info_has_thumbnail() {
     let data = std::fs::read(example_heic()).expect("read");
-    let info = heic_decoder::ImageInfo::from_bytes(&data).expect("probe");
+    let info = heic::ImageInfo::from_bytes(&data).expect("probe");
     assert!(
         info.has_thumbnail,
         "example.heic should report has_thumbnail=true"
@@ -438,7 +438,7 @@ fn test_decode_thumbnail_none() {
     if let Ok(data) = std::fs::read(nokia_path) {
         let decoder = DecoderConfig::new();
         let thumb = decoder
-            .decode_thumbnail(&data, heic_decoder::PixelLayout::Rgb8)
+            .decode_thumbnail(&data, heic::PixelLayout::Rgb8)
             .expect("decode_thumbnail");
         if thumb.is_none() {
             println!("C001.heic has no thumbnail (expected)");
@@ -454,11 +454,11 @@ fn test_image_info_matches_decoded_dimensions() {
     // applied irot/imir/clap transforms, causing dimension mismatch panics.
     // iPhone photos have irot 90°, making raw 4032x3024 → decoded 3024x4032.
     let data = std::fs::read(iphone_heic()).expect("read");
-    let info = heic_decoder::ImageInfo::from_bytes(&data).expect("probe");
+    let info = heic::ImageInfo::from_bytes(&data).expect("probe");
 
     let decoder = DecoderConfig::new();
     let decoded = decoder
-        .decode(&data, heic_decoder::PixelLayout::Rgb8)
+        .decode(&data, heic::PixelLayout::Rgb8)
         .expect("decode");
 
     assert_eq!(

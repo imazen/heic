@@ -7,7 +7,7 @@ fn main() {
         .nth(1)
         .unwrap_or_else(|| format!("{}/test-images/example_q10.heic", heic_base_dir()));
     let data = std::fs::read(&path).expect("read");
-    let decoder = heic_decoder::DecoderConfig::new();
+    let decoder = heic::DecoderConfig::new();
     let frame = decoder.decode_to_frame(&data).expect("decode");
 
     eprintln!("QP map stride: {}", frame.deblock_stride);

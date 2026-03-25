@@ -10,8 +10,8 @@ fn main() {
         .unwrap_or(500);
 
     let data = std::fs::read(&path).unwrap();
-    let mut decoder = heic_decoder::VideoDecoder::new(16);
+    let mut decoder = heic::VideoDecoder::new(16);
     decoder.mv_trace_next_inter = true;
-    heic_decoder::cabac_bin_trace(max_bins);
+    heic::cabac_bin_trace(max_bins);
     let _ = decoder.decode_annex_b(&data);
 }

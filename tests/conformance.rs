@@ -192,7 +192,7 @@ fn count_frame_types(bitstream: &Path) -> String {
 /// Decode a bitstream with our decoder and return per-frame cropped Y planes.
 fn decode_with_ours(bitstream: &Path) -> Result<Vec<Vec<u16>>, String> {
     let data = std::fs::read(bitstream).map_err(|e| format!("read: {e}"))?;
-    let mut decoder = heic_decoder::VideoDecoder::new(16);
+    let mut decoder = heic::VideoDecoder::new(16);
     let frames = decoder
         .decode_annex_b(&data)
         .map_err(|e| format!("decode: {e}"))?;
@@ -659,7 +659,7 @@ fn merge_a_deblock_debug() {
     };
 
     let data = std::fs::read(&bitstream).unwrap();
-    let mut decoder = heic_decoder::VideoDecoder::new(16);
+    let mut decoder = heic::VideoDecoder::new(16);
     let frames = decoder.decode_annex_b(&data).unwrap();
     let ref_frames = load_reference_yuv(&ref_yuv, width, height);
 

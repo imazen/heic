@@ -1,4 +1,4 @@
-use heic_decoder::heif::{FourCC, ItemProperty, ItemType};
+use heic::heif::{FourCC, ItemProperty, ItemType};
 
 fn heic_base_dir() -> String {
     std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into())
@@ -12,7 +12,7 @@ fn main() {
     eprintln!("File: {} ({} bytes)", path, data.len());
 
     let container =
-        heic_decoder::heif::parse(&data, &heic_decoder::Unstoppable).expect("parse failed");
+        heic::heif::parse(&data, &heic::Unstoppable).expect("parse failed");
     eprintln!("Brand: {}", container.brand);
     eprintln!("Primary item ID: {}", container.primary_item_id);
     eprintln!();

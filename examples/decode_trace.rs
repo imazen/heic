@@ -8,7 +8,7 @@ fn main() {
         .unwrap_or_else(|| format!("{}/libheif/examples/example.heic", heic_base_dir()));
     let output_path = std::env::args().nth(2);
     let data = std::fs::read(&path).expect("Failed to read test file");
-    let decoder = heic_decoder::DecoderConfig::new();
+    let decoder = heic::DecoderConfig::new();
     let frame = decoder.decode_to_frame(&data).expect("decode failed");
 
     // Write PPM if output path provided

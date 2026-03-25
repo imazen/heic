@@ -3,7 +3,7 @@
 //! These tests are `#[ignore]` by default since they require real HEIC files
 //! with HDR gain maps. Set `HEIC_TEST_DIR` to point to your test file directory.
 
-use heic_decoder::{AuxiliaryImageType, DecoderConfig, ImageInfo};
+use heic::{AuxiliaryImageType, DecoderConfig, ImageInfo};
 
 fn heic_base_dir() -> String {
     std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into())

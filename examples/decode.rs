@@ -7,7 +7,7 @@
 //   cargo run --example decode -- image.heic --thumbnail  # decode thumbnail
 //   cargo run --example decode -- image.heic --into       # use decode_into path
 
-use heic_decoder::{DecoderConfig, ImageInfo, Limits, PixelLayout};
+use heic::{DecoderConfig, ImageInfo, Limits, PixelLayout};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

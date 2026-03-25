@@ -7,7 +7,7 @@ fn main() {
 
     let data = std::fs::read(&input).expect("read input");
     let container =
-        heic_decoder::heif::parse(&data, &heic_decoder::Unstoppable).expect("parse container");
+        heic::heif::parse(&data, &heic::Unstoppable).expect("parse container");
 
     let primary_id = container.primary_item_id;
     let item = container.primary_item().expect("no primary item");

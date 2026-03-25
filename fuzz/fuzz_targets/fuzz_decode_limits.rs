@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use heic_decoder::{DecoderConfig, Limits, PixelLayout};
+use heic::{DecoderConfig, Limits, PixelLayout};
 
 /// Limits fuzzer: verify Limits enforcement under adversarial input.
 /// Decode with strict resource limits — should never exceed them.

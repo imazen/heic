@@ -3,7 +3,7 @@
 //! This test finds pixels with large RGB differences and traces
 //! backwards through the decoding pipeline to find the source.
 
-use heic_decoder::DecoderConfig;
+use heic::DecoderConfig;
 use std::path::Path;
 
 fn heic_base_dir() -> String {
@@ -127,7 +127,7 @@ fn find_first_bad_pixel() {
 
     let ref_image = ref_decoder.decode(&data).expect("Reference decode failed");
     let our_image = our_decoder
-        .decode(&data, heic_decoder::PixelLayout::Rgb8)
+        .decode(&data, heic::PixelLayout::Rgb8)
         .expect("Our decode failed");
 
     assert_eq!(ref_image.width, our_image.width);

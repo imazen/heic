@@ -87,7 +87,7 @@ fn verify_mc_first_pu() {
     }
 
     let data = std::fs::read(bitstream).unwrap();
-    let mut decoder = heic_decoder::VideoDecoder::new(16);
+    let mut decoder = heic::VideoDecoder::new(16);
     let frames = decoder.decode_annex_b(&data).unwrap();
 
     // Frame 0: I-frame (reference for P-frame at POC=4 = frames[4])

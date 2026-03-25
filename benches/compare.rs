@@ -1,4 +1,4 @@
-// Head-to-head benchmark: pure Rust heic-decoder vs native libheif (SSE) vs WASM libheif
+// Head-to-head benchmark: pure Rust heic vs native libheif (SSE) vs WASM libheif
 //
 // Native libheif is linked directly via raw FFI against the system library (1.12 + libde265 SSE).
 
@@ -233,11 +233,11 @@ fn bench_decode_small(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(data.len() as u64));
 
     // Pure Rust
-    let rust_dec = heic_decoder::DecoderConfig::new();
+    let rust_dec = heic::DecoderConfig::new();
     group.bench_function("rust", |b| {
         b.iter(|| {
             rust_dec
-                .decode(&data, heic_decoder::PixelLayout::Rgb8)
+                .decode(&data, heic::PixelLayout::Rgb8)
                 .unwrap()
         });
     });
@@ -281,12 +281,12 @@ fn bench_decode_large(c: &mut Criterion) {
             .num_threads(1)
             .build()
             .unwrap();
-        let rust_dec = heic_decoder::DecoderConfig::new();
+        let rust_dec = heic::DecoderConfig::new();
         group.bench_function("rust_1thread", |b| {
             b.iter(|| {
                 pool.install(|| {
                     rust_dec
-                        .decode(&data, heic_decoder::PixelLayout::Rgb8)
+                        .decode(&data, heic::PixelLayout::Rgb8)
                         .unwrap()
                 })
             });
@@ -294,11 +294,11 @@ fn bench_decode_large(c: &mut Criterion) {
     }
     #[cfg(not(feature = "parallel"))]
     {
-        let rust_dec = heic_decoder::DecoderConfig::new();
+        let rust_dec = heic::DecoderConfig::new();
         group.bench_function("rust", |b| {
             b.iter(|| {
                 rust_dec
-                    .decode(&data, heic_decoder::PixelLayout::Rgb8)
+                    .decode(&data, heic::PixelLayout::Rgb8)
                     .unwrap()
             });
         });
@@ -307,11 +307,11 @@ fn bench_decode_large(c: &mut Criterion) {
     // Pure Rust (parallel — use all cores)
     #[cfg(feature = "parallel")]
     {
-        let rust_dec = heic_decoder::DecoderConfig::new();
+        let rust_dec = heic::DecoderConfig::new();
         group.bench_function("rust_parallel", |b| {
             b.iter(|| {
                 rust_dec
-                    .decode(&data, heic_decoder::PixelLayout::Rgb8)
+                    .decode(&data, heic::PixelLayout::Rgb8)
                     .unwrap()
             });
         });
@@ -342,7 +342,7 @@ fn bench_probe(c: &mut Criterion) {
 
     // Pure Rust (no decoder init needed)
     group.bench_function("rust", |b| {
-        b.iter(|| heic_decoder::ImageInfo::from_bytes(&data).unwrap());
+        b.iter(|| heic::ImageInfo::from_bytes(&data).unwrap());
     });
 
     // Native libheif
@@ -375,7 +375,7 @@ fn bench_exif(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(data.len() as u64));
 
     // Pure Rust
-    let rust_dec = heic_decoder::DecoderConfig::new();
+    let rust_dec = heic::DecoderConfig::new();
     group.bench_function("rust", |b| {
         b.iter(|| rust_dec.extract_exif(&data).unwrap());
     });

@@ -19,7 +19,7 @@ fn compare_nofilter() {
     }
 
     let data = std::fs::read(bitstream).unwrap();
-    let mut decoder = heic_decoder::VideoDecoder::new(16);
+    let mut decoder = heic::VideoDecoder::new(16);
     decoder.disable_loop_filters = true;
     let frames = decoder.decode_annex_b(&data).unwrap();
 
@@ -134,7 +134,7 @@ fn trace_girlshy_p_frame_mvs() {
     }
 
     let data = std::fs::read(bitstream).unwrap();
-    let mut decoder = heic_decoder::VideoDecoder::new(16);
+    let mut decoder = heic::VideoDecoder::new(16);
     // Enable MV tracing for the first inter frame (P-frame at POC=4)
     decoder.mv_trace_next_inter = true;
     let _ = decoder.decode_annex_b(&data).unwrap();
@@ -151,11 +151,11 @@ fn compare_cabac_bins() {
     }
 
     let data = std::fs::read(bitstream).unwrap();
-    let mut decoder = heic_decoder::VideoDecoder::new(16);
+    let mut decoder = heic::VideoDecoder::new(16);
     // Enable per-bin tracing for the first inter frame
     decoder.mv_trace_next_inter = true; // this resets SE counter; we also need bin trace
     // Enable bin trace: first 200 bins
-    heic_decoder::cabac_bin_trace(200);
+    heic::cabac_bin_trace(200);
     let _ = decoder.decode_annex_b(&data).unwrap();
 }
 
@@ -169,7 +169,7 @@ fn trace_girlshy_frame1() {
     }
 
     let data = std::fs::read(bitstream).unwrap();
-    let mut decoder = heic_decoder::VideoDecoder::new(16);
+    let mut decoder = heic::VideoDecoder::new(16);
     let frames = decoder.decode_annex_b(&data).unwrap();
 
     // Load reference YUV

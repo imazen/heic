@@ -1,7 +1,7 @@
 //! Extract raw HEVC bitstream (Annex B format) from HEIC container
 //! for use with dec265 or other decoders.
 
-use heic_decoder::heif;
+use heic::heif;
 
 fn heic_base_dir() -> String {
     std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into())
@@ -17,7 +17,7 @@ const OUTPUT_H265: &str = "/tmp/example.h265";
 fn extract_annexb() {
     let data = std::fs::read(example_heic()).expect("Failed to read HEIC");
     let container =
-        heif::parse(&data, &heic_decoder::Unstoppable).expect("Failed to parse container");
+        heif::parse(&data, &heic::Unstoppable).expect("Failed to parse container");
 
     let item = container.primary_item().expect("No primary item");
     let config = item.hevc_config.as_ref().expect("No HEVC config");

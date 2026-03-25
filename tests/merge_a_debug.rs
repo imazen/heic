@@ -23,7 +23,7 @@ fn check_merge_a_nofilter() {
     }
 
     let data = std::fs::read(&bit).unwrap();
-    let mut decoder = heic_decoder::VideoDecoder::new(16);
+    let mut decoder = heic::VideoDecoder::new(16);
     decoder.disable_loop_filters = true;
     let frames = decoder.decode_annex_b(&data).unwrap();
 
@@ -173,7 +173,7 @@ fn check_merge_a_pixels() {
     }
 
     let data = std::fs::read(&bit).unwrap();
-    let mut decoder = heic_decoder::VideoDecoder::new(16);
+    let mut decoder = heic::VideoDecoder::new(16);
     let frames = decoder.decode_annex_b(&data).unwrap();
 
     let ref_data = std::fs::read(&ref_path).unwrap();
@@ -263,9 +263,9 @@ fn trace_deblock_poc4() {
 
     // We only want to trace frame POC=4 (the first B-frame)
     // Enable trace before decoding
-    heic_decoder::enable_deblock_trace();
+    heic::enable_deblock_trace();
 
-    let mut decoder = heic_decoder::VideoDecoder::new(16);
+    let mut decoder = heic::VideoDecoder::new(16);
     let frames = decoder.decode_annex_b(&data).unwrap();
 
     eprintln!("Decoded {} frames", frames.len());
@@ -328,7 +328,7 @@ fn dump_deblock_flags_poc4() {
     };
 
     let data = std::fs::read(&bit).unwrap();
-    let mut decoder = heic_decoder::VideoDecoder::new(16);
+    let mut decoder = heic::VideoDecoder::new(16);
     // We need access to frames with deblock_flags intact
     // decode_annex_b returns frames in display order, frame[4] = POC 4
     let frames = decoder.decode_annex_b(&data).unwrap();
@@ -412,11 +412,11 @@ fn compare_filter_impact() {
     let frame_size = luma_size + 2 * ((w / 2) * (h / 2)) as usize;
 
     // Decode with filters
-    let mut dec = heic_decoder::VideoDecoder::new(16);
+    let mut dec = heic::VideoDecoder::new(16);
     let filtered = dec.decode_annex_b(&data).unwrap();
 
     // Decode without filters
-    let mut dec2 = heic_decoder::VideoDecoder::new(16);
+    let mut dec2 = heic::VideoDecoder::new(16);
     dec2.disable_loop_filters = true;
     let unfiltered = dec2.decode_annex_b(&data).unwrap();
 
@@ -523,7 +523,7 @@ fn dump_bs_derivation_poc4() {
     // We need to access inter context data. Let me decode and inspect.
     // Instead of using decode_annex_b, manually decode with access to SliceContext.
     // Actually, let's just use the VideoDecoder and inspect the frame's flags directly.
-    let mut decoder = heic_decoder::VideoDecoder::new(16);
+    let mut decoder = heic::VideoDecoder::new(16);
     let frames = decoder.decode_annex_b(&data).unwrap();
 
     // Unfortunately we can't access the inter deblock context from the test.
@@ -586,7 +586,7 @@ fn trace_merge_a_mvs() {
     };
 
     let data = std::fs::read(&bit).unwrap();
-    let mut decoder = heic_decoder::VideoDecoder::new(16);
+    let mut decoder = heic::VideoDecoder::new(16);
     decoder.mv_trace_next_inter = true;
     let _ = decoder.decode_annex_b(&data).unwrap();
 }
@@ -607,7 +607,7 @@ fn trace_poc2_mvs() {
     };
 
     let data = std::fs::read(&bit).unwrap();
-    let mut decoder = heic_decoder::VideoDecoder::new(16);
+    let mut decoder = heic::VideoDecoder::new(16);
     decoder.disable_loop_filters = true;
     decoder.mv_trace_poc = 1;
     let _ = decoder.decode_annex_b(&data).unwrap();
@@ -634,7 +634,7 @@ fn debug_poc2_nofilter() {
     }
 
     let data = std::fs::read(&bit).unwrap();
-    let mut decoder = heic_decoder::VideoDecoder::new(16);
+    let mut decoder = heic::VideoDecoder::new(16);
     decoder.disable_loop_filters = true;
     let frames = decoder.decode_annex_b(&data).unwrap();
 

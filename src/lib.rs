@@ -7,7 +7,7 @@
 //! # Quick Start
 //!
 //! ```no_run
-//! use heic_decoder::{DecoderConfig, PixelLayout};
+//! use heic::{DecoderConfig, PixelLayout};
 //!
 //! let data = std::fs::read("image.heic").unwrap();
 //! let output = DecoderConfig::new().decode(&data, PixelLayout::Rgba8).unwrap();
@@ -17,7 +17,7 @@
 //! # Decode with Limits and Cancellation
 //!
 //! ```no_run
-//! use heic_decoder::{DecoderConfig, PixelLayout, Limits};
+//! use heic::{DecoderConfig, PixelLayout, Limits};
 //!
 //! let data = std::fs::read("image.heic").unwrap();
 //! let mut limits = Limits::default();
@@ -36,7 +36,7 @@
 //! # Zero-Copy into Pre-Allocated Buffer
 //!
 //! ```no_run
-//! use heic_decoder::{DecoderConfig, ImageInfo, PixelLayout};
+//! use heic::{DecoderConfig, ImageInfo, PixelLayout};
 //!
 //! let data = std::fs::read("image.heic").unwrap();
 //! let info = ImageInfo::from_bytes(&data).unwrap();
@@ -72,7 +72,7 @@
 //! # Advanced: Raw YCbCr Access
 //!
 //! ```no_run
-//! use heic_decoder::DecoderConfig;
+//! use heic::DecoderConfig;
 //!
 //! let data = std::fs::read("image.heic").unwrap();
 //! let frame = DecoderConfig::new().decode_to_frame(&data).unwrap();
@@ -192,7 +192,7 @@ impl PixelLayout {
 /// # Example
 ///
 /// ```
-/// use heic_decoder::Limits;
+/// use heic::Limits;
 ///
 /// let mut limits = Limits::default();
 /// limits.max_width = Some(8192);
@@ -658,7 +658,7 @@ pub struct HdrGainMap {
 /// # Example
 ///
 /// ```ignore
-/// use heic_decoder::{DecoderConfig, PixelLayout};
+/// use heic::{DecoderConfig, PixelLayout};
 ///
 /// let config = DecoderConfig::new();
 /// let output = config.decode(&data, PixelLayout::Rgba8)?;

@@ -1,4 +1,4 @@
-//! Zennode decode node definition for heic-decoder.
+//! Zennode decode node definition for heic.
 //!
 //! Provides [`DecodeHeic`], a self-documenting pipeline node that bridges
 //! zennode's parameter system with [`crate::HeicDecoderConfig`].

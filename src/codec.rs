@@ -1,11 +1,11 @@
-//! zencodec trait implementations for heic-decoder.
+//! zencodec trait implementations for heic.
 //!
 //! Provides [`HeicDecoderConfig`] that implements the 4-layer decode trait
-//! hierarchy from zencodec, wrapping the native heic-decoder API.
+//! hierarchy from zencodec, wrapping the native heic API.
 //!
 //! # Trait mapping
 //!
-//! | zencodec | heic-decoder adapter |
+//! | zencodec | heic adapter |
 //! |----------------|----------------------|
 //! | `DecoderConfig` | [`HeicDecoderConfig`] |
 //! | `DecodeJob<'a>` | [`HeicDecodeJob`] |

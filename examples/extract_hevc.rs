@@ -8,7 +8,7 @@ fn main() {
         .nth(1)
         .unwrap_or_else(|| format!("{}/libheif/examples/example.heic", heic_base_dir()));
     let data = std::fs::read(&path).expect("read");
-    let container = heic_decoder::heif::parse(&data, &heic_decoder::Unstoppable).expect("parse");
+    let container = heic::heif::parse(&data, &heic::Unstoppable).expect("parse");
 
     // Find primary image item
     let item = container.primary_item().expect("no primary item");

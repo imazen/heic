@@ -1,7 +1,7 @@
 //! Compare our decoder output against reference (heic-wasm-rs / libheif)
 
 use fast_ssim2::compute_ssimulacra2;
-use heic_decoder::DecoderConfig;
+use heic::DecoderConfig;
 use imgref::ImgVec;
 use std::path::Path;
 
@@ -69,7 +69,7 @@ fn test_ssim2_against_reference() {
         };
 
         // Decode with our decoder
-        let our_result = our_decoder.decode(&data, heic_decoder::PixelLayout::Rgb8);
+        let our_result = our_decoder.decode(&data, heic::PixelLayout::Rgb8);
         let our_image = match our_result {
             Ok(img) => img,
             Err(e) => {
@@ -128,7 +128,7 @@ fn test_pixel_difference_stats() {
             Err(_) => continue,
         };
 
-        let our_image = match our_decoder.decode(&data, heic_decoder::PixelLayout::Rgb8) {
+        let our_image = match our_decoder.decode(&data, heic::PixelLayout::Rgb8) {
             Ok(img) => img,
             Err(_) => continue,
         };
@@ -191,7 +191,7 @@ fn write_comparison_images() {
 
     let ref_image = ref_decoder.decode(&data).expect("Reference decode failed");
     let our_image = our_decoder
-        .decode(&data, heic_decoder::PixelLayout::Rgb8)
+        .decode(&data, heic::PixelLayout::Rgb8)
         .expect("Our decode failed");
 
     // Write reference PPM

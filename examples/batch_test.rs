@@ -29,7 +29,7 @@ fn main() {
         .collect();
     entries.sort_by_key(|e| e.file_name());
 
-    let decoder = heic_decoder::DecoderConfig::new();
+    let decoder = heic::DecoderConfig::new();
     let mut pass = 0u32;
     let mut fail = 0u32;
 

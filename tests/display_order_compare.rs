@@ -20,7 +20,7 @@ fn compare_display_order() {
     }
 
     let data = std::fs::read(bitstream).unwrap();
-    let mut decoder = heic_decoder::VideoDecoder::new(16);
+    let mut decoder = heic::VideoDecoder::new(16);
     let frames = decoder.decode_annex_b(&data).unwrap();
 
     let ref_data = std::fs::read(ref_path).unwrap();

@@ -5,7 +5,7 @@ fn heic_base_dir() -> String {
 fn main() {
     let data =
         std::fs::read(format!("{}/libheif/examples/example.heic", heic_base_dir())).expect("read");
-    let decoder = heic_decoder::DecoderConfig::new();
+    let decoder = heic::DecoderConfig::new();
     let frame = decoder.decode_to_frame(&data).expect("decode");
 
     let stride = frame.deblock_stride;

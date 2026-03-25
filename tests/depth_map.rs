@@ -3,7 +3,7 @@
 //! These tests are `#[ignore]` by default since they require real HEIC files
 //! with depth data. Set `HEIC_TEST_DIR` to point to your test file directory.
 
-use heic_decoder::{
+use heic::{
     AuxiliaryImageType, DecoderConfig, DepthRepresentationType, ImageInfo, PixelLayout,
 };
 
