@@ -63,8 +63,8 @@
 //!
 //! Decode methods return [`Result<T>`], which is `core::result::Result<T, At<HeicError>>`.
 //! The [`At`] wrapper from the `whereat` crate attaches source location to errors
-//! for easier debugging. Use `.decompose().0` to unwrap the location and get the
-//! underlying [`HeicError`].
+//! for easier debugging. Use `.error()` to inspect the inner [`HeicError`], or
+//! `.decompose()` to separate the error from its trace.
 //!
 //! For probing, [`ImageInfo::from_bytes`] returns a separate [`ProbeError`] enum
 //! that distinguishes "not enough data" from "not a HEIC file" from "corrupt header".
@@ -385,11 +385,11 @@ impl ImageInfo {
         }
 
         let container = heif::parse(data, &Unstoppable)
-            .map_err(|e: At<HeicError>| ProbeError::Corrupt(e.decompose().0))?;
+            .map_err(ProbeError::Corrupt)?;
 
         let primary_item = container
             .primary_item()
-            .ok_or(ProbeError::Corrupt(HeicError::NoPrimaryImage))?;
+            .ok_or_else(|| ProbeError::Corrupt(at!(HeicError::NoPrimaryImage)))?;
 
         // Check for alpha auxiliary image
         let has_alpha = !container
@@ -536,10 +536,10 @@ impl ImageInfo {
         // Fallback to reading image data
         let image_data = container
             .get_item_data(primary_item.id)
-            .map_err(|e: At<HeicError>| ProbeError::Corrupt(e.decompose().0))?;
+            .map_err(ProbeError::Corrupt)?;
 
         let hevc_info =
-            hevc::get_info(&image_data).map_err(|e| ProbeError::Corrupt(HeicError::from(e)))?;
+            hevc::get_info(&image_data).map_err(|e| ProbeError::Corrupt(at!(HeicError::from(e))))?;
 
         let (width, height) =
             apply_transform_dimensions(hevc_info.width, hevc_info.height, &primary_item.transforms);

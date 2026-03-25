@@ -25,6 +25,8 @@ use zencodec::{
 };
 use zenpixels::{Cicp, ColorPrimaries, PixelBuffer, PixelDescriptor, TransferFunction};
 
+use whereat::{At, ResultAtExt, at};
+
 use crate::auxiliary::AuxiliaryImageType;
 use crate::error::HeicError;
 
@@ -135,7 +137,7 @@ impl Default for HeicDecoderConfig {
 }
 
 impl zencodec::decode::DecoderConfig for HeicDecoderConfig {
-    type Error = HeicError;
+    type Error = At<HeicError>;
     type Job<'a> = HeicDecodeJob<'a>;
 
     fn formats() -> &'static [ImageFormat] {
@@ -227,10 +229,10 @@ fn descriptor_to_layout(desc: PixelDescriptor) -> crate::PixelLayout {
 }
 
 impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
-    type Error = HeicError;
+    type Error = At<HeicError>;
     type Dec = HeicDecoder<'a>;
     type StreamDec = HeicStreamDecoder;
-    type AnimationFrameDec = Unsupported<HeicError>;
+    type AnimationFrameDec = Unsupported<At<HeicError>>;
 
     fn with_stop(mut self, stop: zencodec::StopToken) -> Self {
         self.stop = Some(stop);
@@ -242,22 +244,21 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
         self
     }
 
-    fn probe(&self, data: &[u8]) -> Result<ImageInfo, HeicError> {
+    fn probe(&self, data: &[u8]) -> Result<ImageInfo, At<HeicError>> {
         self.limits
             .check_input_size(data.len() as u64)
-            .map_err(|e| HeicError::LimitExceeded(limit_exceeded_msg(e)))?;
+            .map_err(|e| at!(HeicError::LimitExceeded(limit_exceeded_msg(e))))?;
         let native = crate::ImageInfo::from_bytes(data).map_err(probe_error_to_heic)?;
         Ok(build_image_info_lightweight(&native))
     }
 
-    fn probe_full(&self, data: &[u8]) -> Result<ImageInfo, HeicError> {
+    fn probe_full(&self, data: &[u8]) -> Result<ImageInfo, At<HeicError>> {
         self.limits
             .check_input_size(data.len() as u64)
-            .map_err(|e| HeicError::LimitExceeded(limit_exceeded_msg(e)))?;
+            .map_err(|e| at!(HeicError::LimitExceeded(limit_exceeded_msg(e))))?;
         let native = crate::ImageInfo::from_bytes(data).map_err(probe_error_to_heic)?;
         // Parse the HEIF container once and extract all metadata from it
         let container = crate::heif::parse(data, &enough::Unstoppable)
-            .map_err(|e| e.decompose().0)
             .ok();
         Ok(build_image_info_full(
             &native,
@@ -267,10 +268,10 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
         ))
     }
 
-    fn output_info(&self, data: &[u8]) -> Result<OutputInfo, HeicError> {
+    fn output_info(&self, data: &[u8]) -> Result<OutputInfo, At<HeicError>> {
         self.limits
             .check_input_size(data.len() as u64)
-            .map_err(|e| HeicError::LimitExceeded(limit_exceeded_msg(e)))?;
+            .map_err(|e| at!(HeicError::LimitExceeded(limit_exceeded_msg(e))))?;
         let native = crate::ImageInfo::from_bytes(data).map_err(probe_error_to_heic)?;
         let available = available_descriptors(native.has_alpha, native.bit_depth);
         let base_desc = available[0]; // default for this image
@@ -286,10 +287,10 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
         mut self,
         data: Cow<'a, [u8]>,
         preferred: &[PixelDescriptor],
-    ) -> Result<HeicDecoder<'a>, HeicError> {
+    ) -> Result<HeicDecoder<'a>, At<HeicError>> {
         self.limits
             .check_input_size(data.len() as u64)
-            .map_err(|e| HeicError::LimitExceeded(limit_exceeded_msg(e)))?;
+            .map_err(|e| at!(HeicError::LimitExceeded(limit_exceeded_msg(e))))?;
         let thread_count = policy_to_threads(self.limits.threading());
         let stop = self.stop.take();
         Ok(HeicDecoder {
@@ -307,10 +308,10 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
         data: Cow<'a, [u8]>,
         sink: &mut dyn DecodeRowSink,
         preferred: &[PixelDescriptor],
-    ) -> Result<OutputInfo, HeicError> {
+    ) -> Result<OutputInfo, At<HeicError>> {
         self.limits
             .check_input_size(data.len() as u64)
-            .map_err(|e| HeicError::LimitExceeded(limit_exceeded_msg(e)))?;
+            .map_err(|e| at!(HeicError::LimitExceeded(limit_exceeded_msg(e))))?;
         // Probe for image properties
         let probe_info = crate::ImageInfo::from_bytes(&data).ok();
         let has_alpha = probe_info.as_ref().is_some_and(|pi| pi.has_alpha);
@@ -329,15 +330,15 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
             let desc = ps.descriptor();
             let w = ps.width();
             let h = ps.rows();
-            sink.begin(w, h, desc).map_err(HeicError::Sink)?;
+            sink.begin(w, h, desc).map_err(|e| at!(HeicError::Sink(e)))?;
             let mut dst = sink
                 .provide_next_buffer(0, h, w, desc)
-                .map_err(HeicError::Sink)?;
+                .map_err(|e| at!(HeicError::Sink(e)))?;
             for row in 0..h {
                 dst.row_mut(row).copy_from_slice(ps.row(row));
             }
             drop(dst);
-            sink.finish().map_err(HeicError::Sink)?;
+            sink.finish().map_err(|e| at!(HeicError::Sink(e)))?;
             let info = output.info();
             return Ok(OutputInfo::full_decode(info.width, info.height, desc));
         }
@@ -388,14 +389,14 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
         adapter
             .inner
             .begin(probe_width, probe_height, desc)
-            .map_err(HeicError::Sink)?;
+            .map_err(|e| at!(HeicError::Sink(e)))?;
 
-        let (w, h) = req.decode_rows(&mut adapter).map_err(|e| e.decompose().0)?;
+        let (w, h) = req.decode_rows(&mut adapter)?;
         // Check for deferred sink errors from demand() calls
         adapter.take_deferred_error()?;
         // Flush the last strip that was written by the native decoder
         adapter.flush_pending()?;
-        adapter.inner.finish().map_err(HeicError::Sink)?;
+        adapter.inner.finish().map_err(|e| at!(HeicError::Sink(e)))?;
         Ok(OutputInfo::full_decode(w, h, desc))
     }
 
@@ -403,10 +404,10 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
         self,
         data: Cow<'a, [u8]>,
         preferred: &[PixelDescriptor],
-    ) -> Result<HeicStreamDecoder, HeicError> {
+    ) -> Result<HeicStreamDecoder, At<HeicError>> {
         self.limits
             .check_input_size(data.len() as u64)
-            .map_err(|e| HeicError::LimitExceeded(limit_exceeded_msg(e)))?;
+            .map_err(|e| at!(HeicError::LimitExceeded(limit_exceeded_msg(e))))?;
         let thread_count = policy_to_threads(self.limits.threading());
         HeicStreamDecoder::new(
             &data,
@@ -421,10 +422,10 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
         self,
         _data: Cow<'a, [u8]>,
         _preferred: &[PixelDescriptor],
-    ) -> Result<Unsupported<HeicError>, HeicError> {
-        Err(HeicError::Unsupported(
+    ) -> Result<Unsupported<At<HeicError>>, At<HeicError>> {
+        Err(at!(HeicError::Unsupported(
             "HEIC does not support animation decoding",
-        ))
+        )))
     }
 }
 
@@ -445,19 +446,19 @@ struct RowSinkAdapter<'a> {
     pending_y: Option<u32>,
     pending_height: u32,
     /// Deferred sink error from within `demand()` (which can't return Result).
-    deferred_error: Option<HeicError>,
+    deferred_error: Option<At<HeicError>>,
 }
 
 impl RowSinkAdapter<'_> {
     /// Flush any pending strip data to the zencodec sink.
-    fn flush_pending(&mut self) -> Result<(), HeicError> {
+    fn flush_pending(&mut self) -> Result<(), At<HeicError>> {
         if let Some(y) = self.pending_y.take() {
             let bpp = self.descriptor.bytes_per_pixel();
             let row_bytes = self.width as usize * bpp;
             let mut dst = self
                 .inner
                 .provide_next_buffer(y, self.pending_height, self.width, self.descriptor)
-                .map_err(HeicError::Sink)?;
+                .map_err(|e| at!(HeicError::Sink(e)))?;
             for row in 0..self.pending_height {
                 let src_start = row as usize * row_bytes;
                 dst.row_mut(row)
@@ -476,7 +477,7 @@ impl RowSinkAdapter<'_> {
     }
 
     /// Take any deferred error from a prior `demand()` call.
-    fn take_deferred_error(&mut self) -> Result<(), HeicError> {
+    fn take_deferred_error(&mut self) -> Result<(), At<HeicError>> {
         match self.deferred_error.take() {
             Some(e) => Err(e),
             None => Ok(()),
@@ -521,9 +522,9 @@ pub struct HeicDecoder<'a> {
 }
 
 impl zencodec::decode::Decode for HeicDecoder<'_> {
-    type Error = HeicError;
+    type Error = At<HeicError>;
 
-    fn decode(self) -> Result<DecodeOutput, HeicError> {
+    fn decode(self) -> Result<DecodeOutput, At<HeicError>> {
         let data: &[u8] = &self.data;
         let preferred = &self.preferred;
 
@@ -550,7 +551,7 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
             if self.thread_count > 0 {
                 req = req.with_max_threads(self.thread_count);
             }
-            let frame = req.decode_yuv().map_err(|e| e.decompose().0)?;
+            let frame = req.decode_yuv()?;
 
             let has_alpha = frame.alpha_plane.is_some();
             let w = frame.cropped_width();
@@ -573,10 +574,10 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
                         a: c[3],
                     })
                     .collect();
-                let pb = PixelBuffer::from_pixels(pixels, w, h)
-                    .map_err(|_| HeicError::InvalidData("pixel count mismatch"))?
+                let pb = PixelBuffer::from_pixels_erased(pixels, w, h)
+                    .map_err_at(|_| HeicError::InvalidData("pixel count mismatch"))?
                     .with_descriptor(desc);
-                (pb.into(), w, h, true)
+                (pb, w, h, true)
             } else {
                 let desc = cicp_descriptor(
                     PixelDescriptor::RGB16_SRGB,
@@ -592,10 +593,10 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
                         b: c[2],
                     })
                     .collect();
-                let pb = PixelBuffer::from_pixels(pixels, w, h)
-                    .map_err(|_| HeicError::InvalidData("pixel count mismatch"))?
+                let pb = PixelBuffer::from_pixels_erased(pixels, w, h)
+                    .map_err_at(|_| HeicError::InvalidData("pixel count mismatch"))?
                     .with_descriptor(desc);
-                (pb.into(), w, h, false)
+                (pb, w, h, false)
             }
         } else {
             // 8-bit path: use negotiated layout for decode.
@@ -614,7 +615,7 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
             if self.thread_count > 0 {
                 req = req.with_max_threads(self.thread_count);
             }
-            let native_output = req.decode().map_err(|e| e.decompose().0)?;
+            let native_output = req.decode()?;
             let has_alpha =
                 layout == crate::PixelLayout::Rgba8 || layout == crate::PixelLayout::Bgra8;
             let w = native_output.width;
@@ -635,7 +636,6 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
         // Build ImageInfo with all available metadata.
         // Parse the HEIF container once for all metadata extraction.
         let container = crate::heif::parse(data, &enough::Unstoppable)
-            .map_err(|e| e.decompose().0)
             .ok();
         let fallback_info = crate::ImageInfo {
             width,
@@ -679,10 +679,10 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
             });
 
             // Decode and attach the HDR gain map if present.
-            if pi.has_gain_map {
-                if let Ok(gain_map) = crate::decode::decode_gain_map(data) {
-                    output.extensions_mut().insert(gain_map);
-                }
+            if pi.has_gain_map
+                && let Ok(gain_map) = crate::decode::decode_gain_map(data)
+            {
+                output.extensions_mut().insert(gain_map);
             }
         }
 
@@ -730,7 +730,7 @@ impl HeicStreamDecoder {
         limits: Option<&crate::Limits>,
         stop: Option<&dyn zencodec::enough::Stop>,
         thread_count: usize,
-    ) -> Result<Self, HeicError> {
+    ) -> Result<Self, At<HeicError>> {
         let stop_ref: &dyn enough::Stop = stop.unwrap_or(&enough::Unstoppable);
 
         // Probe for metadata
@@ -739,11 +739,10 @@ impl HeicStreamDecoder {
         let config = crate::DecoderConfig::new();
         let pi = probe_info
             .as_ref()
-            .ok_or(HeicError::InvalidData("cannot probe HEIC header"))?;
+            .ok_or_else(|| at!(HeicError::InvalidData("cannot probe HEIC header")))?;
 
         // Parse container once for metadata extraction and grid init
         let container = crate::heif::parse(data, stop_ref)
-            .map_err(|e| e.decompose().0)
             .ok();
 
         // Build ImageInfo for the trait (uses pre-parsed container)
@@ -787,7 +786,7 @@ impl HeicStreamDecoder {
             if thread_count > 0 {
                 req = req.with_max_threads(thread_count);
             }
-            let frame = req.decode_yuv().map_err(|e| e.decompose().0)?;
+            let frame = req.decode_yuv()?;
             let has_alpha = frame.alpha_plane.is_some();
 
             let wants_alpha = negotiated == PixelDescriptor::RGBA16_SRGB;
@@ -809,10 +808,9 @@ impl HeicStreamDecoder {
                     .collect();
                 let w = frame.cropped_width();
                 let h = frame.cropped_height();
-                PixelBuffer::from_pixels(pixels, w, h)
-                    .map_err(|_| HeicError::InvalidData("pixel count mismatch"))?
+                PixelBuffer::from_pixels_erased(pixels, w, h)
+                    .map_err_at(|_| HeicError::InvalidData("pixel count mismatch"))?
                     .with_descriptor(desc)
-                    .into()
             } else {
                 let desc = cicp_descriptor(
                     PixelDescriptor::RGB16_SRGB,
@@ -830,10 +828,9 @@ impl HeicStreamDecoder {
                     .collect();
                 let w = frame.cropped_width();
                 let h = frame.cropped_height();
-                PixelBuffer::from_pixels(pixels, w, h)
-                    .map_err(|_| HeicError::InvalidData("pixel count mismatch"))?
+                PixelBuffer::from_pixels_erased(pixels, w, h)
+                    .map_err_at(|_| HeicError::InvalidData("pixel count mismatch"))?
                     .with_descriptor(desc)
-                    .into()
             }
         } else {
             let layout = descriptor_to_layout(negotiated);
@@ -847,7 +844,7 @@ impl HeicStreamDecoder {
             if thread_count > 0 {
                 req = req.with_max_threads(thread_count);
             }
-            let native_output = req.decode().map_err(|e| e.decompose().0)?;
+            let native_output = req.decode()?;
             let mut pb = raw_to_pixel_buffer(
                 native_output.data,
                 native_output.width,
@@ -885,21 +882,21 @@ impl HeicStreamDecoder {
         limits: Option<&crate::Limits>,
         stop: &dyn enough::Stop,
         _probe_info: &crate::ImageInfo,
-    ) -> Result<Option<GridState>, HeicError> {
+    ) -> Result<Option<GridState>, At<HeicError>> {
         use crate::heif::{self, ColorInfo, FourCC, ItemType};
 
-        stop.check().map_err(HeicError::Cancelled)?;
+        stop.check().map_err(|r| at!(HeicError::Cancelled(r)))?;
 
         // Use pre-parsed container or parse now
         let owned;
         let container: &heif::HeifContainer<'_> = match pre_parsed {
             Some(c) => c,
             None => {
-                owned = heif::parse(data, stop).map_err(|e| e.decompose().0)?;
+                owned = heif::parse(data, stop)?;
                 &owned
             }
         };
-        let primary_item = container.primary_item().ok_or(HeicError::NoPrimaryImage)?;
+        let primary_item = container.primary_item().ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
 
         // Must be a grid with no transforms and no alpha
         if primary_item.item_type != ItemType::Grid {
@@ -924,9 +921,9 @@ impl HeicStreamDecoder {
         // Parse grid descriptor
         let grid_data = container
             .get_item_data(primary_item.id)
-            .map_err(|e| e.decompose().0)?;
+            ?;
         if grid_data.len() < 8 {
-            return Err(HeicError::InvalidData("Grid descriptor too short"));
+            return Err(at!(HeicError::InvalidData("Grid descriptor too short")));
         }
 
         let flags = grid_data[1];
@@ -934,9 +931,9 @@ impl HeicStreamDecoder {
         let cols = grid_data[3] as u32 + 1;
         let (output_width, output_height) = if (flags & 1) != 0 {
             if grid_data.len() < 12 {
-                return Err(HeicError::InvalidData(
+                return Err(at!(HeicError::InvalidData(
                     "Grid descriptor too short for 32-bit dims",
-                ));
+                )));
             }
             (
                 u32::from_be_bytes([grid_data[4], grid_data[5], grid_data[6], grid_data[7]]),
@@ -951,27 +948,27 @@ impl HeicStreamDecoder {
 
         if let Some(lim) = limits {
             lim.check_dimensions(output_width, output_height)
-                .map_err(|e| e.decompose().0)?;
+                ?;
         }
 
         // Get tile info
         let tile_ids = container.get_item_references(primary_item.id, FourCC::DIMG);
         let expected_tiles = (rows * cols) as usize;
         if tile_ids.len() != expected_tiles {
-            return Err(HeicError::InvalidData("Grid tile count mismatch"));
+            return Err(at!(HeicError::InvalidData("Grid tile count mismatch")));
         }
 
         let first_tile = container
             .get_item(tile_ids[0])
-            .ok_or(HeicError::InvalidData("Missing tile item"))?;
+            .ok_or_else(|| at!(HeicError::InvalidData("Missing tile item")))?;
         let tile_config = first_tile
             .hevc_config
             .as_ref()
-            .ok_or(HeicError::InvalidData("Missing tile hvcC config"))?
+            .ok_or_else(|| at!(HeicError::InvalidData("Missing tile hvcC config")))?
             .clone();
         let (tile_width, tile_height) = first_tile
             .dimensions
-            .ok_or(HeicError::InvalidData("Missing tile dimensions"))?;
+            .ok_or_else(|| at!(HeicError::InvalidData("Missing tile dimensions")))?;
 
         // Color override from grid item's colr nclx
         let color_override = match &primary_item.color_info {
@@ -990,7 +987,6 @@ impl HeicStreamDecoder {
                 container
                     .get_item_data(tid)
                     .map(|cow| cow.into_owned())
-                    .map_err(|e| e.decompose().0)
             })
             .collect::<Result<_, _>>()?;
 
@@ -1015,7 +1011,7 @@ impl HeicStreamDecoder {
     }
 
     /// Decode one grid tile-row into `self.strip_buffer`.
-    fn decode_grid_row(&mut self) -> Result<Option<(u32, u32, u32)>, HeicError> {
+    fn decode_grid_row(&mut self) -> Result<Option<(u32, u32, u32)>, At<HeicError>> {
         let grid = self.grid.as_ref().unwrap();
         let row = self.current_grid_row;
         if row >= grid.rows {
@@ -1044,8 +1040,7 @@ impl HeicStreamDecoder {
                 break;
             }
             let mut tile_frame =
-                crate::hevc::decode_with_config(&grid.tile_config, &grid.tile_data[tile_idx])
-                    .map_err(HeicError::from)?;
+                crate::hevc::decode_with_config(&grid.tile_config, &grid.tile_data[tile_idx])?;
 
             if let Some((fr, mc)) = grid.color_override {
                 tile_frame.full_range = fr;
@@ -1076,9 +1071,9 @@ impl HeicStreamDecoder {
 }
 
 impl zencodec::decode::StreamingDecode for HeicStreamDecoder {
-    type Error = HeicError;
+    type Error = At<HeicError>;
 
-    fn next_batch(&mut self) -> Result<Option<(u32, zenpixels::PixelSlice<'_>)>, HeicError> {
+    fn next_batch(&mut self) -> Result<Option<(u32, zenpixels::PixelSlice<'_>)>, At<HeicError>> {
         if self.grid.is_some() {
             let result = self.decode_grid_row()?;
             match result {
@@ -1093,7 +1088,7 @@ impl zencodec::decode::StreamingDecode for HeicStreamDecoder {
                         stride,
                         self.descriptor,
                     )
-                    .map_err(|_| HeicError::InvalidData("failed to create pixel slice"))?;
+                    .map_err(|_| at!(HeicError::InvalidData("failed to create pixel slice")))?;
                     Ok(Some((y, slice)))
                 }
             }
@@ -1128,26 +1123,29 @@ fn raw_to_pixel_buffer(
     w: u32,
     h: u32,
     layout: crate::PixelLayout,
-) -> Result<PixelBuffer, HeicError> {
-    let err = |_| HeicError::InvalidData("pixel buffer size mismatch");
+) -> Result<PixelBuffer, At<HeicError>> {
     match layout {
         crate::PixelLayout::Rgb8 => {
             // Zero-copy: Vec<u8> → PixelBuffer with RGB8 descriptor
-            Ok(PixelBuffer::from_vec(raw, w, h, PixelDescriptor::RGB8_SRGB).map_err(err)?)
+            Ok(PixelBuffer::from_vec(raw, w, h, PixelDescriptor::RGB8_SRGB)
+                .map_err_at(|_| HeicError::InvalidData("pixel buffer size mismatch"))?)
         }
         crate::PixelLayout::Rgba8 => {
             // Zero-copy: Vec<u8> → PixelBuffer with RGBA8 descriptor
-            Ok(PixelBuffer::from_vec(raw, w, h, PixelDescriptor::RGBA8_SRGB).map_err(err)?)
+            Ok(PixelBuffer::from_vec(raw, w, h, PixelDescriptor::RGBA8_SRGB)
+                .map_err_at(|_| HeicError::InvalidData("pixel buffer size mismatch"))?)
         }
         crate::PixelLayout::Bgr8 => {
             // In-place BGR→RGB swizzle via garb, then zero-copy wrap
             garb::bytes::rgb_to_bgr_inplace(&mut raw)
-                .map_err(|_| HeicError::InvalidData("BGR swizzle size mismatch"))?;
-            Ok(PixelBuffer::from_vec(raw, w, h, PixelDescriptor::RGB8_SRGB).map_err(err)?)
+                .map_err(|_| at!(HeicError::InvalidData("BGR swizzle size mismatch")))?;
+            Ok(PixelBuffer::from_vec(raw, w, h, PixelDescriptor::RGB8_SRGB)
+                .map_err_at(|_| HeicError::InvalidData("pixel buffer size mismatch"))?)
         }
         crate::PixelLayout::Bgra8 => {
             // Zero-copy: Vec<u8> → PixelBuffer with BGRA8 descriptor
-            Ok(PixelBuffer::from_vec(raw, w, h, PixelDescriptor::BGRA8_SRGB).map_err(err)?)
+            Ok(PixelBuffer::from_vec(raw, w, h, PixelDescriptor::BGRA8_SRGB)
+                .map_err_at(|_| HeicError::InvalidData("pixel buffer size mismatch"))?)
         }
     }
 }
@@ -1315,11 +1313,13 @@ fn layout_to_descriptor(layout: crate::PixelLayout) -> PixelDescriptor {
     }
 }
 
-/// Convert `ProbeError` to `HeicError` for trait compatibility.
-fn probe_error_to_heic(e: crate::ProbeError) -> HeicError {
+/// Convert `ProbeError` to `At<HeicError>` for trait compatibility.
+fn probe_error_to_heic(e: crate::ProbeError) -> At<HeicError> {
     match e {
-        crate::ProbeError::NeedMoreData => HeicError::InvalidData("not enough data to probe"),
-        crate::ProbeError::InvalidFormat => HeicError::InvalidData("not a valid HEIC/HEIF file"),
+        crate::ProbeError::NeedMoreData => at!(HeicError::InvalidData("not enough data to probe")),
+        crate::ProbeError::InvalidFormat => {
+            at!(HeicError::InvalidData("not a valid HEIC/HEIF file"))
+        }
         crate::ProbeError::Corrupt(inner) => inner,
     }
 }
@@ -1515,13 +1515,13 @@ mod tests {
     #[test]
     fn probe_error_conversion() {
         let e = probe_error_to_heic(crate::ProbeError::NeedMoreData);
-        assert!(matches!(e, HeicError::InvalidData(_)));
+        assert!(matches!(e.error(), HeicError::InvalidData(_)));
 
         let e = probe_error_to_heic(crate::ProbeError::InvalidFormat);
-        assert!(matches!(e, HeicError::InvalidData(_)));
+        assert!(matches!(e.error(), HeicError::InvalidData(_)));
 
-        let e = probe_error_to_heic(crate::ProbeError::Corrupt(HeicError::NoPrimaryImage));
-        assert!(matches!(e, HeicError::NoPrimaryImage));
+        let e = probe_error_to_heic(crate::ProbeError::Corrupt(at!(HeicError::NoPrimaryImage)));
+        assert!(matches!(e.error(), HeicError::NoPrimaryImage));
     }
 
     #[test]
@@ -1653,7 +1653,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
-            matches!(err, HeicError::LimitExceeded(_)),
+            matches!(err.error(), HeicError::LimitExceeded(_)),
             "expected LimitExceeded, got {err:?}"
         );
     }
@@ -1697,7 +1697,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert!(
-            matches!(err, HeicError::LimitExceeded(_)),
+            matches!(err.error(), HeicError::LimitExceeded(_)),
             "expected LimitExceeded, got {err:?}"
         );
     }
@@ -1721,7 +1721,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
-            matches!(err, HeicError::LimitExceeded(_)),
+            matches!(err.error(), HeicError::LimitExceeded(_)),
             "expected LimitExceeded, got {err:?}"
         );
     }

@@ -166,7 +166,7 @@ pub enum ProbeError {
     /// Data is not a recognized HEIC/HEIF format
     InvalidFormat,
     /// Header is present but malformed
-    Corrupt(HeicError),
+    Corrupt(At<HeicError>),
 }
 
 impl fmt::Display for ProbeError {
