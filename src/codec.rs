@@ -110,7 +110,8 @@ static HEIC_DECODE_CAPS: DecodeCapabilities = DecodeCapabilities::new()
     .with_enforces_max_pixels(true)
     .with_enforces_max_memory(true)
     .with_enforces_max_input_bytes(true)
-    .with_gain_map(true);
+    .with_gain_map(true)
+    .with_threads_supported_range(1, if cfg!(feature = "parallel") { 256 } else { 1 });
 
 // ── Supported descriptors ──────────────────────────────────────────────────
 
