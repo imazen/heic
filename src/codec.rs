@@ -20,11 +20,12 @@ use zencodec::decode::{
     DecodeCapabilities, DecodeOutput, DecodeRowSink, OutputInfo, negotiate_pixel_format,
 };
 use zencodec::{
-    ImageFormat, ImageInfo, ImageSequence, Orientation, ResourceLimits, ThreadingPolicy,
-    Unsupported,
+    GainMapPresence, ImageFormat, ImageInfo, ImageSequence, Orientation, ResourceLimits,
+    Supplements, ThreadingPolicy, Unsupported,
 };
 use zenpixels::{Cicp, ColorPrimaries, PixelBuffer, PixelDescriptor, TransferFunction};
 
+use enough::Stop as _;
 use whereat::{At, ResultAtExt, at};
 
 use crate::auxiliary::AuxiliaryImageType;
@@ -44,6 +45,23 @@ pub struct HeicAuxiliaryInfo {
     pub has_gain_map: bool,
     /// Types of all auxiliary images present.
     pub auxiliary_types: alloc::vec::Vec<AuxiliaryImageType>,
+}
+
+/// Source encoding details for HEIC files.
+///
+/// HEIC is always lossy (HEVC-compressed), and the original quality
+/// setting cannot be recovered from the bitstream headers.
+#[derive(Debug, Clone, Copy)]
+pub struct HeicSourceEncoding;
+
+impl zencodec::SourceEncodingDetails for HeicSourceEncoding {
+    fn source_generic_quality(&self) -> Option<f32> {
+        None // Cannot recover quality from HEVC headers
+    }
+
+    fn is_lossless(&self) -> bool {
+        false // HEIC is always lossy (HEVC-compressed)
+    }
 }
 
 // ── Threading helpers ────────────────────────────────────────────────────
@@ -90,7 +108,8 @@ static HEIC_DECODE_CAPS: DecodeCapabilities = DecodeCapabilities::new()
     .with_native_alpha(true)
     .with_enforces_max_pixels(true)
     .with_enforces_max_memory(true)
-    .with_enforces_max_input_bytes(true);
+    .with_enforces_max_input_bytes(true)
+    .with_gain_map(true);
 
 // ── Supported descriptors ──────────────────────────────────────────────────
 
@@ -258,7 +277,11 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
             .map_err(|e| at!(HeicError::LimitExceeded(limit_exceeded_msg(e))))?;
         let native = crate::ImageInfo::from_bytes(data).map_err(probe_error_to_heic)?;
         // Parse the HEIF container once and extract all metadata from it
-        let container = crate::heif::parse(data, &enough::Unstoppable).ok();
+        let stop_ref: &dyn enough::Stop = match self.stop {
+            Some(ref s) => s,
+            None => &enough::Unstoppable,
+        };
+        let container = crate::heif::parse(data, stop_ref).ok();
         Ok(build_image_info_full(
             &native,
             container.as_ref(),
@@ -416,7 +439,7 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
             &data,
             preferred,
             self.native_limits().as_ref(),
-            self.stop.as_ref().map(|s| s as &dyn zencodec::enough::Stop),
+            self.stop,
             thread_count,
         )
     }
@@ -661,7 +684,8 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
         };
         let pi_ref = probe_info.as_ref().unwrap_or(&fallback_info);
         let info = build_image_info_full(pi_ref, container.as_ref(), width, height);
-        let mut output = DecodeOutput::new(buf, info);
+        let mut output =
+            DecodeOutput::new(buf, info).with_source_encoding_details(HeicSourceEncoding);
 
         // Attach auxiliary image metadata as an extension if available.
         if let Some(ref pi) = probe_info {
@@ -719,6 +743,7 @@ pub struct HeicStreamDecoder {
     current_grid_row: u32,
     strip_buffer: alloc::vec::Vec<u8>,
     full_pixels: Option<PixelBuffer>,
+    stop: Option<zencodec::StopToken>,
 }
 
 impl HeicStreamDecoder {
@@ -730,10 +755,13 @@ impl HeicStreamDecoder {
         data: &[u8],
         preferred: &[PixelDescriptor],
         limits: Option<&crate::Limits>,
-        stop: Option<&dyn zencodec::enough::Stop>,
+        owned_stop: Option<zencodec::StopToken>,
         thread_count: usize,
     ) -> Result<Self, At<HeicError>> {
-        let stop_ref: &dyn enough::Stop = stop.unwrap_or(&enough::Unstoppable);
+        let stop_ref: &dyn enough::Stop = match owned_stop {
+            Some(ref s) => s,
+            None => &enough::Unstoppable,
+        };
 
         // Probe for metadata
         let probe_info = crate::ImageInfo::from_bytes(data).ok();
@@ -768,6 +796,7 @@ impl HeicStreamDecoder {
                 current_grid_row: 0,
                 strip_buffer: alloc::vec::Vec::new(),
                 full_pixels: None,
+                stop: owned_stop,
             });
         }
 
@@ -781,9 +810,7 @@ impl HeicStreamDecoder {
             if let Some(lim) = limits {
                 req = req.with_limits(lim);
             }
-            if let Some(s) = stop {
-                req = req.with_stop(s);
-            }
+            req = req.with_stop(stop_ref);
             if thread_count > 0 {
                 req = req.with_max_threads(thread_count);
             }
@@ -839,9 +866,7 @@ impl HeicStreamDecoder {
             if let Some(lim) = limits {
                 req = req.with_limits(lim);
             }
-            if let Some(s) = stop {
-                req = req.with_stop(s);
-            }
+            req = req.with_stop(stop_ref);
             if thread_count > 0 {
                 req = req.with_max_threads(thread_count);
             }
@@ -870,6 +895,7 @@ impl HeicStreamDecoder {
             current_grid_row: 0,
             strip_buffer: alloc::vec::Vec::new(),
             full_pixels: Some(pixels),
+            stop: owned_stop,
         })
     }
 
@@ -1008,6 +1034,11 @@ impl HeicStreamDecoder {
 
     /// Decode one grid tile-row into `self.strip_buffer`.
     fn decode_grid_row(&mut self) -> Result<Option<(u32, u32, u32)>, At<HeicError>> {
+        // Check for cancellation before decoding a tile row
+        if let Some(ref stop) = self.stop {
+            stop.check().map_err(|r| at!(HeicError::Cancelled(r)))?;
+        }
+
         let grid = self.grid.as_ref().unwrap();
         let row = self.current_grid_row;
         if row >= grid.rows {
@@ -1165,7 +1196,14 @@ fn build_image_info_lightweight(pi: &crate::ImageInfo) -> ImageInfo {
         .with_orientation(Orientation::Normal) // Decoder applies transforms
         .with_alpha(pi.has_alpha)
         .with_bit_depth(pi.bit_depth)
-        .with_channel_count(if pi.has_alpha { 4 } else { 3 });
+        .with_channel_count(if pi.has_alpha { 4 } else { 3 })
+        .with_source_encoding_details(HeicSourceEncoding)
+        .with_supplements({
+            let mut s = Supplements::default();
+            s.gain_map = pi.has_gain_map;
+            s.depth_map = pi.has_depth;
+            s
+        });
 
     // Set CICP if we have non-default values
     if pi.color_primaries != 2 || pi.transfer_characteristics != 2 || pi.matrix_coefficients != 2 {
@@ -1175,6 +1213,14 @@ fn build_image_info_lightweight(pi: &crate::ImageInfo) -> ImageInfo {
             pi.matrix_coefficients as u8,
             pi.video_full_range,
         ));
+    }
+
+    // Set gain map presence based on probe info
+    if pi.has_gain_map {
+        // Probe-only: we know a gain map exists but don't have parsed metadata yet
+        info.gain_map = GainMapPresence::Unknown;
+    } else {
+        info.gain_map = GainMapPresence::Absent;
     }
 
     info
@@ -1198,7 +1244,21 @@ fn build_image_info_full(
         .with_orientation(Orientation::Normal) // Decoder applies transforms
         .with_alpha(pi.has_alpha)
         .with_bit_depth(pi.bit_depth)
-        .with_channel_count(if pi.has_alpha { 4 } else { 3 });
+        .with_channel_count(if pi.has_alpha { 4 } else { 3 })
+        .with_source_encoding_details(HeicSourceEncoding)
+        .with_supplements({
+            let mut s = Supplements::default();
+            s.gain_map = pi.has_gain_map;
+            s.depth_map = pi.has_depth;
+            s
+        });
+
+    // Set gain map presence based on probe info
+    if pi.has_gain_map {
+        info.gain_map = GainMapPresence::Unknown;
+    } else {
+        info.gain_map = GainMapPresence::Absent;
+    }
 
     // Set CICP if we have non-default values
     if pi.color_primaries != 2 || pi.transfer_characteristics != 2 || pi.matrix_coefficients != 2 {
@@ -1221,14 +1281,6 @@ fn build_image_info_full(
         {
             info = info.with_icc_profile(icc.clone());
         }
-
-        // HDR gain map (Apple format) — detection only, not exposed in ImageInfo
-        // TODO: re-add when zencodec adds gain map support to ImageInfo
-        // if let Some(ref item) = primary_item
-        //     && !container
-        //         .find_auxiliary_items(item.id, "urn:com:apple:photo:2020:aux:hdrgainmap")
-        //         .is_empty()
-        // { }
 
         // EXIF extraction
         if let Some(exif) = extract_exif_from_container(container) {
