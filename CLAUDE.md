@@ -87,6 +87,8 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 ### Dependencies
 - `enough` — cooperative cancellation (Stop trait)
 - `whereat` — error location tracking (At<E> wrapper)
+- `archmage` — SIMD dispatch via CPU feature tokens
+- `safe_unaligned_simd` — safe wrappers over std::arch intrinsics
 
 ## Code Style
 
@@ -273,6 +275,9 @@ src/
 ├── lib.rs           # Public API types (DecoderConfig, DecodeRequest, Limits, etc.)
 ├── decode.rs        # Internal decode pipeline (grid, overlay, alpha, gain map, metadata)
 ├── error.rs         # Error types
+├── auxiliary.rs     # Auxiliary image handling
+├── codec.rs         # zencodec integration adapter
+├── zennode_defs.rs  # zennode decode node definitions
 ├── heif/
 │   ├── mod.rs
 │   ├── boxes.rs     # ISOBMFF box definitions
@@ -292,6 +297,9 @@ src/
     ├── residual.rs  # Transform coefficient parsing
     ├── transform.rs # Inverse DCT/DST (scalar + incant! dispatch)
     ├── transform_simd.rs # SIMD transforms: IDST 4x4, IDCT 8/16/32, residual add, dequantize
+    ├── transform_simd_neon.rs # NEON SIMD transforms
+    ├── color_convert.rs # YCbCr→RGB SIMD color conversion
+    ├── color_convert_neon.rs # NEON color conversion
     ├── deblock.rs   # Deblocking filter (H.265 8.7.2, inter-aware bS)
     ├── sao.rs       # Sample Adaptive Offset (H.265 8.7.3)
     ├── debug.rs     # CABAC tracker, invariant checks
