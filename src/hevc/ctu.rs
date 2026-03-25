@@ -14,6 +14,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 const DEBUG_TRACE: bool = false;
 
 /// Set to true to enable WPP-specific debug tracing
+#[allow(dead_code)]
 const WPP_TRACE: bool = false;
 
 /// Debug print macro gated behind DEBUG_TRACE const
@@ -43,6 +44,8 @@ use super::transform;
 use super::transform_simd::add_residual_block_scalar;
 #[cfg(target_arch = "x86_64")]
 use super::transform_simd::add_residual_block_v3;
+#[cfg(target_arch = "aarch64")]
+use super::transform_simd_neon::add_residual_block_neon;
 use crate::error::HevcError;
 use archmage::incant;
 
@@ -640,6 +643,7 @@ impl<'a> SliceContext<'a> {
         self.ctb_x = start_addr % pic_width_in_ctbs;
 
         let mut ctu_count = 0u32;
+        #[allow(unused_variables)]
         let total_ctus = pic_width_in_ctbs * pic_height_in_ctbs;
 
         // Tiles: compute tile column/row boundaries and tile scan order
@@ -2226,7 +2230,7 @@ impl<'a> SliceContext<'a> {
                     size,
                     max_val
                 ),
-                [v3]
+                [v3, neon]
             );
         } else {
             for py in 0..size {

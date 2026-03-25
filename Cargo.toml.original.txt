@@ -1,0 +1,63 @@
+[package]
+name = "heic-decoder"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "AGPL-3.0-only"
+description = "Pure Rust HEIC/HEIF image decoder with SIMD acceleration"
+repository = "https://github.com/imazen/heic-decoder-rs"
+keywords = ["heic", "heif", "hevc", "image", "decoder"]
+categories = ["multimedia::images", "multimedia::encoding"]
+exclude = [
+    "CLAUDE.md",
+    "FEEDBACK.md",
+    "CABAC-DEBUG-HANDOFF.md",
+    "heaptrack.*",
+    "examples/batch_test.rs",
+    "examples/compare_support.rs",
+    "examples/compare_yuv.rs",
+    "examples/debug_edges.rs",
+    "examples/debug_qp.rs",
+    "examples/decode_trace.rs",
+    "examples/dump_container.rs",
+    "examples/dump_hevc.rs",
+    "examples/extract_hevc.rs",
+    "examples/test_all.rs",
+]
+
+[features]
+default = ["std"]
+std = ["archmage/std"]
+parallel = ["std", "dep:rayon"]
+zencodec = ["dep:zencodec", "dep:zenpixels", "dep:rgb", "dep:imgref", "dep:garb"]
+
+[dependencies]
+enough = "0.4"
+whereat = "0.1.3"
+archmage = { version = "0.9.9", default-features = false, features = ["macros"] }
+safe_unaligned_simd = "0.2.5"
+rayon = { version = "1.10", optional = true }
+zencodec = { path = "../zencodec", optional = true }
+zenpixels = { path = "../zenpixels/zenpixels", default-features = false, optional = true }
+rgb = { version = "0.8", default-features = false, features = ["as-bytes"], optional = true }
+imgref = { version = "1.12", optional = true }
+garb = { version = "0.2.1", default-features = false, optional = true }
+
+[dev-dependencies]
+criterion = "0.6"
+fast-ssim2 = { version = "0.6.5", features = ["imgref"] }
+imgref = "1.11"
+heic-wasm-rs = { path = "../../heic/heic-wasm-rs" }
+png = "0.17"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[[bench]]
+name = "decode"
+harness = false
+
+[[bench]]
+name = "compare"
+harness = false

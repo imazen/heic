@@ -4,7 +4,7 @@
 //! - 4x4 Inverse DST (for intra 4x4 luma)
 //! - 4x4, 8x8, 16x16, 32x32 Inverse DCT
 //!
-//! The 8x8 and 16x16 IDCTs dispatch to AVX2 SIMD via `incant!` when available.
+//! The 8x8 and 16x16 IDCTs dispatch to AVX2/NEON SIMD via `incant!` when available.
 
 // Transform and inverse quantization for HEVC
 use super::transform_simd::{
@@ -12,6 +12,10 @@ use super::transform_simd::{
 };
 #[cfg(target_arch = "x86_64")]
 use super::transform_simd::{dequantize_v3, idct8_v3, idct16_v3, idct32_v3, idst4_v3};
+#[cfg(target_arch = "aarch64")]
+use super::transform_simd_neon::{
+    dequantize_neon, idct8_neon, idct16_neon, idct32_neon, idst4_neon,
+};
 use archmage::incant;
 
 /// Maximum number of coefficients (32x32 transform)
@@ -35,7 +39,7 @@ static DCT4_MATRIX: [[i16; 4]; 4] = [
 
 /// Inverse 4x4 DST (for intra 4x4 luma blocks)
 pub fn idst4(coeffs: &[i16; 16], output: &mut [i16; 16], bit_depth: u8) {
-    incant!(idst4(coeffs, output, bit_depth), [v3]);
+    incant!(idst4(coeffs, output, bit_depth), [v3, neon]);
 }
 
 /// Scalar implementation of inverse 4x4 DST
@@ -147,7 +151,7 @@ fn idct8_1d(src: [i32; 8], shift: i32) -> [i32; 8] {
 
 /// Inverse 8x8 DCT — dispatches to AVX2 when available, scalar fallback otherwise
 pub fn idct8(coeffs: &[i16; 64], output: &mut [i16; 64], bit_depth: u8) {
-    incant!(idct8(coeffs, output, bit_depth), [v3])
+    incant!(idct8(coeffs, output, bit_depth), [v3, neon])
 }
 
 /// Scalar 8x8 IDCT using partial butterfly (called by SIMD scalar fallback)
@@ -277,7 +281,7 @@ fn idct16_1d(src: [i32; 16], shift: i32) -> [i32; 16] {
 
 /// Inverse 16x16 DCT — dispatches to AVX2 when available, scalar fallback otherwise
 pub fn idct16(coeffs: &[i16; 256], output: &mut [i16; 256], bit_depth: u8) {
-    incant!(idct16(coeffs, output, bit_depth), [v3])
+    incant!(idct16(coeffs, output, bit_depth), [v3, neon])
 }
 
 /// Scalar 16x16 IDCT using partial butterfly (called by SIMD scalar fallback)
@@ -609,7 +613,7 @@ fn idct32_1d(src: [i32; 32], shift: i32) -> [i32; 32] {
 
 /// Inverse 32x32 DCT — dispatches to AVX2 when available, scalar fallback otherwise
 pub fn idct32(coeffs: &[i16; 1024], output: &mut [i16; 1024], bit_depth: u8) {
-    incant!(idct32(coeffs, output, bit_depth), [v3])
+    incant!(idct32(coeffs, output, bit_depth), [v3, neon])
 }
 
 /// Scalar 32x32 IDCT using partial butterfly (called by SIMD scalar fallback)
@@ -669,7 +673,7 @@ pub fn dequantize(coeffs: &mut [i16], params: DequantParams) {
     let add = if shift > 0 { 1 << (shift - 1) } else { 0 };
 
     if shift >= 0 {
-        incant!(dequantize(coeffs, combined_scale, shift, add), [v3]);
+        incant!(dequantize(coeffs, combined_scale, shift, add), [v3, neon]);
     } else {
         // Negative shift (left shift) — rare, keep scalar
         let neg_shift = -shift;

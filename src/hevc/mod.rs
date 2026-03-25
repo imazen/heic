@@ -21,6 +21,10 @@ mod sao;
 mod slice;
 mod transform;
 mod transform_simd;
+#[cfg(target_arch = "aarch64")]
+mod transform_simd_neon;
+#[cfg(target_arch = "aarch64")]
+mod color_convert_neon;
 mod transforms;
 
 pub use picture::DecodedFrame;

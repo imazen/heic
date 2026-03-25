@@ -1,7 +1,7 @@
 //! SIMD-accelerated YCbCr→RGB color conversion
 //!
-//! Uses archmage for safe runtime dispatch across x86 (AVX2) with
-//! scalar fallback on other platforms.
+//! Uses archmage for safe runtime dispatch across x86 (AVX2) and AArch64 (NEON)
+//! with scalar fallback on other platforms.
 
 // The `#[arcane]` macro generates multiple function variants for SIMD dispatch;
 // the allow attribute on individual functions does not propagate to generated code.
@@ -14,12 +14,15 @@ use archmage::prelude::*;
 #[cfg(target_arch = "x86_64")]
 use safe_unaligned_simd::x86_64::{_mm_loadu_si64, _mm_loadu_si128, _mm256_storeu_si256};
 
+#[cfg(target_arch = "aarch64")]
+use super::color_convert_neon::convert_420_to_rgb_neon;
+
 /// Get color matrix coefficients for YCbCr→RGB conversion.
 ///
 /// Returns (cr_r, cb_g, cr_g, cb_b, y_bias, y_scale, rounding, shift_bits).
 /// Full-range uses ×256 fixed-point, limited-range uses ×8192.
 #[inline]
-fn get_coefficients(
+pub(crate) fn get_coefficients(
     full_range: bool,
     matrix_coeffs: u8,
 ) -> (i32, i32, i32, i32, i32, i32, i32, i32) {
@@ -76,7 +79,7 @@ pub fn convert_420_to_rgb(
             matrix_coeffs,
             rgb
         ),
-        [v3]
+        [v3, neon]
     )
 }
 
@@ -313,8 +316,8 @@ fn convert_420_to_rgb_v3(
 /// Convert a single 4:2:0 pixel (shared between SIMD prefix/tail and scalar path)
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)] // only used from #[arcane] AVX2 path
-fn scalar_pixel(
+#[allow(dead_code)] // only used from #[arcane] AVX2/NEON paths
+pub(crate) fn scalar_pixel(
     y_plane: &[u16],
     cb_plane: &[u16],
     cr_plane: &[u16],

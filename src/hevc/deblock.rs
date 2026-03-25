@@ -546,6 +546,7 @@ fn filter_edge_luma(
     let d_ep = dp < ((beta + (beta >> 1)) >> 3);
     let d_eq = dq < ((beta + (beta >> 1)) >> 3);
 
+    #[allow(unused_variables)]
     let de = if strong { 2 } else { 1 };
 
     #[cfg(feature = "std")]
