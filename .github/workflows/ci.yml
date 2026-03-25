@@ -36,13 +36,8 @@ jobs:
       - name: Patch path deps for CI
         shell: bash
         run: |
-          # Delete unpublished path-only deps; strip zencodec feature
-          sed \
-            -e '/^zencodec = { path/d' \
-            -e '/^zenpixels = { path/d' \
-            -e '/^heic-wasm-rs/d' \
-            -e '/^zencodec = \["dep:zencodec"/d' \
-            Cargo.toml > Cargo.toml.ci && mv Cargo.toml.ci Cargo.toml
+          # Delete unpublished path-only dev-deps
+          sed -e '/^heic-wasm-rs/d' Cargo.toml > Cargo.toml.ci && mv Cargo.toml.ci Cargo.toml
           rm -f Cargo.lock
 
       - name: Test (default features)
@@ -53,6 +48,35 @@ jobs:
 
       - name: Check (no_std)
         run: cargo check --no-default-features
+
+  feature-perms:
+    name: Feature permutations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Patch path deps for CI
+        shell: bash
+        run: |
+          sed -e '/^heic-wasm-rs/d' Cargo.toml > Cargo.toml.ci && mv Cargo.toml.ci Cargo.toml
+          rm -f Cargo.lock
+
+      - name: Check (no_std)
+        run: cargo check --no-default-features
+
+      - name: Test (parallel)
+        run: cargo test --lib --features parallel
+
+      - name: Test (zencodec)
+        run: cargo test --lib --features zencodec
+
+      - name: Test (parallel,zencodec)
+        run: cargo test --lib --features "parallel,zencodec"
+
+      - name: Test (all-features)
+        run: cargo test --lib --all-features
 
   clippy:
     name: Clippy
@@ -67,16 +91,17 @@ jobs:
       - name: Patch path deps for CI
         shell: bash
         run: |
-          sed \
-            -e '/^zencodec = { path/d' \
-            -e '/^zenpixels = { path/d' \
-            -e '/^heic-wasm-rs/d' \
-            -e '/^zencodec = \["dep:zencodec"/d' \
-            Cargo.toml > Cargo.toml.ci && mv Cargo.toml.ci Cargo.toml
+          sed -e '/^heic-wasm-rs/d' Cargo.toml > Cargo.toml.ci && mv Cargo.toml.ci Cargo.toml
           rm -f Cargo.lock
 
       - name: Clippy (default + parallel)
         run: cargo clippy --lib --features parallel -- -D warnings
+
+      - name: Clippy (zencodec)
+        run: cargo clippy --lib --features zencodec -- -D warnings
+
+      - name: Clippy (all-features)
+        run: cargo clippy --lib --all-features -- -D warnings
 
   fmt:
     name: Format
@@ -102,12 +127,7 @@ jobs:
       - name: Patch path deps for CI
         shell: bash
         run: |
-          sed \
-            -e '/^zencodec = { path/d' \
-            -e '/^zenpixels = { path/d' \
-            -e '/^heic-wasm-rs/d' \
-            -e '/^zencodec = \["dep:zencodec"/d' \
-            Cargo.toml > Cargo.toml.ci && mv Cargo.toml.ci Cargo.toml
+          sed -e '/^heic-wasm-rs/d' Cargo.toml > Cargo.toml.ci && mv Cargo.toml.ci Cargo.toml
           rm -f Cargo.lock
 
       - name: Check MSRV
