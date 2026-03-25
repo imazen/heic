@@ -41,7 +41,7 @@ zencodec = { path = "../zencodec", optional = true }
 zenpixels = { path = "../zenpixels/zenpixels", default-features = false, optional = true }
 rgb = { version = "0.8", default-features = false, features = ["as-bytes"], optional = true }
 imgref = { version = "1.12", optional = true }
-garb = { version = "0.2.1", default-features = false, optional = true }
+garb = { version = "0.2.4", default-features = false, optional = true }
 
 [dev-dependencies]
 criterion = "0.6"
