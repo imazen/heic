@@ -30,6 +30,7 @@ default = ["std"]
 std = ["archmage/std"]
 parallel = ["std", "dep:rayon"]
 zencodec = ["dep:zencodec", "dep:zenpixels", "dep:rgb", "dep:imgref", "dep:garb"]
+zennode = ["dep:zennode", "zencodec"]
 
 [dependencies]
 enough = "0.4.2"
@@ -42,6 +43,7 @@ zenpixels = { version = "0.2.0", default-features = false, features = ["rgb", "i
 rgb = { version = "0.8", default-features = false, features = ["as-bytes"], optional = true }
 imgref = { version = "1.12", optional = true }
 garb = { version = "0.2.5", default-features = false, optional = true }
+zennode = { path = "../zennode/zennode", optional = true, default-features = false, features = ["derive"] }
 
 [dev-dependencies]
 criterion = "0.6"
