@@ -384,8 +384,7 @@ impl ImageInfo {
             return Err(ProbeError::InvalidFormat);
         }
 
-        let container = heif::parse(data, &Unstoppable)
-            .map_err(ProbeError::Corrupt)?;
+        let container = heif::parse(data, &Unstoppable).map_err(ProbeError::Corrupt)?;
 
         let primary_item = container
             .primary_item()
@@ -538,8 +537,8 @@ impl ImageInfo {
             .get_item_data(primary_item.id)
             .map_err(ProbeError::Corrupt)?;
 
-        let hevc_info =
-            hevc::get_info(&image_data).map_err(|e| ProbeError::Corrupt(at!(HeicError::from(e))))?;
+        let hevc_info = hevc::get_info(&image_data)
+            .map_err(|e| ProbeError::Corrupt(at!(HeicError::from(e))))?;
 
         let (width, height) =
             apply_transform_dimensions(hevc_info.width, hevc_info.height, &primary_item.transforms);

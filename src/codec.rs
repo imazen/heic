@@ -258,8 +258,7 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
             .map_err(|e| at!(HeicError::LimitExceeded(limit_exceeded_msg(e))))?;
         let native = crate::ImageInfo::from_bytes(data).map_err(probe_error_to_heic)?;
         // Parse the HEIF container once and extract all metadata from it
-        let container = crate::heif::parse(data, &enough::Unstoppable)
-            .ok();
+        let container = crate::heif::parse(data, &enough::Unstoppable).ok();
         Ok(build_image_info_full(
             &native,
             container.as_ref(),
@@ -330,7 +329,8 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
             let desc = ps.descriptor();
             let w = ps.width();
             let h = ps.rows();
-            sink.begin(w, h, desc).map_err(|e| at!(HeicError::Sink(e)))?;
+            sink.begin(w, h, desc)
+                .map_err(|e| at!(HeicError::Sink(e)))?;
             let mut dst = sink
                 .provide_next_buffer(0, h, w, desc)
                 .map_err(|e| at!(HeicError::Sink(e)))?;
@@ -396,7 +396,10 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
         adapter.take_deferred_error()?;
         // Flush the last strip that was written by the native decoder
         adapter.flush_pending()?;
-        adapter.inner.finish().map_err(|e| at!(HeicError::Sink(e)))?;
+        adapter
+            .inner
+            .finish()
+            .map_err(|e| at!(HeicError::Sink(e)))?;
         Ok(OutputInfo::full_decode(w, h, desc))
     }
 
@@ -635,8 +638,7 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
 
         // Build ImageInfo with all available metadata.
         // Parse the HEIF container once for all metadata extraction.
-        let container = crate::heif::parse(data, &enough::Unstoppable)
-            .ok();
+        let container = crate::heif::parse(data, &enough::Unstoppable).ok();
         let fallback_info = crate::ImageInfo {
             width,
             height,
@@ -742,8 +744,7 @@ impl HeicStreamDecoder {
             .ok_or_else(|| at!(HeicError::InvalidData("cannot probe HEIC header")))?;
 
         // Parse container once for metadata extraction and grid init
-        let container = crate::heif::parse(data, stop_ref)
-            .ok();
+        let container = crate::heif::parse(data, stop_ref).ok();
 
         // Build ImageInfo for the trait (uses pre-parsed container)
         let info = build_image_info_full(pi, container.as_ref(), pi.width, pi.height);
@@ -896,7 +897,9 @@ impl HeicStreamDecoder {
                 &owned
             }
         };
-        let primary_item = container.primary_item().ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
+        let primary_item = container
+            .primary_item()
+            .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
 
         // Must be a grid with no transforms and no alpha
         if primary_item.item_type != ItemType::Grid {
@@ -919,9 +922,7 @@ impl HeicStreamDecoder {
         }
 
         // Parse grid descriptor
-        let grid_data = container
-            .get_item_data(primary_item.id)
-            ?;
+        let grid_data = container.get_item_data(primary_item.id)?;
         if grid_data.len() < 8 {
             return Err(at!(HeicError::InvalidData("Grid descriptor too short")));
         }
@@ -947,8 +948,7 @@ impl HeicStreamDecoder {
         };
 
         if let Some(lim) = limits {
-            lim.check_dimensions(output_width, output_height)
-                ?;
+            lim.check_dimensions(output_width, output_height)?;
         }
 
         // Get tile info
@@ -983,11 +983,7 @@ impl HeicStreamDecoder {
         // Extract tile data
         let tile_data: alloc::vec::Vec<alloc::vec::Vec<u8>> = tile_ids
             .iter()
-            .map(|&tid| {
-                container
-                    .get_item_data(tid)
-                    .map(|cow| cow.into_owned())
-            })
+            .map(|&tid| container.get_item_data(tid).map(|cow| cow.into_owned()))
             .collect::<Result<_, _>>()?;
 
         // Negotiate 8-bit layout for grid tiles (no alpha, ≤8-bit)
@@ -1132,8 +1128,10 @@ fn raw_to_pixel_buffer(
         }
         crate::PixelLayout::Rgba8 => {
             // Zero-copy: Vec<u8> → PixelBuffer with RGBA8 descriptor
-            Ok(PixelBuffer::from_vec(raw, w, h, PixelDescriptor::RGBA8_SRGB)
-                .map_err_at(|_| HeicError::InvalidData("pixel buffer size mismatch"))?)
+            Ok(
+                PixelBuffer::from_vec(raw, w, h, PixelDescriptor::RGBA8_SRGB)
+                    .map_err_at(|_| HeicError::InvalidData("pixel buffer size mismatch"))?,
+            )
         }
         crate::PixelLayout::Bgr8 => {
             // In-place BGR→RGB swizzle via garb, then zero-copy wrap
@@ -1144,8 +1142,10 @@ fn raw_to_pixel_buffer(
         }
         crate::PixelLayout::Bgra8 => {
             // Zero-copy: Vec<u8> → PixelBuffer with BGRA8 descriptor
-            Ok(PixelBuffer::from_vec(raw, w, h, PixelDescriptor::BGRA8_SRGB)
-                .map_err_at(|_| HeicError::InvalidData("pixel buffer size mismatch"))?)
+            Ok(
+                PixelBuffer::from_vec(raw, w, h, PixelDescriptor::BGRA8_SRGB)
+                    .map_err_at(|_| HeicError::InvalidData("pixel buffer size mismatch"))?,
+            )
         }
     }
 }
