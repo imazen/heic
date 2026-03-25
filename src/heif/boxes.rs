@@ -62,6 +62,10 @@ impl FourCC {
     pub const THMB: Self = Self(*b"thmb");
     /// Content describes reference (metadata item → image it describes)
     pub const CDSC: Self = Self(*b"cdsc");
+    /// Content Light Level Information property
+    pub const CLLI: Self = Self(*b"clli");
+    /// Mastering Display Colour Volume property
+    pub const MDCV: Self = Self(*b"mdcv");
 
     /// Create from bytes
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
@@ -220,6 +224,34 @@ pub struct ItemInfo {
     pub hidden: bool,
 }
 
+/// Content Light Level Information from cLLi box (ISO 14496-12 / CEA-861.3).
+///
+/// Contains peak and frame-average brightness for HDR content.
+#[derive(Debug, Clone, Copy)]
+pub struct ContentLightLevelBox {
+    /// Maximum Content Light Level (MaxCLL) in cd/m².
+    pub max_content_light_level: u16,
+    /// Maximum Frame-Average Light Level (MaxFALL) in cd/m².
+    pub max_frame_average_light_level: u16,
+}
+
+/// Mastering Display Colour Volume from mDCv box (ISO 14496-12 / SMPTE ST 2086).
+///
+/// Describes the mastering display's primaries, white point, and luminance range.
+/// Values are stored in the raw representation from the box.
+#[derive(Debug, Clone, Copy)]
+pub struct MasteringDisplayBox {
+    /// Display primaries in CIE 1931 xy, in 0.00002 units (divide by 50000 for float).
+    /// Order per SMPTE ST 2086 encoding: `[(x, y); 3]`.
+    pub primaries_xy: [(u16, u16); 3],
+    /// White point in CIE 1931 xy, in 0.00002 units `(x, y)`.
+    pub white_point_xy: (u16, u16),
+    /// Maximum luminance in 0.0001 cd/m² units (divide by 10000 for cd/m²).
+    pub max_luminance: u32,
+    /// Minimum luminance in 0.0001 cd/m² units (divide by 10000 for cd/m²).
+    pub min_luminance: u32,
+}
+
 /// Clean aperture from clap box (ISO 14496-12)
 #[derive(Debug, Clone, Copy)]
 pub struct CleanAperture {
@@ -340,6 +372,10 @@ pub enum ItemProperty {
     Mirror(ImageMirror),
     /// Auxiliary type (auxC) — URN string + optional subtype data
     AuxiliaryType(AuxiliaryTypeProperty),
+    /// Content Light Level Information (cLLi)
+    ContentLightLevel(ContentLightLevelBox),
+    /// Mastering Display Colour Volume (mDCv)
+    MasteringDisplay(MasteringDisplayBox),
     /// Unknown property
     Unknown,
 }

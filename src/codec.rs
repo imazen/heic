@@ -21,8 +21,8 @@ use zencodec::decode::{
     negotiate_pixel_format,
 };
 use zencodec::{
-    GainMapPresence, ImageFormat, ImageInfo, ImageSequence, Orientation, ResourceLimits,
-    Supplements, ThreadingPolicy, Unsupported,
+    ContentLightLevel, GainMapPresence, ImageFormat, ImageInfo, ImageSequence, MasteringDisplay,
+    Orientation, ResourceLimits, Supplements, ThreadingPolicy, Unsupported,
 };
 use zenpixels::{Cicp, ColorPrimaries, PixelBuffer, PixelDescriptor, TransferFunction};
 
@@ -1323,15 +1323,38 @@ fn build_image_info_full(
             info = info.with_xmp(xmp);
         }
 
-        // TODO: Extract ContentLightLevel (cLLi) and MasteringDisplay (mDCv) HDR
-        // metadata from the HEIF container properties and wire into
-        // `info.source_color.content_light_level` / `info.source_color.mastering_display`.
-        // The HEIF parser does not yet parse cLLi/mDCv boxes (they are treated as
-        // `ItemProperty::Unknown` in `parse_ipco`). Adding support requires:
-        //   1. Define `FourCC::CLLI` / `FourCC::MDCV` constants in boxes.rs
-        //   2. Add `ContentLightLevel` / `MasteringDisplay` variants to `ItemProperty`
-        //   3. Parse the box payloads in parse_ipco
-        //   4. Look up the property for the primary item here and set the fields
+        // Extract Content Light Level (cLLi) from primary item properties
+        if let Some(ref item) = primary_item
+            && let Some(clli) = &item.content_light_level
+        {
+            info = info.with_content_light_level(ContentLightLevel::new(
+                clli.max_content_light_level,
+                clli.max_frame_average_light_level,
+            ));
+        }
+
+        // Extract Mastering Display Colour Volume (mDCv) from primary item properties
+        if let Some(ref item) = primary_item
+            && let Some(mdcv) = &item.mastering_display
+        {
+            // Convert from 0.00002 units to float CIE xy (divide by 50000)
+            let xy = |v: u16| v as f32 / 50_000.0;
+            let primaries_xy = [
+                [xy(mdcv.primaries_xy[0].0), xy(mdcv.primaries_xy[0].1)],
+                [xy(mdcv.primaries_xy[1].0), xy(mdcv.primaries_xy[1].1)],
+                [xy(mdcv.primaries_xy[2].0), xy(mdcv.primaries_xy[2].1)],
+            ];
+            let white_point_xy = [xy(mdcv.white_point_xy.0), xy(mdcv.white_point_xy.1)];
+            // Convert from 0.0001 cd/m² units to float (divide by 10000)
+            let max_luminance = mdcv.max_luminance as f32 / 10_000.0;
+            let min_luminance = mdcv.min_luminance as f32 / 10_000.0;
+            info = info.with_mastering_display(MasteringDisplay::new(
+                primaries_xy,
+                white_point_xy,
+                max_luminance,
+                min_luminance,
+            ));
+        }
     }
 
     info

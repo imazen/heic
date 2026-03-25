@@ -92,6 +92,28 @@ fn main() {
             ItemProperty::AuxiliaryType(aux_type) => {
                 eprintln!("  [{}]: auxC type={:?}", i, aux_type);
             }
+            ItemProperty::ContentLightLevel(clli) => {
+                eprintln!(
+                    "  [{}]: clli maxCLL={} maxFALL={}",
+                    i, clli.max_content_light_level, clli.max_frame_average_light_level
+                );
+            }
+            ItemProperty::MasteringDisplay(mdcv) => {
+                eprintln!(
+                    "  [{}]: mdcv primaries=[({},{}),({},{}),({},{})] wp=({},{}) maxLum={} minLum={}",
+                    i,
+                    mdcv.primaries_xy[0].0,
+                    mdcv.primaries_xy[0].1,
+                    mdcv.primaries_xy[1].0,
+                    mdcv.primaries_xy[1].1,
+                    mdcv.primaries_xy[2].0,
+                    mdcv.primaries_xy[2].1,
+                    mdcv.white_point_xy.0,
+                    mdcv.white_point_xy.1,
+                    mdcv.max_luminance,
+                    mdcv.min_luminance
+                );
+            }
             ItemProperty::Unknown => {
                 eprintln!("  [{}]: (unknown)", i);
             }

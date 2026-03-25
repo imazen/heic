@@ -10,9 +10,9 @@ use core::str;
 use enough::Stop;
 
 use super::boxes::{
-    Box, BoxIterator, CleanAperture, ColorInfo, FourCC, HevcDecoderConfig, ImageMirror,
-    ImageRotation, ImageSpatialExtents, ItemInfo, ItemLocation, ItemProperty, ItemReference,
-    PropertyAssociation, Transform,
+    Box, BoxIterator, CleanAperture, ColorInfo, ContentLightLevelBox, FourCC, HevcDecoderConfig,
+    ImageMirror, ImageRotation, ImageSpatialExtents, ItemInfo, ItemLocation, ItemProperty,
+    ItemReference, MasteringDisplayBox, PropertyAssociation, Transform,
 };
 use whereat::at;
 
@@ -121,6 +121,10 @@ pub struct Item {
     /// Auxiliary type property (from auxC box), containing the URN string
     /// and optional subtype data (e.g., depth representation info).
     pub auxiliary_type_property: Option<super::boxes::AuxiliaryTypeProperty>,
+    /// Content Light Level Information (from cLLi box).
+    pub content_light_level: Option<super::boxes::ContentLightLevelBox>,
+    /// Mastering Display Colour Volume (from mDCv box).
+    pub mastering_display: Option<super::boxes::MasteringDisplayBox>,
 }
 
 impl<'a> HeifContainer<'a> {
@@ -147,6 +151,8 @@ impl<'a> HeifContainer<'a> {
         let mut transforms = Vec::new();
         let mut color_info = None;
         let mut auxiliary_type_property = None;
+        let mut content_light_level = None;
+        let mut mastering_display = None;
 
         if let Some(assoc) = assoc {
             for &(prop_idx, _essential) in &assoc.properties {
@@ -180,6 +186,12 @@ impl<'a> HeifContainer<'a> {
                         ItemProperty::AuxiliaryType(atp) => {
                             auxiliary_type_property = Some(atp.clone());
                         }
+                        ItemProperty::ContentLightLevel(clli) => {
+                            content_light_level = Some(*clli);
+                        }
+                        ItemProperty::MasteringDisplay(mdcv) => {
+                            mastering_display = Some(*mdcv);
+                        }
                         _ => {}
                     }
                 }
@@ -198,6 +210,8 @@ impl<'a> HeifContainer<'a> {
             transforms,
             color_info,
             auxiliary_type_property,
+            content_light_level,
+            mastering_display,
         })
     }
 
@@ -860,6 +874,20 @@ fn parse_ipco(ipco: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop
                     ItemProperty::Unknown
                 }
             }
+            FourCC::CLLI => {
+                if let Ok(clli) = parse_clli(&child) {
+                    ItemProperty::ContentLightLevel(clli)
+                } else {
+                    ItemProperty::Unknown
+                }
+            }
+            FourCC::MDCV => {
+                if let Ok(mdcv) = parse_mdcv(&child) {
+                    ItemProperty::MasteringDisplay(mdcv)
+                } else {
+                    ItemProperty::Unknown
+                }
+            }
             _ => ItemProperty::Unknown,
         };
         container.properties.push(prop);
@@ -957,6 +985,64 @@ fn parse_auxc(auxc: &Box<'_>) -> Result<super::boxes::AuxiliaryTypeProperty> {
     Ok(super::boxes::AuxiliaryTypeProperty {
         aux_type,
         subtype_data,
+    })
+}
+
+/// Parse a Content Light Level Information property box (cLLi).
+///
+/// NOT a FullBox — payload is 4 bytes: two u16 BE values.
+/// See ISO 14496-12 § 12.1.5.
+fn parse_clli(clli: &Box<'_>) -> Result<ContentLightLevelBox> {
+    let content = clli.content;
+    if content.len() < 4 {
+        return Err(at!(HeicError::InvalidContainer("clli too short")));
+    }
+    let max_content_light_level = u16::from_be_bytes([content[0], content[1]]);
+    let max_frame_average_light_level = u16::from_be_bytes([content[2], content[3]]);
+    Ok(ContentLightLevelBox {
+        max_content_light_level,
+        max_frame_average_light_level,
+    })
+}
+
+/// Parse a Mastering Display Colour Volume property box (mDCv).
+///
+/// NOT a FullBox — payload is 24 bytes.
+/// See ISO 14496-12 § 12.1.5 / SMPTE ST 2086.
+fn parse_mdcv(mdcv: &Box<'_>) -> Result<MasteringDisplayBox> {
+    let content = mdcv.content;
+    if content.len() < 24 {
+        return Err(at!(HeicError::InvalidContainer("mdcv too short")));
+    }
+    let mut pos = 0;
+    let mut primaries = [(0u16, 0u16); 3];
+    for p in &mut primaries {
+        let x = u16::from_be_bytes([content[pos], content[pos + 1]]);
+        let y = u16::from_be_bytes([content[pos + 2], content[pos + 3]]);
+        *p = (x, y);
+        pos += 4;
+    }
+    let wp_x = u16::from_be_bytes([content[pos], content[pos + 1]]);
+    let wp_y = u16::from_be_bytes([content[pos + 2], content[pos + 3]]);
+    pos += 4;
+    let max_luminance = u32::from_be_bytes([
+        content[pos],
+        content[pos + 1],
+        content[pos + 2],
+        content[pos + 3],
+    ]);
+    pos += 4;
+    let min_luminance = u32::from_be_bytes([
+        content[pos],
+        content[pos + 1],
+        content[pos + 2],
+        content[pos + 3],
+    ]);
+    Ok(MasteringDisplayBox {
+        primaries_xy: primaries,
+        white_point_xy: (wp_x, wp_y),
+        max_luminance,
+        min_luminance,
     })
 }
 
