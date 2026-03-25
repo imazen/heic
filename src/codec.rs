@@ -17,7 +17,8 @@ use alloc::borrow::Cow;
 
 use rgb::{Rgb, Rgba};
 use zencodec::decode::{
-    DecodeCapabilities, DecodeOutput, DecodeRowSink, OutputInfo, negotiate_pixel_format,
+    DecodeCapabilities, DecodeOutput, DecodePolicy, DecodeRowSink, OutputInfo,
+    negotiate_pixel_format,
 };
 use zencodec::{
     GainMapPresence, ImageFormat, ImageInfo, ImageSequence, Orientation, ResourceLimits,
@@ -176,6 +177,7 @@ impl zencodec::decode::DecoderConfig for HeicDecoderConfig {
             config: self,
             stop: None,
             limits: ResourceLimits::none(),
+            policy: None,
         }
     }
 }
@@ -187,6 +189,24 @@ pub struct HeicDecodeJob<'a> {
     config: &'a HeicDecoderConfig,
     stop: Option<zencodec::StopToken>,
     limits: ResourceLimits,
+    policy: Option<DecodePolicy>,
+}
+
+/// Apply [`DecodePolicy`] to an [`ImageInfo`], stripping metadata fields
+/// that the policy disallows. Returns the filtered info.
+fn apply_policy(policy: Option<&DecodePolicy>, mut info: ImageInfo) -> ImageInfo {
+    if let Some(policy) = policy {
+        if !policy.resolve_icc(true) {
+            info.source_color.icc_profile = None;
+        }
+        if !policy.resolve_exif(true) {
+            info.embedded_metadata.exif = None;
+        }
+        if !policy.resolve_xmp(true) {
+            info.embedded_metadata.xmp = None;
+        }
+    }
+    info
 }
 
 impl<'a> HeicDecodeJob<'a> {
@@ -263,12 +283,20 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
         self
     }
 
+    fn with_policy(mut self, policy: DecodePolicy) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+
     fn probe(&self, data: &[u8]) -> Result<ImageInfo, At<HeicError>> {
         self.limits
             .check_input_size(data.len() as u64)
             .map_err(|e| at!(HeicError::LimitExceeded(limit_exceeded_msg(e))))?;
         let native = crate::ImageInfo::from_bytes(data).map_err(probe_error_to_heic)?;
-        Ok(build_image_info_lightweight(&native))
+        Ok(apply_policy(
+            self.policy.as_ref(),
+            build_image_info_lightweight(&native),
+        ))
     }
 
     fn probe_full(&self, data: &[u8]) -> Result<ImageInfo, At<HeicError>> {
@@ -282,11 +310,9 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
             None => &enough::Unstoppable,
         };
         let container = crate::heif::parse(data, stop_ref).ok();
-        Ok(build_image_info_full(
-            &native,
-            container.as_ref(),
-            native.width,
-            native.height,
+        Ok(apply_policy(
+            self.policy.as_ref(),
+            build_image_info_full(&native, container.as_ref(), native.width, native.height),
         ))
     }
 
@@ -322,6 +348,7 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
             stop,
             limits: self.native_limits(),
             thread_count,
+            policy: self.policy,
         })
     }
 
@@ -545,6 +572,7 @@ pub struct HeicDecoder<'a> {
     limits: Option<crate::Limits>,
     /// Thread count from threading policy (0 = unlimited/default).
     thread_count: usize,
+    policy: Option<DecodePolicy>,
 }
 
 impl zencodec::decode::Decode for HeicDecoder<'_> {
@@ -683,7 +711,10 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
             icc_profile: None,
         };
         let pi_ref = probe_info.as_ref().unwrap_or(&fallback_info);
-        let info = build_image_info_full(pi_ref, container.as_ref(), width, height);
+        let info = apply_policy(
+            self.policy.as_ref(),
+            build_image_info_full(pi_ref, container.as_ref(), width, height),
+        );
         let mut output =
             DecodeOutput::new(buf, info).with_source_encoding_details(HeicSourceEncoding);
 
@@ -1291,6 +1322,16 @@ fn build_image_info_full(
         if let Some(xmp) = extract_xmp_from_container(container) {
             info = info.with_xmp(xmp);
         }
+
+        // TODO: Extract ContentLightLevel (cLLi) and MasteringDisplay (mDCv) HDR
+        // metadata from the HEIF container properties and wire into
+        // `info.source_color.content_light_level` / `info.source_color.mastering_display`.
+        // The HEIF parser does not yet parse cLLi/mDCv boxes (they are treated as
+        // `ItemProperty::Unknown` in `parse_ipco`). Adding support requires:
+        //   1. Define `FourCC::CLLI` / `FourCC::MDCV` constants in boxes.rs
+        //   2. Add `ContentLightLevel` / `MasteringDisplay` variants to `ItemProperty`
+        //   3. Parse the box payloads in parse_ipco
+        //   4. Look up the property for the primary item here and set the fields
     }
 
     info
