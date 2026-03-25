@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/heic-decoder/badge.svg)](https://docs.rs/heic-decoder)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 
-Pure Rust HEIC/HEIF image decoder. No C/C++ dependencies, no unsafe code, 5 runtime crates.
+Pure Rust HEIC/HEIF image decoder. No C/C++ dependencies, no unsafe code, 4 runtime crates.
 
 - `#![forbid(unsafe_code)]` — zero unsafe blocks in the entire codebase
 - `no_std + alloc` compatible (compiles for wasm32-unknown-unknown)
@@ -122,21 +122,21 @@ let gainmap = DecoderConfig::new().decode_gain_map(&data)?;
 
 ## Performance
 
-Benchmarked on AMD Ryzen 9 7950X, WSL2, Rust 1.93, release profile (thin LTO, codegen-units=1). See `benchmarks/comparison_2026-03-01.md` for full methodology and comparison against native libheif.
+Benchmarked on AMD Ryzen 9 7950X, WSL2, Rust 1.93, release profile (thin LTO, codegen-units=1).
 
-| Image | Time | vs native libheif (SSE) |
-|-------|------|------------------------|
-| 1280x854 (single tile) | 48 ms | 1.2x faster |
-| 3024x4032 (48-tile, sequential) | 429 ms | 2.3x slower |
-| 3024x4032 (48-tile, `parallel`) | 151 ms | 1.3x faster |
-| Probe (metadata only) | 1.2 µs | 24x faster |
-| EXIF extraction | 4.3 µs | 54x faster |
+| Image | Time |
+|-------|------|
+| 1280x854 (single tile) | 54 ms |
+| 3024x4032 (48-tile, sequential) | 451 ms |
+| 3024x4032 (48-tile, `parallel`) | 180 ms |
+| Probe (metadata only) | 1.3 µs |
+| EXIF extraction | 4.4 µs |
 
 SIMD-accelerated on x86-64 (AVX2 for color conversion, IDCT 8/16/32, residual add, dequantize; SSE4.1 for IDST 4x4). Scalar fallback on other architectures.
 
 ## Dependencies
 
-5 runtime crates (default features), none with C/FFI:
+4 runtime crates (default features), none with C/FFI:
 
 ```
 heic-decoder
