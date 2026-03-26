@@ -235,11 +235,7 @@ fn bench_decode_small(c: &mut Criterion) {
     // Pure Rust
     let rust_dec = heic::DecoderConfig::new();
     group.bench_function("rust", |b| {
-        b.iter(|| {
-            rust_dec
-                .decode(&data, heic::PixelLayout::Rgb8)
-                .unwrap()
-        });
+        b.iter(|| rust_dec.decode(&data, heic::PixelLayout::Rgb8).unwrap());
     });
 
     // Native libheif (system, with SSE)
@@ -283,24 +279,14 @@ fn bench_decode_large(c: &mut Criterion) {
             .unwrap();
         let rust_dec = heic::DecoderConfig::new();
         group.bench_function("rust_1thread", |b| {
-            b.iter(|| {
-                pool.install(|| {
-                    rust_dec
-                        .decode(&data, heic::PixelLayout::Rgb8)
-                        .unwrap()
-                })
-            });
+            b.iter(|| pool.install(|| rust_dec.decode(&data, heic::PixelLayout::Rgb8).unwrap()));
         });
     }
     #[cfg(not(feature = "parallel"))]
     {
         let rust_dec = heic::DecoderConfig::new();
         group.bench_function("rust", |b| {
-            b.iter(|| {
-                rust_dec
-                    .decode(&data, heic::PixelLayout::Rgb8)
-                    .unwrap()
-            });
+            b.iter(|| rust_dec.decode(&data, heic::PixelLayout::Rgb8).unwrap());
         });
     }
 
@@ -309,11 +295,7 @@ fn bench_decode_large(c: &mut Criterion) {
     {
         let rust_dec = heic::DecoderConfig::new();
         group.bench_function("rust_parallel", |b| {
-            b.iter(|| {
-                rust_dec
-                    .decode(&data, heic::PixelLayout::Rgb8)
-                    .unwrap()
-            });
+            b.iter(|| rust_dec.decode(&data, heic::PixelLayout::Rgb8).unwrap());
         });
     }
 

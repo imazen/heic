@@ -16,8 +16,7 @@ const OUTPUT_H265: &str = "/tmp/example.h265";
 #[ignore]
 fn extract_annexb() {
     let data = std::fs::read(example_heic()).expect("Failed to read HEIC");
-    let container =
-        heif::parse(&data, &heic::Unstoppable).expect("Failed to parse container");
+    let container = heif::parse(&data, &heic::Unstoppable).expect("Failed to parse container");
 
     let item = container.primary_item().expect("No primary item");
     let config = item.hevc_config.as_ref().expect("No HEVC config");

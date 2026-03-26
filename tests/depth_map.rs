@@ -3,9 +3,7 @@
 //! These tests are `#[ignore]` by default since they require real HEIC files
 //! with depth data. Set `HEIC_TEST_DIR` to point to your test file directory.
 
-use heic::{
-    AuxiliaryImageType, DecoderConfig, DepthRepresentationType, ImageInfo, PixelLayout,
-};
+use heic::{AuxiliaryImageType, DecoderConfig, DepthRepresentationType, ImageInfo, PixelLayout};
 
 fn heic_base_dir() -> String {
     std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into())

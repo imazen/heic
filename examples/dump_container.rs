@@ -11,8 +11,7 @@ fn main() {
     let data = std::fs::read(&path).expect("Failed to read file");
     eprintln!("File: {} ({} bytes)", path, data.len());
 
-    let container =
-        heic::heif::parse(&data, &heic::Unstoppable).expect("parse failed");
+    let container = heic::heif::parse(&data, &heic::Unstoppable).expect("parse failed");
     eprintln!("Brand: {}", container.brand);
     eprintln!("Primary item ID: {}", container.primary_item_id);
     eprintln!();
