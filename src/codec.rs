@@ -129,10 +129,25 @@ static DECODE_DESCRIPTORS: &[PixelDescriptor] = &[
 /// HEIC decoder configuration implementing [`zencodec::decode::DecoderConfig`].
 ///
 /// Wraps [`crate::DecoderConfig`] for use with the zencodec trait system.
-/// HEIC decoding has no tunable parameters, so this is a thin wrapper.
+///
+/// Supplement extraction (gain map, depth map) is **opt-in**: both default
+/// to `false`. Enable via [`with_extract_gain_map`](Self::with_extract_gain_map)
+/// or [`with_extract_depth`](Self::with_extract_depth). The flags propagate
+/// to every [`HeicDecodeJob`] created by [`job()`](Self::job).
 #[derive(Clone, Debug)]
 pub struct HeicDecoderConfig {
     inner: crate::DecoderConfig,
+    /// Whether to decode the HDR gain map auxiliary image when present.
+    ///
+    /// Default: `false`. Container metadata (`ImageInfo.supplements.gain_map`,
+    /// `GainMapPresence`) is always populated cheaply during probe regardless
+    /// of this flag — only the pixel decode is gated.
+    pub extract_gain_map: bool,
+    /// Whether to decode the depth map auxiliary image when present.
+    ///
+    /// Default: `false`. Container metadata (`ImageInfo.supplements.depth_map`)
+    /// is always populated during probe regardless of this flag.
+    pub extract_depth: bool,
 }
 
 impl HeicDecoderConfig {
@@ -141,6 +156,8 @@ impl HeicDecoderConfig {
     pub fn new() -> Self {
         Self {
             inner: crate::DecoderConfig::new(),
+            extract_gain_map: false,
+            extract_depth: false,
         }
     }
 
@@ -148,6 +165,20 @@ impl HeicDecoderConfig {
     #[must_use]
     pub fn inner(&self) -> &crate::DecoderConfig {
         &self.inner
+    }
+
+    /// Enable or disable gain map extraction.
+    #[must_use]
+    pub fn with_extract_gain_map(mut self, extract: bool) -> Self {
+        self.extract_gain_map = extract;
+        self
+    }
+
+    /// Enable or disable depth map extraction.
+    #[must_use]
+    pub fn with_extract_depth(mut self, extract: bool) -> Self {
+        self.extract_depth = extract;
+        self
     }
 }
 
@@ -179,6 +210,8 @@ impl zencodec::decode::DecoderConfig for HeicDecoderConfig {
             stop: None,
             limits: ResourceLimits::none(),
             policy: None,
+            extract_gain_map: self.extract_gain_map,
+            extract_depth: self.extract_depth,
         }
     }
 }
@@ -186,11 +219,18 @@ impl zencodec::decode::DecoderConfig for HeicDecoderConfig {
 // ── Decode Job ─────────────────────────────────────────────────────────────
 
 /// Per-operation HEIC decode job.
+///
+/// Supplement extraction flags (`extract_gain_map`, `extract_depth`) are
+/// inherited from [`HeicDecoderConfig`] and can be overridden per-job.
 pub struct HeicDecodeJob<'a> {
     config: &'a HeicDecoderConfig,
     stop: Option<zencodec::StopToken>,
     limits: ResourceLimits,
     policy: Option<DecodePolicy>,
+    /// Whether to decode the HDR gain map when present (default: `false`).
+    pub extract_gain_map: bool,
+    /// Whether to decode the depth map when present (default: `false`).
+    pub extract_depth: bool,
 }
 
 /// Apply [`DecodePolicy`] to an [`ImageInfo`], stripping metadata fields
@@ -350,6 +390,8 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
             limits: self.native_limits(),
             thread_count,
             policy: self.policy,
+            extract_gain_map: self.extract_gain_map,
+            extract_depth: self.extract_depth,
         })
     }
 
@@ -574,6 +616,10 @@ pub struct HeicDecoder<'a> {
     /// Thread count from threading policy (0 = unlimited/default).
     thread_count: usize,
     policy: Option<DecodePolicy>,
+    /// Whether to decode the HDR gain map when present.
+    extract_gain_map: bool,
+    /// Whether to decode the depth map when present.
+    extract_depth: bool,
 }
 
 impl zencodec::decode::Decode for HeicDecoder<'_> {
@@ -736,11 +782,20 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
                 auxiliary_types: aux_types,
             });
 
-            // Decode and attach the HDR gain map if present.
-            if pi.has_gain_map
+            // Decode and attach the HDR gain map if requested and present.
+            if self.extract_gain_map
+                && pi.has_gain_map
                 && let Ok(gain_map) = crate::decode::decode_gain_map(data)
             {
                 output.extensions_mut().insert(gain_map);
+            }
+
+            // Decode and attach the depth map if requested and present.
+            if self.extract_depth
+                && pi.has_depth
+                && let Ok(depth_map) = crate::decode::decode_depth(data)
+            {
+                output.extensions_mut().insert(depth_map);
             }
         }
 

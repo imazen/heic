@@ -20,18 +20,18 @@ use crate::codec::HeicDecoderConfig;
 /// Convert to [`HeicDecoderConfig`] via
 /// [`to_decoder_config()`](DecodeHeic::to_decoder_config).
 ///
+/// # Wired flags
+///
+/// - **`extract_gain_map`**: Mapped to [`HeicDecoderConfig::extract_gain_map`].
+///   Controls whether the HDR gain map auxiliary image is decoded (opt-in,
+///   default `true` in the node, `false` in the raw config).
+/// - **`extract_depth`**: Mapped to [`HeicDecoderConfig::extract_depth`].
+///   Controls whether the depth map auxiliary image is decoded (default `false`).
+///
 /// # Gaps
 ///
-/// The underlying [`HeicDecoderConfig`] currently has no configuration knobs —
-/// the native `DecoderConfig` is a zero-field struct. These node fields
-/// document *intent* for the pipeline layer:
-///
-/// - **`extract_gain_map`**: Gain map extraction is currently unconditional
-///   in the zencodec adapter (always extracted when present). This field
-///   will gate extraction once the adapter respects it.
-/// - **`extract_depth`** / **`extract_mattes`**: Depth and matte auxiliary
-///   image decoding is not yet wired through the zencodec layer. These
-///   fields are placeholders for when that support lands.
+/// - **`extract_mattes`**: Matte auxiliary image decoding is not yet wired
+///   through the zencodec layer. This field is a placeholder.
 /// - **`decode_thumbnail`**: Thumbnail decoding is not yet exposed through
 ///   the zencodec wrapper. The HEIF container stores thumbnails, but the
 ///   current decode path always decodes the primary item.
@@ -45,9 +45,7 @@ pub struct DecodeHeic {
     /// to the output extensions as a separate image. Apple ProRAW and
     /// iPhone HDR photos typically include gain maps.
     ///
-    /// **Note:** The zencodec adapter currently extracts gain maps
-    /// unconditionally. This field will gate that behavior once the
-    /// adapter is updated.
+    /// Mapped to [`HeicDecoderConfig::extract_gain_map`].
     #[param(default = true)]
     #[param(section = "Supplements", label = "Extract Gain Map")]
     #[kv("heic.gain_map")]
@@ -58,8 +56,7 @@ pub struct DecodeHeic {
     /// Portrait-mode photos from iPhones include depth maps for
     /// computational photography effects.
     ///
-    /// **Note:** Depth map extraction is not yet wired through the
-    /// zencodec layer. This field is a placeholder.
+    /// Mapped to [`HeicDecoderConfig::extract_depth`].
     #[param(default = false)]
     #[param(section = "Supplements", label = "Extract Depth Map")]
     #[kv("heic.depth")]
@@ -70,8 +67,8 @@ pub struct DecodeHeic {
     /// Mattes (hair, skin, teeth) are used for portrait lighting and
     /// other segmentation-based effects in Apple's camera pipeline.
     ///
-    /// **Note:** Matte extraction is not yet wired through the
-    /// zencodec layer. This field is a placeholder.
+    /// **Note:** Not yet wired through the zencodec layer. This field
+    /// is a placeholder for when matte extraction support lands.
     #[param(default = false)]
     #[param(section = "Supplements", label = "Extract Mattes")]
     #[kv("heic.mattes")]
@@ -105,23 +102,23 @@ impl Default for DecodeHeic {
 impl DecodeHeic {
     /// Convert this node into a [`HeicDecoderConfig`].
     ///
-    /// Currently returns a default config because [`HeicDecoderConfig`] has
-    /// no tunable parameters — the native decoder is a zero-config struct.
+    /// Maps the supplement extraction flags (`extract_gain_map`,
+    /// `extract_depth`) through to [`HeicDecoderConfig`]. These control
+    /// whether the decoder performs the (expensive) pixel decode of
+    /// auxiliary images — container metadata is always populated cheaply.
     ///
-    /// The node fields (`extract_gain_map`, `extract_depth`, `extract_mattes`,
-    /// `decode_thumbnail`) capture pipeline intent but are not yet plumbed
-    /// through to the decoder. The pipeline layer should inspect these fields
-    /// directly (via [`DecodeHeic`]) to decide post-decode behavior:
+    /// Fields not yet wired to the decoder:
+    /// - **`extract_mattes`**: Matte auxiliary image decode is not yet
+    ///   supported in the zencodec adapter.
+    /// - **`decode_thumbnail`**: Thumbnail decode path is not yet exposed.
     ///
-    /// - Gate gain map attachment on `extract_gain_map`
-    /// - Trigger auxiliary image decode for `extract_depth` / `extract_mattes`
-    /// - Route to thumbnail decode path for `decode_thumbnail`
+    /// The pipeline layer should inspect these fields directly (via
+    /// [`DecodeHeic`]) for behaviors not yet supported by the config.
     #[must_use]
     pub fn to_decoder_config(&self) -> HeicDecoderConfig {
-        // HeicDecoderConfig wraps the native DecoderConfig which has no
-        // configuration knobs. All node fields must be interpreted by the
-        // pipeline layer rather than the decoder itself.
         HeicDecoderConfig::new()
+            .with_extract_gain_map(self.extract_gain_map)
+            .with_extract_depth(self.extract_depth)
     }
 }
 
@@ -233,11 +230,21 @@ mod tests {
     }
 
     #[test]
-    fn to_decoder_config_returns_default() {
+    fn to_decoder_config_maps_flags() {
         let node = DecodeHeic::default();
-        let _config = node.to_decoder_config();
-        // HeicDecoderConfig has no observable state to assert on —
-        // just verify it constructs without panicking.
+        let config = node.to_decoder_config();
+        // Default node has extract_gain_map=true, extract_depth=false
+        assert!(config.extract_gain_map);
+        assert!(!config.extract_depth);
+
+        let node2 = DecodeHeic {
+            extract_gain_map: false,
+            extract_depth: true,
+            ..DecodeHeic::default()
+        };
+        let config2 = node2.to_decoder_config();
+        assert!(!config2.extract_gain_map);
+        assert!(config2.extract_depth);
     }
 
     #[test]
