@@ -240,6 +240,8 @@ pub struct SliceContext<'a> {
     /// Rice parameter initialization states (H.265 StatCoeff[0..3])
     /// Persists across TUs within a substream; saved/restored for WPP
     pub stat_coeff: [u8; 4],
+    /// Reusable scratch buffer for motion compensation two-pass filtering
+    mc_scratch: mc::McScratch,
 
     // -- Inter prediction state --
     /// Prediction mode map at min_pu_size granularity (Intra/Inter/Skip)
@@ -555,6 +557,7 @@ impl<'a> SliceContext<'a> {
             residual_buf: [0i16; 1024],
             scaling_buf: [16u8; 1024],
             stat_coeff: [0u8; 4],
+            mc_scratch: mc::McScratch::default(),
             pred_mode_map: vec![PredMode::Intra; pu_map_size],
             mv_info: vec![PbMotion::UNAVAILABLE; pu_map_size],
             cbf_map: vec![
@@ -1477,7 +1480,9 @@ impl<'a> SliceContext<'a> {
             }
 
             // Apply motion compensation (prediction → frame)
-            self.apply_mc(&motion, x0, y0, cb_size, cb_size, frame);
+            let mut mc_scratch = core::mem::take(&mut self.mc_scratch);
+            self.apply_mc(&motion, x0, y0, cb_size, cb_size, &mut mc_scratch, frame);
+            self.mc_scratch = mc_scratch;
             return Ok(());
         }
 
@@ -1616,7 +1621,9 @@ impl<'a> SliceContext<'a> {
                     );
                 }
 
-                self.apply_mc(&motion, px, py, pw, ph, frame);
+                let mut mc_scratch = core::mem::take(&mut self.mc_scratch);
+                self.apply_mc(&motion, px, py, pw, ph, &mut mc_scratch, frame);
+                self.mc_scratch = mc_scratch;
             }
             pu_list_is_merge = any_merge;
 
@@ -2780,6 +2787,7 @@ impl<'a> SliceContext<'a> {
     }
 
     /// Apply motion compensation for a PU: fetch from reference frame(s), blend, write to frame
+    #[allow(clippy::too_many_arguments)]
     fn apply_mc(
         &self,
         motion: &PbMotion,
@@ -2787,6 +2795,7 @@ impl<'a> SliceContext<'a> {
         py: u32,
         pw: u32,
         ph: u32,
+        scratch: &mut mc::McScratch,
         frame: &mut DecodedFrame,
     ) {
         let bit_depth = self.sps.bit_depth_y();
@@ -2846,8 +2855,8 @@ impl<'a> SliceContext<'a> {
             && let Some(r0) = ref_l0
             && let Some(r1) = ref_l1
         {
-            mc::mc_luma(r0, motion.mv[0], &blk, pred0, true);
-            mc::mc_luma(r1, motion.mv[1], &blk, pred1, true);
+            mc::mc_luma(r0, motion.mv[0], &blk, pred0, true, scratch);
+            mc::mc_luma(r1, motion.mv[1], &blk, pred1, true, scratch);
             mc::blend_bi(pred0, pred1, &mut frame.y_plane, frame.width as usize, &blk);
         } else {
             let (ref_frame, mv) = if motion.pred_flag[0] {
@@ -2856,7 +2865,7 @@ impl<'a> SliceContext<'a> {
                 (ref_l1, motion.mv[1])
             };
             if let Some(rf) = ref_frame {
-                mc::mc_luma(rf, mv, &blk, pred0, false);
+                mc::mc_luma(rf, mv, &blk, pred0, false, scratch);
                 mc::blend_uni(pred0, &mut frame.y_plane, frame.width as usize, &blk);
             }
         }
@@ -2885,7 +2894,11 @@ impl<'a> SliceContext<'a> {
             let mut cpred1 = [0i16; 1024];
 
             for c_idx in 0..2u8 {
-                let mc_one = |rf: &DecodedFrame, mv: MotionVector, pred: &mut [i16], bi: bool| {
+                let mc_one = |rf: &DecodedFrame,
+                              mv: MotionVector,
+                              pred: &mut [i16],
+                              bi: bool,
+                              sc: &mut mc::McScratch| {
                     let (plane, stride) = rf.plane(c_idx + 1);
                     let (_, c_height) = rf.chroma_dims();
                     let cref = ChromaRef {
@@ -2895,15 +2908,15 @@ impl<'a> SliceContext<'a> {
                         sub_x,
                         sub_y,
                     };
-                    mc::mc_chroma(&cref, mv, &cblk, pred, bi);
+                    mc::mc_chroma(&cref, mv, &cblk, pred, bi, sc);
                 };
 
                 let (plane_mut, plane_stride) = frame.plane_mut(c_idx + 1);
 
                 if is_bi {
                     if let (Some(r0), Some(r1)) = (ref_l0, ref_l1) {
-                        mc_one(r0, motion.mv[0], &mut cpred0[..cbuf_size], true);
-                        mc_one(r1, motion.mv[1], &mut cpred1[..cbuf_size], true);
+                        mc_one(r0, motion.mv[0], &mut cpred0[..cbuf_size], true, scratch);
+                        mc_one(r1, motion.mv[1], &mut cpred1[..cbuf_size], true, scratch);
                         mc::blend_bi(
                             &cpred0[..cbuf_size],
                             &cpred1[..cbuf_size],
@@ -2919,7 +2932,7 @@ impl<'a> SliceContext<'a> {
                         (ref_l1, motion.mv[1])
                     };
                     if let Some(rf) = rf {
-                        mc_one(rf, mv, &mut cpred0[..cbuf_size], false);
+                        mc_one(rf, mv, &mut cpred0[..cbuf_size], false, scratch);
                         mc::blend_uni(&cpred0[..cbuf_size], plane_mut, plane_stride, &cblk);
                     }
                 }

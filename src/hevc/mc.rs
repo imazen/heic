@@ -5,7 +5,7 @@
 
 #![allow(dead_code)] // Phase 5: used when inter decode pipeline is wired up
 
-use alloc::vec;
+use alloc::vec::Vec;
 
 use super::inter::MotionVector;
 use super::picture::DecodedFrame;
@@ -31,6 +31,14 @@ const CHROMA_FILTER: [[i16; 4]; 8] = [
     [-2, 16, 54, -4], // 6/8
     [-2, 10, 58, -2], // 7/8
 ];
+
+/// Reusable scratch buffer for motion compensation intermediate values.
+/// Avoids per-block heap allocation for two-pass (H+V) fractional-pel filtering.
+#[derive(Default)]
+pub struct McScratch {
+    /// Intermediate i32 samples for separable filter passes
+    pub buf: Vec<i32>,
+}
 
 /// Parameters for a motion compensation block
 pub struct McBlock {
@@ -58,6 +66,7 @@ pub fn mc_luma(
     blk: &McBlock,
     pred: &mut [i16],
     bi_pred: bool,
+    scratch: &mut McScratch,
 ) {
     let ref_plane = &ref_frame.y_plane;
     let stride = ref_frame.width as i32;
@@ -128,10 +137,13 @@ pub fn mc_luma(
             }
         }
     } else {
-        // Both H and V: two-pass
+        // Both H and V: two-pass — reuse scratch buffer
         let tmp_w = w as i32;
         let tmp_h = h as i32 + 7;
-        let mut tmp = vec![0i32; (tmp_w * tmp_h) as usize];
+        let tmp_len = (tmp_w * tmp_h) as usize;
+        scratch.buf.resize(tmp_len, 0);
+        scratch.buf[..tmp_len].fill(0);
+        let tmp = &mut scratch.buf;
 
         let coeff_h = &LUMA_FILTER[frac_x];
         for j in 0..tmp_h {
@@ -206,6 +218,7 @@ pub fn mc_chroma(
     blk: &McBlock,
     pred: &mut [i16],
     bi_pred: bool,
+    scratch: &mut McScratch,
 ) {
     let cmv_x = if cref.sub_x > 1 {
         mv.x as i32
@@ -288,9 +301,13 @@ pub fn mc_chroma(
             }
         }
     } else {
+        // Both H and V: two-pass — reuse scratch buffer
         let tmp_w = w as i32;
         let tmp_h = h as i32 + 3;
-        let mut tmp = vec![0i32; (tmp_w * tmp_h) as usize];
+        let tmp_len = (tmp_w * tmp_h) as usize;
+        scratch.buf.resize(tmp_len, 0);
+        scratch.buf[..tmp_len].fill(0);
+        let tmp = &mut scratch.buf;
 
         let coeff_h = &CHROMA_FILTER[frac_x];
         for j in 0..tmp_h {
@@ -425,7 +442,15 @@ mod tests {
             h: 4,
             bit_depth: 8,
         };
-        mc_luma(&frame, MotionVector::ZERO, &blk, &mut pred, false);
+        let mut scratch = McScratch::default();
+        mc_luma(
+            &frame,
+            MotionVector::ZERO,
+            &blk,
+            &mut pred,
+            false,
+            &mut scratch,
+        );
         assert_eq!(pred[0], 18); // (2,2) = 2*8+2
         assert_eq!(pred[5], 27); // (3,3) = 3*8+3
     }
@@ -447,7 +472,15 @@ mod tests {
             bit_depth: 8,
         };
         // MV = (0, 1) quarter-pel → frac_y=1, int_y=4
-        mc_luma(&frame, MotionVector { x: 0, y: 1 }, &blk, &mut pred, false);
+        let mut scratch = McScratch::default();
+        mc_luma(
+            &frame,
+            MotionVector { x: 0, y: 1 },
+            &blk,
+            &mut pred,
+            false,
+            &mut scratch,
+        );
         // All pixels should be 100 (constant input)
         for &v in &pred {
             assert_eq!(v, 100, "constant ref should give exact value");
@@ -472,11 +505,26 @@ mod tests {
             h: 1,
             bit_depth: 8,
         };
+        let mut scratch = McScratch::default();
         // MV = (0, 0) → should give pixel at (4,4) = 64
-        mc_luma(&frame, MotionVector::ZERO, &blk, &mut pred, false);
+        mc_luma(
+            &frame,
+            MotionVector::ZERO,
+            &blk,
+            &mut pred,
+            false,
+            &mut scratch,
+        );
         assert_eq!(pred[0], 64);
         // MV = (2, 0) → half-pel horizontal at (4.5, 4)
-        mc_luma(&frame, MotionVector { x: 2, y: 0 }, &blk, &mut pred, false);
+        mc_luma(
+            &frame,
+            MotionVector { x: 2, y: 0 },
+            &blk,
+            &mut pred,
+            false,
+            &mut scratch,
+        );
         // Half-pel of gradient: should be close to average of 64 and 80 = 72
         // Exact: filter[-1,4,-11,40,40,-11,4,-1] applied to [16,32,48,64,80,96,112,128]
         #[allow(clippy::identity_op, clippy::neg_multiply)]
@@ -503,8 +551,23 @@ mod tests {
             bit_depth: 8,
         };
         // Integer position bi-pred: both predict same pixel
-        mc_luma(&frame, MotionVector::ZERO, &blk, &mut pred0, true);
-        mc_luma(&frame, MotionVector::ZERO, &blk, &mut pred1, true);
+        let mut scratch = McScratch::default();
+        mc_luma(
+            &frame,
+            MotionVector::ZERO,
+            &blk,
+            &mut pred0,
+            true,
+            &mut scratch,
+        );
+        mc_luma(
+            &frame,
+            MotionVector::ZERO,
+            &blk,
+            &mut pred1,
+            true,
+            &mut scratch,
+        );
         // Intermediate: 100 << 6 = 6400
         assert_eq!(pred0[0], 6400);
         assert_eq!(pred1[0], 6400);
