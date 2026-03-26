@@ -190,7 +190,7 @@ impl Default for HeicDecoderConfig {
 
 impl zencodec::decode::DecoderConfig for HeicDecoderConfig {
     type Error = At<HeicError>;
-    type Job<'a> = HeicDecodeJob<'a>;
+    type Job = HeicDecodeJob;
 
     fn formats() -> &'static [ImageFormat] {
         &[ImageFormat::Heic]
@@ -204,14 +204,16 @@ impl zencodec::decode::DecoderConfig for HeicDecoderConfig {
         &HEIC_DECODE_CAPS
     }
 
-    fn job(&self) -> HeicDecodeJob<'_> {
+    fn job(self) -> HeicDecodeJob {
+        let extract_gain_map = self.extract_gain_map;
+        let extract_depth = self.extract_depth;
         HeicDecodeJob {
             config: self,
             stop: None,
             limits: ResourceLimits::none(),
             policy: None,
-            extract_gain_map: self.extract_gain_map,
-            extract_depth: self.extract_depth,
+            extract_gain_map,
+            extract_depth,
         }
     }
 }
@@ -222,8 +224,8 @@ impl zencodec::decode::DecoderConfig for HeicDecoderConfig {
 ///
 /// Supplement extraction flags (`extract_gain_map`, `extract_depth`) are
 /// inherited from [`HeicDecoderConfig`] and can be overridden per-job.
-pub struct HeicDecodeJob<'a> {
-    config: &'a HeicDecoderConfig,
+pub struct HeicDecodeJob {
+    config: HeicDecoderConfig,
     stop: Option<zencodec::StopToken>,
     limits: ResourceLimits,
     policy: Option<DecodePolicy>,
@@ -250,7 +252,7 @@ fn apply_policy(policy: Option<&DecodePolicy>, mut info: ImageInfo) -> ImageInfo
     info
 }
 
-impl<'a> HeicDecodeJob<'a> {
+impl HeicDecodeJob {
     /// Build native limits from zencodec ResourceLimits.
     fn native_limits(&self) -> Option<crate::Limits> {
         if !self.limits.has_any() {
@@ -308,7 +310,7 @@ fn descriptor_to_layout(desc: PixelDescriptor) -> crate::PixelLayout {
     }
 }
 
-impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob<'a> {
+impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
     type Error = At<HeicError>;
     type Dec = HeicDecoder<'a>;
     type StreamDec = HeicStreamDecoder;
@@ -608,7 +610,7 @@ impl crate::RowSink for RowSinkAdapter<'_> {
 
 /// Single-image HEIC decoder.
 pub struct HeicDecoder<'a> {
-    config: &'a HeicDecoderConfig,
+    config: HeicDecoderConfig,
     data: Cow<'a, [u8]>,
     preferred: alloc::vec::Vec<PixelDescriptor>,
     stop: Option<zencodec::StopToken>,
@@ -1979,7 +1981,7 @@ mod tests {
         };
 
         let config = HeicDecoderConfig::new();
-        let job_light = config.job();
+        let job_light = config.clone().job();
         let job_full = config.job();
         let light = job_light.probe(&data).expect("probe");
         let full = job_full.probe_full(&data).expect("probe_full");
