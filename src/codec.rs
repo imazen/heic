@@ -190,7 +190,7 @@ impl Default for HeicDecoderConfig {
 
 impl zencodec::decode::DecoderConfig for HeicDecoderConfig {
     type Error = At<HeicError>;
-    type Job = HeicDecodeJob;
+    type Job<'a> = HeicDecodeJob;
 
     fn formats() -> &'static [ImageFormat] {
         &[ImageFormat::Heic]
@@ -204,7 +204,7 @@ impl zencodec::decode::DecoderConfig for HeicDecoderConfig {
         &HEIC_DECODE_CAPS
     }
 
-    fn job(self) -> HeicDecodeJob {
+    fn job<'a>(self) -> Self::Job<'a> {
         let extract_gain_map = self.extract_gain_map;
         let extract_depth = self.extract_depth;
         HeicDecodeJob {
