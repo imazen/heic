@@ -38,7 +38,7 @@ whereat = "0.1.4"
 archmage = { version = "0.9.12", default-features = false, features = ["macros"] }
 safe_unaligned_simd = "0.2.5"
 rayon = { version = "1.10", optional = true }
-zencodec = { version = "0.1.2", optional = true }
+zencodec = { version = "0.1.3", optional = true }
 zenpixels = { version = "0.2.0", default-features = false, features = ["rgb", "imgref"], optional = true }
 rgb = { version = "0.8", default-features = false, features = ["as-bytes"], optional = true }
 imgref = { version = "1.12", optional = true }
