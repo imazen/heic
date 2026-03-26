@@ -384,12 +384,13 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
             .map_err(|e| at!(HeicError::LimitExceeded(limit_exceeded_msg(e))))?;
         let thread_count = policy_to_threads(self.limits.threading());
         let stop = self.stop.take();
+        let limits = self.native_limits();
         Ok(HeicDecoder {
             config: self.config,
             data,
             preferred: preferred.to_vec(),
             stop,
-            limits: self.native_limits(),
+            limits,
             thread_count,
             policy: self.policy,
             extract_gain_map: self.extract_gain_map,
