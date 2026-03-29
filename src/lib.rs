@@ -117,8 +117,8 @@ pub use codec::{
     HeicStreamDecoder,
 };
 
-#[cfg(feature = "zennode")]
-pub mod zennode_defs;
+// #[cfg(feature = "zennode")]
+// pub mod zennode_defs;
 
 pub use auxiliary::{
     AuxiliaryImageDescriptor, AuxiliaryImageType, DepthMap, DepthRepresentationInfo,
