@@ -1283,7 +1283,7 @@ fn build_image_info_lightweight(pi: &crate::ImageInfo) -> ImageInfo {
             image_count: Some(1),
             random_access: true,
         })
-        .with_orientation(Orientation::Normal) // Decoder applies transforms
+        .with_orientation(Orientation::Identity) // Decoder applies transforms
         .with_alpha(pi.has_alpha)
         .with_bit_depth(pi.bit_depth)
         .with_channel_count(if pi.has_alpha { 4 } else { 3 })
@@ -1331,7 +1331,7 @@ fn build_image_info_full(
             image_count: Some(1),
             random_access: true,
         })
-        .with_orientation(Orientation::Normal) // Decoder applies transforms
+        .with_orientation(Orientation::Identity) // Decoder applies transforms
         .with_alpha(pi.has_alpha)
         .with_bit_depth(pi.bit_depth)
         .with_channel_count(if pi.has_alpha { 4 } else { 3 })
