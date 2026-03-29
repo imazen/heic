@@ -7,7 +7,7 @@ license = "AGPL-3.0-only OR LicenseRef-Imazen-Commercial"
 description = "Pure Rust HEIC/HEIF image decoder with SIMD acceleration"
 repository = "https://github.com/imazen/heic"
 keywords = ["heic", "heif", "hevc", "image", "decoder"]
-categories = ["multimedia::images", "multimedia::encoding"]
+categories = ["multimedia::images", "parser-implementations"]
 exclude = [
     "CLAUDE.md",
     "FEEDBACK.md",
@@ -23,6 +23,9 @@ exclude = [
     "examples/dump_hevc.rs",
     "examples/extract_hevc.rs",
     "examples/test_all.rs",
+    "tests/compare_reference.rs",
+    "tests/trace_bad_pixel.rs",
+    "benches/compare.rs",
 ]
 
 [features]
@@ -33,24 +36,24 @@ zencodec = ["dep:zencodec", "dep:zenpixels", "dep:rgb", "dep:imgref", "dep:garb"
 # zennode = ["dep:zennode", "zencodec"]
 
 [dependencies]
-enough = "0.4.2"
-whereat = "0.1.4"
-archmage = { version = "0.9.14", default-features = false, features = ["macros"] }
+enough = "0.4.3"
+whereat = "0.1.5"
+archmage = { version = "0.9.15", default-features = false, features = ["macros"] }
 safe_unaligned_simd = "0.2.5"
-rayon = { version = "1.10", optional = true }
-zencodec = { version = "0.1.8", optional = true }
+rayon = { version = "1.11.0", optional = true }
+zencodec = { version = "0.1.9", optional = true }
 zenpixels = { version = "0.2.1", default-features = false, features = ["rgb", "imgref"], optional = true }
-rgb = { version = "0.8", default-features = false, features = ["as-bytes"], optional = true }
-imgref = { version = "1.12", optional = true }
+rgb = { version = "0.8.53", default-features = false, features = ["as-bytes"], optional = true }
+imgref = { version = "1.12.0", optional = true }
 garb = { version = "0.2.5", default-features = false, optional = true }
 # zennode = { path = "../zennode/zennode", optional = true, default-features = false, features = ["derive"] }
 
 [dev-dependencies]
-criterion = "0.6"
-fast-ssim2 = { version = "0.6.5", features = ["imgref"] }
-imgref = "1.11"
-heic-wasm-rs = { path = "../../heic/heic-wasm-rs" }
-png = "0.17"
+criterion = "0.8.2"
+fast-ssim2 = { version = "0.7.1", features = ["imgref"] }
+imgref = "1.12.0"
+# heic-wasm-rs = { path = "../../heic/heic-wasm-rs" } # local-only, not published
+png = "0.18.1"
 
 [profile.release]
 lto = "thin"
@@ -60,6 +63,7 @@ codegen-units = 1
 name = "decode"
 harness = false
 
-[[bench]]
-name = "compare"
-harness = false
+# compare bench requires heic-wasm-rs (local-only, excluded from publish)
+# [[bench]]
+# name = "compare"
+# harness = false

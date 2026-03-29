@@ -1,4 +1,4 @@
-# heic [![CI](https://img.shields.io/github/actions/workflow/status/imazen/heic-decoder-rs/ci.yml?style=for-the-badge)](https://github.com/imazen/heic-decoder-rs/actions/workflows/ci.yml) [![MSRV](https://img.shields.io/badge/MSRV-1.89-blue?style=for-the-badge)](https://doc.rust-lang.org/cargo/reference/manifest.html#the-rust-version-field) [![license](https://img.shields.io/crates/l/heic?style=for-the-badge)](https://github.com/imazen/heic-decoder-rs#license)
+# heic [![CI](https://img.shields.io/github/actions/workflow/status/imazen/heic/ci.yml?style=flat-square&label=CI)](https://github.com/imazen/heic/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/heic?style=flat-square)](https://crates.io/crates/heic) [![lib.rs](https://img.shields.io/crates/v/heic?style=flat-square&label=lib.rs&color=blue)](https://lib.rs/crates/heic) [![docs.rs](https://img.shields.io/docsrs/heic?style=flat-square)](https://docs.rs/heic) [![license](https://img.shields.io/crates/l/heic?style=flat-square)](https://github.com/imazen/heic#license)
 
 Pure Rust HEIC/HEIF image decoder. No C/C++ dependencies, no unsafe code, 4 runtime crates.
 
@@ -41,7 +41,7 @@ Decodes most HEIC files from iPhones and cameras. 103/162 test files decode succ
 ## Usage
 
 ```rust
-use heic_decoder::{DecoderConfig, PixelLayout};
+use heic::{DecoderConfig, PixelLayout};
 
 let data = std::fs::read("image.heic")?;
 let output = DecoderConfig::new().decode(&data, PixelLayout::Rgba8)?;
@@ -51,7 +51,7 @@ println!("{}x{} image, {} bytes", output.width, output.height, output.data.len()
 ### Limits and cancellation
 
 ```rust
-use heic_decoder::{DecoderConfig, PixelLayout, Limits};
+use heic::{DecoderConfig, PixelLayout, Limits};
 
 let mut limits = Limits::default();
 limits.max_width = Some(8192);
@@ -69,7 +69,7 @@ let output = DecoderConfig::new()
 ### Probe without decoding
 
 ```rust
-use heic_decoder::ImageInfo;
+use heic::ImageInfo;
 
 let info = ImageInfo::from_bytes(&data)?;
 println!("{}x{}, bit_depth={}, alpha={}, exif={}",
@@ -135,7 +135,7 @@ SIMD-accelerated on x86-64 (AVX2 for color conversion, IDCT 8/16/32, residual ad
 4 runtime crates (default features), none with C/FFI:
 
 ```
-heic-decoder
+heic
 ├── archmage          — SIMD dispatch via CPU feature tokens
 │   └── safe_unaligned_simd  — safe wrappers over std::arch intrinsics
 ├── enough            — cooperative cancellation (0 unsafe)

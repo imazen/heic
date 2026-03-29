@@ -238,7 +238,7 @@ fn trace_girlshy_frame1() {
                 let our4_idx = y as usize * stride4 + x as usize;
                 let i_idx = y as usize * stride0 + x as usize;
 
-                let i_val = our_f0.y_plane[i_idx];
+                let _i_val = our_f0.y_plane[i_idx];
                 let r4_val = ref_f4[ref_idx];
                 let o4_val = our_f4.y_plane[our4_idx];
                 let diff = o4_val as i32 - r4_val as i32;
@@ -328,7 +328,7 @@ fn trace_girlshy_frame1() {
             // PU at (32,0) MV=(-112,-19): ref_pos = (32-28, 0-5) = (4, -5)
             // For pixel (62,0): ref_x = 4 + (62-32) = 34, ref_y = -5, frac=(0,1)
             // With all y-clamped to 0: should be I-frame[34, 0]
-            let iframe_val_at_34_0 = our_f0.y_plane[0 * stride0 + 34];
+            let iframe_val_at_34_0 = our_f0.y_plane[34];
             eprintln!("  I-frame[34,0] = {iframe_val_at_34_0}");
             eprintln!("  I-frame row 0, cols 30..40:");
             eprint!("   ");
@@ -432,6 +432,7 @@ fn trace_girlshy_frame1() {
     // Per-frame PSNR for first 10 frames
     eprintln!("\n=== Per-frame Y-plane comparison (first 10 frames) ===");
     let compare_count = frames.len().min(ref_data.len() / frame_size).min(10);
+    #[allow(clippy::needless_range_loop)]
     for fi in 0..compare_count {
         let ref_y_start = fi * frame_size;
         let ref_y: Vec<u16> = ref_data[ref_y_start..ref_y_start + luma_size]
@@ -444,8 +445,8 @@ fn trace_girlshy_frame1() {
         let mut sse = 0u64;
         let mut exact = 0u32;
         let mut max_diff = 0u16;
-        let cw = frames[fi].cropped_width() as usize;
-        let ch = frames[fi].cropped_height() as usize;
+        let _cw = frames[fi].cropped_width() as usize;
+        let _ch = frames[fi].cropped_height() as usize;
 
         for y in 0..h as usize {
             for x in 0..w as usize {
