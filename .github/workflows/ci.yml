@@ -34,10 +34,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Test (default features)
-        run: cargo test
+        run: cargo test --lib
 
       - name: Test (parallel)
-        run: cargo test --features parallel
+        run: cargo test --lib --features parallel
 
       - name: Check (no_std)
         run: cargo check --no-default-features
@@ -54,16 +54,16 @@ jobs:
         run: cargo check --no-default-features
 
       - name: Test (parallel)
-        run: cargo test --features parallel
+        run: cargo test --lib --features parallel
 
       - name: Test (zencodec)
-        run: cargo test --features zencodec
+        run: cargo test --lib --features zencodec
 
       - name: Test (parallel,zencodec)
-        run: cargo test --features "parallel,zencodec"
+        run: cargo test --lib --features "parallel,zencodec"
 
       - name: Test (all publishable features)
-        run: cargo test --features "std,fallible-alloc,parallel,zencodec"
+        run: cargo test --lib --features "std,fallible-alloc,parallel,zencodec"
 
   clippy:
     name: Clippy
@@ -120,7 +120,7 @@ jobs:
           key: cross-i686
 
       - name: Test (i686)
-        run: cross test --target i686-unknown-linux-gnu
+        run: cross test --lib --target i686-unknown-linux-gnu
 
   coverage:
     name: Coverage
@@ -132,7 +132,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Generate coverage
-        run: cargo llvm-cov --lcov --output-path lcov.info
+        run: cargo llvm-cov --lib --lcov --output-path lcov.info
 
       - name: Upload coverage
         uses: codecov/codecov-action@v5
