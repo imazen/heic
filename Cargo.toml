@@ -37,7 +37,7 @@ zencodec = ["dep:zencodec", "dep:zenpixels", "dep:rgb", "dep:imgref", "dep:garb"
 
 [dependencies]
 enough = "0.4.3"
-whereat = "0.1.5"
+whereat = { version = "0.1.5"}
 archmage = { version = "0.9.15", default-features = false, features = ["macros"] }
 safe_unaligned_simd = "0.2.5"
 rayon = { version = "1.11.0", optional = true }
