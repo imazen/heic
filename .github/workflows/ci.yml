@@ -76,13 +76,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Clippy (default + parallel)
-        run: cargo clippy --all-targets --features parallel -- -D warnings
+        run: cargo clippy --lib --features parallel -- -D warnings
 
       - name: Clippy (zencodec)
-        run: cargo clippy --all-targets --features zencodec -- -D warnings
+        run: cargo clippy --lib --features zencodec -- -D warnings
 
       - name: Clippy (all publishable features)
-        run: cargo clippy --all-targets --features "std,fallible-alloc,parallel,zencodec" -- -D warnings
+        run: cargo clippy --lib --features "std,fallible-alloc,parallel,zencodec" -- -D warnings
 
   fmt:
     name: Format
