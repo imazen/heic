@@ -580,6 +580,16 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
     let mut long_term_ref_pics_sps = LongTermRefPicSps::default();
     if long_term_ref_pics_present_flag {
         let num_long_term_ref_pics_sps = reader.read_ue()? as usize;
+        // H.265 spec limit: num_long_term_ref_pics_sps shall be in range 0..32
+        if num_long_term_ref_pics_sps > 32 {
+            return Err(HevcError::InvalidParameterSet {
+                kind: "SPS",
+                msg: alloc::format!(
+                    "num_long_term_ref_pics_sps {} exceeds spec limit of 32",
+                    num_long_term_ref_pics_sps
+                ),
+            });
+        }
         let poc_bits = log2_max_pic_order_cnt_lsb_minus4 + 4;
         long_term_ref_pics_sps
             .lt_ref_pic_poc_lsb

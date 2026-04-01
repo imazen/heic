@@ -131,7 +131,7 @@ fn decode_nal_units(nal_units: &[bitstream::NalUnit<'_>]) -> Result<DecodedFrame
         sps.pic_height_in_luma_samples,
         sps.bit_depth_y(),
         sps.chroma_format_idc,
-    );
+    )?;
     frame.full_range = sps.video_full_range_flag;
     frame.matrix_coeffs = sps.matrix_coeffs;
     frame.color_primaries = sps.color_primaries;
@@ -318,8 +318,10 @@ impl VideoDecoder {
     }
 
     /// Finish the current picture: apply loop filters, insert into DPB, return frame + POC
-    fn finish_current_picture(&mut self) -> Option<(i32, DecodedFrame)> {
-        let mut pic = self.current_pic.take()?;
+    fn finish_current_picture(&mut self) -> Result<Option<(i32, DecodedFrame)>> {
+        let Some(mut pic) = self.current_pic.take() else {
+            return Ok(None);
+        };
         let poc = pic.poc;
 
         // Apply deferred loop filters now that all slices are decoded
@@ -328,7 +330,9 @@ impl VideoDecoder {
         {
             if !lf.deblocking_disabled {
                 let inter_ctx = if !lf.is_intra_slice {
-                    let sps = self.sps.as_ref().unwrap();
+                    let sps = self.sps.as_ref().ok_or(HevcError::MissingParameterSet(
+                        "SPS missing at picture finish",
+                    ))?;
                     let min_pu = ((1u32 << sps.log2_min_cb_size()) / 2).max(1);
                     let pu_stride = sps.pic_width_in_luma_samples.div_ceil(min_pu);
                     Some(deblock::InterDeblockCtx {
@@ -373,7 +377,7 @@ impl VideoDecoder {
             self.dpb.evict_unneeded();
             self.dpb.insert(entry);
         }
-        Some((poc, pic.frame))
+        Ok(Some((poc, pic.frame)))
     }
 
     /// Decode a slice NAL unit. Returns a frame only when a NEW picture starts
@@ -400,7 +404,7 @@ impl VideoDecoder {
         let curr_poc;
         if slice_header.first_slice_segment_in_pic_flag {
             // Finish previous picture
-            if let Some((poc, frame)) = self.finish_current_picture() {
+            if let Some((poc, frame)) = self.finish_current_picture()? {
                 output_frame = Some(frame);
                 self.last_decoded_poc = poc;
             }
@@ -445,7 +449,7 @@ impl VideoDecoder {
             }
 
             // Create new frame
-            let frame = create_frame(&sps);
+            let frame = create_frame(&sps)?;
             self.current_pic = Some(CurrentPicture {
                 frame,
                 poc: curr_poc,
@@ -676,7 +680,7 @@ impl VideoDecoder {
             }
         }
         // Flush the last picture
-        if let Some((poc, frame)) = self.finish_current_picture() {
+        if let Some((poc, frame)) = self.finish_current_picture()? {
             frames.push((poc, frame));
         }
 
@@ -721,13 +725,13 @@ fn clone_frame_for_ref(f: &DecodedFrame) -> DecodedFrame {
 }
 
 /// Create a frame from SPS parameters
-fn create_frame(sps: &params::Sps) -> DecodedFrame {
+fn create_frame(sps: &params::Sps) -> Result<DecodedFrame> {
     let mut frame = DecodedFrame::with_params(
         sps.pic_width_in_luma_samples,
         sps.pic_height_in_luma_samples,
         sps.bit_depth_y(),
         sps.chroma_format_idc,
-    );
+    )?;
     frame.full_range = sps.video_full_range_flag;
     frame.matrix_coeffs = sps.matrix_coeffs;
     frame.color_primaries = sps.color_primaries;
@@ -748,7 +752,7 @@ fn create_frame(sps: &params::Sps) -> DecodedFrame {
             sps.conf_win_offset.3 * sub_height_c,
         );
     }
-    frame
+    Ok(frame)
 }
 
 /// Apply deblocking + SAO loop filters

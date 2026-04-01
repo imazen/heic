@@ -134,6 +134,10 @@ pub enum HevcError {
     Unsupported(&'static str),
     /// Decoding error
     DecodingError(&'static str),
+    /// Memory allocation failed
+    AllocationFailed,
+    /// Dimension overflow (width * height exceeds limits)
+    DimensionOverflow,
 }
 
 impl fmt::Display for HevcError {
@@ -151,11 +155,19 @@ impl fmt::Display for HevcError {
             }
             Self::Unsupported(msg) => write!(f, "unsupported: {msg}"),
             Self::DecodingError(msg) => write!(f, "decoding error: {msg}"),
+            Self::AllocationFailed => write!(f, "memory allocation failed"),
+            Self::DimensionOverflow => write!(f, "frame dimensions overflow"),
         }
     }
 }
 
 impl core::error::Error for HevcError {}
+
+impl From<TryReserveError> for HevcError {
+    fn from(_: TryReserveError) -> Self {
+        Self::AllocationFailed
+    }
+}
 
 /// Errors from probing image headers
 #[derive(Debug)]

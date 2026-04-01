@@ -4,6 +4,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::color_convert;
+use crate::error::HevcError;
+
+type Result<T> = core::result::Result<T, HevcError>;
 
 /// Sentinel value for uninitialized pixels.
 /// Used during decoding to distinguish decoded samples from uninitialized ones
@@ -73,14 +76,18 @@ pub struct DecodedFrame {
 }
 
 impl DecodedFrame {
-    /// Create a frame with specific parameters
+    /// Create a frame with specific parameters.
     ///
-    /// # Panics
-    /// Panics if width * height overflows u32.
-    pub(crate) fn with_params(width: u32, height: u32, bit_depth: u8, chroma_format: u8) -> Self {
+    /// Returns an error if dimensions overflow or allocation fails.
+    pub(crate) fn with_params(
+        width: u32,
+        height: u32,
+        bit_depth: u8,
+        chroma_format: u8,
+    ) -> Result<Self> {
         let luma_size = width
             .checked_mul(height)
-            .expect("frame dimensions overflow") as usize;
+            .ok_or(HevcError::DimensionOverflow)? as usize;
 
         let (chroma_width, chroma_height) = match chroma_format {
             0 => (0, 0),                                  // Monochrome
@@ -90,33 +97,43 @@ impl DecodedFrame {
             _ => (width.div_ceil(2), height.div_ceil(2)),
         };
 
-        let chroma_size = (chroma_width * chroma_height) as usize;
+        let chroma_size = chroma_width
+            .checked_mul(chroma_height)
+            .ok_or(HevcError::DimensionOverflow)? as usize;
 
         let deblock_stride = width.div_ceil(4);
         let deblock_height = height.div_ceil(4);
-        let deblock_size = (deblock_stride * deblock_height) as usize;
+        let deblock_size = deblock_stride
+            .checked_mul(deblock_height)
+            .ok_or(HevcError::DimensionOverflow)? as usize;
 
-        Self {
+        let y_plane = try_vec![UNINIT_SAMPLE; luma_size]?;
+        let cb_plane = try_vec![UNINIT_SAMPLE; chroma_size]?;
+        let cr_plane = try_vec![UNINIT_SAMPLE; chroma_size]?;
+        let deblock_flags = try_vec![0u8; deblock_size]?;
+        let qp_map = try_vec![0i8; deblock_size]?;
+
+        Ok(Self {
             width,
             height,
-            y_plane: vec![UNINIT_SAMPLE; luma_size],
-            cb_plane: vec![UNINIT_SAMPLE; chroma_size],
-            cr_plane: vec![UNINIT_SAMPLE; chroma_size],
+            y_plane,
+            cb_plane,
+            cr_plane,
             bit_depth,
             chroma_format,
             crop_left: 0,
             crop_right: 0,
             crop_top: 0,
             crop_bottom: 0,
-            deblock_flags: vec![0; deblock_size],
+            deblock_flags,
             deblock_stride,
-            qp_map: vec![0; deblock_size],
+            qp_map,
             alpha_plane: None,
             full_range: false,
             matrix_coeffs: 2,
             color_primaries: 2,
             transfer_characteristics: 2,
-        }
+        })
     }
 
     /// Mark a vertical TU/CU boundary at luma position (x, y) with given size
@@ -289,26 +306,24 @@ impl DecodedFrame {
 
     /// Compute `cropped_width * cropped_height` as `usize` with overflow check.
     ///
-    /// # Panics
-    /// Panics if the product overflows `usize`.
+    /// Dimensions are validated during construction, so overflow here is
+    /// not reachable for properly constructed frames.
     fn total_cropped_pixels(&self) -> usize {
         let w = self.cropped_width() as u64;
         let h = self.cropped_height() as u64;
-        let total = w
-            .checked_mul(h)
-            .expect("dimension overflow: width * height exceeds u64");
-        usize::try_from(total).expect("dimension overflow: pixel count exceeds usize")
+        // Cropped dimensions are always <= full dimensions, which were
+        // validated by with_params(), so this cannot overflow.
+        let total = w.saturating_mul(h);
+        usize::try_from(total).unwrap_or(usize::MAX)
     }
 
     /// Compute `cropped_width * cropped_height * bpp` as `usize` with overflow check.
     ///
-    /// # Panics
-    /// Panics if the product overflows `usize`.
+    /// Dimensions are validated during construction, so overflow here is
+    /// not reachable for properly constructed frames.
     fn total_cropped_bytes(&self, bytes_per_pixel: usize) -> usize {
         let total = self.total_cropped_pixels();
-        total
-            .checked_mul(bytes_per_pixel)
-            .expect("dimension overflow: total bytes exceeds usize")
+        total.saturating_mul(bytes_per_pixel)
     }
 
     /// Convert YCbCr to interleaved RGB bytes with conformance window cropping.

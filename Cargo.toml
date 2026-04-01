@@ -31,6 +31,7 @@ exclude = [
 [features]
 default = ["std"]
 std = ["archmage/std"]
+fallible-alloc = []
 parallel = ["std", "dep:rayon"]
 zencodec = ["dep:zencodec", "dep:zenpixels", "dep:rgb", "dep:imgref", "dep:garb"]
 

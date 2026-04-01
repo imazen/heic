@@ -220,7 +220,7 @@ mod tests {
     #[test]
     fn test_dpb_insert_and_find() {
         let mut dpb = Dpb::new(4);
-        let frame = DecodedFrame::with_params(64, 64, 8, 1);
+        let frame = DecodedFrame::with_params(64, 64, 8, 1).unwrap();
         let entry = DpbEntry::new(frame, 42, 4);
         let slot = dpb.insert(entry).unwrap();
         assert_eq!(dpb.count(), 1);
@@ -232,7 +232,7 @@ mod tests {
     fn test_dpb_active_pocs() {
         let mut dpb = Dpb::new(4);
         for poc in [0, 1, 2] {
-            let frame = DecodedFrame::with_params(64, 64, 8, 1);
+            let frame = DecodedFrame::with_params(64, 64, 8, 1).unwrap();
             dpb.insert(DpbEntry::new(frame, poc, 4));
         }
         let mut pocs = dpb.active_pocs();
@@ -244,7 +244,7 @@ mod tests {
     fn test_dpb_mark_unused() {
         let mut dpb = Dpb::new(4);
         for poc in [0, 1, 2] {
-            let frame = DecodedFrame::with_params(64, 64, 8, 1);
+            let frame = DecodedFrame::with_params(64, 64, 8, 1).unwrap();
             dpb.insert(DpbEntry::new(frame, poc, 4));
         }
         dpb.mark_unused(&[0, 2]); // POC 1 is no longer referenced

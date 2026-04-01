@@ -504,23 +504,30 @@ impl<'a> SliceContext<'a> {
         let min_cb_size = 1u32 << sps.log2_min_cb_size();
         let ct_depth_map_stride = sps.pic_width_in_luma_samples.div_ceil(min_cb_size);
         let ct_depth_map_height = sps.pic_height_in_luma_samples.div_ceil(min_cb_size);
-        let ct_map_size = (ct_depth_map_stride * ct_depth_map_height) as usize;
-        let ct_depth_map = vec![0xFF; ct_map_size];
+        let ct_map_size = (ct_depth_map_stride as usize)
+            .checked_mul(ct_depth_map_height as usize)
+            .ok_or(HevcError::DecodingError("ct_depth_map size overflow"))?;
+        let ct_depth_map = try_vec![0xFFu8; ct_map_size]?;
 
         // Intra mode map at min_pu_size granularity (= min_cb_size / 2)
         // This supports NxN partition PU-level resolution
         let min_pu_size = (min_cb_size / 2).max(1);
         let intra_mode_map_stride = sps.pic_width_in_luma_samples.div_ceil(min_pu_size);
         let intra_mode_map_height = sps.pic_height_in_luma_samples.div_ceil(min_pu_size);
-        let pu_map_size = (intra_mode_map_stride * intra_mode_map_height) as usize;
-        let intra_mode_map = vec![IntraPredMode::Dc.as_u8(); pu_map_size];
-        let intra_chroma_mode_map = vec![IntraPredMode::Dc.as_u8(); pu_map_size];
+        let pu_map_size = (intra_mode_map_stride as usize)
+            .checked_mul(intra_mode_map_height as usize)
+            .ok_or(HevcError::DecodingError("pu_map size overflow"))?;
+        let intra_mode_map = try_vec![IntraPredMode::Dc.as_u8(); pu_map_size]?;
+        let intra_chroma_mode_map = try_vec![IntraPredMode::Dc.as_u8(); pu_map_size]?;
 
         // QP map at min_tb_size granularity
         let min_tb_size = 1u32 << sps.log2_min_tb_size();
         let qp_map_stride = sps.pic_width_in_luma_samples.div_ceil(min_tb_size);
         let qp_map_height = sps.pic_height_in_luma_samples.div_ceil(min_tb_size);
-        let qp_map = vec![slice_qp as i8; (qp_map_stride * qp_map_height) as usize];
+        let qp_map_size = (qp_map_stride as usize)
+            .checked_mul(qp_map_height as usize)
+            .ok_or(HevcError::DecodingError("qp_map size overflow"))?;
+        let qp_map = try_vec![slice_qp as i8; qp_map_size]?;
 
         Ok(Self {
             sps,
@@ -553,18 +560,19 @@ impl<'a> SliceContext<'a> {
             last_qpy_in_prev_qg: slice_qp,
             current_qg_x: -1,
             current_qg_y: -1,
-            sao_map: SaoMap::new(sps.pic_width_in_ctbs(), sps.pic_height_in_ctbs()),
+            sao_map: SaoMap::new(sps.pic_width_in_ctbs(), sps.pic_height_in_ctbs())?,
             residual_buf: [0i16; 1024],
             scaling_buf: [16u8; 1024],
             stat_coeff: [0u8; 4],
             mc_scratch: mc::McScratch::default(),
-            pred_mode_map: vec![PredMode::Intra; pu_map_size],
-            mv_info: vec![PbMotion::UNAVAILABLE; pu_map_size],
-            cbf_map: vec![
-                false;
-                (sps.pic_width_in_luma_samples.div_ceil(4)
-                    * sps.pic_height_in_luma_samples.div_ceil(4)) as usize
-            ],
+            pred_mode_map: try_vec![PredMode::Intra; pu_map_size]?,
+            mv_info: try_vec![PbMotion::UNAVAILABLE; pu_map_size]?,
+            cbf_map: {
+                let cbf_size = (sps.pic_width_in_luma_samples.div_ceil(4) as usize)
+                    .checked_mul(sps.pic_height_in_luma_samples.div_ceil(4) as usize)
+                    .ok_or(HevcError::DecodingError("cbf_map size overflow"))?;
+                try_vec![false; cbf_size]?
+            },
             cbf_map_stride: sps.pic_width_in_luma_samples.div_ceil(4),
             curr_poc: 0,
             ref_pic_lists: RefPicLists::default(),
@@ -623,7 +631,11 @@ impl<'a> SliceContext<'a> {
             cbf_map_stride: self.cbf_map_stride,
             qp_map: core::mem::take(&mut self.qp_map),
             qp_map_stride: self.qp_map_stride,
-            sao_map: core::mem::replace(&mut self.sao_map, SaoMap::new(0, 0)),
+            sao_map: core::mem::replace(
+                &mut self.sao_map,
+                // SaoMap::new(0, 0) allocates 0 elements — cannot fail
+                SaoMap::new(0, 0).unwrap_or_else(|_| unreachable!()),
+            ),
         }
     }
 
@@ -1108,12 +1120,12 @@ impl<'a> SliceContext<'a> {
 
                     if sao_type_idx == 1 {
                         // Band offset: decode signs + band position
-                        let mut signed_offsets = [0i8; 4];
+                        let mut signed_offsets = [0i16; 4];
                         for i in 0..4 {
                             if offsets_abs[i] != 0 {
                                 let sign = self.cabac.decode_bypass()?;
                                 se_trace("sao_offset_sign", sign as i64, &self.cabac);
-                                let val = (offsets_abs[i] as i32 * offset_scale) as i8;
+                                let val = (offsets_abs[i] as i32 * offset_scale) as i16;
                                 signed_offsets[i] = if sign != 0 { -val } else { val };
                             }
                         }
@@ -1125,7 +1137,7 @@ impl<'a> SliceContext<'a> {
                     } else {
                         // Edge offset: store absolute values (sign applied during filtering)
                         for (i, &offset) in offsets_abs.iter().enumerate() {
-                            info.sao_offset_val[c_idx][i] = (offset as i32 * offset_scale) as i8;
+                            info.sao_offset_val[c_idx][i] = (offset as i32 * offset_scale) as i16;
                         }
 
                         if c_idx <= 1 {
@@ -3429,7 +3441,13 @@ impl<'a> SliceContext<'a> {
         log2_cb_size: u8,
         frame: &mut DecodedFrame,
     ) -> Result<()> {
-        let pcm = self.sps.pcm_params.as_ref().unwrap();
+        let pcm = self
+            .sps
+            .pcm_params
+            .as_ref()
+            .ok_or(HevcError::InvalidBitstream(
+                "pcm_flag set but SPS has no PCM params",
+            ))?;
         let pcm_bit_depth_luma = pcm.pcm_sample_bit_depth_luma_minus1 as u32 + 1;
         let pcm_bit_depth_chroma = pcm.pcm_sample_bit_depth_chroma_minus1 as u32 + 1;
 
