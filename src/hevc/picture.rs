@@ -1095,6 +1095,7 @@ mod tests {
     /// Before the fix, `(65536u32 * 65536u32)` would overflow u32 to 0.
     /// After the fix, it correctly computes 4,294,967,296 via u64.
     #[test]
+    #[cfg(target_pointer_width = "64")]
     fn total_cropped_pixels_no_u32_overflow() {
         let frame = frame_with_cropped_dims(65536, 65536);
         // This would have been 0 with u32 arithmetic (65536 * 65536 wraps to 0)
@@ -1105,6 +1106,7 @@ mod tests {
     /// Verify that total_cropped_bytes correctly handles dimensions that
     /// would overflow u32 when multiplied by bytes_per_pixel.
     #[test]
+    #[cfg(target_pointer_width = "64")]
     fn total_cropped_bytes_no_u32_overflow() {
         let frame = frame_with_cropped_dims(65536, 65536);
         let total_rgb = frame.total_cropped_bytes(3);
@@ -1117,6 +1119,7 @@ mod tests {
     /// Verify total_cropped_pixels handles large u32 values near u32::MAX.
     /// u32::MAX * 2 = 8_589_934_590 which overflows u32 but fits in u64.
     #[test]
+    #[cfg(target_pointer_width = "64")]
     fn total_cropped_pixels_near_u32_max() {
         let frame = frame_with_cropped_dims(u32::MAX, 2);
         let total = frame.total_cropped_pixels();
