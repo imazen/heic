@@ -482,7 +482,14 @@ static void extract_auxiliary_images(struct heif_image_handle *handle,
                 free(ids);
             }
 
-            if (aux_type) heif_image_handle_free_auxiliary_types(&aux_type);
+            if (aux_type) {
+#if LIBHEIF_HAVE_VERSION(1,18,0)
+                /* API changed: takes handle + pointer-to-type since 1.18 */
+                heif_image_handle_free_auxiliary_types(aux_handle, &aux_type);
+#else
+                heif_image_handle_free_auxiliary_types(&aux_type);
+#endif
+            }
             heif_image_handle_release(aux_handle);
             jw_obj_close(j);
         }
