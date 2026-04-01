@@ -128,8 +128,8 @@ fn probe_synthetic_files() {
         "synthetic/synth_8bit_lossless.heic",
     ] {
         let data = read_file(name);
-        let info = ImageInfo::from_bytes(&data)
-            .unwrap_or_else(|e| panic!("probe failed for {name}: {e}"));
+        let info =
+            ImageInfo::from_bytes(&data).unwrap_or_else(|e| panic!("probe failed for {name}: {e}"));
         assert!(info.width > 0, "{name}: width should be > 0");
         assert!(info.height > 0, "{name}: height should be > 0");
         assert_eq!(info.bit_depth, 8, "{name}: should be 8-bit");
@@ -188,7 +188,10 @@ fn probe_all_libheif_examples() {
                 count += 1;
             }
             Err(e) => {
-                failures.push(format!("{}: {e}", path.file_name().unwrap().to_string_lossy()));
+                failures.push(format!(
+                    "{}: {e}",
+                    path.file_name().unwrap().to_string_lossy()
+                ));
             }
         }
     }
@@ -219,7 +222,10 @@ fn no_gain_map_in_libheif_example() {
     assert!(!info.has_gain_map);
 
     let result = DecoderConfig::new().decode_gain_map(&data);
-    assert!(result.is_err(), "non-HDR file should error on gain map decode");
+    assert!(
+        result.is_err(),
+        "non-HDR file should error on gain map decode"
+    );
 }
 
 #[test]
