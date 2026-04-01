@@ -55,12 +55,8 @@ fn extract_reference(input_path: &Path) -> PathBuf {
     std::fs::create_dir_all(&outdir).expect("create outdir");
 
     let root = repo_root();
-    let rel_input = input_path
-        .strip_prefix(&root)
-        .unwrap_or(input_path);
-    let rel_out = outdir
-        .strip_prefix(&root)
-        .unwrap_or(&outdir);
+    let rel_input = input_path.strip_prefix(&root).unwrap_or(input_path);
+    let rel_out = outdir.strip_prefix(&root).unwrap_or(&outdir);
 
     let status = Command::new("docker")
         .args([
@@ -76,7 +72,11 @@ fn extract_reference(input_path: &Path) -> PathBuf {
         .status()
         .expect("docker run failed");
 
-    assert!(status.success(), "heif-ref extract failed for {}", input_path.display());
+    assert!(
+        status.success(),
+        "heif-ref extract failed for {}",
+        input_path.display()
+    );
     outdir
 }
 
@@ -170,9 +170,7 @@ fn parse_ref_info(outdir: &Path) -> RefInfo {
         .find("\"color_profile\":")
         .map(|i| &primary[i..])
         .unwrap_or("");
-    let color_profile_type = json_str(cp_start, "type")
-        .unwrap_or("none")
-        .to_string();
+    let color_profile_type = json_str(cp_start, "type").unwrap_or("none").to_string();
 
     // Parse auxiliary_images array
     let mut aux_types = Vec::new();
@@ -265,10 +263,7 @@ fn parse_ref_info(outdir: &Path) -> RefInfo {
 }
 
 fn rgb_to_imgvec(rgb: &[u8], width: u32, height: u32) -> ImgVec<[u8; 3]> {
-    let pixels: Vec<[u8; 3]> = rgb
-        .chunks_exact(3)
-        .map(|c| [c[0], c[1], c[2]])
-        .collect();
+    let pixels: Vec<[u8; 3]> = rgb.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
     ImgVec::new(pixels, width as usize, height as usize)
 }
 
@@ -325,15 +320,29 @@ fn compare_example_heic_metadata() {
     assert_eq!(our_info.bit_depth, ref_info.bit_depth, "bit_depth mismatch");
 
     // Metadata presence
-    assert_eq!(our_info.has_exif, ref_info.exif_present, "EXIF presence mismatch");
-    assert_eq!(our_info.has_xmp, ref_info.xmp_present, "XMP presence mismatch");
-    assert_eq!(our_info.has_thumbnail, ref_info.thumbnail_present, "thumbnail presence mismatch");
+    assert_eq!(
+        our_info.has_exif, ref_info.exif_present,
+        "EXIF presence mismatch"
+    );
+    assert_eq!(
+        our_info.has_xmp, ref_info.xmp_present,
+        "XMP presence mismatch"
+    );
+    assert_eq!(
+        our_info.has_thumbnail, ref_info.thumbnail_present,
+        "thumbnail presence mismatch"
+    );
 
     println!("example.heic metadata: MATCH");
     println!(
         "  {}x{}, alpha={}, depth={}, exif={}, xmp={}, thumb={}",
-        ref_info.width, ref_info.height, ref_info.has_alpha, ref_info.bit_depth,
-        ref_info.exif_present, ref_info.xmp_present, ref_info.thumbnail_present
+        ref_info.width,
+        ref_info.height,
+        ref_info.has_alpha,
+        ref_info.bit_depth,
+        ref_info.exif_present,
+        ref_info.xmp_present,
+        ref_info.thumbnail_present
     );
 }
 
@@ -357,7 +366,11 @@ fn compare_example_heic_pixels() {
 
     // Load reference pixels
     let ref_pixels = std::fs::read(ref_dir.join("primary.bin")).unwrap();
-    assert_eq!(ref_pixels.len(), ours.data.len(), "pixel buffer size mismatch");
+    assert_eq!(
+        ref_pixels.len(),
+        ours.data.len(),
+        "pixel buffer size mismatch"
+    );
 
     // SSIM2 comparison
     let ref_img = rgb_to_imgvec(&ref_pixels, ref_info.width, ref_info.height);
@@ -371,10 +384,7 @@ fn compare_example_heic_pixels() {
     println!("  SSIM2: {ssim2:.2}");
     println!("  Avg diff: {avg_diff:.2}, Max diff: {max_diff}, Exact: {exact_pct:.1}%");
 
-    assert!(
-        ssim2 > 50.0,
-        "SSIM2 {ssim2:.2} too low (expected > 50)"
-    );
+    assert!(ssim2 > 50.0, "SSIM2 {ssim2:.2} too low (expected > 50)");
 }
 
 #[test]
@@ -398,9 +408,12 @@ fn compare_hdr_sample_metadata() {
     // Metadata presence
     assert_eq!(our_info.has_exif, ref_info.exif_present, "EXIF mismatch");
     assert_eq!(our_info.has_xmp, ref_info.xmp_present, "XMP mismatch");
-    assert_eq!(our_info.has_gain_map, !ref_info.aux_types.is_empty()
-        && ref_info.aux_types.iter().any(|t| t.contains("hdrgainmap")),
-        "gain map presence mismatch");
+    assert_eq!(
+        our_info.has_gain_map,
+        !ref_info.aux_types.is_empty()
+            && ref_info.aux_types.iter().any(|t| t.contains("hdrgainmap")),
+        "gain map presence mismatch"
+    );
 
     // ICC profile
     assert_eq!(
@@ -412,9 +425,12 @@ fn compare_hdr_sample_metadata() {
     println!("hdr-sample.heic metadata: MATCH");
     println!(
         "  {}x{}, exif={}, xmp={}, icc={}, gain_map={}",
-        ref_info.width, ref_info.height,
-        ref_info.exif_present, ref_info.xmp_present,
-        ref_info.color_profile_type, !ref_info.aux_types.is_empty()
+        ref_info.width,
+        ref_info.height,
+        ref_info.exif_present,
+        ref_info.xmp_present,
+        ref_info.color_profile_type,
+        !ref_info.aux_types.is_empty()
     );
     for aux in &ref_info.aux_images {
         println!("  aux: {} {}x{}", aux.aux_type, aux.width, aux.height);
@@ -509,8 +525,16 @@ fn compare_hdr_sample_gain_map() {
     if let Some(ref_gm_path) = ref_gm_path {
         let ref_gm_pixels = std::fs::read(&ref_gm_path).unwrap();
         let expected_size = (gm_aux.width * gm_aux.height) as usize;
-        assert_eq!(ref_gm_pixels.len(), expected_size, "ref gain map size mismatch");
-        assert_eq!(our_gm.data.len(), expected_size, "our gain map size mismatch");
+        assert_eq!(
+            ref_gm_pixels.len(),
+            expected_size,
+            "ref gain map size mismatch"
+        );
+        assert_eq!(
+            our_gm.data.len(),
+            expected_size,
+            "our gain map size mismatch"
+        );
 
         // Compare gain map pixels
         let mut total_diff: u64 = 0;
@@ -529,7 +553,10 @@ fn compare_hdr_sample_gain_map() {
         let avg = total_diff as f64 / expected_size as f64;
         let exact_pct = exact as f64 / expected_size as f64 * 100.0;
 
-        println!("hdr-sample.heic gain map ({}x{}):", gm_aux.width, gm_aux.height);
+        println!(
+            "hdr-sample.heic gain map ({}x{}):",
+            gm_aux.width, gm_aux.height
+        );
         println!("  Avg diff: {avg:.2}, Max diff: {max_diff}, Exact: {exact_pct:.1}%");
     }
 }
@@ -578,11 +605,7 @@ fn compare_hdr_sample_exif() {
         our_exif.len(),
         ref_exif_body.len()
     );
-    assert_eq!(
-        our_exif.as_ref(),
-        ref_exif_body,
-        "EXIF content mismatch"
-    );
+    assert_eq!(our_exif.as_ref(), ref_exif_body, "EXIF content mismatch");
     println!("hdr-sample.heic EXIF: MATCH ({} bytes)", our_exif.len());
 }
 
@@ -627,12 +650,11 @@ fn compare_hdr_sample_xmp() {
         our_xmp_trimmed.len(),
         ref_xmp_trimmed.len()
     );
-    assert_eq!(
-        our_xmp_trimmed,
-        ref_xmp_trimmed,
-        "XMP content mismatch"
+    assert_eq!(our_xmp_trimmed, ref_xmp_trimmed, "XMP content mismatch");
+    println!(
+        "hdr-sample.heic XMP: MATCH ({} bytes)",
+        our_xmp_trimmed.len()
     );
-    println!("hdr-sample.heic XMP: MATCH ({} bytes)", our_xmp_trimmed.len());
 }
 
 #[test]
@@ -660,7 +682,11 @@ fn compare_synthetic_files() {
 
         let ref_pixels = std::fs::read(ref_dir.join("primary.bin")).unwrap();
         if ref_pixels.len() != ours.data.len() {
-            eprintln!("{name}: pixel buffer size mismatch (ref={}, ours={})", ref_pixels.len(), ours.data.len());
+            eprintln!(
+                "{name}: pixel buffer size mismatch (ref={}, ours={})",
+                ref_pixels.len(),
+                ours.data.len()
+            );
             continue;
         }
 
