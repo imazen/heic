@@ -169,7 +169,7 @@ jobs:
           rm -f Cargo.lock
 
       - name: Generate coverage
-        run: cargo llvm-cov --lcov --output-path lcov.info
+        run: cargo llvm-cov --lib --lcov --output-path lcov.info
 
       - name: Upload coverage
         uses: codecov/codecov-action@v5
