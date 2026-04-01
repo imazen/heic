@@ -107,25 +107,11 @@ impl DecodedFrame {
             .checked_mul(deblock_height)
             .ok_or(HevcError::DimensionOverflow)? as usize;
 
-        let mut y_plane = Vec::new();
-        y_plane.try_reserve(luma_size)?;
-        y_plane.resize(luma_size, UNINIT_SAMPLE);
-
-        let mut cb_plane = Vec::new();
-        cb_plane.try_reserve(chroma_size)?;
-        cb_plane.resize(chroma_size, UNINIT_SAMPLE);
-
-        let mut cr_plane = Vec::new();
-        cr_plane.try_reserve(chroma_size)?;
-        cr_plane.resize(chroma_size, UNINIT_SAMPLE);
-
-        let mut deblock_flags = Vec::new();
-        deblock_flags.try_reserve(deblock_size)?;
-        deblock_flags.resize(deblock_size, 0);
-
-        let mut qp_map = Vec::new();
-        qp_map.try_reserve(deblock_size)?;
-        qp_map.resize(deblock_size, 0);
+        let y_plane = try_vec![UNINIT_SAMPLE; luma_size]?;
+        let cb_plane = try_vec![UNINIT_SAMPLE; chroma_size]?;
+        let cr_plane = try_vec![UNINIT_SAMPLE; chroma_size]?;
+        let deblock_flags = try_vec![0u8; deblock_size]?;
+        let qp_map = try_vec![0i8; deblock_size]?;
 
         Ok(Self {
             width,

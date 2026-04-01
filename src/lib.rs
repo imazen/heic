@@ -100,6 +100,41 @@ extern crate alloc;
 
 whereat::define_at_crate_info!();
 
+/// Allocate a `Vec<T>` filled with `len` copies of `val`, returning `Result`.
+///
+/// With `fallible-alloc` feature: uses `try_reserve` + `resize` (never panics on OOM).
+/// Without `fallible-alloc` (default): uses `vec![val; len]` (fast memset path,
+/// panics on OOM like standard Rust, but wraps result in `Ok`).
+///
+/// Always returns `Result<Vec<T>, HevcError>` so callers use `try_vec![...; ...]?`
+/// — the `?` is visible at the call site, not hidden in the macro.
+macro_rules! try_vec {
+    ($val:expr; $len:expr) => {{
+        #[cfg(feature = "fallible-alloc")]
+        {
+            $crate::alloc_vec_fallible($len, $val)
+        }
+        #[cfg(not(feature = "fallible-alloc"))]
+        {
+            Ok::<::alloc::vec::Vec<_>, $crate::error::HevcError>(::alloc::vec![$val; $len])
+        }
+    }};
+}
+
+/// Fallible vec allocation — called by `try_vec!` when `fallible-alloc` is enabled.
+#[cfg(feature = "fallible-alloc")]
+#[inline]
+pub(crate) fn alloc_vec_fallible<T: Clone>(
+    len: usize,
+    val: T,
+) -> core::result::Result<alloc::vec::Vec<T>, error::HevcError> {
+    let mut v = alloc::vec::Vec::new();
+    v.try_reserve(len)
+        .map_err(|_| error::HevcError::AllocationFailed)?;
+    v.resize(len, val);
+    Ok(v)
+}
+
 mod auxiliary;
 mod decode;
 mod error;

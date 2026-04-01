@@ -51,15 +51,6 @@ use archmage::incant;
 
 type Result<T> = core::result::Result<T, HevcError>;
 
-/// Allocate a `Vec<T>` of `len` elements filled with `val`, using fallible allocation.
-/// Returns `HevcError::AllocationFailed` if the reservation fails.
-fn try_alloc_vec<T: Clone>(val: T, len: usize) -> Result<Vec<T>> {
-    let mut v = Vec::new();
-    v.try_reserve(len)?;
-    v.resize(len, val);
-    Ok(v)
-}
-
 /// Global SE counter for syntax element tracing
 pub static SE_COUNTER: AtomicU32 = AtomicU32::new(0);
 pub const SE_TRACE_LIMIT: u32 = 0;
@@ -516,7 +507,7 @@ impl<'a> SliceContext<'a> {
         let ct_map_size = (ct_depth_map_stride as usize)
             .checked_mul(ct_depth_map_height as usize)
             .ok_or(HevcError::DecodingError("ct_depth_map size overflow"))?;
-        let ct_depth_map = try_alloc_vec(0xFFu8, ct_map_size)?;
+        let ct_depth_map = try_vec![0xFFu8; ct_map_size]?;
 
         // Intra mode map at min_pu_size granularity (= min_cb_size / 2)
         // This supports NxN partition PU-level resolution
@@ -526,8 +517,8 @@ impl<'a> SliceContext<'a> {
         let pu_map_size = (intra_mode_map_stride as usize)
             .checked_mul(intra_mode_map_height as usize)
             .ok_or(HevcError::DecodingError("pu_map size overflow"))?;
-        let intra_mode_map = try_alloc_vec(IntraPredMode::Dc.as_u8(), pu_map_size)?;
-        let intra_chroma_mode_map = try_alloc_vec(IntraPredMode::Dc.as_u8(), pu_map_size)?;
+        let intra_mode_map = try_vec![IntraPredMode::Dc.as_u8(); pu_map_size]?;
+        let intra_chroma_mode_map = try_vec![IntraPredMode::Dc.as_u8(); pu_map_size]?;
 
         // QP map at min_tb_size granularity
         let min_tb_size = 1u32 << sps.log2_min_tb_size();
@@ -536,7 +527,7 @@ impl<'a> SliceContext<'a> {
         let qp_map_size = (qp_map_stride as usize)
             .checked_mul(qp_map_height as usize)
             .ok_or(HevcError::DecodingError("qp_map size overflow"))?;
-        let qp_map = try_alloc_vec(slice_qp as i8, qp_map_size)?;
+        let qp_map = try_vec![slice_qp as i8; qp_map_size]?;
 
         Ok(Self {
             sps,
@@ -574,13 +565,13 @@ impl<'a> SliceContext<'a> {
             scaling_buf: [16u8; 1024],
             stat_coeff: [0u8; 4],
             mc_scratch: mc::McScratch::default(),
-            pred_mode_map: try_alloc_vec(PredMode::Intra, pu_map_size)?,
-            mv_info: try_alloc_vec(PbMotion::UNAVAILABLE, pu_map_size)?,
+            pred_mode_map: try_vec![PredMode::Intra; pu_map_size]?,
+            mv_info: try_vec![PbMotion::UNAVAILABLE; pu_map_size]?,
             cbf_map: {
                 let cbf_size = (sps.pic_width_in_luma_samples.div_ceil(4) as usize)
                     .checked_mul(sps.pic_height_in_luma_samples.div_ceil(4) as usize)
                     .ok_or(HevcError::DecodingError("cbf_map size overflow"))?;
-                try_alloc_vec(false, cbf_size)?
+                try_vec![false; cbf_size]?
             },
             cbf_map_stride: sps.pic_width_in_luma_samples.div_ceil(4),
             curr_poc: 0,

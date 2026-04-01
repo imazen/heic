@@ -40,10 +40,7 @@ impl SaoMap {
         let size = (width_ctbs as usize)
             .checked_mul(height_ctbs as usize)
             .ok_or(crate::error::HevcError::DimensionOverflow)?;
-        let mut data = Vec::new();
-        data.try_reserve(size)
-            .map_err(|_| crate::error::HevcError::AllocationFailed)?;
-        data.resize(size, SaoInfo::default());
+        let data = try_vec![SaoInfo::default(); size]?;
         Ok(Self {
             data,
             width_ctbs,
