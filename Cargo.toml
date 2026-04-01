@@ -27,6 +27,7 @@ exclude = [
     "tests/trace_bad_pixel.rs",
     "benches/compare.rs",
 ]
+autoexamples = false
 
 [features]
 default = ["std"]
@@ -51,18 +52,47 @@ garb = { version = "0.2.5", default-features = false, optional = true }
 criterion = "0.8.2"
 fast-ssim2 = { version = "0.7.1", features = ["imgref"] }
 imgref = "1.12.0"
-# heic-wasm-rs = { path = "../../heic/heic-wasm-rs" } # local-only, not published
+# heic-wasm-rs: reference decoder for comparison tests
+# Uncomment + RUSTFLAGS='--cfg heic_reference' cargo test to enable
+# heic-wasm-rs = { path = "../../heic/heic-wasm-rs" }
 png = "0.18.1"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(heic_reference)'] }
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
 
+# Only auto-discover examples that don't need heic-wasm-rs
+[[example]]
+name = "decode"
+[[example]]
+name = "bin_trace_emit"
+[[example]]
+name = "dump_hevc"
+[[example]]
+name = "compare_yuv"
+# batch_test and compare_support need API/dep fixes, excluded for now
+[[example]]
+name = "debug_edges"
+[[example]]
+name = "debug_qp"
+[[example]]
+name = "decode_trace"
+[[example]]
+name = "dump_container"
+[[example]]
+name = "extract_hevc"
+[[example]]
+name = "test_all"
+# compare_support requires heic-wasm-rs (uncomment dep + add [[example]] to use)
+
 [[bench]]
 name = "decode"
 harness = false
 
-# compare bench requires heic-wasm-rs (local-only, excluded from publish)
+# compare bench requires heic-wasm-rs (uncomment dep + this entry to use)
 # [[bench]]
 # name = "compare"
 # harness = false

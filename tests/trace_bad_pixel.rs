@@ -1,3 +1,4 @@
+#![cfg(heic_reference)]
 //! Backwards tracing from bad pixels to CABAC operations
 //!
 //! This test finds pixels with large RGB differences and traces

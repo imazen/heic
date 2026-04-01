@@ -1,3 +1,4 @@
+#![cfg(heic_reference)]
 //! Compare our decoder output against reference (heic-wasm-rs / libheif)
 
 use fast_ssim2::compute_ssimulacra2;

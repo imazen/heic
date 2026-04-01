@@ -1,3 +1,4 @@
+#![cfg(heic_reference)]
 // Head-to-head benchmark: pure Rust heic vs native libheif (SSE) vs WASM libheif
 //
 // Native libheif is linked directly via raw FFI against the system library (1.12 + libde265 SSE).

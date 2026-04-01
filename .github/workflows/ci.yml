@@ -33,18 +33,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: Patch path deps for CI
-        shell: bash
-        run: |
-          # Delete unpublished path-only dev-deps
-          sed -e '/^heic-wasm-rs/d' Cargo.toml > Cargo.toml.ci && mv Cargo.toml.ci Cargo.toml
-          rm -f Cargo.lock
-
       - name: Test (default features)
-        run: cargo test --lib
+        run: cargo test
 
       - name: Test (parallel)
-        run: cargo test --lib --features parallel
+        run: cargo test --features parallel
 
       - name: Check (no_std)
         run: cargo check --no-default-features
@@ -57,26 +50,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: Patch path deps for CI
-        shell: bash
-        run: |
-          sed -e '/^heic-wasm-rs/d' Cargo.toml > Cargo.toml.ci && mv Cargo.toml.ci Cargo.toml
-          rm -f Cargo.lock
-
       - name: Check (no_std)
         run: cargo check --no-default-features
 
       - name: Test (parallel)
-        run: cargo test --lib --features parallel
+        run: cargo test --features parallel
 
       - name: Test (zencodec)
-        run: cargo test --lib --features zencodec
+        run: cargo test --features zencodec
 
       - name: Test (parallel,zencodec)
-        run: cargo test --lib --features "parallel,zencodec"
+        run: cargo test --features "parallel,zencodec"
 
-      - name: Test (all-features)
-        run: cargo test --lib --all-features
+      - name: Test (all publishable features)
+        run: cargo test --features "std,fallible-alloc,parallel,zencodec"
 
   clippy:
     name: Clippy
@@ -88,20 +75,14 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
 
-      - name: Patch path deps for CI
-        shell: bash
-        run: |
-          sed -e '/^heic-wasm-rs/d' Cargo.toml > Cargo.toml.ci && mv Cargo.toml.ci Cargo.toml
-          rm -f Cargo.lock
-
       - name: Clippy (default + parallel)
-        run: cargo clippy --lib --features parallel -- -D warnings
+        run: cargo clippy --all-targets --features parallel -- -D warnings
 
       - name: Clippy (zencodec)
-        run: cargo clippy --lib --features zencodec -- -D warnings
+        run: cargo clippy --all-targets --features zencodec -- -D warnings
 
-      - name: Clippy (all-features)
-        run: cargo clippy --lib --all-features -- -D warnings
+      - name: Clippy (all publishable features)
+        run: cargo clippy --all-targets --features "std,fallible-alloc,parallel,zencodec" -- -D warnings
 
   fmt:
     name: Format
@@ -124,12 +105,6 @@ jobs:
       - uses: taiki-e/install-action@cargo-hack
       - uses: Swatinem/rust-cache@v2
 
-      - name: Patch path deps for CI
-        shell: bash
-        run: |
-          sed -e '/^heic-wasm-rs/d' Cargo.toml > Cargo.toml.ci && mv Cargo.toml.ci Cargo.toml
-          rm -f Cargo.lock
-
       - name: Check MSRV
         run: cargo hack check --rust-version
 
@@ -144,14 +119,8 @@ jobs:
         with:
           key: cross-i686
 
-      - name: Patch path deps for CI
-        shell: bash
-        run: |
-          sed -e '/^heic-wasm-rs/d' Cargo.toml > Cargo.toml.ci && mv Cargo.toml.ci Cargo.toml
-          rm -f Cargo.lock
-
       - name: Test (i686)
-        run: cross test --target i686-unknown-linux-gnu --lib
+        run: cross test --target i686-unknown-linux-gnu
 
   coverage:
     name: Coverage
@@ -162,14 +131,8 @@ jobs:
       - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: Swatinem/rust-cache@v2
 
-      - name: Patch path deps for CI
-        shell: bash
-        run: |
-          sed -e '/^heic-wasm-rs/d' Cargo.toml > Cargo.toml.ci && mv Cargo.toml.ci Cargo.toml
-          rm -f Cargo.lock
-
       - name: Generate coverage
-        run: cargo llvm-cov --lib --lcov --output-path lcov.info
+        run: cargo llvm-cov --lcov --output-path lcov.info
 
       - name: Upload coverage
         uses: codecov/codecov-action@v5
