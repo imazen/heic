@@ -363,7 +363,7 @@ fn decode_iovl(
         canvas_height,
         bit_depth,
         chroma_format,
-    );
+    )?;
 
     // Apply canvas fill values (16-bit values scaled to bit depth)
     let fill_shift = 16u32.saturating_sub(bit_depth as u32);
@@ -527,7 +527,7 @@ fn decode_grid(
         output_height,
         bit_depth,
         chroma_format,
-    );
+    )?;
 
     // Streaming decode: decode tiles and blit immediately, dropping each tile
     // (or row of tiles) before decoding the next. This keeps peak memory at

@@ -428,7 +428,7 @@ mod tests {
 
     #[test]
     fn test_mc_luma_integer_pos() {
-        let mut frame = DecodedFrame::with_params(8, 8, 8, 1);
+        let mut frame = DecodedFrame::with_params(8, 8, 8, 1).unwrap();
         for y in 0..8u32 {
             for x in 0..8u32 {
                 frame.y_plane[(y * 8 + x) as usize] = (y * 8 + x) as u16;
@@ -459,7 +459,7 @@ mod tests {
     /// Uses a constant reference (all pixels = 100) where output should be exactly 100.
     #[test]
     fn test_mc_luma_vpel_constant() {
-        let mut frame = DecodedFrame::with_params(16, 16, 8, 1);
+        let mut frame = DecodedFrame::with_params(16, 16, 8, 1).unwrap();
         for p in &mut frame.y_plane {
             *p = 100;
         }
@@ -490,7 +490,7 @@ mod tests {
     /// Test quarter-pel H filter with a known gradient.
     #[test]
     fn test_mc_luma_hpel_gradient() {
-        let mut frame = DecodedFrame::with_params(16, 16, 8, 1);
+        let mut frame = DecodedFrame::with_params(16, 16, 8, 1).unwrap();
         // Fill with column gradient: pixel = x * 16
         for y in 0..16u32 {
             for x in 0..16u32 {
@@ -537,7 +537,7 @@ mod tests {
     /// Test bi-pred blending with known intermediate values
     #[test]
     fn test_mc_luma_bipred_blend() {
-        let mut frame = DecodedFrame::with_params(16, 16, 8, 1);
+        let mut frame = DecodedFrame::with_params(16, 16, 8, 1).unwrap();
         for p in &mut frame.y_plane {
             *p = 100;
         }

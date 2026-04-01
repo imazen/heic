@@ -1129,7 +1129,11 @@ impl HeicStreamDecoder {
             stop.check().map_err(|r| at!(HeicError::Cancelled(r)))?;
         }
 
-        let grid = self.grid.as_ref().unwrap();
+        let grid = self.grid.as_ref().ok_or_else(|| {
+            at!(HeicError::InvalidData(
+                "grid not initialized for streaming decode"
+            ))
+        })?;
         let row = self.current_grid_row;
         if row >= grid.rows {
             return Ok(None);

@@ -3,7 +3,6 @@
 //! Applied after deblocking to reduce banding and ringing artifacts.
 //! Two modes per CTB: Band Offset (BO) and Edge Offset (EO).
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use super::picture::DecodedFrame;
@@ -22,7 +21,8 @@ pub struct SaoInfo {
     /// Signed offset values per component, 4 values each
     /// For band offset: offsets for 4 consecutive bands starting at band_position
     /// For edge offset: offsets[0]=cat1(+), [1]=cat2(+), [2]=cat3(-), [3]=cat4(-)
-    pub sao_offset_val: [[i8; 4]; 3],
+    /// Stored as i16 to handle high bit depths (>10-bit) without truncation.
+    pub sao_offset_val: [[i16; 4]; 3],
 }
 
 /// SAO map for the entire frame, stored at CTB granularity
@@ -33,12 +33,22 @@ pub struct SaoMap {
 }
 
 impl SaoMap {
-    pub fn new(width_ctbs: u32, height_ctbs: u32) -> Self {
-        Self {
-            data: vec![SaoInfo::default(); (width_ctbs * height_ctbs) as usize],
+    pub fn new(
+        width_ctbs: u32,
+        height_ctbs: u32,
+    ) -> core::result::Result<Self, crate::error::HevcError> {
+        let size = (width_ctbs as usize)
+            .checked_mul(height_ctbs as usize)
+            .ok_or(crate::error::HevcError::DimensionOverflow)?;
+        let mut data = Vec::new();
+        data.try_reserve(size)
+            .map_err(|_| crate::error::HevcError::AllocationFailed)?;
+        data.resize(size, SaoInfo::default());
+        Ok(Self {
+            data,
             width_ctbs,
             height_ctbs,
-        }
+        })
     }
 
     #[inline]
@@ -302,14 +312,14 @@ fn apply_sao_band_inplace(
     x_end: u32,
     y_end: u32,
     band_position: u8,
-    offsets: &[i8; 4],
+    offsets: &[i16; 4],
     bit_depth: u8,
 ) {
     let max_val = (1i32 << bit_depth) - 1;
     let band_shift = bit_depth - 5;
 
     // Build lookup table for the 32 bands
-    let mut band_table = [0i8; 32];
+    let mut band_table = [0i16; 32];
     for k in 0..4u8 {
         let band_idx = (band_position + k) & 31;
         band_table[band_idx as usize] = offsets[k as usize];
@@ -342,7 +352,7 @@ fn apply_sao_edge(
     x_end: u32,
     y_end: u32,
     eo_class: u8,
-    offsets: &[i8; 4],
+    offsets: &[i16; 4],
     bit_depth: u8,
 ) {
     let max_val = (1i32 << bit_depth) - 1;
