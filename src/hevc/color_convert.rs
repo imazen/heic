@@ -83,9 +83,10 @@ pub fn convert_420_to_rgb(
     )
 }
 
-/// WASM128 variant — delegates to scalar (auto-vectorized by LLVM)
+/// WASM128 YCbCr→RGB — scalar loop under target_feature(+simd128) for auto-vectorization
 #[cfg(target_arch = "wasm32")]
 #[allow(clippy::too_many_arguments)]
+#[arcane]
 fn convert_420_to_rgb_wasm128(
     _token: Wasm128Token,
     y_plane: &[u16],
@@ -102,22 +103,33 @@ fn convert_420_to_rgb_wasm128(
     matrix_coeffs: u8,
     rgb: &mut [u8],
 ) {
-    convert_420_to_rgb_scalar(
-        ScalarToken,
-        y_plane,
-        cb_plane,
-        cr_plane,
-        y_stride,
-        c_stride,
-        y_start,
-        y_end,
-        x_start,
-        x_end,
-        shift,
-        full_range,
-        matrix_coeffs,
-        rgb,
-    );
+    let (cr_r, cb_g, cr_g, cb_b, y_bias, y_scale, rnd, shr) =
+        get_coefficients(full_range, matrix_coeffs);
+
+    let mut out_idx = 0;
+    for y in y_start..y_end {
+        let y_row = y as usize * y_stride;
+        let c_row = (y as usize / 2) * c_stride;
+        for x in x_start..x_end {
+            let y_val = (y_plane[y_row + x as usize] >> shift) as i32;
+            let cx = x as usize / 2;
+            let c_idx = c_row + cx;
+            let cb_val = (cb_plane[c_idx] >> shift) as i32;
+            let cr_val = (cr_plane[c_idx] >> shift) as i32;
+
+            let cb = cb_val - 128;
+            let cr = cr_val - 128;
+            let yv = (y_val - y_bias) * y_scale;
+            let r = (yv + cr_r * cr + rnd) >> shr;
+            let g = (yv + cb_g * cb + cr_g * cr + rnd) >> shr;
+            let b = (yv + cb_b * cb + rnd) >> shr;
+
+            rgb[out_idx] = r.clamp(0, 255) as u8;
+            rgb[out_idx + 1] = g.clamp(0, 255) as u8;
+            rgb[out_idx + 2] = b.clamp(0, 255) as u8;
+            out_idx += 3;
+        }
+    }
 }
 
 /// Scalar YCbCr→RGB conversion (fallback for all platforms)
