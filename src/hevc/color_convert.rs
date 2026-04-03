@@ -103,8 +103,20 @@ fn convert_420_to_rgb_wasm128(
     rgb: &mut [u8],
 ) {
     convert_420_to_rgb_scalar(
-        ScalarToken, y_plane, cb_plane, cr_plane, y_stride, c_stride, y_start, y_end, x_start,
-        x_end, shift, full_range, matrix_coeffs, rgb,
+        ScalarToken,
+        y_plane,
+        cb_plane,
+        cr_plane,
+        y_stride,
+        c_stride,
+        y_start,
+        y_end,
+        x_start,
+        x_end,
+        shift,
+        full_range,
+        matrix_coeffs,
+        rgb,
     );
 }
 
