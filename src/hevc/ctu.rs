@@ -46,6 +46,8 @@ use super::transform_simd::add_residual_block_scalar;
 use super::transform_simd::add_residual_block_v3;
 #[cfg(target_arch = "aarch64")]
 use super::transform_simd_neon::add_residual_block_neon;
+#[cfg(target_arch = "wasm32")]
+use super::transform_simd::add_residual_block_wasm128;
 use crate::error::HevcError;
 use archmage::incant;
 
@@ -2249,7 +2251,7 @@ impl<'a> SliceContext<'a> {
                     size,
                     max_val
                 ),
-                [v3, neon, scalar]
+                [v3, neon, wasm128, scalar]
             );
         } else {
             for py in 0..size {

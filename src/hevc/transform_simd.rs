@@ -1443,3 +1443,72 @@ pub(crate) fn dequantize_scalar(
         *coef = value.clamp(-32768, 32767) as i16;
     }
 }
+
+// =============================================================================
+// WASM128 variants — delegate to scalar (WASM auto-vectorizes the scalar loops)
+// =============================================================================
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn idst4_wasm128(
+    _token: Wasm128Token,
+    coeffs: &[i16; 16],
+    output: &mut [i16; 16],
+    bit_depth: u8,
+) {
+    idst4_scalar(ScalarToken, coeffs, output, bit_depth);
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn idct8_wasm128(
+    _token: Wasm128Token,
+    coeffs: &[i16; 64],
+    output: &mut [i16; 64],
+    bit_depth: u8,
+) {
+    idct8_scalar(ScalarToken, coeffs, output, bit_depth);
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn idct16_wasm128(
+    _token: Wasm128Token,
+    coeffs: &[i16; 256],
+    output: &mut [i16; 256],
+    bit_depth: u8,
+) {
+    idct16_scalar(ScalarToken, coeffs, output, bit_depth);
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn idct32_wasm128(
+    _token: Wasm128Token,
+    coeffs: &[i16; 1024],
+    output: &mut [i16; 1024],
+    bit_depth: u8,
+) {
+    idct32_scalar(ScalarToken, coeffs, output, bit_depth);
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn dequantize_wasm128(
+    _token: Wasm128Token,
+    coeffs: &mut [i16],
+    combined_scale: i32,
+    shift: i32,
+    add: i32,
+) {
+    dequantize_scalar(ScalarToken, coeffs, combined_scale, shift, add);
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn add_residual_block_wasm128(
+    _token: Wasm128Token,
+    plane: &mut [u16],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    residual: &[i16],
+    size: usize,
+    max_val: i32,
+) {
+    add_residual_block_scalar(ScalarToken, plane, stride, x0, y0, residual, size, max_val);
+}
