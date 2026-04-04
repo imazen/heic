@@ -67,6 +67,41 @@ impl FourCC {
     /// Mastering Display Colour Volume property
     pub const MDCV: Self = Self(*b"mdcv");
 
+    // --- Movie (moov) structure boxes for image sequences ---
+
+    /// Movie container box
+    pub const MOOV: Self = Self(*b"moov");
+    /// Track container box
+    pub const TRAK: Self = Self(*b"trak");
+    /// Track header box
+    pub const TKHD: Self = Self(*b"tkhd");
+    /// Media container box
+    pub const MDIA: Self = Self(*b"mdia");
+    /// Media header box
+    pub const MDHD: Self = Self(*b"mdhd");
+    /// Media information box
+    pub const MINF: Self = Self(*b"minf");
+    /// Sample table box
+    pub const STBL: Self = Self(*b"stbl");
+    /// Sample description box
+    pub const STSD: Self = Self(*b"stsd");
+    /// Sample size box
+    pub const STSZ: Self = Self(*b"stsz");
+    /// Chunk offset box (32-bit)
+    pub const STCO: Self = Self(*b"stco");
+    /// Chunk offset box (64-bit)
+    pub const CO64: Self = Self(*b"co64");
+    /// Sample-to-chunk box
+    pub const STSC: Self = Self(*b"stsc");
+    /// Sync sample box (I-frame indices)
+    pub const STSS: Self = Self(*b"stss");
+    /// HEVC sample entry type
+    pub const HVC1: Self = Self(*b"hvc1");
+    /// HEVC sample entry type (variant)
+    pub const HEV1: Self = Self(*b"hev1");
+    /// Track reference box
+    pub const TREF: Self = Self(*b"tref");
+
     /// Create from bytes
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.len() >= 4 {
