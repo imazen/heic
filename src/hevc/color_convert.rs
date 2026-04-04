@@ -84,7 +84,7 @@ pub fn convert_420_to_rgb(
 }
 
 /// WASM128 YCbCr→RGB — scalar loop under target_feature(+simd128) for auto-vectorization
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[cfg(target_arch = "wasm32")]
 #[allow(clippy::too_many_arguments)]
 #[arcane]
 fn convert_420_to_rgb_wasm128(
@@ -130,43 +130,6 @@ fn convert_420_to_rgb_wasm128(
             out_idx += 3;
         }
     }
-}
-
-/// WASM128 YCbCr→RGB fallback — delegates to scalar when simd128 is not available
-#[cfg(all(target_arch = "wasm32", not(target_feature = "simd128")))]
-#[allow(clippy::too_many_arguments)]
-fn convert_420_to_rgb_wasm128(
-    _token: Wasm128Token,
-    y_plane: &[u16],
-    cb_plane: &[u16],
-    cr_plane: &[u16],
-    y_stride: usize,
-    c_stride: usize,
-    y_start: u32,
-    y_end: u32,
-    x_start: u32,
-    x_end: u32,
-    shift: u32,
-    full_range: bool,
-    matrix_coeffs: u8,
-    rgb: &mut [u8],
-) {
-    convert_420_to_rgb_scalar(
-        ScalarToken,
-        y_plane,
-        cb_plane,
-        cr_plane,
-        y_stride,
-        c_stride,
-        y_start,
-        y_end,
-        x_start,
-        x_end,
-        shift,
-        full_range,
-        matrix_coeffs,
-        rgb,
-    );
 }
 
 /// Scalar YCbCr→RGB conversion (fallback for all platforms)
