@@ -160,9 +160,10 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 - PCM mode support (H.265 7.3.8.8) — raw sample read + CABAC reinit
 - Tile-aware CABAC context derivation (split_cu_flag, cu_skip_flag, SAO merge, intra MPM)
 - Tile boundary QP prediction reset (H.265 8.6.1) and context/StatCoeff reinit
+- HEIF image sequence (msf1/moov) support: moov/trak/stbl parsing, synthetic Item creation, all 11 Nokia C026-C041 decode
 
 ### Current Quality (RGB comparison vs libheif)
-- 103/162 test files decode successfully
+- 114/173 test files decode successfully (103 meta-based + 11 msf1 image sequences)
 - Best: example_q95 65.7dB (98% pixel-exact), classic-car 77.3dB (BT.709)
 - Nokia C001-C052: 50.5dB (77% pixel-exact)
 - Grid images: image1 50.4dB, classic-car 77.3dB
