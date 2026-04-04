@@ -1,8 +1,12 @@
-//! AVX2 SIMD implementations of HEVC inverse transforms (IDCT 8/16/32)
+//! SIMD implementations of HEVC inverse transforms (IDCT 8/16/32)
 //!
-//! Uses the interleave + madd_epi16 approach from libde265, adapted for AVX2.
+//! x86_64: Uses the interleave + madd_epi16 approach from libde265, adapted for AVX2.
 //! The key operation is `_mm256_madd_epi16`: multiply 16 pairs of i16, sum adjacent
 //! pairs → 8 i32. This perfectly matches the DCT butterfly's multiply-accumulate pattern.
+//!
+//! wasm32: Uses 128-bit SIMD (`v128`) with i32x4 multiply-accumulate for IDST4 and IDCT8.
+//! Since wasm128 lacks `madd_epi16`, the butterfly uses i32x4 arithmetic (widen, multiply,
+//! add/sub) processing 4 columns in parallel per pass. IDCT16/32 delegate to scalar.
 
 // The `#[arcane]` macro generates multiple function variants for SIMD dispatch;
 // the allow attribute on individual functions does not propagate to generated code.
@@ -14,6 +18,9 @@ use archmage::prelude::*;
 use safe_unaligned_simd::x86_64::{
     _mm_loadu_si128, _mm_storeu_si128, _mm256_loadu_si256, _mm256_storeu_si256,
 };
+
+#[cfg(target_arch = "wasm32")]
+use safe_unaligned_simd::wasm32::{v128_load, v128_store};
 
 /// Pack two i16 coefficients into one i32 for `_mm256_set1_epi32` + `_mm256_madd_epi16`.
 /// `a` goes in the low 16 bits (multiplies the first element of each interleaved pair),
@@ -1445,7 +1452,113 @@ pub(crate) fn dequantize_scalar(
 }
 
 // =============================================================================
-// WASM128 variants — delegate to scalar (WASM auto-vectorizes the scalar loops)
+// Generic SIMD implementations using magetypes
+// =============================================================================
+
+/// Generic add_residual_block using i16x8 with u16↔i16 bitcast.
+///
+/// Processes 8 pixels per iteration: load u16 prediction as u16x8, bitcast to i16x8,
+/// add i16 residual, clamp to [0, max_val], bitcast back to u16x8, store.
+/// Values are safe to reinterpret as i16 since max_val ≤ 1023 for 10-bit HEVC.
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn add_residual_block_generic<T>(
+    token: T,
+    plane: &mut [u16],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    residual: &[i16],
+    size: usize,
+    max_val: i32,
+) where
+    T: magetypes::simd::backends::I16x8Bitcast,
+{
+    use magetypes::simd::generic::{i16x8, u16x8};
+
+    let zero = i16x8::zero(token);
+    let max_v = i16x8::splat(token, max_val as i16);
+
+    for py in 0..size {
+        let row_start = (y0 + py) * stride + x0;
+        let row = &mut plane[row_start..row_start + size];
+        let res_row = &residual[py * size..(py + 1) * size];
+
+        let chunks = size / 8;
+        for c in 0..chunks {
+            let offset = c * 8;
+            // Load prediction as u16x8, bitcast to i16x8
+            let pred_u = u16x8::load(token, row[offset..offset + 8].try_into().unwrap());
+            let pred = pred_u.bitcast_i16x8();
+            let res = i16x8::load(token, res_row[offset..offset + 8].try_into().unwrap());
+            // Add and clamp with signed operations
+            let sum = pred + res;
+            let clamped = sum.max(zero).min(max_v);
+            // Store back as u16
+            let clamped_u = clamped.bitcast_u16x8();
+            clamped_u.store((&mut row[offset..offset + 8]).try_into().unwrap());
+        }
+        // Scalar remainder
+        for i in (chunks * 8)..size {
+            let pred = row[i] as i32;
+            let r = res_row[i] as i32;
+            row[i] = (pred + r).clamp(0, max_val) as u16;
+        }
+    }
+}
+
+/// Generic dequantize using i32x4 multiply + add with scalar shift.
+///
+/// Processes 4 coefficients per iteration: widen i16→i32, multiply by combined_scale,
+/// add rounding, shift right (scalar per-element since magetypes lacks variable shift),
+/// clamp to i16 range, store back.
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+fn dequantize_generic<T: magetypes::simd::backends::I32x4Backend + Copy>(
+    token: T,
+    coeffs: &mut [i16],
+    combined_scale: i32,
+    shift: i32,
+    add: i32,
+) {
+    use magetypes::simd::generic::i32x4;
+
+    let scale_v = i32x4::splat(token, combined_scale);
+    let add_v = i32x4::splat(token, add);
+
+    let chunks = coeffs.len() / 4;
+    for c in 0..chunks {
+        let off = c * 4;
+        // Widen i16 → i32
+        let vals: [i32; 4] = [
+            coeffs[off] as i32,
+            coeffs[off + 1] as i32,
+            coeffs[off + 2] as i32,
+            coeffs[off + 3] as i32,
+        ];
+        let v = i32x4::from_array(token, vals);
+        // SIMD multiply + add
+        let prod = v * scale_v;
+        let with_round = prod + add_v;
+        // Variable shift via to_array (magetypes only has const shift)
+        let arr = with_round.to_array();
+        // Shift and clamp to i16 range, store back
+        coeffs[off] = (arr[0] >> shift).clamp(-32768, 32767) as i16;
+        coeffs[off + 1] = (arr[1] >> shift).clamp(-32768, 32767) as i16;
+        coeffs[off + 2] = (arr[2] >> shift).clamp(-32768, 32767) as i16;
+        coeffs[off + 3] = (arr[3] >> shift).clamp(-32768, 32767) as i16;
+    }
+
+    // Scalar remainder
+    for coef in coeffs.iter_mut().skip(chunks * 4) {
+        let value = (*coef as i32 * combined_scale + add) >> shift;
+        *coef = value.clamp(-32768, 32767) as i16;
+    }
+}
+
+// =============================================================================
+// WASM128 variants
 // =============================================================================
 
 #[cfg(target_arch = "wasm32")]
@@ -1488,20 +1601,23 @@ pub(crate) fn idct32_wasm128(
     idct32_scalar(ScalarToken, coeffs, output, bit_depth);
 }
 
+/// WASM128 dequantize: real i32x4 SIMD via generic implementation.
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn dequantize_wasm128(
-    _token: Wasm128Token,
+    token: Wasm128Token,
     coeffs: &mut [i16],
     combined_scale: i32,
     shift: i32,
     add: i32,
 ) {
-    dequantize_scalar(ScalarToken, coeffs, combined_scale, shift, add);
+    dequantize_generic(token, coeffs, combined_scale, shift, add);
 }
 
+/// WASM128 add_residual_block: real i16x8 SIMD via generic implementation.
 #[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn add_residual_block_wasm128(
-    _token: Wasm128Token,
+    token: Wasm128Token,
     plane: &mut [u16],
     stride: usize,
     x0: usize,
@@ -1510,5 +1626,5 @@ pub(crate) fn add_residual_block_wasm128(
     size: usize,
     max_val: i32,
 ) {
-    add_residual_block_scalar(ScalarToken, plane, stride, x0, y0, residual, size, max_val);
+    add_residual_block_generic(token, plane, stride, x0, y0, residual, size, max_val);
 }
