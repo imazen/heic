@@ -4,16 +4,20 @@ Pure Rust HEIC/HEIF image decoder. No C/C++ dependencies, no unsafe code, 4 runt
 
 - `#![forbid(unsafe_code)]` — zero unsafe blocks in the entire codebase
 - `no_std + alloc` compatible (compiles for wasm32-unknown-unknown)
-- AVX2/SSE4.1 SIMD acceleration with automatic scalar fallback
+- AVX2/SSE4.1/NEON SIMD acceleration with automatic scalar fallback
 - Optional tile-parallel decoding via rayon
 
 ## Status
 
-Decodes most HEIC files from iPhones and cameras. 103/162 test files decode successfully. Best quality: 77.3 dB PSNR (BT.709), 73% pixel-exact on example.heic.
+Decodes most HEIC files from iPhones and cameras. 118/162 HEIF test files decode successfully (with `av1` + `unci` features). 49/49 ITU-T HEVC conformance vectors pass. Best quality: 77.3 dB PSNR (BT.709), 73% pixel-exact on example.heic.
 
 ### What works
 - HEIF container parsing (ISOBMFF boxes, grid images, overlays, identity-derived items)
+- HEIF image sequences (msf1/moov — first I-frame extraction from movie structure)
+- Multi-codec dispatch: HEVC, AV1 (`av1` feature), uncompressed HEIF (`unci` feature)
 - Full HEVC I-frame decoding (VPS/SPS/PPS, CABAC, intra prediction, transforms)
+- AV1 still image decoding via rav1d-safe (`av1` feature)
+- Uncompressed HEIF with deflate/zlib decompression via zenflate (`unci` feature)
 - Deblocking filter and SAO (Sample Adaptive Offset)
 - YCbCr→RGB with BT.601/BT.709/BT.2020 matrices (full + limited range)
 - CICP color info from HEVC VUI and HEIF colr nclx (container overrides codec)
@@ -25,10 +29,13 @@ Decodes most HEIC files from iPhones and cameras. 103/162 test files decode succ
 - HEVC scaling lists (custom dequantization matrices)
 - AVX2 SIMD: color conversion, IDCT 8/16/32, residual add, dequantize
 - SSE4.1 SIMD: IDST 4x4
+- NEON SIMD: color conversion, IDCT 8/16/32, IDST 4x4
 - Tile-parallel grid decoding via rayon (`parallel` feature)
 
 ### Known limitations
-- I-slices only (sufficient for HEIC still images; no inter prediction for video)
+- HEVC I-slices only (sufficient for HEIC still images; no inter prediction for video)
+- JPEG and H.264/AVC codecs in HEIF: detected but not decoded
+- Brotli-compressed uncompressed HEIF: not yet supported (deflate/zlib only)
 - PQ/HLG transfer functions: parsed and exposed via `ImageInfo`, but no EOTF applied — callers handle tone-mapping
 
 ## Features
@@ -37,6 +44,8 @@ Decodes most HEIC files from iPhones and cameras. 103/162 test files decode succ
 |---------|---------|-------------|
 | `std` | yes | Standard library support. Disable for `no_std + alloc`. |
 | `parallel` | no | Parallel tile decoding via rayon. Implies `std`. |
+| `av1` | no | AV1 codec support via rav1d-safe. Implies `std`. |
+| `unci` | no | Uncompressed HEIF (ISO 23001-17) with deflate/zlib decompression via zenflate. |
 
 ## Usage
 
@@ -128,7 +137,7 @@ Benchmarked on AMD Ryzen 9 7950X, WSL2, Rust 1.93, release profile (thin LTO, co
 | Probe (metadata only) | 1.3 µs |
 | EXIF extraction | 4.4 µs |
 
-SIMD-accelerated on x86-64 (AVX2 for color conversion, IDCT 8/16/32, residual add, dequantize; SSE4.1 for IDST 4x4). Scalar fallback on other architectures.
+SIMD-accelerated on x86-64 (AVX2 for color conversion, IDCT 8/16/32, residual add, dequantize; SSE4.1 for IDST 4x4) and AArch64 (NEON for color conversion, IDCT 8/16/32, IDST 4x4). Scalar fallback when SIMD is unavailable.
 
 ## Dependencies
 
@@ -144,6 +153,8 @@ heic
 ```
 
 With `parallel`: adds rayon + crossbeam (6 more crates, all pure Rust).
+With `av1`: adds rav1d-safe (pure Rust AV1 decoder with archmage SIMD).
+With `unci`: adds zenflate (pure Rust DEFLATE/zlib).
 
 ## Memory
 
