@@ -177,9 +177,17 @@ fn decode_item(
             }
         }
         ItemType::Unci => {
-            return Err(at!(HeicError::UnsupportedCodec(
-                "uncompressed HEIF requires the 'unci' feature"
-            )));
+            #[cfg(feature = "unci")]
+            {
+                let image_data = container.get_item_data(item.id)?;
+                decode_unci_item(item, &image_data)?
+            }
+            #[cfg(not(feature = "unci"))]
+            {
+                return Err(at!(HeicError::UnsupportedCodec(
+                    "uncompressed HEIF requires the 'unci' feature"
+                )));
+            }
         }
         ItemType::Avc1 => {
             return Err(at!(HeicError::UnsupportedCodec(
@@ -648,6 +656,213 @@ fn decode_av1_item(item: &heif::Item, image_data: &[u8]) -> Result<crate::hevc::
     output.matrix_coeffs = color_info.matrix_coefficients as u8;
     output.color_primaries = color_info.primaries as u8;
     output.transfer_characteristics = color_info.transfer_characteristics as u8;
+
+    Ok(output)
+}
+
+/// Decode an uncompressed HEIF (unci) image item.
+///
+/// Handles both compressed (deflate/zlib via zenflate) and raw uncompressed
+/// pixel data as defined in ISO 23001-17. Supports pixel-interleaved and
+/// component-planar layouts for 8-bit unsigned integer components.
+#[cfg(feature = "unci")]
+fn decode_unci_item(item: &heif::Item, image_data: &[u8]) -> Result<crate::hevc::DecodedFrame> {
+    let unc_config = item
+        .uncompressed_config
+        .as_ref()
+        .ok_or_else(|| at!(HeicError::InvalidData("unci item has no uncC config")))?;
+
+    let (width, height) = item
+        .dimensions
+        .ok_or_else(|| at!(HeicError::InvalidData("unci item has no dimensions")))?;
+
+    if width == 0 || height == 0 {
+        return Err(at!(HeicError::InvalidData("unci item has zero dimensions")));
+    }
+
+    let num_components = unc_config.components.len();
+    if num_components == 0 {
+        return Err(at!(HeicError::InvalidData("unci item has no components")));
+    }
+
+    // Calculate expected decompressed size with overflow checks
+    let bits_per_pixel: u32 = unc_config
+        .components
+        .iter()
+        .try_fold(0u32, |acc, c| {
+            acc.checked_add(c.component_bit_depth_minus_one as u32 + 1)
+        })
+        .ok_or_else(|| at!(HeicError::InvalidData("unci bit depth overflow")))?;
+
+    // For now, only support 8-bit unsigned integer components
+    let all_8bit = unc_config
+        .components
+        .iter()
+        .all(|c| c.component_bit_depth_minus_one == 7 && c.component_format == 0);
+    if !all_8bit {
+        return Err(at!(HeicError::Unsupported(
+            "unci: only 8-bit unsigned integer components supported"
+        )));
+    }
+
+    let bytes_per_pixel = bits_per_pixel.div_ceil(8);
+    let expected_size = (width as u64)
+        .checked_mul(height as u64)
+        .and_then(|n| n.checked_mul(bytes_per_pixel as u64))
+        .ok_or_else(|| at!(HeicError::LimitExceeded("unci decompressed size overflow")))?;
+
+    // Security: limit decompressed size to 512 MiB
+    if expected_size > 512 * 1024 * 1024 {
+        return Err(at!(HeicError::LimitExceeded(
+            "unci decompressed size exceeds 512 MiB"
+        )));
+    }
+    let expected_size = expected_size as usize;
+
+    // Decompress if compression config is present
+    let pixel_data: alloc::borrow::Cow<'_, [u8]> =
+        if let Some(ref cmp_config) = item.compression_config {
+            let mut decompressed = Vec::new();
+            decompressed
+                .try_reserve(expected_size)
+                .map_err(|_| at!(HeicError::OutOfMemory))?;
+            decompressed.resize(expected_size, 0);
+
+            let mut decompressor = zenflate::Decompressor::new();
+            let result = match &cmp_config.compression_type.0 {
+                b"defl" => decompressor
+                    .deflate_decompress(image_data, &mut decompressed, enough::Unstoppable)
+                    .map_err(|_| at!(HeicError::InvalidData("unci deflate decompression failed"))),
+                b"zlib" => decompressor
+                    .zlib_decompress(image_data, &mut decompressed, enough::Unstoppable)
+                    .map_err(|_| at!(HeicError::InvalidData("unci zlib decompression failed"))),
+                _ => {
+                    return Err(at!(HeicError::UnsupportedCodec(
+                        "unci compression type not supported (only deflate and zlib)"
+                    )));
+                }
+            }?;
+
+            decompressed.truncate(result.output_written);
+            alloc::borrow::Cow::Owned(decompressed)
+        } else {
+            // No compression — use raw data
+            alloc::borrow::Cow::Borrowed(image_data)
+        };
+
+    if pixel_data.len() < expected_size {
+        return Err(at!(HeicError::InvalidData(
+            "unci decompressed data smaller than expected"
+        )));
+    }
+
+    // Create output frame — use RGB (chroma_format=3 = 4:4:4) for unci
+    let mut output = crate::hevc::DecodedFrame::with_params(width, height, 8, 3)?;
+
+    // Set full-range since unci pixels are typically full-range
+    output.full_range = true;
+
+    // Determine component layout → map component indices to R, G, B channels
+    // ISO 23001-17 component_index: 0=Y/R, 1=Cb/G, 2=Cr/B, 3=A, 4=R, 5=G, 6=B
+    let interleave = unc_config.interleave_type;
+
+    match interleave {
+        0 => {
+            // Component-planar: each component stored as a complete plane
+            let plane_size = (width as usize) * (height as usize);
+            for (comp_idx, comp) in unc_config.components.iter().enumerate() {
+                let plane_offset = comp_idx * plane_size;
+                if plane_offset + plane_size > pixel_data.len() {
+                    return Err(at!(HeicError::InvalidData(
+                        "unci component plane extends past data"
+                    )));
+                }
+                let plane_data = &pixel_data[plane_offset..plane_offset + plane_size];
+
+                // Map component_index to Y/Cb/Cr plane
+                let target = match comp.component_index {
+                    0 | 4 => Some(&mut output.y_plane),  // Y or R
+                    1 | 5 => Some(&mut output.cb_plane), // Cb or G
+                    2 | 6 => Some(&mut output.cr_plane), // Cr or B
+                    _ => None,                           // alpha or unknown — skip
+                };
+
+                if let Some(target_plane) = target {
+                    for (i, &val) in plane_data.iter().enumerate() {
+                        if i < target_plane.len() {
+                            target_plane[i] = val as u16;
+                        }
+                    }
+                }
+            }
+        }
+        1 => {
+            // Pixel-interleaved: R,G,B,R,G,B,...
+            let stride = num_components;
+            let mut comp_to_plane: [Option<u8>; 8] = [None; 8];
+            for (i, comp) in unc_config.components.iter().enumerate() {
+                if i < 8 {
+                    comp_to_plane[i] = match comp.component_index {
+                        0 | 4 => Some(0), // Y/R
+                        1 | 5 => Some(1), // Cb/G
+                        2 | 6 => Some(2), // Cr/B
+                        _ => None,
+                    };
+                }
+            }
+
+            for y in 0..height as usize {
+                for x in 0..width as usize {
+                    let pixel_offset = (y * width as usize + x) * stride;
+                    if pixel_offset + stride > pixel_data.len() {
+                        break;
+                    }
+                    let dst_idx = y * output.y_stride() + x;
+                    for (c, &mapping) in comp_to_plane.iter().enumerate().take(num_components) {
+                        if let Some(plane_id) = mapping {
+                            let val = pixel_data[pixel_offset + c] as u16;
+                            match plane_id {
+                                0 => {
+                                    if dst_idx < output.y_plane.len() {
+                                        output.y_plane[dst_idx] = val;
+                                    }
+                                }
+                                1 => {
+                                    if dst_idx < output.cb_plane.len() {
+                                        output.cb_plane[dst_idx] = val;
+                                    }
+                                }
+                                2 => {
+                                    if dst_idx < output.cr_plane.len() {
+                                        output.cr_plane[dst_idx] = val;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {
+            return Err(at!(HeicError::Unsupported(
+                "unci interleave type not supported (only component-planar and pixel-interleaved)"
+            )));
+        }
+    }
+
+    // For unci RGB data, set identity matrix (no YCbCr conversion needed)
+    // The output planes contain R, G, B directly when component indices are 4, 5, 6
+    // or Y, Cb, Cr when indices are 0, 1, 2
+    let has_rgb_indices = unc_config
+        .components
+        .iter()
+        .any(|c| c.component_index >= 4 && c.component_index <= 6);
+
+    if has_rgb_indices {
+        // Direct RGB in Y/Cb/Cr planes — use identity matrix (0)
+        output.matrix_coeffs = 0;
+    }
 
     Ok(output)
 }
