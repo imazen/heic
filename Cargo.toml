@@ -35,6 +35,8 @@ std = ["archmage/std"]
 fallible-alloc = []
 parallel = ["std", "dep:rayon"]
 zencodec = ["dep:zencodec", "dep:zenpixels", "dep:rgb", "dep:imgref", "dep:garb"]
+av1 = ["std", "dep:rav1d-safe"]
+unci = ["dep:zenflate"]
 
 [dependencies]
 enough = "0.4.3"
@@ -48,6 +50,8 @@ zenpixels = { version = "0.2.2", default-features = false, features = ["rgb", "i
 rgb = { version = "0.8.53", default-features = false, features = ["as-bytes"], optional = true }
 imgref = { version = "1.12.0", optional = true }
 garb = { version = "0.2.5", default-features = false, optional = true }
+rav1d-safe = { version = "0.5.3", optional = true, default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
+zenflate = { version = "0.3.4", optional = true, default-features = false }
 
 [dev-dependencies]
 criterion = "0.8.2"

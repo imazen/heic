@@ -147,17 +147,44 @@ fn decode_item(
     check_stop(stop)?;
 
     let mut frame = match item.item_type {
-        ItemType::Grid => decode_grid(container, item, limits, stop, max_threads)?,
+        ItemType::Grid => decode_grid(container, item, depth, limits, stop, max_threads)?,
         ItemType::Iden => decode_iden(container, item, depth, limits, stop, max_threads)?,
         ItemType::Iovl => decode_iovl(container, item, depth, limits, stop, max_threads)?,
-        _ => {
+        ItemType::Hvc1 | ItemType::Unknown(_) => {
+            // HEVC path — Unknown falls through to HEVC for backwards compat
             let image_data = container.get_item_data(item.id)?;
-
             if let Some(ref config) = item.hevc_config {
                 crate::hevc::decode_with_config(config, &image_data)?
-            } else {
+            } else if item.item_type == ItemType::Hvc1 {
                 crate::hevc::decode(&image_data)?
+            } else {
+                return Err(at!(HeicError::UnsupportedCodec(
+                    "unknown item type with no decoder config"
+                )));
             }
+        }
+        ItemType::Av01 => {
+            return Err(at!(HeicError::UnsupportedCodec(
+                "AV1 codec requires the 'av1' feature"
+            )));
+        }
+        ItemType::Unci => {
+            return Err(at!(HeicError::UnsupportedCodec(
+                "uncompressed HEIF requires the 'unci' feature"
+            )));
+        }
+        ItemType::Avc1 => {
+            return Err(at!(HeicError::UnsupportedCodec(
+                "H.264/AVC codec not supported"
+            )));
+        }
+        ItemType::Jpeg => {
+            return Err(at!(HeicError::UnsupportedCodec("JPEG codec not supported")));
+        }
+        ItemType::Exif | ItemType::Mime => {
+            return Err(at!(HeicError::InvalidData(
+                "metadata item type cannot be decoded as image"
+            )));
         }
     };
 
@@ -350,13 +377,15 @@ fn decode_iovl(
     let first_tile_item = container
         .get_item(tile_ids[0])
         .ok_or_else(|| at!(HeicError::InvalidData("Missing overlay tile item")))?;
-    let first_tile_config = first_tile_item
-        .hevc_config
-        .as_ref()
-        .ok_or_else(|| at!(HeicError::InvalidData("Missing overlay tile hvcC")))?;
 
-    let bit_depth = first_tile_config.bit_depth_luma_minus8 + 8;
-    let chroma_format = first_tile_config.chroma_format;
+    let (bit_depth, chroma_format) = if let Some(ref config) = first_tile_item.hevc_config {
+        (config.bit_depth_luma_minus8 + 8, config.chroma_format)
+    } else if let Some(ref config) = first_tile_item.av1_config {
+        (config.bit_depth(), config.chroma_format())
+    } else {
+        // Default to 8-bit 4:2:0 for unknown codecs
+        (8u8, 1u8)
+    };
 
     let mut output = crate::hevc::DecodedFrame::with_params(
         canvas_width,
@@ -464,6 +493,7 @@ fn decode_iovl(
 fn decode_grid(
     container: &heif::HeifContainer<'_>,
     grid_item: &heif::Item,
+    depth: u32,
     limits: &Limits,
     stop: &dyn Stop,
     max_threads: Option<usize>,
@@ -505,23 +535,35 @@ fn decode_grid(
         return Err(at!(HeicError::InvalidData("Grid tile count mismatch")));
     }
 
-    // Get hvcC config from the first tile item
+    // Get config from the first tile item — supports HEVC, AV1, and unci tiles
     let first_tile = container
         .get_item(tile_ids[0])
         .ok_or_else(|| at!(HeicError::InvalidData("Missing tile item")))?;
-    let tile_config = first_tile
-        .hevc_config
-        .as_ref()
-        .ok_or_else(|| at!(HeicError::InvalidData("Missing tile hvcC config")))?;
+
+    // Determine bit depth and chroma format from the tile's codec config
+    let (bit_depth, chroma_format) = if let Some(ref config) = first_tile.hevc_config {
+        (config.bit_depth_luma_minus8 + 8, config.chroma_format)
+    } else if let Some(ref config) = first_tile.av1_config {
+        (config.bit_depth(), config.chroma_format())
+    } else if first_tile.uncompressed_config.is_some() {
+        // unci tiles: assume 8-bit RGB (chroma_format 3 = 4:4:4)
+        let bd = first_tile
+            .uncompressed_config
+            .as_ref()
+            .and_then(|c| c.components.first())
+            .map(|c| c.component_bit_depth_minus_one + 1)
+            .unwrap_or(8);
+        (bd, 3)
+    } else {
+        return Err(at!(HeicError::InvalidData(
+            "Missing tile decoder config (no hvcC, av1C, or uncC)"
+        )));
+    };
 
     // Get tile dimensions from ispe
     let (tile_width, tile_height) = first_tile
         .dimensions
         .ok_or_else(|| at!(HeicError::InvalidData("Missing tile dimensions")))?;
-
-    // Create output frame at the grid's output dimensions
-    let bit_depth = tile_config.bit_depth_luma_minus8 + 8;
-    let chroma_format = tile_config.chroma_format;
     let mut output = crate::hevc::DecodedFrame::with_params(
         output_width,
         output_height,
@@ -538,27 +580,57 @@ fn decode_grid(
         .map(|&tid| container.get_item_data(tid))
         .collect::<core::result::Result<_, _>>()?;
 
+    // For HEVC grids, use the parallel decode path when available
+    let hevc_tile_config = first_tile.hevc_config.as_ref();
+
     #[cfg(feature = "parallel")]
     {
-        // Parallel: decode tiles concurrently (respecting max_threads), then blit.
-        let all_tiles = decode_tiles_parallel(&tile_data_list, tile_config, max_threads)?;
+        if let Some(tile_config) = hevc_tile_config {
+            // Parallel HEVC: decode tiles concurrently (respecting max_threads), then blit.
+            let all_tiles = decode_tiles_parallel(&tile_data_list, tile_config, max_threads)?;
 
-        for (tile_idx, tile_frame) in all_tiles.iter().enumerate() {
-            if tile_idx == 0 {
-                output.full_range = tile_frame.full_range;
-                output.matrix_coeffs = tile_frame.matrix_coeffs;
+            for (tile_idx, tile_frame) in all_tiles.iter().enumerate() {
+                if tile_idx == 0 {
+                    output.full_range = tile_frame.full_range;
+                    output.matrix_coeffs = tile_frame.matrix_coeffs;
+                }
+                blit_tile_to_grid(
+                    &mut output,
+                    tile_frame,
+                    tile_idx,
+                    cols,
+                    tile_width,
+                    tile_height,
+                    output_width,
+                    output_height,
+                    chroma_format,
+                );
             }
-            blit_tile_to_grid(
-                &mut output,
-                tile_frame,
-                tile_idx,
-                cols,
-                tile_width,
-                tile_height,
-                output_width,
-                output_height,
-                chroma_format,
-            );
+        } else {
+            // Non-HEVC tiles: sequential decode via decode_item per tile
+            for (tile_idx, &tile_id) in tile_ids.iter().enumerate() {
+                check_stop(stop)?;
+                let tile_item = container
+                    .get_item(tile_id)
+                    .ok_or_else(|| at!(HeicError::InvalidData("Missing grid tile")))?;
+                let tile_frame =
+                    decode_item(container, &tile_item, depth + 1, limits, stop, max_threads)?;
+                if tile_idx == 0 {
+                    output.full_range = tile_frame.full_range;
+                    output.matrix_coeffs = tile_frame.matrix_coeffs;
+                }
+                blit_tile_to_grid(
+                    &mut output,
+                    &tile_frame,
+                    tile_idx,
+                    cols,
+                    tile_width,
+                    tile_height,
+                    output_width,
+                    output_height,
+                    chroma_format,
+                );
+            }
         }
     }
 
@@ -568,7 +640,16 @@ fn decode_grid(
         // Sequential: decode one tile, blit, drop — only 1 tile in memory at a time.
         for (tile_idx, tile_data) in tile_data_list.iter().enumerate() {
             check_stop(stop)?;
-            let tile_frame = crate::hevc::decode_with_config(tile_config, tile_data)?;
+            let tile_frame = if let Some(tile_config) = hevc_tile_config {
+                crate::hevc::decode_with_config(tile_config, tile_data)?
+            } else {
+                // Non-HEVC tiles: look up the tile item and dispatch
+                let tile_id = tile_ids[tile_idx];
+                let tile_item = container
+                    .get_item(tile_id)
+                    .ok_or_else(|| at!(HeicError::InvalidData("Missing grid tile")))?;
+                decode_item(container, &tile_item, depth + 1, limits, stop, None)?
+            };
             if tile_idx == 0 {
                 output.full_range = tile_frame.full_range;
                 output.matrix_coeffs = tile_frame.matrix_coeffs;
@@ -769,10 +850,13 @@ pub(crate) fn try_decode_grid_streaming(
     let first_tile = container
         .get_item(tile_ids[0])
         .ok_or_else(|| at!(HeicError::InvalidData("Missing tile item")))?;
-    let tile_config = first_tile
-        .hevc_config
-        .as_ref()
-        .ok_or_else(|| at!(HeicError::InvalidData("Missing tile hvcC config")))?;
+
+    // Streaming grid path only supports HEVC tiles
+    let tile_config = match first_tile.hevc_config.as_ref() {
+        Some(config) => config,
+        None => return Ok(None),
+    };
+
     let (tile_width, tile_height) = first_tile
         .dimensions
         .ok_or_else(|| at!(HeicError::InvalidData("Missing tile dimensions")))?;
@@ -956,10 +1040,13 @@ pub(crate) fn try_decode_grid_to_sink(
     let first_tile = container
         .get_item(tile_ids[0])
         .ok_or_else(|| at!(HeicError::InvalidData("Missing tile item")))?;
-    let tile_config = first_tile
-        .hevc_config
-        .as_ref()
-        .ok_or_else(|| at!(HeicError::InvalidData("Missing tile hvcC config")))?;
+
+    // Streaming grid path only supports HEVC tiles
+    let tile_config = match first_tile.hevc_config.as_ref() {
+        Some(config) => config,
+        None => return Ok(None),
+    };
+
     let (tile_width, tile_height) = first_tile
         .dimensions
         .ok_or_else(|| at!(HeicError::InvalidData("Missing tile dimensions")))?;

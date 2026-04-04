@@ -66,6 +66,12 @@ impl FourCC {
     pub const CLLI: Self = Self(*b"clli");
     /// Mastering Display Colour Volume property
     pub const MDCV: Self = Self(*b"mdcv");
+    /// AV1 decoder configuration
+    pub const AV1C: Self = Self(*b"av1C");
+    /// Uncompressed codec configuration (ISO 23001-17)
+    pub const UNCC: Self = Self(*b"uncC");
+    /// Generic compression configuration (ISO 23001-17)
+    pub const CMPC: Self = Self(*b"cmpC");
 
     // --- Movie (moov) structure boxes for image sequences ---
 
@@ -360,6 +366,108 @@ pub struct HevcDecoderConfig {
     pub nal_units: Vec<Vec<u8>>,
 }
 
+/// AV1 decoder configuration from av1C box (ISO 14496-12 / AV1 Codec ISO Media File Format)
+#[derive(Debug, Clone)]
+pub struct Av1DecoderConfig {
+    /// AV1 sequence profile (0=Main, 1=High, 2=Professional)
+    pub seq_profile: u8,
+    /// AV1 sequence level index for operating point 0
+    pub seq_level_idx_0: u8,
+    /// High bitdepth flag (10 or 12 bit when true)
+    pub high_bitdepth: bool,
+    /// Twelve bit flag (only meaningful when high_bitdepth is true)
+    pub twelve_bit: bool,
+    /// Monochrome flag (no chroma planes)
+    pub monochrome: bool,
+    /// Chroma subsampling X (true = subsampled horizontally)
+    pub chroma_subsampling_x: bool,
+    /// Chroma subsampling Y (true = subsampled vertically)
+    pub chroma_subsampling_y: bool,
+    /// Raw OBU data to prepend before decode (sequence header, metadata OBUs, etc.)
+    pub config_obus: Vec<u8>,
+}
+
+impl Av1DecoderConfig {
+    /// Bit depth derived from the config flags
+    pub fn bit_depth(&self) -> u8 {
+        if !self.high_bitdepth {
+            8
+        } else if self.twelve_bit {
+            12
+        } else {
+            10
+        }
+    }
+
+    /// Chroma format: 0=mono, 1=4:2:0, 2=4:2:2, 3=4:4:4
+    pub fn chroma_format(&self) -> u8 {
+        if self.monochrome {
+            0
+        } else if self.chroma_subsampling_x && self.chroma_subsampling_y {
+            1 // 4:2:0
+        } else if self.chroma_subsampling_x {
+            2 // 4:2:2
+        } else {
+            3 // 4:4:4
+        }
+    }
+}
+
+/// Uncompressed codec configuration from uncC box (ISO 23001-17)
+#[derive(Debug, Clone)]
+pub struct UncompressedConfig {
+    /// Profile (0 for base)
+    pub profile: u32,
+    /// Component descriptors
+    pub components: Vec<UncompressedComponent>,
+    /// Sampling type: 0=no subsampling, 1=4:2:2, 2=4:2:0, 3=4:1:1
+    pub sampling_type: u8,
+    /// Interleave type: 0=component, 1=pixel, 2=mixed, 3=row, 4=tile, 5=multi-y
+    pub interleave_type: u8,
+    /// Block size (0=no blocks)
+    pub block_size: u8,
+    /// Components stored in little-endian byte order
+    pub components_little_endian: bool,
+    /// Block padding is at LSB (vs MSB)
+    pub block_pad_lsb: bool,
+    /// Blocks stored in little-endian
+    pub block_little_endian: bool,
+    /// Block byte order is reversed
+    pub block_reversed: bool,
+    /// Padding bits have unknown/arbitrary values
+    pub pad_unknown: bool,
+    /// Fixed pixel size in bytes (0=variable)
+    pub pixel_size: u8,
+    /// Row alignment in bytes (0=no alignment)
+    pub row_align_size: u32,
+    /// Tile alignment in bytes (0=no alignment)
+    pub tile_align_size: u32,
+    /// Number of tile columns minus one
+    pub num_tile_cols_minus_one: u32,
+    /// Number of tile rows minus one
+    pub num_tile_rows_minus_one: u32,
+}
+
+/// Component descriptor within an uncompressed codec configuration
+#[derive(Debug, Clone)]
+pub struct UncompressedComponent {
+    /// Component index (identifies the color channel)
+    pub component_index: u16,
+    /// Bit depth minus one
+    pub component_bit_depth_minus_one: u8,
+    /// Component format: 0=unsigned int, 1=float
+    pub component_format: u8,
+    /// Component alignment in bytes (0=none)
+    pub component_align_size: u8,
+}
+
+/// Generic compression configuration from cmpC box (ISO 23001-17)
+#[derive(Debug, Clone)]
+pub struct CompressionConfig {
+    /// Compression type FourCC: `defl` (deflate), `zlib`, `brot` (brotli)
+    pub compression_type: FourCC,
+}
+
 /// Color information from colr box
 #[derive(Debug, Clone)]
 pub enum ColorInfo {
@@ -397,6 +505,12 @@ pub enum ItemProperty {
     ImageExtents(ImageSpatialExtents),
     /// HEVC decoder config (hvcC)
     HevcConfig(HevcDecoderConfig),
+    /// AV1 decoder config (av1C)
+    Av1Config(Av1DecoderConfig),
+    /// Uncompressed codec config (uncC)
+    UncompressedConfig(UncompressedConfig),
+    /// Generic compression config (cmpC)
+    CompressionConfig(CompressionConfig),
     /// Color info (colr)
     ColorInfo(ColorInfo),
     /// Clean aperture (clap)

@@ -10,9 +10,10 @@ use core::str;
 use enough::Stop;
 
 use super::boxes::{
-    Box, BoxIterator, CleanAperture, ColorInfo, ContentLightLevelBox, FourCC, HevcDecoderConfig,
-    ImageMirror, ImageRotation, ImageSpatialExtents, ItemInfo, ItemLocation, ItemProperty,
-    ItemReference, MasteringDisplayBox, PropertyAssociation, Transform,
+    Av1DecoderConfig, Box, BoxIterator, CleanAperture, ColorInfo, CompressionConfig,
+    ContentLightLevelBox, FourCC, HevcDecoderConfig, ImageMirror, ImageRotation,
+    ImageSpatialExtents, ItemInfo, ItemLocation, ItemProperty, ItemReference, MasteringDisplayBox,
+    PropertyAssociation, Transform, UncompressedComponent, UncompressedConfig,
 };
 use whereat::at;
 
@@ -66,6 +67,14 @@ pub struct HeifContainer<'a> {
 pub enum ItemType {
     /// HEVC coded image
     Hvc1,
+    /// AV1 coded image
+    Av01,
+    /// H.264/AVC coded image
+    Avc1,
+    /// JPEG coded image
+    Jpeg,
+    /// Uncompressed/generic compressed (ISO 23001-17)
+    Unci,
     /// Image grid
     Grid,
     /// Image overlay
@@ -84,6 +93,10 @@ impl From<FourCC> for ItemType {
     fn from(fourcc: FourCC) -> Self {
         match &fourcc.0 {
             b"hvc1" => Self::Hvc1,
+            b"av01" => Self::Av01,
+            b"avc1" => Self::Avc1,
+            b"jpeg" => Self::Jpeg,
+            b"unci" => Self::Unci,
             b"grid" => Self::Grid,
             b"iovl" => Self::Iovl,
             b"iden" => Self::Iden,
@@ -107,6 +120,12 @@ pub struct Item {
     pub dimensions: Option<(u32, u32)>,
     /// HEVC config (if available)
     pub hevc_config: Option<HevcDecoderConfig>,
+    /// AV1 config (if available)
+    pub av1_config: Option<Av1DecoderConfig>,
+    /// Uncompressed codec config (if available)
+    pub uncompressed_config: Option<UncompressedConfig>,
+    /// Generic compression config (if available)
+    pub compression_config: Option<CompressionConfig>,
     /// Clean aperture crop (if available)
     pub clean_aperture: Option<CleanAperture>,
     /// Image rotation (if available)
@@ -145,6 +164,9 @@ impl<'a> HeifContainer<'a> {
 
         let mut dimensions = None;
         let mut hevc_config = None;
+        let mut av1_config = None;
+        let mut uncompressed_config = None;
+        let mut compression_config = None;
         let mut clean_aperture = None;
         let mut rotation = None;
         let mut mirror = None;
@@ -167,6 +189,15 @@ impl<'a> HeifContainer<'a> {
                         }
                         ItemProperty::HevcConfig(config) => {
                             hevc_config = Some(config.clone());
+                        }
+                        ItemProperty::Av1Config(config) => {
+                            av1_config = Some(config.clone());
+                        }
+                        ItemProperty::UncompressedConfig(config) => {
+                            uncompressed_config = Some(config.clone());
+                        }
+                        ItemProperty::CompressionConfig(config) => {
+                            compression_config = Some(config.clone());
                         }
                         ItemProperty::CleanAperture(clap) => {
                             clean_aperture = Some(*clap);
@@ -204,6 +235,9 @@ impl<'a> HeifContainer<'a> {
             name: info.item_name.clone(),
             dimensions,
             hevc_config,
+            av1_config,
+            uncompressed_config,
+            compression_config,
             clean_aperture,
             rotation,
             mirror,
@@ -909,6 +943,27 @@ fn parse_ipco(ipco: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop
                     ItemProperty::Unknown
                 }
             }
+            FourCC::AV1C => {
+                if let Ok(config) = parse_av1c(&child) {
+                    ItemProperty::Av1Config(config)
+                } else {
+                    ItemProperty::Unknown
+                }
+            }
+            FourCC::UNCC => {
+                if let Ok(config) = parse_uncc(&child) {
+                    ItemProperty::UncompressedConfig(config)
+                } else {
+                    ItemProperty::Unknown
+                }
+            }
+            FourCC::CMPC => {
+                if let Ok(config) = parse_cmpc(&child) {
+                    ItemProperty::CompressionConfig(config)
+                } else {
+                    ItemProperty::Unknown
+                }
+            }
             _ => ItemProperty::Unknown,
         };
         container.properties.push(prop);
@@ -1389,6 +1444,259 @@ fn parse_ipma(ipma: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop
     }
 
     Ok(())
+}
+
+/// Parse an AV1 Codec Configuration Box (av1C).
+///
+/// Format (AV1 Codec ISO Media File Format, section 2.3.3):
+/// - 1 byte: `marker(1) | version(7)` — must be 0x81
+/// - 1 byte: `seq_profile(3) | seq_level_idx_0(5)`
+/// - 1 byte: `seq_tier_0(1) | high_bitdepth(1) | twelve_bit(1) | monochrome(1)
+///   | chroma_subsampling_x(1) | chroma_subsampling_y(1) | chroma_sample_position(2)`
+/// - 1 byte: `reserved(3) | initial_presentation_delay_present(1) | ipd_or_reserved(4)`
+/// - remaining: configOBUs
+fn parse_av1c(av1c: &Box<'_>) -> Result<Av1DecoderConfig> {
+    let content = av1c.content;
+    if content.len() < 4 {
+        return Err(at!(HeicError::InvalidContainer("av1C too short")));
+    }
+
+    // Validate marker and version byte
+    if content[0] != 0x81 {
+        return Err(at!(HeicError::InvalidContainer(
+            "av1C invalid marker/version byte"
+        )));
+    }
+
+    let seq_profile = (content[1] >> 5) & 0x07;
+    let seq_level_idx_0 = content[1] & 0x1F;
+
+    let byte2 = content[2];
+    let high_bitdepth = (byte2 >> 6) & 1 != 0;
+    let twelve_bit = (byte2 >> 5) & 1 != 0;
+    let monochrome = (byte2 >> 4) & 1 != 0;
+    let chroma_subsampling_x = (byte2 >> 3) & 1 != 0;
+    let chroma_subsampling_y = (byte2 >> 2) & 1 != 0;
+
+    // Remaining bytes are configOBUs
+    let config_obus = if content.len() > 4 {
+        content[4..].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    Ok(Av1DecoderConfig {
+        seq_profile,
+        seq_level_idx_0,
+        high_bitdepth,
+        twelve_bit,
+        monochrome,
+        chroma_subsampling_x,
+        chroma_subsampling_y,
+        config_obus,
+    })
+}
+
+/// Maximum number of components in an uncompressed codec configuration.
+const MAX_UNCI_COMPONENTS: u32 = 256;
+
+/// Parse an Uncompressed Codec Configuration Box (uncC, ISO 23001-17).
+///
+/// This is a FullBox: version(1) + flags(3) + profile(4) + component_count(2) + ...
+fn parse_uncc(uncc: &Box<'_>) -> Result<UncompressedConfig> {
+    let content = uncc.content;
+    // Minimum: 4 (ver/flags) + 4 (profile) + 4 (component_count as u32 for v1, or u16)
+    if content.len() < 10 {
+        return Err(at!(HeicError::InvalidContainer("uncC too short")));
+    }
+
+    let _version = content[0];
+    let mut pos = 4; // skip version + flags
+
+    let profile = u32::from_be_bytes([
+        content[pos],
+        content[pos + 1],
+        content[pos + 2],
+        content[pos + 3],
+    ]);
+    pos += 4;
+
+    if pos + 4 > content.len() {
+        return Err(at!(HeicError::InvalidContainer(
+            "uncC truncated at component_count"
+        )));
+    }
+
+    // ISO 23001-17 uncC uses a u32 component count for all versions
+    let component_count = u32::from_be_bytes([
+        content[pos],
+        content[pos + 1],
+        content[pos + 2],
+        content[pos + 3],
+    ]);
+    pos += 4;
+
+    if component_count > MAX_UNCI_COMPONENTS {
+        return Err(at!(HeicError::LimitExceeded(
+            "uncC component count exceeds limit"
+        )));
+    }
+
+    let mut components = Vec::new();
+    components
+        .try_reserve(component_count as usize)
+        .map_err(|_| at!(HeicError::OutOfMemory))?;
+
+    for _ in 0..component_count {
+        // Each component: component_index(2) + bit_depth_minus_one(1) + format(1) + align_size(1) = 5 bytes
+        if pos + 5 > content.len() {
+            return Err(at!(HeicError::InvalidContainer(
+                "uncC truncated at component"
+            )));
+        }
+        let component_index = u16::from_be_bytes([content[pos], content[pos + 1]]);
+        pos += 2;
+        let component_bit_depth_minus_one = content[pos];
+        pos += 1;
+        let component_format = content[pos];
+        pos += 1;
+        let component_align_size = content[pos];
+        pos += 1;
+
+        components.push(UncompressedComponent {
+            component_index,
+            component_bit_depth_minus_one,
+            component_format,
+            component_align_size,
+        });
+    }
+
+    // Remaining fixed fields
+    if pos + 8 > content.len() {
+        // If remaining data is short, return defaults for optional fields
+        return Ok(UncompressedConfig {
+            profile,
+            components,
+            sampling_type: 0,
+            interleave_type: 0,
+            block_size: 0,
+            components_little_endian: false,
+            block_pad_lsb: false,
+            block_little_endian: false,
+            block_reversed: false,
+            pad_unknown: false,
+            pixel_size: 0,
+            row_align_size: 0,
+            tile_align_size: 0,
+            num_tile_cols_minus_one: 0,
+            num_tile_rows_minus_one: 0,
+        });
+    }
+
+    let sampling_type = content[pos];
+    pos += 1;
+    let interleave_type = content[pos];
+    pos += 1;
+    let block_size = content[pos];
+    pos += 1;
+
+    // Flags byte
+    let flags_byte = content[pos];
+    pos += 1;
+    let components_little_endian = (flags_byte >> 7) & 1 != 0;
+    let block_pad_lsb = (flags_byte >> 6) & 1 != 0;
+    let block_little_endian = (flags_byte >> 5) & 1 != 0;
+    let block_reversed = (flags_byte >> 4) & 1 != 0;
+    let pad_unknown = (flags_byte >> 3) & 1 != 0;
+
+    let pixel_size = content[pos];
+    pos += 1;
+
+    let row_align_size = if pos + 4 <= content.len() {
+        let val = u32::from_be_bytes([
+            content[pos],
+            content[pos + 1],
+            content[pos + 2],
+            content[pos + 3],
+        ]);
+        pos += 4;
+        val
+    } else {
+        0
+    };
+
+    let tile_align_size = if pos + 4 <= content.len() {
+        let val = u32::from_be_bytes([
+            content[pos],
+            content[pos + 1],
+            content[pos + 2],
+            content[pos + 3],
+        ]);
+        pos += 4;
+        val
+    } else {
+        0
+    };
+
+    let num_tile_cols_minus_one = if pos + 4 <= content.len() {
+        let val = u32::from_be_bytes([
+            content[pos],
+            content[pos + 1],
+            content[pos + 2],
+            content[pos + 3],
+        ]);
+        pos += 4;
+        val
+    } else {
+        0
+    };
+
+    let num_tile_rows_minus_one = if pos + 4 <= content.len() {
+        let val = u32::from_be_bytes([
+            content[pos],
+            content[pos + 1],
+            content[pos + 2],
+            content[pos + 3],
+        ]);
+        let _ = pos; // suppress unused assignment warning
+        val
+    } else {
+        0
+    };
+
+    Ok(UncompressedConfig {
+        profile,
+        components,
+        sampling_type,
+        interleave_type,
+        block_size,
+        components_little_endian,
+        block_pad_lsb,
+        block_little_endian,
+        block_reversed,
+        pad_unknown,
+        pixel_size,
+        row_align_size,
+        tile_align_size,
+        num_tile_cols_minus_one,
+        num_tile_rows_minus_one,
+    })
+}
+
+/// Parse a Generic Compression Configuration Box (cmpC, ISO 23001-17).
+///
+/// FullBox: version(1) + flags(3) + compression_type(4)
+fn parse_cmpc(cmpc: &Box<'_>) -> Result<CompressionConfig> {
+    let content = cmpc.content;
+    // 4 (version + flags) + 4 (compression_type) = 8 bytes minimum
+    if content.len() < 8 {
+        return Err(at!(HeicError::InvalidContainer("cmpC too short")));
+    }
+
+    let compression_type = FourCC::from_bytes(&content[4..8])
+        .ok_or_else(|| at!(HeicError::InvalidContainer("cmpC invalid compression type")))?;
+
+    Ok(CompressionConfig { compression_type })
 }
 
 // ---------------------------------------------------------------------------

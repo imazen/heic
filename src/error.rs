@@ -41,6 +41,8 @@ pub enum HeicError {
     Cancelled(StopReason),
     /// A decode sink reported an error
     Sink(alloc::boxed::Box<dyn core::error::Error + Send + Sync>),
+    /// Codec not supported (e.g., AV1 without the `av1` feature, or JPEG, or H.264)
+    UnsupportedCodec(&'static str),
 }
 
 impl fmt::Display for HeicError {
@@ -58,6 +60,7 @@ impl fmt::Display for HeicError {
             Self::OutOfMemory => write!(f, "out of memory"),
             Self::Cancelled(reason) => write!(f, "{reason}"),
             Self::Sink(e) => write!(f, "decode sink error: {e}"),
+            Self::UnsupportedCodec(msg) => write!(f, "unsupported codec: {msg}"),
         }
     }
 }

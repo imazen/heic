@@ -528,7 +528,68 @@ impl ImageInfo {
             });
         }
 
-        // For grid/iden/iovl: get dimensions from ispe, bit depth from first tile's hvcC
+        // For grid/iden/iovl/av01/unci and other non-hvc1: get dimensions from ispe,
+        // bit depth from first tile's codec config or from the item's own config.
+        if let Some(ref config) = primary_item.av1_config
+            && let Some((w, h)) = primary_item.dimensions
+        {
+            let bit_depth = config.bit_depth();
+            let chroma_format = config.chroma_format();
+            let (width, height) = apply_transform_dimensions(w, h, &primary_item.transforms);
+            return Ok(ImageInfo {
+                width,
+                height,
+                has_alpha,
+                bit_depth,
+                chroma_format,
+                has_exif,
+                has_xmp,
+                has_thumbnail,
+                color_primaries,
+                transfer_characteristics,
+                matrix_coefficients,
+                video_full_range,
+                has_icc_profile,
+                has_depth,
+                has_gain_map,
+                exif: exif.clone(),
+                xmp: xmp.clone(),
+                icc_profile: icc_profile.clone(),
+            });
+        }
+
+        if primary_item.uncompressed_config.is_some()
+            && let Some((w, h)) = primary_item.dimensions
+        {
+            let bit_depth = primary_item
+                .uncompressed_config
+                .as_ref()
+                .and_then(|c| c.components.first())
+                .map(|c| c.component_bit_depth_minus_one + 1)
+                .unwrap_or(8);
+            let (width, height) = apply_transform_dimensions(w, h, &primary_item.transforms);
+            return Ok(ImageInfo {
+                width,
+                height,
+                has_alpha,
+                bit_depth,
+                chroma_format: 3, // unci is typically RGB = 4:4:4
+                has_exif,
+                has_xmp,
+                has_thumbnail,
+                color_primaries,
+                transfer_characteristics,
+                matrix_coefficients,
+                video_full_range,
+                has_icc_profile,
+                has_depth,
+                has_gain_map,
+                exif: exif.clone(),
+                xmp: xmp.clone(),
+                icc_profile: icc_profile.clone(),
+            });
+        }
+
         if primary_item.item_type != ItemType::Hvc1
             && let Some((w, h)) = primary_item.dimensions
         {
@@ -540,11 +601,16 @@ impl ImageInfo {
                     && r.from_item_id == primary_item.id
                     && let Some(&tile_id) = r.to_item_ids.first()
                     && let Some(tile) = container.get_item(tile_id)
-                    && let Some(ref config) = tile.hevc_config
                 {
-                    bit_depth = config.bit_depth_luma_minus8 + 8;
-                    chroma_format = config.chroma_format;
-                    break;
+                    if let Some(ref config) = tile.hevc_config {
+                        bit_depth = config.bit_depth_luma_minus8 + 8;
+                        chroma_format = config.chroma_format;
+                        break;
+                    } else if let Some(ref config) = tile.av1_config {
+                        bit_depth = config.bit_depth();
+                        chroma_format = config.chroma_format();
+                        break;
+                    }
                 }
             }
             let (width, height) = apply_transform_dimensions(w, h, &primary_item.transforms);
