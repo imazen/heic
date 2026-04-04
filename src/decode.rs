@@ -164,9 +164,17 @@ fn decode_item(
             }
         }
         ItemType::Av01 => {
-            return Err(at!(HeicError::UnsupportedCodec(
-                "AV1 codec requires the 'av1' feature"
-            )));
+            #[cfg(feature = "av1")]
+            {
+                let image_data = container.get_item_data(item.id)?;
+                decode_av1_item(item, &image_data)?
+            }
+            #[cfg(not(feature = "av1"))]
+            {
+                return Err(at!(HeicError::UnsupportedCodec(
+                    "AV1 codec requires the 'av1' feature"
+                )));
+            }
         }
         ItemType::Unci => {
             return Err(at!(HeicError::UnsupportedCodec(
@@ -485,6 +493,161 @@ fn decode_iovl(
             }
         }
     }
+
+    Ok(output)
+}
+
+/// Decode an AV1-coded image item using rav1d-safe.
+///
+/// Prepends the av1C configOBUs to the image data, feeds the combined OBU
+/// stream to the rav1d decoder, and converts the resulting frame to a
+/// `DecodedFrame` with Y/Cb/Cr planes.
+#[cfg(feature = "av1")]
+fn decode_av1_item(item: &heif::Item, image_data: &[u8]) -> Result<crate::hevc::DecodedFrame> {
+    use rav1d_safe::src::managed::{Decoder, Planes, Settings};
+
+    let config = item
+        .av1_config
+        .as_ref()
+        .ok_or_else(|| at!(HeicError::InvalidData("AV1 item has no av1C config")))?;
+
+    // Build combined OBU data: config_obus + image_data
+    let total_len = config
+        .config_obus
+        .len()
+        .checked_add(image_data.len())
+        .ok_or_else(|| at!(HeicError::LimitExceeded("AV1 OBU data size overflow")))?;
+    if total_len > 256 * 1024 * 1024 {
+        return Err(at!(HeicError::LimitExceeded(
+            "AV1 OBU data exceeds 256 MiB"
+        )));
+    }
+
+    let mut obu_data = Vec::new();
+    obu_data
+        .try_reserve(total_len)
+        .map_err(|_| at!(HeicError::OutOfMemory))?;
+    obu_data.extend_from_slice(&config.config_obus);
+    obu_data.extend_from_slice(image_data);
+
+    // Create decoder with default settings (single-threaded for still images)
+    let mut decoder = Decoder::with_settings(Settings::default()).map_err(|e| {
+        at!(HeicError::InvalidData(match e {
+            rav1d_safe::src::managed::Error::OutOfMemory => "AV1 decoder init: out of memory",
+            _ => "AV1 decoder initialization failed",
+        }))
+    })?;
+
+    // Feed the OBU data
+    let frame_opt = decoder
+        .decode(&obu_data)
+        .map_err(|_| at!(HeicError::InvalidData("AV1 decode failed")))?;
+
+    // Get the frame — it may come from decode() or flush()
+    let frame = if let Some(f) = frame_opt {
+        f
+    } else {
+        // Try flushing to get buffered frames
+        let flushed = decoder
+            .flush()
+            .map_err(|_| at!(HeicError::InvalidData("AV1 flush failed")))?;
+        flushed
+            .into_iter()
+            .next()
+            .ok_or_else(|| at!(HeicError::InvalidData("AV1 decoder produced no frames")))?
+    };
+
+    let width = frame.width();
+    let height = frame.height();
+    let bit_depth = frame.bit_depth();
+
+    // Map rav1d PixelLayout to our chroma_format
+    let chroma_format = match frame.pixel_layout() {
+        rav1d_safe::src::managed::PixelLayout::I400 => 0u8,
+        rav1d_safe::src::managed::PixelLayout::I420 => 1,
+        rav1d_safe::src::managed::PixelLayout::I422 => 2,
+        rav1d_safe::src::managed::PixelLayout::I444 => 3,
+    };
+
+    let mut output =
+        crate::hevc::DecodedFrame::with_params(width, height, bit_depth, chroma_format)?;
+
+    // Copy planes from rav1d frame to our DecodedFrame
+    match frame.planes() {
+        Planes::Depth8(planes) => {
+            // Copy Y plane
+            let y_view = planes.y();
+            for y in 0..height as usize {
+                let src_row = y_view.row(y);
+                let dst_start = y * output.y_stride();
+                for (i, &val) in src_row.iter().take(width as usize).enumerate() {
+                    output.y_plane[dst_start + i] = val as u16;
+                }
+            }
+
+            // Copy Cb/Cr planes if not monochrome
+            if chroma_format > 0
+                && let (Some(cb_view), Some(cr_view)) = (planes.u(), planes.v())
+            {
+                let c_height = cb_view.height();
+                let c_width = cb_view.width();
+                for y in 0..c_height {
+                    let cb_row = cb_view.row(y);
+                    let cr_row = cr_view.row(y);
+                    let dst_start = y * output.c_stride();
+                    for (i, (&cb, &cr)) in cb_row
+                        .iter()
+                        .take(c_width)
+                        .zip(cr_row.iter().take(c_width))
+                        .enumerate()
+                    {
+                        output.cb_plane[dst_start + i] = cb as u16;
+                        output.cr_plane[dst_start + i] = cr as u16;
+                    }
+                }
+            }
+        }
+        Planes::Depth16(planes) => {
+            // Copy Y plane (16-bit)
+            let y_view = planes.y();
+            for y in 0..height as usize {
+                let src_row = y_view.row(y);
+                let dst_start = y * output.y_stride();
+                for (i, &val) in src_row.iter().take(width as usize).enumerate() {
+                    output.y_plane[dst_start + i] = val;
+                }
+            }
+
+            // Copy Cb/Cr planes if not monochrome
+            if chroma_format > 0
+                && let (Some(cb_view), Some(cr_view)) = (planes.u(), planes.v())
+            {
+                let c_height = cb_view.height();
+                let c_width = cb_view.width();
+                for y in 0..c_height {
+                    let cb_row = cb_view.row(y);
+                    let cr_row = cr_view.row(y);
+                    let dst_start = y * output.c_stride();
+                    for (i, (&cb, &cr)) in cb_row
+                        .iter()
+                        .take(c_width)
+                        .zip(cr_row.iter().take(c_width))
+                        .enumerate()
+                    {
+                        output.cb_plane[dst_start + i] = cb;
+                        output.cr_plane[dst_start + i] = cr;
+                    }
+                }
+            }
+        }
+    }
+
+    // Set color info from the AV1 frame
+    let color_info = frame.color_info();
+    output.full_range = color_info.color_range == rav1d_safe::src::managed::ColorRange::Full;
+    output.matrix_coeffs = color_info.matrix_coefficients as u8;
+    output.color_primaries = color_info.primaries as u8;
+    output.transfer_characteristics = color_info.transfer_characteristics as u8;
 
     Ok(output)
 }
