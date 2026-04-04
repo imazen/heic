@@ -1,11 +1,8 @@
-//! SIMD implementations of HEVC inverse transforms (IDCT 8/16/32)
+//! AVX2 SIMD implementations of HEVC inverse transforms (IDCT 8/16/32)
 //!
-//! AVX2 uses the interleave + madd_epi16 approach from libde265.
+//! Uses the interleave + madd_epi16 approach from libde265, adapted for AVX2.
 //! The key operation is `_mm256_madd_epi16`: multiply 16 pairs of i16, sum adjacent
 //! pairs → 8 i32. This perfectly matches the DCT butterfly's multiply-accumulate pattern.
-//!
-//! WASM128 variants use `#[arcane]` to enable `target_feature(+simd128)`, allowing
-//! LLVM to auto-vectorize the scalar loop bodies with wasm SIMD instructions.
 
 // The `#[arcane]` macro generates multiple function variants for SIMD dispatch;
 // the allow attribute on individual functions does not propagate to generated code.
@@ -1448,24 +1445,10 @@ pub(crate) fn dequantize_scalar(
 }
 
 // =============================================================================
-// WASM128 variants — #[arcane] enables target_feature(+simd128) for auto-vectorization.
-// When compiled without +simd128, these delegate to scalar to avoid emitting
-// simd128 opcodes that would fail wasm module validation.
+// WASM128 variants — delegate to scalar (WASM auto-vectorizes the scalar loops)
 // =============================================================================
 
-/// WASM128 IDST 4x4 — scalar body under target_feature(+simd128) for auto-vectorization
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-#[arcane]
-pub(crate) fn idst4_wasm128(
-    _token: Wasm128Token,
-    coeffs: &[i16; 16],
-    output: &mut [i16; 16],
-    bit_depth: u8,
-) {
-    super::transform::idst4_inner(coeffs, output, bit_depth);
-}
-
-#[cfg(all(target_arch = "wasm32", not(target_feature = "simd128")))]
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn idst4_wasm128(
     _token: Wasm128Token,
     coeffs: &[i16; 16],
@@ -1475,19 +1458,7 @@ pub(crate) fn idst4_wasm128(
     idst4_scalar(ScalarToken, coeffs, output, bit_depth);
 }
 
-/// WASM128 IDCT 8x8 — scalar body under target_feature(+simd128) for auto-vectorization
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-#[arcane]
-pub(crate) fn idct8_wasm128(
-    _token: Wasm128Token,
-    coeffs: &[i16; 64],
-    output: &mut [i16; 64],
-    bit_depth: u8,
-) {
-    super::transform::idct8_inner(coeffs, output, bit_depth);
-}
-
-#[cfg(all(target_arch = "wasm32", not(target_feature = "simd128")))]
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn idct8_wasm128(
     _token: Wasm128Token,
     coeffs: &[i16; 64],
@@ -1497,19 +1468,7 @@ pub(crate) fn idct8_wasm128(
     idct8_scalar(ScalarToken, coeffs, output, bit_depth);
 }
 
-/// WASM128 IDCT 16x16 — scalar body under target_feature(+simd128) for auto-vectorization
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-#[arcane]
-pub(crate) fn idct16_wasm128(
-    _token: Wasm128Token,
-    coeffs: &[i16; 256],
-    output: &mut [i16; 256],
-    bit_depth: u8,
-) {
-    super::transform::idct16_inner(coeffs, output, bit_depth);
-}
-
-#[cfg(all(target_arch = "wasm32", not(target_feature = "simd128")))]
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn idct16_wasm128(
     _token: Wasm128Token,
     coeffs: &[i16; 256],
@@ -1519,19 +1478,7 @@ pub(crate) fn idct16_wasm128(
     idct16_scalar(ScalarToken, coeffs, output, bit_depth);
 }
 
-/// WASM128 IDCT 32x32 — scalar body under target_feature(+simd128) for auto-vectorization
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-#[arcane]
-pub(crate) fn idct32_wasm128(
-    _token: Wasm128Token,
-    coeffs: &[i16; 1024],
-    output: &mut [i16; 1024],
-    bit_depth: u8,
-) {
-    super::transform::idct32_inner(coeffs, output, bit_depth);
-}
-
-#[cfg(all(target_arch = "wasm32", not(target_feature = "simd128")))]
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn idct32_wasm128(
     _token: Wasm128Token,
     coeffs: &[i16; 1024],
@@ -1541,23 +1488,7 @@ pub(crate) fn idct32_wasm128(
     idct32_scalar(ScalarToken, coeffs, output, bit_depth);
 }
 
-/// WASM128 dequantize — scalar loop under target_feature(+simd128) for auto-vectorization
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-#[arcane]
-pub(crate) fn dequantize_wasm128(
-    _token: Wasm128Token,
-    coeffs: &mut [i16],
-    combined_scale: i32,
-    shift: i32,
-    add: i32,
-) {
-    for coef in coeffs.iter_mut() {
-        let value = (*coef as i32 * combined_scale + add) >> shift;
-        *coef = value.clamp(-32768, 32767) as i16;
-    }
-}
-
-#[cfg(all(target_arch = "wasm32", not(target_feature = "simd128")))]
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn dequantize_wasm128(
     _token: Wasm128Token,
     coeffs: &mut [i16],
@@ -1568,33 +1499,7 @@ pub(crate) fn dequantize_wasm128(
     dequantize_scalar(ScalarToken, coeffs, combined_scale, shift, add);
 }
 
-/// WASM128 residual add — scalar loop under target_feature(+simd128) for auto-vectorization
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-#[allow(clippy::too_many_arguments)]
-#[arcane]
-pub(crate) fn add_residual_block_wasm128(
-    _token: Wasm128Token,
-    plane: &mut [u16],
-    stride: usize,
-    x0: usize,
-    y0: usize,
-    residual: &[i16],
-    size: usize,
-    max_val: i32,
-) {
-    for py in 0..size {
-        let row_start = (y0 + py) * stride + x0;
-        let row = &mut plane[row_start..row_start + size];
-        let res_row = &residual[py * size..(py + 1) * size];
-        for (out, &r) in row.iter_mut().zip(res_row.iter()) {
-            let pred = *out as i32;
-            *out = (pred + r as i32).clamp(0, max_val) as u16;
-        }
-    }
-}
-
-#[cfg(all(target_arch = "wasm32", not(target_feature = "simd128")))]
-#[allow(clippy::too_many_arguments)]
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn add_residual_block_wasm128(
     _token: Wasm128Token,
     plane: &mut [u16],
