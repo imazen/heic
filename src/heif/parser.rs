@@ -475,6 +475,10 @@ fn parse_ftyp(ftyp: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
         FourCC(*b"hevx"),
         FourCC(*b"mif1"),
         FourCC(*b"msf1"),
+        FourCC(*b"mif2"), // HEIF v2
+        FourCC(*b"mif3"), // HEIF v3
+        FourCC(*b"avif"), // AV1 Image File Format
+        FourCC(*b"avis"), // AV1 Image Sequence
     ];
 
     let is_heif = valid_brands.contains(&container.brand)
