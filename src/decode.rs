@@ -120,7 +120,7 @@ pub(crate) fn decode_to_frame(
                 .copied()
         });
     if let Some(alpha_id) = alpha_id
-        && let Some(alpha_plane) = decode_alpha_plane(&container, alpha_id, &frame, limits)
+        && let Some(alpha_plane) = decode_alpha_plane(&container, alpha_id, &frame, limits, stop)
     {
         frame.alpha_plane = Some(alpha_plane);
     }
@@ -167,7 +167,7 @@ fn decode_item(
             #[cfg(feature = "av1")]
             {
                 let image_data = container.get_item_data(item.id)?;
-                decode_av1_item(item, &image_data)?
+                decode_av1_item(item, &image_data, limits, stop)?
             }
             #[cfg(not(feature = "av1"))]
             {
@@ -180,7 +180,7 @@ fn decode_item(
             #[cfg(feature = "unci")]
             {
                 let image_data = container.get_item_data(item.id)?;
-                decode_unci_item(item, &image_data)?
+                decode_unci_item(item, &image_data, limits, stop)?
             }
             #[cfg(not(feature = "unci"))]
             {
@@ -511,7 +511,12 @@ fn decode_iovl(
 /// stream to the rav1d decoder, and converts the resulting frame to a
 /// `DecodedFrame` with Y/Cb/Cr planes.
 #[cfg(feature = "av1")]
-fn decode_av1_item(item: &heif::Item, image_data: &[u8]) -> Result<crate::hevc::DecodedFrame> {
+fn decode_av1_item(
+    item: &heif::Item,
+    image_data: &[u8],
+    limits: &Limits,
+    stop: &dyn Stop,
+) -> Result<crate::hevc::DecodedFrame> {
     use rav1d_safe::src::managed::{Decoder, Planes, Settings};
 
     let config = item
@@ -537,6 +542,8 @@ fn decode_av1_item(item: &heif::Item, image_data: &[u8]) -> Result<crate::hevc::
         .map_err(|_| at!(HeicError::OutOfMemory))?;
     obu_data.extend_from_slice(&config.config_obus);
     obu_data.extend_from_slice(image_data);
+
+    check_stop(stop)?;
 
     // Create decoder with default settings (single-threaded for still images)
     let mut decoder = Decoder::with_settings(Settings::default()).map_err(|e| {
@@ -568,6 +575,13 @@ fn decode_av1_item(item: &heif::Item, image_data: &[u8]) -> Result<crate::hevc::
     let width = frame.width();
     let height = frame.height();
     let bit_depth = frame.bit_depth();
+
+    // Check limits on decoded frame dimensions
+    limits.check_dimensions(width, height)?;
+    let estimated = DecoderConfig::estimate_memory(width, height, PixelLayout::Rgba8);
+    limits.check_memory(estimated)?;
+
+    check_stop(stop)?;
 
     // Map rav1d PixelLayout to our chroma_format
     let chroma_format = match frame.pixel_layout() {
@@ -666,7 +680,12 @@ fn decode_av1_item(item: &heif::Item, image_data: &[u8]) -> Result<crate::hevc::
 /// pixel data as defined in ISO 23001-17. Supports pixel-interleaved and
 /// component-planar layouts for 8-bit unsigned integer components.
 #[cfg(feature = "unci")]
-fn decode_unci_item(item: &heif::Item, image_data: &[u8]) -> Result<crate::hevc::DecodedFrame> {
+fn decode_unci_item(
+    item: &heif::Item,
+    image_data: &[u8],
+    limits: &Limits,
+    stop: &dyn Stop,
+) -> Result<crate::hevc::DecodedFrame> {
     let unc_config = item
         .uncompressed_config
         .as_ref()
@@ -679,6 +698,11 @@ fn decode_unci_item(item: &heif::Item, image_data: &[u8]) -> Result<crate::hevc:
     if width == 0 || height == 0 {
         return Err(at!(HeicError::InvalidData("unci item has zero dimensions")));
     }
+
+    // Check limits on unci dimensions before allocating
+    limits.check_dimensions(width, height)?;
+    let estimated = DecoderConfig::estimate_memory(width, height, PixelLayout::Rgba8);
+    limits.check_memory(estimated)?;
 
     let num_components = unc_config.components.len();
     if num_components == 0 {
@@ -711,13 +735,18 @@ fn decode_unci_item(item: &heif::Item, image_data: &[u8]) -> Result<crate::hevc:
         .and_then(|n| n.checked_mul(bytes_per_pixel as u64))
         .ok_or_else(|| at!(HeicError::LimitExceeded("unci decompressed size overflow")))?;
 
-    // Security: limit decompressed size to 512 MiB
-    if expected_size > 512 * 1024 * 1024 {
+    // Security: limit decompressed size to min(512 MiB, limits.max_memory_bytes)
+    let decompress_cap = limits
+        .max_memory_bytes
+        .map_or(512 * 1024 * 1024, |m| m.min(512 * 1024 * 1024));
+    if expected_size > decompress_cap {
         return Err(at!(HeicError::LimitExceeded(
-            "unci decompressed size exceeds 512 MiB"
+            "unci decompressed size exceeds limit"
         )));
     }
     let expected_size = expected_size as usize;
+
+    check_stop(stop)?;
 
     // Decompress if compression config is present
     let pixel_data: alloc::borrow::Cow<'_, [u8]> =
@@ -731,10 +760,10 @@ fn decode_unci_item(item: &heif::Item, image_data: &[u8]) -> Result<crate::hevc:
             let mut decompressor = zenflate::Decompressor::new();
             let result = match &cmp_config.compression_type.0 {
                 b"defl" => decompressor
-                    .deflate_decompress(image_data, &mut decompressed, enough::Unstoppable)
+                    .deflate_decompress(image_data, &mut decompressed, stop)
                     .map_err(|_| at!(HeicError::InvalidData("unci deflate decompression failed"))),
                 b"zlib" => decompressor
-                    .zlib_decompress(image_data, &mut decompressed, enough::Unstoppable)
+                    .zlib_decompress(image_data, &mut decompressed, stop)
                     .map_err(|_| at!(HeicError::InvalidData("unci zlib decompression failed"))),
                 _ => {
                     return Err(at!(HeicError::UnsupportedCodec(
@@ -771,6 +800,7 @@ fn decode_unci_item(item: &heif::Item, image_data: &[u8]) -> Result<crate::hevc:
             // Component-planar: each component stored as a complete plane
             let plane_size = (width as usize) * (height as usize);
             for (comp_idx, comp) in unc_config.components.iter().enumerate() {
+                check_stop(stop)?;
                 let plane_offset = comp_idx * plane_size;
                 if plane_offset + plane_size > pixel_data.len() {
                     return Err(at!(HeicError::InvalidData(
@@ -812,10 +842,11 @@ fn decode_unci_item(item: &heif::Item, image_data: &[u8]) -> Result<crate::hevc:
             }
 
             for y in 0..height as usize {
+                check_stop(stop)?;
                 for x in 0..width as usize {
                     let pixel_offset = (y * width as usize + x) * stride;
                     if pixel_offset + stride > pixel_data.len() {
-                        break;
+                        return Err(at!(HeicError::InvalidData("unci pixel data truncated")));
                     }
                     let dst_idx = y * output.y_stride() + x;
                     for (c, &mapping) in comp_to_plane.iter().enumerate().take(num_components) {
@@ -1660,10 +1691,10 @@ fn decode_alpha_plane(
     alpha_id: u32,
     primary_frame: &crate::hevc::DecodedFrame,
     limits: &Limits,
+    stop: &dyn Stop,
 ) -> Option<Vec<u16>> {
     let alpha_item = container.get_item(alpha_id)?;
     let alpha_data = container.get_item_data(alpha_id).ok()?;
-    let alpha_config = alpha_item.hevc_config.as_ref()?;
 
     // Check limits on alpha image dimensions before decoding
     if let Some((w, h)) = alpha_item.dimensions {
@@ -1672,7 +1703,25 @@ fn decode_alpha_plane(
         limits.check_memory(estimated).ok()?;
     }
 
-    let alpha_frame = crate::hevc::decode_with_config(alpha_config, &alpha_data).ok()?;
+    check_stop(stop).ok()?;
+
+    // Multi-codec dispatch: try HEVC first, then AV1
+    let alpha_frame = if let Some(ref config) = alpha_item.hevc_config {
+        crate::hevc::decode_with_config(config, &alpha_data).ok()?
+    } else {
+        #[cfg(feature = "av1")]
+        {
+            if alpha_item.av1_config.is_some() {
+                decode_av1_item(&alpha_item, &alpha_data, limits, stop).ok()?
+            } else {
+                return None;
+            }
+        }
+        #[cfg(not(feature = "av1"))]
+        {
+            return None;
+        }
+    };
 
     let primary_w = primary_frame.cropped_width();
     let primary_h = primary_frame.cropped_height();

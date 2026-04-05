@@ -1799,7 +1799,7 @@ fn parse_moov<'a>(
     };
 
     // Resolve sample → file offset using stco + stsc tables
-    let sample_offset = resolve_sample_offset(track, first_sync, file_data.len() as u64)?;
+    let sample_offset = resolve_sample_offset(track, first_sync, file_data.len() as u64, stop)?;
 
     let sample_end = sample_offset
         .checked_add(sample_size as u64)
@@ -1896,7 +1896,7 @@ fn parse_moov<'a>(
             };
 
             let Ok(thumb_offset) =
-                resolve_sample_offset(other_track, thumb_sync, file_data.len() as u64)
+                resolve_sample_offset(other_track, thumb_sync, file_data.len() as u64, stop)
             else {
                 continue;
             };
@@ -2385,7 +2385,12 @@ fn parse_stss(stss: &Box<'_>, info: &mut TrackInfo) -> Result<()> {
 /// from stco/co64. We walk through chunks counting samples until we find the
 /// chunk containing our target sample, then add up preceding sample sizes
 /// within that chunk.
-fn resolve_sample_offset(track: &TrackInfo, sample_number: u32, file_len: u64) -> Result<u64> {
+fn resolve_sample_offset(
+    track: &TrackInfo,
+    sample_number: u32,
+    file_len: u64,
+    stop: &dyn Stop,
+) -> Result<u64> {
     if sample_number == 0 || sample_number > track.sample_count {
         return Err(at!(HeicError::InvalidData("sample number out of range")));
     }
@@ -2404,6 +2409,7 @@ fn resolve_sample_offset(track: &TrackInfo, sample_number: u32, file_len: u64) -
     let stsc = &track.sample_to_chunk;
 
     for (entry_idx, &(first_chunk, samples_per_chunk, _desc_idx)) in stsc.iter().enumerate() {
+        check_stop(stop)?;
         // first_chunk is 1-based
         let next_first_chunk = if entry_idx + 1 < stsc.len() {
             stsc[entry_idx + 1].0
