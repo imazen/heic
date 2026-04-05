@@ -4,7 +4,7 @@
 //! references, grid layouts, auxiliary images) using committed test files that
 //! require no external downloads.
 
-use heic::{DecoderConfig, ImageInfo};
+use heic::{DecoderConfig, ImageInfo, PixelLayout};
 use std::path::{Path, PathBuf};
 
 fn testdata() -> PathBuf {
@@ -514,4 +514,155 @@ fn unci_brotli_returns_unsupported() {
         }
         Ok(_) => panic!("brotli unci decode should fail (not implemented)"),
     }
+}
+
+// ---- Limits enforcement tests ----
+
+/// Verify that restrictive max_pixels limits reject HEVC decode.
+#[test]
+fn limits_reject_hevc_decode() {
+    let data = read_file("libheif-examples/example.heic");
+    let mut limits = heic::Limits::default();
+    limits.max_pixels = Some(100); // 1280x854 will exceed this
+
+    let result = DecoderConfig::new()
+        .decode_request(&data)
+        .with_output_layout(PixelLayout::Rgb8)
+        .with_limits(&limits)
+        .decode();
+
+    assert!(
+        result.is_err(),
+        "HEVC decode should fail with tiny pixel limit"
+    );
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("limit exceeded") || msg.contains("pixel count"),
+        "should be a limit error, got: {msg}"
+    );
+}
+
+/// Verify that restrictive max_width limits reject decode.
+#[test]
+fn limits_reject_max_width() {
+    let data = read_file("libheif-examples/example.heic");
+    let mut limits = heic::Limits::default();
+    limits.max_width = Some(10); // 1280 wide, will exceed this
+
+    let result = DecoderConfig::new()
+        .decode_request(&data)
+        .with_output_layout(PixelLayout::Rgb8)
+        .with_limits(&limits)
+        .decode();
+
+    assert!(result.is_err(), "decode should fail with tiny width limit");
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("limit exceeded") || msg.contains("width"),
+        "should be a limit error, got: {msg}"
+    );
+}
+
+/// Verify that restrictive limits reject unci decode.
+#[cfg(feature = "unci")]
+#[test]
+fn limits_reject_unci_decode() {
+    let data = read_file("libheif-examples/uncompressed_comp_RGB.heif");
+    let mut limits = heic::Limits::default();
+    limits.max_pixels = Some(1); // Any unci image will exceed this
+
+    let result = DecoderConfig::new()
+        .decode_request(&data)
+        .with_output_layout(PixelLayout::Rgb8)
+        .with_limits(&limits)
+        .decode();
+
+    assert!(
+        result.is_err(),
+        "unci decode should fail with tiny pixel limit"
+    );
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("limit exceeded") || msg.contains("pixel count"),
+        "should be a limit error, got: {msg}"
+    );
+}
+
+/// Verify that unci truncated pixel data returns an error, not a truncated image.
+#[cfg(feature = "unci")]
+#[test]
+fn unci_truncated_data_returns_error() {
+    let data = read_file("libheif-examples/uncompressed_comp_RGB.heif");
+
+    // First, verify the file decodes successfully without truncation
+    let ok_result = DecoderConfig::new().decode(&data, PixelLayout::Rgb8);
+    assert!(
+        ok_result.is_ok(),
+        "untruncated unci should decode OK: {:?}",
+        ok_result.err()
+    );
+
+    // Now truncate the file data significantly (remove last 50% of mdat)
+    // This should cause an error when the pixel data is too short
+    let truncated = &data[..data.len() / 2];
+    let result = DecoderConfig::new().decode(truncated, PixelLayout::Rgb8);
+
+    assert!(
+        result.is_err(),
+        "truncated unci data should return an error, not silent corruption"
+    );
+}
+
+/// A Stop implementation that is always cancelled.
+struct AlwaysCancelled;
+
+impl heic::Stop for AlwaysCancelled {
+    fn check(&self) -> Result<(), heic::StopReason> {
+        Err(heic::StopReason::Cancelled)
+    }
+}
+
+/// Verify that a pre-cancelled Stop token causes early return from HEVC decode.
+#[test]
+fn check_stop_cancels_hevc_decode() {
+    let data = read_file("libheif-examples/example.heic");
+
+    let result = DecoderConfig::new()
+        .decode_request(&data)
+        .with_output_layout(PixelLayout::Rgb8)
+        .with_stop(&AlwaysCancelled)
+        .decode();
+
+    assert!(
+        result.is_err(),
+        "cancelled Stop should cause decode to fail"
+    );
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("cancelled"),
+        "should be a cancellation error, got: {msg}"
+    );
+}
+
+/// Verify that a pre-cancelled Stop token causes early return from unci decode.
+#[cfg(feature = "unci")]
+#[test]
+fn check_stop_cancels_unci_decode() {
+    let data = read_file("libheif-examples/uncompressed_comp_RGB.heif");
+
+    let result = DecoderConfig::new()
+        .decode_request(&data)
+        .with_output_layout(PixelLayout::Rgb8)
+        .with_stop(&AlwaysCancelled)
+        .decode();
+
+    assert!(
+        result.is_err(),
+        "cancelled Stop should cause unci decode to fail"
+    );
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("cancelled"),
+        "should be a cancellation error, got: {msg}"
+    );
 }
