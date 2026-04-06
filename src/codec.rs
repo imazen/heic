@@ -671,7 +671,7 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
                     frame.transfer_characteristics as u16,
                 );
                 let rgba_data = frame.to_rgba16()?;
-                let pixels = u16_chunks_to_rgba(rgba_data)?;
+                let pixels = u16_vec_to_rgba(rgba_data);
                 let pb = PixelBuffer::from_pixels_erased(pixels, w, h)
                     .map_err_at(|_| HeicError::InvalidData("pixel count mismatch"))?
                     .with_descriptor(desc);
@@ -683,7 +683,7 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
                     frame.transfer_characteristics as u16,
                 );
                 let rgb_data = frame.to_rgb16()?;
-                let pixels = u16_chunks_to_rgb(rgb_data)?;
+                let pixels = u16_vec_to_rgb(rgb_data);
                 let pb = PixelBuffer::from_pixels_erased(pixels, w, h)
                     .map_err_at(|_| HeicError::InvalidData("pixel count mismatch"))?
                     .with_descriptor(desc);
@@ -928,7 +928,7 @@ impl HeicStreamDecoder {
                     frame.transfer_characteristics as u16,
                 );
                 let rgb_data = frame.to_rgb16()?;
-                let pixels = u16_chunks_to_rgb(rgb_data)?;
+                let pixels = u16_vec_to_rgb(rgb_data);
                 let w = frame.cropped_width();
                 let h = frame.cropped_height();
                 PixelBuffer::from_pixels_erased(pixels, w, h)
@@ -1489,41 +1489,24 @@ fn probe_error_to_heic(e: crate::ProbeError) -> At<HeicError> {
     }
 }
 
-/// Convert a flat `Vec<u16>` of RGB triples into `Vec<Rgb<u16>>` with fallible allocation.
-fn u16_chunks_to_rgb(data: alloc::vec::Vec<u16>) -> Result<alloc::vec::Vec<Rgb<u16>>, At<HeicError>> {
-    let count = data.len() / 3;
-    let mut pixels = alloc::vec::Vec::new();
-    pixels
-        .try_reserve(count)
-        .map_err(|_| at!(HeicError::OutOfMemory))?;
-    for c in data.chunks_exact(3) {
-        pixels.push(Rgb {
-            r: c[0],
-            g: c[1],
-            b: c[2],
-        });
+/// Reinterpret `Vec<u16>` as `Vec<Rgb<u16>>` via bytemuck.
+/// Zero-copy when alignment is compatible (always for u16→Rgb<u16>),
+/// falls back to a single memcpy otherwise.
+fn u16_vec_to_rgb(data: alloc::vec::Vec<u16>) -> alloc::vec::Vec<Rgb<u16>> {
+    match bytemuck::try_cast_vec(data) {
+        Ok(pixels) => pixels,
+        Err((_err, data)) => bytemuck::cast_slice::<u16, Rgb<u16>>(&data).to_vec(),
     }
-    Ok(pixels)
 }
 
-/// Convert a flat `Vec<u16>` of RGBA quads into `Vec<Rgba<u16>>` with fallible allocation.
-fn u16_chunks_to_rgba(
-    data: alloc::vec::Vec<u16>,
-) -> Result<alloc::vec::Vec<Rgba<u16>>, At<HeicError>> {
-    let count = data.len() / 4;
-    let mut pixels = alloc::vec::Vec::new();
-    pixels
-        .try_reserve(count)
-        .map_err(|_| at!(HeicError::OutOfMemory))?;
-    for c in data.chunks_exact(4) {
-        pixels.push(Rgba {
-            r: c[0],
-            g: c[1],
-            b: c[2],
-            a: c[3],
-        });
+/// Reinterpret `Vec<u16>` as `Vec<Rgba<u16>>` via bytemuck.
+/// Zero-copy when alignment is compatible (always for u16→Rgba<u16>),
+/// falls back to a single memcpy otherwise.
+fn u16_vec_to_rgba(data: alloc::vec::Vec<u16>) -> alloc::vec::Vec<Rgba<u16>> {
+    match bytemuck::try_cast_vec(data) {
+        Ok(pixels) => pixels,
+        Err((_err, data)) => bytemuck::cast_slice::<u16, Rgba<u16>>(&data).to_vec(),
     }
-    Ok(pixels)
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
