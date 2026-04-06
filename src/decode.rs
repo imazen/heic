@@ -543,10 +543,25 @@ fn decode_av1_item(
     obu_data.extend_from_slice(&config.config_obus);
     obu_data.extend_from_slice(image_data);
 
+    // Pre-decode limits check: use ispe dimensions if available, and feed
+    // max_pixels to rav1d's frame_size_limit so it rejects oversized frames
+    // during OBU parsing — before allocating the decoded frame.
+    if let Some((w, h)) = item.dimensions {
+        limits.check_dimensions(w, h)?;
+        let estimated = DecoderConfig::estimate_memory(w, h, PixelLayout::Rgba8);
+        limits.check_memory(estimated)?;
+    }
+
     check_stop(stop)?;
 
-    // Create decoder with default settings (single-threaded for still images)
-    let mut decoder = Decoder::with_settings(Settings::default()).map_err(|e| {
+    // Set rav1d frame_size_limit from user limits so the decoder rejects
+    // oversized frames during OBU parsing, before allocating pixel buffers.
+    // Set rav1d frame_size_limit from user limits
+    let mut settings = Settings::default();
+    if let Some(max_pixels) = limits.max_pixels {
+        settings.frame_size_limit = max_pixels.min(u32::MAX as u64) as u32;
+    }
+    let mut decoder = Decoder::with_settings(settings).map_err(|e| {
         at!(HeicError::InvalidData(match e {
             rav1d_safe::src::managed::Error::OutOfMemory => "AV1 decoder init: out of memory",
             _ => "AV1 decoder initialization failed",
@@ -575,11 +590,6 @@ fn decode_av1_item(
     let width = frame.width();
     let height = frame.height();
     let bit_depth = frame.bit_depth();
-
-    // Check limits on decoded frame dimensions
-    limits.check_dimensions(width, height)?;
-    let estimated = DecoderConfig::estimate_memory(width, height, PixelLayout::Rgba8);
-    limits.check_memory(estimated)?;
 
     check_stop(stop)?;
 
