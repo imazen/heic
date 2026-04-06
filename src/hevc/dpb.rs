@@ -6,7 +6,6 @@
 
 #![allow(dead_code)] // Phase 0: types used in subsequent phases
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use super::inter::{MAX_NUM_REF_PICS, PbMotion};
@@ -40,21 +39,25 @@ pub struct DpbEntry {
 
 impl DpbEntry {
     /// Create a new DPB entry from a decoded frame
-    pub fn new(frame: DecodedFrame, poc: i32, min_pu_size: u32) -> Self {
+    pub fn new(
+        frame: DecodedFrame,
+        poc: i32,
+        min_pu_size: u32,
+    ) -> core::result::Result<Self, crate::error::HevcError> {
         let pu_width = frame.width.div_ceil(min_pu_size);
         let pu_height = frame.height.div_ceil(min_pu_size);
         let pu_count = (pu_width * pu_height) as usize;
 
-        Self {
+        Ok(Self {
             frame,
             poc,
             is_reference: true,
             is_output: false,
-            mv_info: vec![PbMotion::UNAVAILABLE; pu_count],
+            mv_info: try_vec![PbMotion::UNAVAILABLE; pu_count]?,
             mv_stride: pu_width,
-            pred_mode_map: vec![PredMode::Intra; pu_count],
+            pred_mode_map: try_vec![PredMode::Intra; pu_count]?,
             ref_poc: [[0i32; MAX_NUM_REF_PICS]; 2],
-        }
+        })
     }
 
     /// Get the motion info for a PU at luma position (x, y)
@@ -221,7 +224,7 @@ mod tests {
     fn test_dpb_insert_and_find() {
         let mut dpb = Dpb::new(4);
         let frame = DecodedFrame::with_params(64, 64, 8, 1).unwrap();
-        let entry = DpbEntry::new(frame, 42, 4);
+        let entry = DpbEntry::new(frame, 42, 4).unwrap();
         let slot = dpb.insert(entry).unwrap();
         assert_eq!(dpb.count(), 1);
         assert_eq!(dpb.find_by_poc(42), Some(slot));
@@ -233,7 +236,7 @@ mod tests {
         let mut dpb = Dpb::new(4);
         for poc in [0, 1, 2] {
             let frame = DecodedFrame::with_params(64, 64, 8, 1).unwrap();
-            dpb.insert(DpbEntry::new(frame, poc, 4));
+            dpb.insert(DpbEntry::new(frame, poc, 4).unwrap());
         }
         let mut pocs = dpb.active_pocs();
         pocs.sort();
@@ -245,7 +248,7 @@ mod tests {
         let mut dpb = Dpb::new(4);
         for poc in [0, 1, 2] {
             let frame = DecodedFrame::with_params(64, 64, 8, 1).unwrap();
-            dpb.insert(DpbEntry::new(frame, poc, 4));
+            dpb.insert(DpbEntry::new(frame, poc, 4).unwrap());
         }
         dpb.mark_unused(&[0, 2]); // POC 1 is no longer referenced
         let pocs = dpb.active_pocs();

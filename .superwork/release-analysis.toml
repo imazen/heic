@@ -1,0 +1,41 @@
+schema_version = 1
+superworkspace = "zen"
+generated_at = "1775432435"
+
+[crates.heic]
+head = "57db308"
+tag = "v0.1.1"
+tag_found = true
+version = "0.1.1"
+class = "library"
+tier = 3
+dependents = 1
+files_changed = 15
+lines_added = 3301
+lines_removed = 72
+src_files_changed = 10
+commit_count = 16
+commit_subjects = [
+    "docs: update README with multi-codec HEIF support",
+    "test: comprehensive tests for multi-codec HEIF support",
+    "feat: uncompressed HEIF (unci) decode via zenflate behind 'unci' feature",
+    "feat: AV1 decode via rav1d-safe behind 'av1' feature flag",
+    "feat: multi-codec dispatch for AV1, unci, JPEG, and H.264 item types",
+    "feat: accept mif3, mif2, avif, and avis brands in HEIF container parser",
+    "feat: add HEIF image sequence (msf1/moov) parsing and decode support",
+    "fix: bump archmage and magetypes to 0.9.16",
+    "feat: native wasm128 SIMD for IDST4, IDCT8, and dequantize",
+    "feat: replace scalar-delegating wasm128 stubs with real SIMD generics",
+    'Revert "feat: add #[arcane] to wasm128 variants for auto-vectorization"',
+    'Revert "fix: add simd128 cfg guard to color_convert wasm128 variant"',
+    "fix: add simd128 cfg guard to color_convert wasm128 variant",
+    "feat: add #[arcane] to wasm128 variants for auto-vectorization",
+    "fix: cargo fmt formatting corrections",
+    "feat: add wasm128 tier to all SIMD dispatch points",
+]
+category = ""
+bump = ""
+reason = ""
+needs_review = false
+semver_check = ""
+copter = ""

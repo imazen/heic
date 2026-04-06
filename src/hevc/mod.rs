@@ -363,7 +363,7 @@ impl VideoDecoder {
 
         if let Some(sps) = &self.sps {
             let min_pu = ((1u32 << sps.log2_min_cb_size()) / 2).max(1);
-            let mut entry = DpbEntry::new(clone_frame_for_ref(&pic.frame), poc, min_pu);
+            let mut entry = DpbEntry::new(clone_frame_for_ref(&pic.frame), poc, min_pu)?;
             // Extract pred_mode_map and mv_info from picture maps if present
             if let Some(maps) = pic.maps {
                 entry.mv_info = maps.mv_info;
