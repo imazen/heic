@@ -1,6 +1,5 @@
 //! Decoded frame representation
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use super::color_convert;
@@ -333,8 +332,8 @@ impl DecodedFrame {
     /// (BT.601, BT.709, or BT.2020) and range from [`full_range`](Self::full_range).
     ///
     /// Uses SIMD-accelerated conversion for 4:2:0 chroma (AVX2 on x86-64).
-    pub fn to_rgb(&self) -> Vec<u8> {
-        let mut rgb = vec![0u8; self.total_cropped_bytes(3)];
+    pub fn to_rgb(&self) -> Result<Vec<u8>> {
+        let mut rgb = try_vec![0u8; self.total_cropped_bytes(3)]?;
         let shift = self.bit_depth - 8;
 
         let y_start = self.crop_top;
@@ -378,14 +377,14 @@ impl DecodedFrame {
             }
         }
 
-        rgb
+        Ok(rgb)
     }
 
     /// Convert YCbCr to interleaved BGRA bytes with conformance window cropping.
     ///
     /// Returns `cropped_width * cropped_height * 4` bytes in B, G, R, A order.
     /// Uses real alpha from [`alpha_plane`](Self::alpha_plane) if present, otherwise 255.
-    pub fn to_bgra(&self) -> Vec<u8> {
+    pub fn to_bgra(&self) -> Result<Vec<u8>> {
         let mut bgra = Vec::with_capacity(self.total_cropped_bytes(4));
         let shift = self.bit_depth - 8;
 
@@ -422,13 +421,13 @@ impl DecodedFrame {
             }
         }
 
-        bgra
+        Ok(bgra)
     }
 
     /// Convert YCbCr to interleaved BGR bytes with conformance window cropping.
     ///
     /// Returns `cropped_width * cropped_height * 3` bytes in B, G, R order.
-    pub fn to_bgr(&self) -> Vec<u8> {
+    pub fn to_bgr(&self) -> Result<Vec<u8>> {
         let mut bgr = Vec::with_capacity(self.total_cropped_bytes(3));
         let shift = self.bit_depth - 8;
 
@@ -450,7 +449,7 @@ impl DecodedFrame {
             }
         }
 
-        bgr
+        Ok(bgr)
     }
 
     /// Write cropped pixels into a pre-allocated buffer in RGB format.
@@ -625,7 +624,7 @@ impl DecodedFrame {
     ///
     /// Returns `cropped_width * cropped_height * 4` bytes in R, G, B, A order.
     /// Uses real alpha from [`alpha_plane`](Self::alpha_plane) if present, otherwise 255.
-    pub fn to_rgba(&self) -> Vec<u8> {
+    pub fn to_rgba(&self) -> Result<Vec<u8>> {
         let mut rgba = Vec::with_capacity(self.total_cropped_bytes(4));
         let shift = self.bit_depth - 8;
 
@@ -663,7 +662,7 @@ impl DecodedFrame {
             }
         }
 
-        rgba
+        Ok(rgba)
     }
 
     /// Get chroma values for a pixel position
@@ -832,9 +831,9 @@ impl DecodedFrame {
     /// For 8-bit sources, this is equivalent to `to_rgb()` with values upscaled.
     /// For 10-bit sources (iPhone HEIC), this preserves the full 10-bit precision
     /// instead of truncating to 8-bit.
-    pub fn to_rgb16(&self) -> Vec<u16> {
+    pub fn to_rgb16(&self) -> Result<Vec<u16>> {
         let total_elems = self.total_cropped_bytes(3); // pixels * 3 channels
-        let mut rgb = vec![0u16; total_elems];
+        let mut rgb = try_vec![0u16; total_elems]?;
 
         let y_start = self.crop_top;
         let y_end = self.height - self.crop_bottom;
@@ -860,14 +859,14 @@ impl DecodedFrame {
             }
         }
 
-        rgb
+        Ok(rgb)
     }
 
     /// Convert YCbCr to interleaved RGBA u16 with conformance window cropping.
     ///
     /// Same precision preservation as [`to_rgb16`](Self::to_rgb16), with alpha
     /// from [`alpha_plane`](Self::alpha_plane) (or max value if absent).
-    pub fn to_rgba16(&self) -> Vec<u16> {
+    pub fn to_rgba16(&self) -> Result<Vec<u16>> {
         let total_elems = self.total_cropped_bytes(4); // pixels * 4 channels
         let mut rgba = Vec::with_capacity(total_elems);
 
@@ -905,7 +904,7 @@ impl DecodedFrame {
             }
         }
 
-        rgba
+        Ok(rgba)
     }
 
     /// Get chroma values at native bit depth (no shift).

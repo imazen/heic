@@ -230,16 +230,16 @@ fn decode_item(
             }
             Transform::Mirror(mirror) => {
                 frame = match mirror.axis {
-                    0 => frame.mirror_vertical(),
-                    1 => frame.mirror_horizontal(),
+                    0 => frame.mirror_vertical()?,
+                    1 => frame.mirror_horizontal()?,
                     _ => frame,
                 };
             }
             Transform::Rotation(rotation) => {
                 frame = match rotation.angle {
-                    90 => frame.rotate_90_cw(),
-                    180 => frame.rotate_180(),
-                    270 => frame.rotate_270_cw(),
+                    90 => frame.rotate_90_cw()?,
+                    180 => frame.rotate_180()?,
+                    270 => frame.rotate_270_cw()?,
                     _ => frame,
                 };
             }
@@ -1988,10 +1988,10 @@ pub(crate) fn decode_thumbnail(data: &[u8], layout: PixelLayout) -> Result<Optio
     let height = frame.cropped_height();
 
     let pixels = match layout {
-        PixelLayout::Rgb8 => frame.to_rgb(),
-        PixelLayout::Rgba8 => frame.to_rgba(),
-        PixelLayout::Bgr8 => frame.to_bgr(),
-        PixelLayout::Bgra8 => frame.to_bgra(),
+        PixelLayout::Rgb8 => frame.to_rgb()?,
+        PixelLayout::Rgba8 => frame.to_rgba()?,
+        PixelLayout::Bgr8 => frame.to_bgr()?,
+        PixelLayout::Bgra8 => frame.to_bgra()?,
     };
 
     Ok(Some(DecodeOutput {
@@ -2166,10 +2166,10 @@ pub(crate) fn decode_auxiliary_item(
     let height = frame.cropped_height();
 
     let pixels = match layout {
-        PixelLayout::Rgb8 => frame.to_rgb(),
-        PixelLayout::Rgba8 => frame.to_rgba(),
-        PixelLayout::Bgr8 => frame.to_bgr(),
-        PixelLayout::Bgra8 => frame.to_bgra(),
+        PixelLayout::Rgb8 => frame.to_rgb()?,
+        PixelLayout::Rgba8 => frame.to_rgba()?,
+        PixelLayout::Bgr8 => frame.to_bgr()?,
+        PixelLayout::Bgra8 => frame.to_bgra()?,
     };
 
     Ok(DecodeOutput {

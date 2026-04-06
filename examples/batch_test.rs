@@ -58,7 +58,7 @@ fn main() {
 
         let w = frame.cropped_width();
         let h = frame.cropped_height();
-        let rgb = frame.to_rgb();
+        let rgb = frame.to_rgb().expect("color conversion failed");
 
         eprint!("{}x{} ", w, h);
 

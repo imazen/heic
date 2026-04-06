@@ -1,23 +1,25 @@
 //! Spatial transforms: rotation and mirror operations on decoded frames.
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use super::DecodedFrame;
+use crate::error::HevcError;
+
+type Result<T> = core::result::Result<T, HevcError>;
 
 impl DecodedFrame {
     /// Rotate the frame 90° clockwise, returning a new frame.
     ///
     /// Output dimensions are swapped: `(width, height)` becomes `(height, width)`.
     /// Crop offsets are transformed accordingly.
-    pub fn rotate_90_cw(&self) -> Self {
+    pub fn rotate_90_cw(&self) -> Result<Self> {
         let ow = self.width;
         let oh = self.height;
         let nw = oh;
         let nh = ow;
 
         // Rotate luma: dst(dx, dy) = src(dy, oh-1-dx)
-        let mut y_plane = vec![0u16; (nw * nh) as usize];
+        let mut y_plane = try_vec![0u16; (nw * nh) as usize]?;
         for dy in 0..nh {
             for dx in 0..nw {
                 y_plane[(dy * nw + dx) as usize] = self.y_plane[((oh - 1 - dx) * ow + dy) as usize];
@@ -25,15 +27,20 @@ impl DecodedFrame {
         }
 
         // Rotate alpha plane (same transform as luma)
-        let alpha_plane = self.alpha_plane.as_ref().map(|alpha| {
-            let mut rotated = vec![0u16; (nw * nh) as usize];
-            for dy in 0..nh {
-                for dx in 0..nw {
-                    rotated[(dy * nw + dx) as usize] = alpha[((oh - 1 - dx) * ow + dy) as usize];
+        let alpha_plane = self
+            .alpha_plane
+            .as_ref()
+            .map(|alpha| -> Result<Vec<u16>> {
+                let mut rotated = try_vec![0u16; (nw * nh) as usize]?;
+                for dy in 0..nh {
+                    for dx in 0..nw {
+                        rotated[(dy * nw + dx) as usize] =
+                            alpha[((oh - 1 - dx) * ow + dy) as usize];
+                    }
                 }
-            }
-            rotated
-        });
+                Ok(rotated)
+            })
+            .transpose()?;
 
         // Rotate chroma planes
         let (ocw, och) = self.chroma_dims();
@@ -41,8 +48,8 @@ impl DecodedFrame {
             let ncw = och;
             let nch = ocw;
             let csz = (ncw * nch) as usize;
-            let mut cb = vec![0u16; csz];
-            let mut cr = vec![0u16; csz];
+            let mut cb = try_vec![0u16; csz]?;
+            let mut cr = try_vec![0u16; csz]?;
             for dy in 0..nch {
                 for dx in 0..ncw {
                     let si = (och - 1 - dx) as usize * ocw as usize + dy as usize;
@@ -58,7 +65,7 @@ impl DecodedFrame {
             (Vec::new(), Vec::new())
         };
 
-        Self {
+        Ok(Self {
             width: nw,
             height: nh,
             y_plane,
@@ -78,18 +85,18 @@ impl DecodedFrame {
             matrix_coeffs: self.matrix_coeffs,
             color_primaries: self.color_primaries,
             transfer_characteristics: self.transfer_characteristics,
-        }
+        })
     }
 
     /// Rotate the frame 180°, returning a new frame.
     ///
     /// Dimensions remain the same. Crop offsets are swapped (left↔right, top↔bottom).
-    pub fn rotate_180(&self) -> Self {
+    pub fn rotate_180(&self) -> Result<Self> {
         let w = self.width;
         let h = self.height;
 
         // Rotate luma: dst(dx, dy) = src(w-1-dx, h-1-dy)
-        let mut y_plane = vec![0u16; (w * h) as usize];
+        let mut y_plane = try_vec![0u16; (w * h) as usize]?;
         for dy in 0..h {
             for dx in 0..w {
                 y_plane[(dy * w + dx) as usize] =
@@ -98,23 +105,27 @@ impl DecodedFrame {
         }
 
         // Rotate alpha plane
-        let alpha_plane = self.alpha_plane.as_ref().map(|alpha| {
-            let mut rotated = vec![0u16; (w * h) as usize];
-            for dy in 0..h {
-                for dx in 0..w {
-                    rotated[(dy * w + dx) as usize] =
-                        alpha[((h - 1 - dy) * w + (w - 1 - dx)) as usize];
+        let alpha_plane = self
+            .alpha_plane
+            .as_ref()
+            .map(|alpha| -> Result<Vec<u16>> {
+                let mut rotated = try_vec![0u16; (w * h) as usize]?;
+                for dy in 0..h {
+                    for dx in 0..w {
+                        rotated[(dy * w + dx) as usize] =
+                            alpha[((h - 1 - dy) * w + (w - 1 - dx)) as usize];
+                    }
                 }
-            }
-            rotated
-        });
+                Ok(rotated)
+            })
+            .transpose()?;
 
         // Rotate chroma planes
         let (cw, ch) = self.chroma_dims();
         let (cb_plane, cr_plane) = if cw > 0 && ch > 0 {
             let csz = (cw * ch) as usize;
-            let mut cb = vec![0u16; csz];
-            let mut cr = vec![0u16; csz];
+            let mut cb = try_vec![0u16; csz]?;
+            let mut cr = try_vec![0u16; csz]?;
             for dy in 0..ch {
                 for dx in 0..cw {
                     let si = (ch - 1 - dy) as usize * cw as usize + (cw - 1 - dx) as usize;
@@ -130,7 +141,7 @@ impl DecodedFrame {
             (Vec::new(), Vec::new())
         };
 
-        Self {
+        Ok(Self {
             width: w,
             height: h,
             y_plane,
@@ -150,21 +161,21 @@ impl DecodedFrame {
             matrix_coeffs: self.matrix_coeffs,
             color_primaries: self.color_primaries,
             transfer_characteristics: self.transfer_characteristics,
-        }
+        })
     }
 
     /// Rotate the frame 270° clockwise (= 90° counter-clockwise), returning a new frame.
     ///
     /// Output dimensions are swapped: `(width, height)` becomes `(height, width)`.
     /// Crop offsets are transformed accordingly.
-    pub fn rotate_270_cw(&self) -> Self {
+    pub fn rotate_270_cw(&self) -> Result<Self> {
         let ow = self.width;
         let oh = self.height;
         let nw = oh;
         let nh = ow;
 
         // Rotate luma: dst(dx, dy) = src(ow-1-dy, dx)
-        let mut y_plane = vec![0u16; (nw * nh) as usize];
+        let mut y_plane = try_vec![0u16; (nw * nh) as usize]?;
         for dy in 0..nh {
             for dx in 0..nw {
                 y_plane[(dy * nw + dx) as usize] = self.y_plane[(dx * ow + (ow - 1 - dy)) as usize];
@@ -172,15 +183,20 @@ impl DecodedFrame {
         }
 
         // Rotate alpha plane
-        let alpha_plane = self.alpha_plane.as_ref().map(|alpha| {
-            let mut rotated = vec![0u16; (nw * nh) as usize];
-            for dy in 0..nh {
-                for dx in 0..nw {
-                    rotated[(dy * nw + dx) as usize] = alpha[(dx * ow + (ow - 1 - dy)) as usize];
+        let alpha_plane = self
+            .alpha_plane
+            .as_ref()
+            .map(|alpha| -> Result<Vec<u16>> {
+                let mut rotated = try_vec![0u16; (nw * nh) as usize]?;
+                for dy in 0..nh {
+                    for dx in 0..nw {
+                        rotated[(dy * nw + dx) as usize] =
+                            alpha[(dx * ow + (ow - 1 - dy)) as usize];
+                    }
                 }
-            }
-            rotated
-        });
+                Ok(rotated)
+            })
+            .transpose()?;
 
         // Rotate chroma planes
         let (ocw, och) = self.chroma_dims();
@@ -188,8 +204,8 @@ impl DecodedFrame {
             let ncw = och;
             let nch = ocw;
             let csz = (ncw * nch) as usize;
-            let mut cb = vec![0u16; csz];
-            let mut cr = vec![0u16; csz];
+            let mut cb = try_vec![0u16; csz]?;
+            let mut cr = try_vec![0u16; csz]?;
             for dy in 0..nch {
                 for dx in 0..ncw {
                     let si = dx as usize * ocw as usize + (ocw - 1 - dy) as usize;
@@ -205,7 +221,7 @@ impl DecodedFrame {
             (Vec::new(), Vec::new())
         };
 
-        Self {
+        Ok(Self {
             width: nw,
             height: nh,
             y_plane,
@@ -225,38 +241,42 @@ impl DecodedFrame {
             matrix_coeffs: self.matrix_coeffs,
             color_primaries: self.color_primaries,
             transfer_characteristics: self.transfer_characteristics,
-        }
+        })
     }
 
     /// Mirror the frame about the vertical axis (left-right flip), returning a new frame.
     ///
     /// Dimensions remain the same. Left and right crop offsets are swapped.
-    pub fn mirror_horizontal(&self) -> Self {
+    pub fn mirror_horizontal(&self) -> Result<Self> {
         let w = self.width;
         let h = self.height;
 
-        let mut y_plane = vec![0u16; (w * h) as usize];
+        let mut y_plane = try_vec![0u16; (w * h) as usize]?;
         for dy in 0..h {
             for dx in 0..w {
                 y_plane[(dy * w + dx) as usize] = self.y_plane[(dy * w + (w - 1 - dx)) as usize];
             }
         }
 
-        let alpha_plane = self.alpha_plane.as_ref().map(|alpha| {
-            let mut mirrored = vec![0u16; (w * h) as usize];
-            for dy in 0..h {
-                for dx in 0..w {
-                    mirrored[(dy * w + dx) as usize] = alpha[(dy * w + (w - 1 - dx)) as usize];
+        let alpha_plane = self
+            .alpha_plane
+            .as_ref()
+            .map(|alpha| -> Result<Vec<u16>> {
+                let mut mirrored = try_vec![0u16; (w * h) as usize]?;
+                for dy in 0..h {
+                    for dx in 0..w {
+                        mirrored[(dy * w + dx) as usize] = alpha[(dy * w + (w - 1 - dx)) as usize];
+                    }
                 }
-            }
-            mirrored
-        });
+                Ok(mirrored)
+            })
+            .transpose()?;
 
         let (cw, ch) = self.chroma_dims();
         let (cb_plane, cr_plane) = if cw > 0 && ch > 0 {
             let csz = (cw * ch) as usize;
-            let mut cb = vec![0u16; csz];
-            let mut cr = vec![0u16; csz];
+            let mut cb = try_vec![0u16; csz]?;
+            let mut cr = try_vec![0u16; csz]?;
             for dy in 0..ch {
                 for dx in 0..cw {
                     let si = dy as usize * cw as usize + (cw - 1 - dx) as usize;
@@ -272,7 +292,7 @@ impl DecodedFrame {
             (Vec::new(), Vec::new())
         };
 
-        Self {
+        Ok(Self {
             width: w,
             height: h,
             y_plane,
@@ -292,38 +312,42 @@ impl DecodedFrame {
             matrix_coeffs: self.matrix_coeffs,
             color_primaries: self.color_primaries,
             transfer_characteristics: self.transfer_characteristics,
-        }
+        })
     }
 
     /// Mirror the frame about the horizontal axis (top-bottom flip), returning a new frame.
     ///
     /// Dimensions remain the same. Top and bottom crop offsets are swapped.
-    pub fn mirror_vertical(&self) -> Self {
+    pub fn mirror_vertical(&self) -> Result<Self> {
         let w = self.width;
         let h = self.height;
 
-        let mut y_plane = vec![0u16; (w * h) as usize];
+        let mut y_plane = try_vec![0u16; (w * h) as usize]?;
         for dy in 0..h {
             for dx in 0..w {
                 y_plane[(dy * w + dx) as usize] = self.y_plane[((h - 1 - dy) * w + dx) as usize];
             }
         }
 
-        let alpha_plane = self.alpha_plane.as_ref().map(|alpha| {
-            let mut mirrored = vec![0u16; (w * h) as usize];
-            for dy in 0..h {
-                for dx in 0..w {
-                    mirrored[(dy * w + dx) as usize] = alpha[((h - 1 - dy) * w + dx) as usize];
+        let alpha_plane = self
+            .alpha_plane
+            .as_ref()
+            .map(|alpha| -> Result<Vec<u16>> {
+                let mut mirrored = try_vec![0u16; (w * h) as usize]?;
+                for dy in 0..h {
+                    for dx in 0..w {
+                        mirrored[(dy * w + dx) as usize] = alpha[((h - 1 - dy) * w + dx) as usize];
+                    }
                 }
-            }
-            mirrored
-        });
+                Ok(mirrored)
+            })
+            .transpose()?;
 
         let (cw, ch) = self.chroma_dims();
         let (cb_plane, cr_plane) = if cw > 0 && ch > 0 {
             let csz = (cw * ch) as usize;
-            let mut cb = vec![0u16; csz];
-            let mut cr = vec![0u16; csz];
+            let mut cb = try_vec![0u16; csz]?;
+            let mut cr = try_vec![0u16; csz]?;
             for dy in 0..ch {
                 for dx in 0..cw {
                     let si = (ch - 1 - dy) as usize * cw as usize + dx as usize;
@@ -339,7 +363,7 @@ impl DecodedFrame {
             (Vec::new(), Vec::new())
         };
 
-        Self {
+        Ok(Self {
             width: w,
             height: h,
             y_plane,
@@ -359,6 +383,6 @@ impl DecodedFrame {
             matrix_coeffs: self.matrix_coeffs,
             color_primaries: self.color_primaries,
             transfer_characteristics: self.transfer_characteristics,
-        }
+        })
     }
 }

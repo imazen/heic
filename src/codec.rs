@@ -668,7 +668,7 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
                     frame.color_primaries as u16,
                     frame.transfer_characteristics as u16,
                 );
-                let rgba_data = frame.to_rgba16();
+                let rgba_data = frame.to_rgba16()?;
                 let pixels: alloc::vec::Vec<Rgba<u16>> = rgba_data
                     .chunks_exact(4)
                     .map(|c| Rgba {
@@ -688,7 +688,7 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
                     frame.color_primaries as u16,
                     frame.transfer_characteristics as u16,
                 );
-                let rgb_data = frame.to_rgb16();
+                let rgb_data = frame.to_rgb16()?;
                 let pixels: alloc::vec::Vec<Rgb<u16>> = rgb_data
                     .chunks_exact(3)
                     .map(|c| Rgb {
@@ -914,7 +914,7 @@ impl HeicStreamDecoder {
                     frame.color_primaries as u16,
                     frame.transfer_characteristics as u16,
                 );
-                let rgba_data = frame.to_rgba16();
+                let rgba_data = frame.to_rgba16()?;
                 let pixels: alloc::vec::Vec<Rgba<u16>> = rgba_data
                     .chunks_exact(4)
                     .map(|c| Rgba {
@@ -935,7 +935,7 @@ impl HeicStreamDecoder {
                     frame.color_primaries as u16,
                     frame.transfer_characteristics as u16,
                 );
-                let rgb_data = frame.to_rgb16();
+                let rgb_data = frame.to_rgb16()?;
                 let pixels: alloc::vec::Vec<Rgb<u16>> = rgb_data
                     .chunks_exact(3)
                     .map(|c| Rgb {

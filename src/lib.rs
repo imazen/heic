@@ -1153,10 +1153,10 @@ impl<'a> DecodeRequest<'a> {
         }
 
         let data = match self.layout {
-            PixelLayout::Rgb8 => frame.to_rgb(),
-            PixelLayout::Rgba8 => frame.to_rgba(),
-            PixelLayout::Bgr8 => frame.to_bgr(),
-            PixelLayout::Bgra8 => frame.to_bgra(),
+            PixelLayout::Rgb8 => frame.to_rgb()?,
+            PixelLayout::Rgba8 => frame.to_rgba()?,
+            PixelLayout::Bgr8 => frame.to_bgr()?,
+            PixelLayout::Bgra8 => frame.to_bgra()?,
         };
 
         Ok(DecodeOutput {
@@ -1284,10 +1284,10 @@ impl<'a> DecodeRequest<'a> {
         }
 
         let data = match self.layout {
-            PixelLayout::Rgb8 => frame.to_rgb(),
-            PixelLayout::Rgba8 => frame.to_rgba(),
-            PixelLayout::Bgr8 => frame.to_bgr(),
-            PixelLayout::Bgra8 => frame.to_bgra(),
+            PixelLayout::Rgb8 => frame.to_rgb()?,
+            PixelLayout::Rgba8 => frame.to_rgba()?,
+            PixelLayout::Bgr8 => frame.to_bgr()?,
+            PixelLayout::Bgra8 => frame.to_bgra()?,
         };
 
         let bpp = self.layout.bytes_per_pixel();
