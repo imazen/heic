@@ -12,6 +12,7 @@ libfuzzer-sys = "0.4"
 
 [dependencies.heic]
 path = ".."
+features = ["av1", "unci"]
 
 [[bin]]
 name = "fuzz_decode"
@@ -30,6 +31,20 @@ bench = false
 [[bin]]
 name = "fuzz_probe"
 path = "fuzz_targets/fuzz_probe.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_decode_av1"
+path = "fuzz_targets/fuzz_decode_av1.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_decode_unci"
+path = "fuzz_targets/fuzz_decode_unci.rs"
 test = false
 doc = false
 bench = false

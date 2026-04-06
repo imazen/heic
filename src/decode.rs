@@ -152,6 +152,10 @@ fn decode_item(
         ItemType::Iovl => decode_iovl(container, item, depth, limits, stop, max_threads)?,
         ItemType::Hvc1 | ItemType::Unknown(_) => {
             // HEVC path — Unknown falls through to HEVC for backwards compat
+            // Check limits before HEVC decode to avoid OOM from crafted SPS
+            if let Some((w, h)) = item.dimensions {
+                limits.check_dimensions(w, h)?;
+            }
             let image_data = container.get_item_data(item.id)?;
             if let Some(ref config) = item.hevc_config {
                 crate::hevc::decode_with_config(config, &image_data)?
