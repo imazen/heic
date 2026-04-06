@@ -64,6 +64,7 @@ pub struct HeifContainer<'a> {
 
 /// Item type enumeration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ItemType {
     /// HEVC coded image
     Hvc1,
