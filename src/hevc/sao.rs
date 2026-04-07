@@ -64,15 +64,8 @@ impl SaoMap {
     }
 
     #[inline]
-    pub fn get_mut(&mut self, ctb_x: u32, ctb_y: u32) -> &mut SaoInfo {
-        let i = (ctb_y * self.width_ctbs + ctb_x) as usize;
-        if i < self.data.len() {
-            &mut self.data[i]
-        } else {
-            // OOB from crafted bitstream — write to last element (no-op effect)
-            let last = self.data.len() - 1;
-            &mut self.data[last]
-        }
+    pub fn get_mut(&mut self, ctb_x: u32, ctb_y: u32) -> Option<&mut SaoInfo> {
+        self.data.get_mut((ctb_y * self.width_ctbs + ctb_x) as usize)
     }
 }
 

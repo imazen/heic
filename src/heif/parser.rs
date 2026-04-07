@@ -1576,6 +1576,9 @@ fn parse_uncc(uncc: &Box<'_>) -> Result<UncompressedConfig> {
         let component_index = u16::from_be_bytes([content[pos], content[pos + 1]]);
         pos += 2;
         let component_bit_depth_minus_one = content[pos];
+        if component_bit_depth_minus_one > 63 {
+            return Err(at!(HeicError::InvalidData("component_bit_depth_minus_one exceeds 63")));
+        }
         pos += 1;
         let component_format = content[pos];
         pos += 1;

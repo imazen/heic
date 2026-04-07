@@ -687,9 +687,15 @@ impl<'a> SliceContext<'a> {
             let mut idx = try_vec![0u32; map_size]?;
             for (ts, &(cx, cy)) in tile_scan.iter().enumerate() {
                 let i = (cy * pic_width_in_ctbs + cx) as usize;
-                if i < map_size {
-                    idx[i] = ts as u32;
+                if i >= map_size {
+                    return Err(HevcError::InvalidParameterSet {
+                        kind: "PPS",
+                        msg: alloc::format!(
+                            "tile scan coordinate ({cx},{cy}) exceeds picture CTB dimensions"
+                        ),
+                    });
                 }
+                idx[i] = ts as u32;
             }
             idx
         } else {
@@ -1164,7 +1170,9 @@ impl<'a> SliceContext<'a> {
             info
         };
 
-        *self.sao_map.get_mut(x_ctb, y_ctb) = sao_info;
+        if let Some(entry) = self.sao_map.get_mut(x_ctb, y_ctb) {
+            *entry = sao_info;
+        }
         Ok(())
     }
 

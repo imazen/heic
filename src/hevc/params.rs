@@ -755,7 +755,19 @@ pub fn parse_pps(data: &[u8]) -> Result<Pps> {
     let sign_data_hiding_enabled_flag = reader.read_bit()? != 0;
     let cabac_init_present_flag = reader.read_bit()? != 0;
     let num_ref_idx_l0_default_active_minus1 = reader.read_ue()? as u8;
+    if num_ref_idx_l0_default_active_minus1 > 14 {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "PPS",
+            msg: alloc::format!("num_ref_idx_l0_default_active_minus1={num_ref_idx_l0_default_active_minus1} exceeds 14"),
+        });
+    }
     let num_ref_idx_l1_default_active_minus1 = reader.read_ue()? as u8;
+    if num_ref_idx_l1_default_active_minus1 > 14 {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "PPS",
+            msg: alloc::format!("num_ref_idx_l1_default_active_minus1={num_ref_idx_l1_default_active_minus1} exceeds 14"),
+        });
+    }
     let init_qp_minus26 = reader.read_se()? as i8;
     let constrained_intra_pred_flag = reader.read_bit()? != 0;
     let transform_skip_enabled_flag = reader.read_bit()? != 0;
