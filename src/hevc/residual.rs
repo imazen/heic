@@ -1149,19 +1149,20 @@ fn decode_coeff_abs_level_remaining(
         } else {
             0
         };
-        ((prefix << rice_param) + suffix) as i16
+        ((prefix << rice_param).saturating_add(suffix)) as i16
     } else {
         // EGk part: suffix bits = prefix - 3 + rice_param
-        let suffix_bits = (prefix - 3 + rice_param as u32) as u8;
+        let suffix_bits = (prefix - 3 + rice_param as u32).min(31) as u8;
         let suffix = cabac.decode_bypass_bits(suffix_bits)?;
         // value = (((1 << (prefix-3)) + 3 - 1) << rice_param) + suffix
-        let base = ((1u32 << (prefix - 3)) + 2) << rice_param;
-        (base + suffix) as i16
+        let shift = (prefix - 3).min(30);
+        let base = ((1u32 << shift) + 2).saturating_mul(1u32 << rice_param);
+        base.saturating_add(suffix) as i16
     };
 
     // Update rice parameter: if baseLevel + value > 3 * (1 << rice_param), increase
     let threshold = 3 * (1 << rice_param);
-    let new_rice_param = if (base_level.unsigned_abs() as u32 + value as u32) > threshold {
+    let new_rice_param = if (base_level.unsigned_abs() as u32).saturating_add(value.unsigned_abs() as u32) > threshold {
         (rice_param + 1).min(4)
     } else {
         rice_param

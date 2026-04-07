@@ -201,7 +201,7 @@ pub fn parse_short_term_rps(
         for i in 0..num_negative_pics as usize {
             let delta_poc_s0_minus1 = reader.read_ue()? as i32;
             let used = reader.read_bit()? != 0;
-            prev_delta_poc -= delta_poc_s0_minus1 + 1;
+            prev_delta_poc = prev_delta_poc.wrapping_sub(delta_poc_s0_minus1 + 1);
             rps.delta_poc_s0[i] = prev_delta_poc;
             rps.used_by_curr_pic_s0[i] = used;
         }
@@ -211,7 +211,7 @@ pub fn parse_short_term_rps(
         for i in 0..num_positive_pics as usize {
             let delta_poc_s1_minus1 = reader.read_ue()? as i32;
             let used = reader.read_bit()? != 0;
-            prev_delta_poc += delta_poc_s1_minus1 + 1;
+            prev_delta_poc = prev_delta_poc.wrapping_add(delta_poc_s1_minus1 + 1);
             rps.delta_poc_s1[i] = prev_delta_poc;
             rps.used_by_curr_pic_s1[i] = used;
         }
