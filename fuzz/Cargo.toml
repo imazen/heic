@@ -55,3 +55,10 @@ path = "fuzz_targets/fuzz_hevc_raw.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_color_transform"
+path = "fuzz_targets/fuzz_color_transform.rs"
+test = false
+doc = false
+bench = false

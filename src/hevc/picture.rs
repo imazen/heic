@@ -135,6 +135,44 @@ impl DecodedFrame {
         })
     }
 
+    /// Create a frame from raw plane data (for fuzz testing).
+    ///
+    /// Fills planes from provided data, with defaults for deblock/qp maps.
+    #[cfg(fuzzing)]
+    pub fn from_planes(
+        width: u32,
+        height: u32,
+        bit_depth: u8,
+        chroma_format: u8,
+        y_plane: Vec<u16>,
+        cb_plane: Vec<u16>,
+        cr_plane: Vec<u16>,
+        full_range: bool,
+        matrix_coeffs: u8,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            y_plane,
+            cb_plane,
+            cr_plane,
+            bit_depth,
+            chroma_format,
+            crop_left: 0,
+            crop_right: 0,
+            crop_top: 0,
+            crop_bottom: 0,
+            deblock_flags: Vec::new(),
+            deblock_stride: 0,
+            qp_map: Vec::new(),
+            alpha_plane: None,
+            full_range,
+            matrix_coeffs,
+            color_primaries: 1,
+            transfer_characteristics: 1,
+        }
+    }
+
     /// Mark a vertical TU/CU boundary at luma position (x, y) with given size
     pub(crate) fn mark_tu_boundary(&mut self, x: u32, y: u32, size: u32) {
         let bx = x / 4;
