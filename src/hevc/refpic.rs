@@ -97,7 +97,8 @@ pub fn parse_short_term_rps(
 
         let delta_rps_sign = reader.read_bit()?;
         let abs_delta_rps_minus1 = reader.read_ue()?;
-        let delta_rps = (1 - 2 * delta_rps_sign as i32) * (abs_delta_rps_minus1 as i32 + 1);
+        let delta_rps = (1i32 - 2 * delta_rps_sign as i32)
+            .wrapping_mul((abs_delta_rps_minus1 as i32).wrapping_add(1));
 
         let ref_set = &prev_sets[ref_rps_idx as usize];
         let ref_num_delta_pocs = ref_set.num_delta_pocs() as usize;
@@ -149,7 +150,7 @@ pub fn parse_short_term_rps(
         // Process existing entries
         for j in 0..ref_count {
             if use_delta_flag[j] || used_by_curr_pic_flag[j] {
-                let d_poc = ref_delta_pocs[j] + delta_rps;
+                let d_poc = ref_delta_pocs[j].wrapping_add(delta_rps);
                 if d_poc < 0 {
                     if (neg_count as usize) < MAX_NUM_REF_PICS {
                         rps.delta_poc_s0[neg_count as usize] = d_poc;
