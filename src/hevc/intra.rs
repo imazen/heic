@@ -52,8 +52,20 @@ pub fn predict_intra(
     c_idx: u8, // 0=Y, 1=Cb, 2=Cr
     strong_intra_smoothing_enabled: bool,
 ) {
+    let log2_size = log2_size.min(5); // max 32x32 TU
     let size = 1u32 << log2_size;
     let bit_depth = frame.bit_depth;
+
+    // Bounds guard: skip if block extends past frame (crafted input)
+    let (pw, ph) = if c_idx == 0 {
+        (frame.width, frame.height)
+    } else {
+        let (cw, ch) = frame.chroma_dims();
+        (cw, ch)
+    };
+    if x + size > pw || y + size > ph {
+        return;
+    }
     let chroma_format = frame.chroma_format;
 
     // Get reference samples (border pixels)

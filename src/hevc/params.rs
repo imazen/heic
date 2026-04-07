@@ -523,12 +523,14 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
         let _max_latency_increase_plus1 = reader.read_ue()?;
     }
 
-    let log2_min_luma_coding_block_size_minus3 = reader.read_ue()? as u8;
-    let log2_diff_max_min_luma_coding_block_size = reader.read_ue()? as u8;
-    let log2_min_luma_transform_block_size_minus2 = reader.read_ue()? as u8;
-    let log2_diff_max_min_luma_transform_block_size = reader.read_ue()? as u8;
-    let max_transform_hierarchy_depth_inter = reader.read_ue()? as u8;
-    let max_transform_hierarchy_depth_intra = reader.read_ue()? as u8;
+    // Clamp log2 block sizes to HEVC spec ranges to prevent shift overflows
+    // downstream. The spec allows log2_cb 3-6, log2_tb 2-5, diffs 0-3.
+    let log2_min_luma_coding_block_size_minus3 = (reader.read_ue()? as u8).min(3);
+    let log2_diff_max_min_luma_coding_block_size = (reader.read_ue()? as u8).min(6);
+    let log2_min_luma_transform_block_size_minus2 = (reader.read_ue()? as u8).min(3);
+    let log2_diff_max_min_luma_transform_block_size = (reader.read_ue()? as u8).min(3);
+    let max_transform_hierarchy_depth_inter = (reader.read_ue()? as u8).min(5);
+    let max_transform_hierarchy_depth_intra = (reader.read_ue()? as u8).min(5);
 
     let scaling_list_enabled_flag = reader.read_bit()? != 0;
     let scaling_list = if scaling_list_enabled_flag {
