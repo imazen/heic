@@ -603,10 +603,16 @@ fn parse_iloc(iloc: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop
     let mut pos = 6;
 
     let item_count = if version < 2 {
+        if pos + 2 > content.len() {
+            return Err(at!(HeicError::InvalidContainer("iloc too short for item count")));
+        }
         let count = u16::from_be_bytes([content[pos], content[pos + 1]]) as u32;
         pos += 2;
         count
     } else {
+        if pos + 4 > content.len() {
+            return Err(at!(HeicError::InvalidContainer("iloc too short for item count")));
+        }
         let count = u32::from_be_bytes([
             content[pos],
             content[pos + 1],
