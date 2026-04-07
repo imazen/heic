@@ -7,9 +7,10 @@ conformance/vectors/
 # Rust build artifacts
 target/
 
-# Fuzz build artifacts and crashes
+# Fuzz build artifacts, corpus, and crashes
 fuzz/target/
 fuzz/artifacts/
+fuzz/corpus/
 
 # Profiling
 perf.data
