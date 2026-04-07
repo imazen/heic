@@ -505,9 +505,9 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
         (0, 0, 0, 0)
     };
 
-    let bit_depth_luma_minus8 = reader.read_ue()? as u8;
-    let bit_depth_chroma_minus8 = reader.read_ue()? as u8;
-    let log2_max_pic_order_cnt_lsb_minus4 = reader.read_ue()? as u8;
+    let bit_depth_luma_minus8 = (reader.read_ue()? as u8).min(8); // max 16-bit
+    let bit_depth_chroma_minus8 = (reader.read_ue()? as u8).min(8); // max 16-bit
+    let log2_max_pic_order_cnt_lsb_minus4 = (reader.read_ue()? as u8).min(12); // max 16 bits
 
     let sub_layer_ordering_info_present_flag = reader.read_bit()? != 0;
 
@@ -590,7 +590,7 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
                 ),
             });
         }
-        let poc_bits = log2_max_pic_order_cnt_lsb_minus4 + 4;
+        let poc_bits = log2_max_pic_order_cnt_lsb_minus4.saturating_add(4);
         long_term_ref_pics_sps
             .lt_ref_pic_poc_lsb
             .reserve(num_long_term_ref_pics_sps);
