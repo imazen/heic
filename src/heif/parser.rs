@@ -2417,7 +2417,10 @@ fn resolve_sample_offset(
 
     for (entry_idx, &(first_chunk, samples_per_chunk, _desc_idx)) in stsc.iter().enumerate() {
         check_stop(stop)?;
-        // first_chunk is 1-based
+        // first_chunk is 1-based; reject 0 from crafted input
+        if first_chunk == 0 {
+            return Err(at!(HeicError::InvalidData("stsc first_chunk is zero")));
+        }
         let next_first_chunk = if entry_idx + 1 < stsc.len() {
             stsc[entry_idx + 1].0
         } else {
@@ -2436,7 +2439,10 @@ fn resolve_sample_offset(
 
             if target >= current_sample && target < chunk_end_sample {
                 // Target sample is in this chunk
-                let chunk_idx = (chunk_1based - 1) as usize;
+                let chunk_idx = chunk_1based
+                    .checked_sub(1)
+                    .ok_or_else(|| at!(HeicError::InvalidData("invalid zero chunk index")))?
+                    as usize;
                 if chunk_idx >= track.chunk_offsets.len() {
                     return Err(at!(HeicError::InvalidData("chunk index out of range")));
                 }
