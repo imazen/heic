@@ -48,3 +48,10 @@ path = "fuzz_targets/fuzz_decode_unci.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_hevc_raw"
+path = "fuzz_targets/fuzz_hevc_raw.rs"
+test = false
+doc = false
+bench = false

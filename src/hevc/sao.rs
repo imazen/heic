@@ -48,14 +48,31 @@ impl SaoMap {
         })
     }
 
+    /// Default SAO info returned for out-of-bounds accesses from crafted bitstreams.
+    const OOB_DEFAULT: SaoInfo = SaoInfo {
+        sao_type_idx: [0; 3],
+        sao_eo_class: [0; 3],
+        sao_band_position: [0; 3],
+        sao_offset_val: [[0; 4]; 3],
+    };
+
     #[inline]
     pub fn get(&self, ctb_x: u32, ctb_y: u32) -> &SaoInfo {
-        &self.data[(ctb_y * self.width_ctbs + ctb_x) as usize]
+        self.data
+            .get((ctb_y * self.width_ctbs + ctb_x) as usize)
+            .unwrap_or(&Self::OOB_DEFAULT)
     }
 
     #[inline]
     pub fn get_mut(&mut self, ctb_x: u32, ctb_y: u32) -> &mut SaoInfo {
-        &mut self.data[(ctb_y * self.width_ctbs + ctb_x) as usize]
+        let i = (ctb_y * self.width_ctbs + ctb_x) as usize;
+        if i < self.data.len() {
+            &mut self.data[i]
+        } else {
+            // OOB from crafted bitstream — write to last element (no-op effect)
+            let last = self.data.len() - 1;
+            &mut self.data[last]
+        }
     }
 }
 

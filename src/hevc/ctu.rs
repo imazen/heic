@@ -683,9 +683,13 @@ impl<'a> SliceContext<'a> {
 
         // Build reverse mapping: given (ctb_x, ctb_y), what is the tile-scan index?
         let tile_scan_idx: Vec<u32> = if tiles {
-            let mut idx = try_vec![0u32; (pic_width_in_ctbs * pic_height_in_ctbs) as usize]?;
+            let map_size = (pic_width_in_ctbs * pic_height_in_ctbs) as usize;
+            let mut idx = try_vec![0u32; map_size]?;
             for (ts, &(cx, cy)) in tile_scan.iter().enumerate() {
-                idx[(cy * pic_width_in_ctbs + cx) as usize] = ts as u32;
+                let i = (cy * pic_width_in_ctbs + cx) as usize;
+                if i < map_size {
+                    idx[i] = ts as u32;
+                }
             }
             idx
         } else {
