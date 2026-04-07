@@ -410,9 +410,9 @@ impl SliceHeader {
             };
 
         // Parse P/B slice inter prediction fields
-        let mut num_ref_idx_l0_active = pps.num_ref_idx_l0_default_active_minus1 + 1;
+        let mut num_ref_idx_l0_active = pps.num_ref_idx_l0_default_active_minus1.saturating_add(1);
         let mut num_ref_idx_l1_active = if slice_type == SliceType::B {
-            pps.num_ref_idx_l1_default_active_minus1 + 1
+            pps.num_ref_idx_l1_default_active_minus1.saturating_add(1)
         } else {
             0
         };

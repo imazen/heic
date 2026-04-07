@@ -565,7 +565,7 @@ impl ImageInfo {
                 .uncompressed_config
                 .as_ref()
                 .and_then(|c| c.components.first())
-                .map(|c| c.component_bit_depth_minus_one + 1)
+                .map(|c| c.component_bit_depth_minus_one.saturating_add(1))
                 .unwrap_or(8);
             let (width, height) = apply_transform_dimensions(w, h, &primary_item.transforms);
             return Ok(ImageInfo {
