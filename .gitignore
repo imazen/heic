@@ -7,10 +7,11 @@ conformance/vectors/
 # Rust build artifacts
 target/
 
-# Fuzz build artifacts, corpus, and crashes
+# Fuzz build artifacts, corpus, crashes, and coverage
 fuzz/target/
 fuzz/artifacts/
 fuzz/corpus/
+fuzz/coverage/
 
 # Profiling
 perf.data
@@ -48,3 +49,5 @@ Thumbs.db
 .idea/
 .vscode/
 *.iml
+*.profraw
+fuzz-*.log
