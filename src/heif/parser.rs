@@ -302,6 +302,12 @@ impl<'a> HeifContainer<'a> {
             .map(|&(_, len)| len)
             .try_fold(0u64, |acc, len| acc.checked_add(len))
             .ok_or_else(|| at!(HeicError::InvalidData("multi-extent total length overflow")))?;
+        // Sanity: total declared extent size cannot exceed the source data
+        if total_len > source.len() as u64 {
+            return Err(at!(HeicError::InvalidData(
+                "multi-extent total exceeds source data"
+            )));
+        }
         let total_len = usize::try_from(total_len)
             .map_err(|_| at!(HeicError::InvalidData("multi-extent total too large")))?;
 
