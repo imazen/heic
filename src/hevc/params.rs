@@ -505,9 +505,29 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
         (0, 0, 0, 0)
     };
 
-    let bit_depth_luma_minus8 = (reader.read_ue()? as u8).min(8); // max 16-bit
-    let bit_depth_chroma_minus8 = (reader.read_ue()? as u8).min(8); // max 16-bit
-    let log2_max_pic_order_cnt_lsb_minus4 = (reader.read_ue()? as u8).min(12); // max 16 bits
+    let bit_depth_luma_minus8 = reader.read_ue()? as u8;
+    if bit_depth_luma_minus8 > 8 {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!("bit_depth_luma_minus8={bit_depth_luma_minus8} exceeds 8"),
+        });
+    }
+    let bit_depth_chroma_minus8 = reader.read_ue()? as u8;
+    if bit_depth_chroma_minus8 > 8 {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!("bit_depth_chroma_minus8={bit_depth_chroma_minus8} exceeds 8"),
+        });
+    }
+    let log2_max_pic_order_cnt_lsb_minus4 = reader.read_ue()? as u8;
+    if log2_max_pic_order_cnt_lsb_minus4 > 12 {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!(
+                "log2_max_pic_order_cnt_lsb_minus4={log2_max_pic_order_cnt_lsb_minus4} exceeds 12"
+            ),
+        });
+    }
 
     let sub_layer_ordering_info_present_flag = reader.read_bit()? != 0;
 
@@ -523,14 +543,50 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
         let _max_latency_increase_plus1 = reader.read_ue()?;
     }
 
-    // Clamp log2 block sizes to HEVC spec ranges to prevent shift overflows
-    // downstream. The spec allows log2_cb 3-6, log2_tb 2-5, diffs 0-3.
-    let log2_min_luma_coding_block_size_minus3 = (reader.read_ue()? as u8).min(3);
-    let log2_diff_max_min_luma_coding_block_size = (reader.read_ue()? as u8).min(6);
-    let log2_min_luma_transform_block_size_minus2 = (reader.read_ue()? as u8).min(3);
-    let log2_diff_max_min_luma_transform_block_size = (reader.read_ue()? as u8).min(3);
-    let max_transform_hierarchy_depth_inter = (reader.read_ue()? as u8).min(5);
-    let max_transform_hierarchy_depth_intra = (reader.read_ue()? as u8).min(5);
+    // Validate log2 block sizes against HEVC spec ranges.
+    // Reject out-of-range values rather than clamping — they indicate a corrupt bitstream.
+    let log2_min_luma_coding_block_size_minus3 = reader.read_ue()? as u8;
+    if log2_min_luma_coding_block_size_minus3 > 3 {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!("log2_min_cb_size_minus3={log2_min_luma_coding_block_size_minus3} exceeds 3"),
+        });
+    }
+    let log2_diff_max_min_luma_coding_block_size = reader.read_ue()? as u8;
+    if log2_diff_max_min_luma_coding_block_size > 3 {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!("log2_diff_max_min_cb={log2_diff_max_min_luma_coding_block_size} exceeds 3"),
+        });
+    }
+    let log2_min_luma_transform_block_size_minus2 = reader.read_ue()? as u8;
+    if log2_min_luma_transform_block_size_minus2 > 3 {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!("log2_min_tb_size_minus2={log2_min_luma_transform_block_size_minus2} exceeds 3"),
+        });
+    }
+    let log2_diff_max_min_luma_transform_block_size = reader.read_ue()? as u8;
+    if log2_diff_max_min_luma_transform_block_size > 3 {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!("log2_diff_max_min_tb={log2_diff_max_min_luma_transform_block_size} exceeds 3"),
+        });
+    }
+    let max_transform_hierarchy_depth_inter = reader.read_ue()? as u8;
+    if max_transform_hierarchy_depth_inter > 5 {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!("max_transform_depth_inter={max_transform_hierarchy_depth_inter} exceeds 5"),
+        });
+    }
+    let max_transform_hierarchy_depth_intra = reader.read_ue()? as u8;
+    if max_transform_hierarchy_depth_intra > 5 {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!("max_transform_depth_intra={max_transform_hierarchy_depth_intra} exceeds 5"),
+        });
+    }
 
     let scaling_list_enabled_flag = reader.read_bit()? != 0;
     let scaling_list = if scaling_list_enabled_flag {

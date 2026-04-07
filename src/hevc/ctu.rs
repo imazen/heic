@@ -1914,7 +1914,7 @@ impl<'a> SliceContext<'a> {
 
                 // Predict Cb (intra only)
                 if is_intra_cu {
-                    intra::predict_intra(frame, x0 / 2, y0 / 2, 2, intra_chroma_mode, 1, sis);
+                    intra::predict_intra(frame, x0 / 2, y0 / 2, 2, intra_chroma_mode, 1, sis)?;
                 }
                 if cbf_cb {
                     self.decode_and_apply_residual(x0 / 2, y0 / 2, 2, 1, scan_order, frame)?;
@@ -1922,7 +1922,7 @@ impl<'a> SliceContext<'a> {
 
                 // Predict Cr (intra only)
                 if is_intra_cu {
-                    intra::predict_intra(frame, x0 / 2, y0 / 2, 2, intra_chroma_mode, 2, sis);
+                    intra::predict_intra(frame, x0 / 2, y0 / 2, 2, intra_chroma_mode, 2, sis)?;
                 }
                 if cbf_cr {
                     self.decode_and_apply_residual(x0 / 2, y0 / 2, 2, 2, scan_order, frame)?;
@@ -2022,7 +2022,7 @@ impl<'a> SliceContext<'a> {
         // Predict luma at TU level BEFORE residual application
         // Only for intra CUs — inter CUs already have MC prediction in the frame
         if is_intra_cu {
-            intra::predict_intra(frame, x0, y0, log2_size, actual_luma_mode, 0, sis);
+            intra::predict_intra(frame, x0, y0, log2_size, actual_luma_mode, 0, sis)?;
         }
 
         let scan_order = if is_intra_cu {
@@ -2073,7 +2073,7 @@ impl<'a> SliceContext<'a> {
 
             // Predict Cb (intra only — inter MC already wrote prediction)
             if is_intra_cu {
-                intra::predict_intra(frame, cx, cy, chroma_log2_size, intra_chroma_mode, 1, sis);
+                intra::predict_intra(frame, cx, cy, chroma_log2_size, intra_chroma_mode, 1, sis)?;
             }
             if cbf_cb {
                 self.decode_and_apply_residual(
@@ -2088,7 +2088,7 @@ impl<'a> SliceContext<'a> {
 
             // Predict Cr (intra only)
             if is_intra_cu {
-                intra::predict_intra(frame, cx, cy, chroma_log2_size, intra_chroma_mode, 2, sis);
+                intra::predict_intra(frame, cx, cy, chroma_log2_size, intra_chroma_mode, 2, sis)?;
             }
             if cbf_cr {
                 self.decode_and_apply_residual(

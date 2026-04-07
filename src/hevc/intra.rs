@@ -51,20 +51,29 @@ pub fn predict_intra(
     mode: IntraPredMode,
     c_idx: u8, // 0=Y, 1=Cb, 2=Cr
     strong_intra_smoothing_enabled: bool,
-) {
-    let log2_size = log2_size.min(5); // max 32x32 TU
+) -> core::result::Result<(), crate::error::HevcError> {
+    if log2_size > 5 {
+        return Err(crate::error::HevcError::DecodingError("log2_size > 5 in intra prediction"));
+    }
     let size = 1u32 << log2_size;
     let bit_depth = frame.bit_depth;
 
-    // Bounds guard: skip if block extends past frame (crafted input)
-    let (pw, ph) = if c_idx == 0 {
-        (frame.width, frame.height)
-    } else {
-        let (cw, ch) = frame.chroma_dims();
-        (cw, ch)
-    };
-    if x + size > pw || y + size > ph {
-        return;
+    // Bounds guard: verify block fits in the allocated plane.
+    // Check against plane length — edge CTUs in real HEVC may extend past
+    // the conformance window (cropping happens later).
+    // For monochrome (chroma_format=0), chroma planes are empty — skip check
+    // since write_sample already guards against OOB.
+    {
+        let (p, s) = frame.plane(c_idx);
+        if !p.is_empty() {
+            let last_row_end = (y as usize + size as usize).saturating_sub(1) * s
+                + x as usize + size as usize;
+            if last_row_end > p.len() {
+                return Err(crate::error::HevcError::DecodingError(
+                    "intra prediction block extends past plane allocation",
+                ));
+            }
+        }
     }
     let chroma_format = frame.chroma_format;
 
@@ -137,6 +146,8 @@ pub fn predict_intra(
             );
         }
     }
+
+    Ok(())
 }
 
 /// Intra prediction reference sample filtering (H.265 8.4.4.2.3)

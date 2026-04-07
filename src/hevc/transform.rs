@@ -679,9 +679,10 @@ pub fn dequantize(coeffs: &mut [i16], params: DequantParams) {
     // Scaling factors from H.265 Table 8-8
     static LEVEL_SCALE: [i32; 6] = [40, 45, 51, 57, 64, 72];
 
-    // QP range: 0-51 (8-bit), 0-63 (10-bit), 0-75 (12-bit). Clamp to prevent
-    // `1 << qp_per` overflow: qp_per = qp/6, max safe qp_per for i32 is 30.
-    let qp = params.qp.min(75);
+    // QP validated at SPS parse (bit_depth max 16 → max QP ~99 → qp_per max 16).
+    // Defense-in-depth: clamp to 180 (qp_per=30) to prevent i32 shift overflow
+    // even if QP derivation produces an out-of-range value.
+    let qp = params.qp.min(180);
     let qp_per = qp / 6;
     let qp_rem = qp % 6;
     let scale = LEVEL_SCALE[qp_rem as usize];
@@ -712,7 +713,7 @@ pub fn dequantize(coeffs: &mut [i16], params: DequantParams) {
 pub fn dequantize_scaled(coeffs: &mut [i16], params: DequantParams, scaling_matrix: &[u8]) {
     static LEVEL_SCALE: [i32; 6] = [40, 45, 51, 57, 64, 72];
 
-    let qp = params.qp.min(75);
+    let qp = params.qp.min(180);
     let qp_per = qp / 6;
     let qp_rem = qp % 6;
     let level_scale = LEVEL_SCALE[qp_rem as usize];
