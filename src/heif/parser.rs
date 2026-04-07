@@ -739,10 +739,16 @@ fn parse_iinf(iinf: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop
     let mut pos = 4;
 
     let entry_count = if version == 0 {
+        if pos + 2 > content.len() {
+            return Err(at!(HeicError::InvalidContainer("iinf too short for entry count")));
+        }
         let count = u16::from_be_bytes([content[pos], content[pos + 1]]) as u32;
         pos += 2;
         count
     } else {
+        if pos + 4 > content.len() {
+            return Err(at!(HeicError::InvalidContainer("iinf too short for entry count")));
+        }
         let count = u32::from_be_bytes([
             content[pos],
             content[pos + 1],
