@@ -970,7 +970,7 @@ fn parse_scaling_list_data(reader: &mut BitstreamReader<'_>) -> Result<ScalingLi
                 }
                 for i in 0..coef_num {
                     let delta = reader.read_se()?;
-                    next_coef = (next_coef + delta + 256) % 256;
+                    next_coef = (next_coef.wrapping_add(delta).wrapping_add(256)) & 255;
                     data.lists[size_id][matrix_id][i] = next_coef as u8;
                 }
             }
