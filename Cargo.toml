@@ -45,7 +45,7 @@ archmage = { version = "0.9.16", default-features = false, features = ["macros"]
 magetypes = { version = "0.9.16", default-features = false }
 safe_unaligned_simd = "0.2.5"
 rayon = { version = "1.11.0", optional = true }
-zencodec = { version = "0.1.11", optional = true }
+zencodec = { version = "0.1.13", optional = true }
 zenpixels = { version = "0.2.2", default-features = false, features = ["rgb", "imgref"], optional = true }
 rgb = { version = "0.8.53", default-features = false, features = ["as-bytes"], optional = true }
 bytemuck = { version = "1.21", default-features = false, features = ["extern_crate_alloc"], optional = true }
