@@ -1,34 +1,44 @@
 # heic [![CI](https://img.shields.io/github/actions/workflow/status/imazen/heic/ci.yml?style=flat-square&label=CI)](https://github.com/imazen/heic/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/heic?style=flat-square)](https://crates.io/crates/heic) [![lib.rs](https://img.shields.io/crates/v/heic?style=flat-square&label=lib.rs&color=blue)](https://lib.rs/crates/heic) [![docs.rs](https://img.shields.io/docsrs/heic?style=flat-square)](https://docs.rs/heic) [![codecov](https://img.shields.io/codecov/c/github/imazen/heic?style=flat-square)](https://codecov.io/gh/imazen/heic) [![license](https://img.shields.io/crates/l/heic?style=flat-square)](https://github.com/imazen/heic#license)
 
-Pure Rust HEIC/HEIF image decoder. No C/C++ dependencies, no unsafe code, 4 runtime crates.
+Pure Rust HEIC/HEIF image decoder. No C/C++ dependencies, no unsafe code.
 
 - `#![forbid(unsafe_code)]` — zero unsafe blocks in the entire codebase
 - `no_std + alloc` compatible (compiles for wasm32-unknown-unknown)
-- AVX2/SSE4.1 SIMD acceleration with automatic scalar fallback
+- Multi-codec: HEVC (built-in), AV1 via [rav1d-safe] (`av1` feature), uncompressed HEIF via [zenflate] (`unci` feature)
+- AVX2/SSE4.1/NEON SIMD acceleration with automatic scalar fallback
+- Cooperative cancellation via [enough] — all decode paths check `Stop` tokens
+- Configurable resource limits (dimensions, pixel count, memory) enforced before allocation
 - Optional tile-parallel decoding via rayon
 
 ## Status
 
-Decodes most HEIC files from iPhones and cameras. 103/162 test files decode successfully. Best quality: 77.3 dB PSNR (BT.709), 73% pixel-exact on example.heic.
+Decodes most HEIC files from iPhones and cameras. 118/162 HEIF test files decode successfully (with `av1` + `unci` features). 49/49 ITU-T HEVC conformance vectors pass. Best quality: 77.3 dB PSNR (BT.709), 73% pixel-exact on example.heic.
 
 ### What works
 - HEIF container parsing (ISOBMFF boxes, grid images, overlays, identity-derived items)
+- HEIF image sequences (msf1/moov — first I-frame extraction from movie structure)
+- Multi-codec dispatch: HEVC, AV1 (`av1` feature), uncompressed HEIF (`unci` feature)
 - Full HEVC I-frame decoding (VPS/SPS/PPS, CABAC, intra prediction, transforms)
+- AV1 still image decoding via rav1d-safe (`av1` feature)
+- Uncompressed HEIF with deflate/zlib decompression via zenflate (`unci` feature)
 - Deblocking filter and SAO (Sample Adaptive Offset)
 - YCbCr→RGB with BT.601/BT.709/BT.2020 matrices (full + limited range)
 - CICP color info from HEVC VUI and HEIF colr nclx (container overrides codec)
 - 10-bit HEVC with transparent 8-bit downconvert or 16-bit output preservation
-- Alpha plane decoding from auxiliary images
+- Alpha plane decoding from auxiliary images (HEVC and AV1)
 - HDR gain map extraction (Apple `urn:com:apple:photo:2020:aux:hdrgainmap`)
 - EXIF, XMP, and ICC profile extraction (zero-copy where possible)
 - Thumbnail decode, image rotation/mirror transforms (ipma ordering)
 - HEVC scaling lists (custom dequantization matrices)
 - AVX2 SIMD: color conversion, IDCT 8/16/32, residual add, dequantize
 - SSE4.1 SIMD: IDST 4x4
+- NEON SIMD: color conversion, IDCT 8/16/32, IDST 4x4
 - Tile-parallel grid decoding via rayon (`parallel` feature)
 
 ### Known limitations
-- I-slices only (sufficient for HEIC still images; no inter prediction for video)
+- HEVC I-slices only (sufficient for HEIC still images; no inter prediction for video)
+- JPEG and H.264/AVC codecs in HEIF: detected but not decoded
+- Brotli-compressed uncompressed HEIF: not yet supported (deflate/zlib only)
 - PQ/HLG transfer functions: parsed and exposed via `ImageInfo`, but no EOTF applied — callers handle tone-mapping
 
 ## Features
@@ -37,6 +47,8 @@ Decodes most HEIC files from iPhones and cameras. 103/162 test files decode succ
 |---------|---------|-------------|
 | `std` | yes | Standard library support. Disable for `no_std + alloc`. |
 | `parallel` | no | Parallel tile decoding via rayon. Implies `std`. |
+| `av1` | no | AV1 codec support via rav1d-safe. Implies `std`. |
+| `unci` | no | Uncompressed HEIF (ISO 23001-17) with deflate/zlib decompression via zenflate. |
 
 ## Usage
 
@@ -128,7 +140,7 @@ Benchmarked on AMD Ryzen 9 7950X, WSL2, Rust 1.93, release profile (thin LTO, co
 | Probe (metadata only) | 1.3 µs |
 | EXIF extraction | 4.4 µs |
 
-SIMD-accelerated on x86-64 (AVX2 for color conversion, IDCT 8/16/32, residual add, dequantize; SSE4.1 for IDST 4x4). Scalar fallback on other architectures.
+SIMD-accelerated on x86-64 (AVX2 for color conversion, IDCT 8/16/32, residual add, dequantize; SSE4.1 for IDST 4x4) and AArch64 (NEON for color conversion, IDCT 8/16/32, IDST 4x4). Scalar fallback when SIMD is unavailable.
 
 ## Dependencies
 
@@ -144,10 +156,28 @@ heic
 ```
 
 With `parallel`: adds rayon + crossbeam (6 more crates, all pure Rust).
+With `av1`: adds rav1d-safe (pure Rust AV1 decoder with archmage SIMD).
+With `unci`: adds zenflate (pure Rust DEFLATE/zlib).
 
 ## Memory
 
 Use `DecoderConfig::estimate_memory()` to check memory requirements before decoding. `decode_into()` uses a streaming path for grid images that reduces peak memory by ~60% compared to `decode()`.
+
+## Security
+
+Designed for untrusted input. All decode paths enforce resource limits before allocation, not after.
+
+- **`#![forbid(unsafe_code)]`** — the entire crate, including SIMD dispatch via archmage
+- **Pre-decode dimension checks** — `Limits` (max_width, max_height, max_pixels, max_memory_bytes) checked against HEIF ispe box dimensions before any codec allocates frame buffers
+- **AV1 frame_size_limit** — `limits.max_pixels` fed directly into rav1d-safe's `Settings::frame_size_limit`, rejecting oversized frames during OBU parsing before pixel buffer allocation
+- **Decompression bomb protection** — unci decompressor capped at `min(512 MiB, limits.max_memory_bytes)` with expected size validated against declared dimensions
+- **Cooperative cancellation** — `enough::Stop` tokens checked in all decode loops (per-CTU for HEVC, per-row for unci, per-tile for grids, inside rav1d, inside zenflate decompression)
+- **Checked arithmetic** — all dimension, offset, and size calculations use `checked_mul`/`checked_add` with explicit error returns
+- **Fallible allocation** — `try_reserve` / `try_vec!` throughout; OOM returns an error, not a panic
+- **Container parser hardening** — resource limits on item count (64K), property count (64K), extents per item (1K), references (64K), sample table entries (1M), string lengths (4K), NAL unit size (16 MiB), ICC profile size (4 MiB)
+- **Fuzz targets** — 5 libfuzzer targets covering decode, decode-with-limits, probe, AV1 decode, and unci decode
+
+Use `DecoderConfig::estimate_memory()` to check memory requirements before decoding. Pass `Limits` to reject files that exceed your resource budget. Pass an `enough::Stop` token for cooperative cancellation of long-running decodes.
 
 ## Image tech I maintain
 

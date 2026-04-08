@@ -12,6 +12,10 @@ use super::transform_simd::{
 };
 #[cfg(target_arch = "x86_64")]
 use super::transform_simd::{dequantize_v3, idct8_v3, idct16_v3, idct32_v3, idst4_v3};
+#[cfg(target_arch = "wasm32")]
+use super::transform_simd::{
+    dequantize_wasm128, idct8_wasm128, idct16_wasm128, idct32_wasm128, idst4_wasm128,
+};
 #[cfg(target_arch = "aarch64")]
 use super::transform_simd_neon::{
     dequantize_neon, idct8_neon, idct16_neon, idct32_neon, idst4_neon,
@@ -39,7 +43,10 @@ static DCT4_MATRIX: [[i16; 4]; 4] = [
 
 /// Inverse 4x4 DST (for intra 4x4 luma blocks)
 pub fn idst4(coeffs: &[i16; 16], output: &mut [i16; 16], bit_depth: u8) {
-    incant!(idst4(coeffs, output, bit_depth), [v3, neon, scalar]);
+    incant!(
+        idst4(coeffs, output, bit_depth),
+        [v3, neon, wasm128, scalar]
+    );
 }
 
 /// Scalar implementation of inverse 4x4 DST
@@ -151,7 +158,10 @@ fn idct8_1d(src: [i32; 8], shift: i32) -> [i32; 8] {
 
 /// Inverse 8x8 DCT — dispatches to AVX2 when available, scalar fallback otherwise
 pub fn idct8(coeffs: &[i16; 64], output: &mut [i16; 64], bit_depth: u8) {
-    incant!(idct8(coeffs, output, bit_depth), [v3, neon, scalar])
+    incant!(
+        idct8(coeffs, output, bit_depth),
+        [v3, neon, wasm128, scalar]
+    )
 }
 
 /// Scalar 8x8 IDCT using partial butterfly (called by SIMD scalar fallback)
@@ -281,7 +291,10 @@ fn idct16_1d(src: [i32; 16], shift: i32) -> [i32; 16] {
 
 /// Inverse 16x16 DCT — dispatches to AVX2 when available, scalar fallback otherwise
 pub fn idct16(coeffs: &[i16; 256], output: &mut [i16; 256], bit_depth: u8) {
-    incant!(idct16(coeffs, output, bit_depth), [v3, neon, scalar])
+    incant!(
+        idct16(coeffs, output, bit_depth),
+        [v3, neon, wasm128, scalar]
+    )
 }
 
 /// Scalar 16x16 IDCT using partial butterfly (called by SIMD scalar fallback)
@@ -613,7 +626,10 @@ fn idct32_1d(src: [i32; 32], shift: i32) -> [i32; 32] {
 
 /// Inverse 32x32 DCT — dispatches to AVX2 when available, scalar fallback otherwise
 pub fn idct32(coeffs: &[i16; 1024], output: &mut [i16; 1024], bit_depth: u8) {
-    incant!(idct32(coeffs, output, bit_depth), [v3, neon, scalar])
+    incant!(
+        idct32(coeffs, output, bit_depth),
+        [v3, neon, wasm128, scalar]
+    )
 }
 
 /// Scalar 32x32 IDCT using partial butterfly (called by SIMD scalar fallback)
@@ -663,8 +679,12 @@ pub fn dequantize(coeffs: &mut [i16], params: DequantParams) {
     // Scaling factors from H.265 Table 8-8
     static LEVEL_SCALE: [i32; 6] = [40, 45, 51, 57, 64, 72];
 
-    let qp_per = params.qp / 6;
-    let qp_rem = params.qp % 6;
+    // QP validated at SPS parse (bit_depth max 16 → max QP ~99 → qp_per max 16).
+    // Defense-in-depth: clamp to 180 (qp_per=30) to prevent i32 shift overflow
+    // even if QP derivation produces an out-of-range value.
+    let qp = params.qp.min(180);
+    let qp_per = qp / 6;
+    let qp_rem = qp % 6;
     let scale = LEVEL_SCALE[qp_rem as usize];
     let combined_scale = scale * (1 << qp_per);
 
@@ -675,7 +695,7 @@ pub fn dequantize(coeffs: &mut [i16], params: DequantParams) {
     if shift >= 0 {
         incant!(
             dequantize(coeffs, combined_scale, shift, add),
-            [v3, neon, scalar]
+            [v3, neon, wasm128, scalar]
         );
     } else {
         // Negative shift (left shift) — rare, keep scalar
@@ -693,25 +713,31 @@ pub fn dequantize(coeffs: &mut [i16], params: DequantParams) {
 pub fn dequantize_scaled(coeffs: &mut [i16], params: DequantParams, scaling_matrix: &[u8]) {
     static LEVEL_SCALE: [i32; 6] = [40, 45, 51, 57, 64, 72];
 
-    let qp_per = params.qp / 6;
-    let qp_rem = params.qp % 6;
+    let qp = params.qp.min(180);
+    let qp_per = qp / 6;
+    let qp_rem = qp % 6;
     let level_scale = LEVEL_SCALE[qp_rem as usize];
 
     // Full bdShift = BitDepth + Log2(nTbS) - 5 (H.265 Eq 8-309)
-    let bd_shift = params.bit_depth as i32 + params.log2_tr_size as i32 - 5;
-    let add = if bd_shift > 0 { 1 << (bd_shift - 1) } else { 0 };
+    // Clamp to prevent shift overflow from crafted parameters.
+    let bd_shift = (params.bit_depth as i32 + params.log2_tr_size as i32 - 5).min(30);
+    let add = if bd_shift > 0 { 1i64 << (bd_shift - 1) } else { 0 };
+
+    // Use i64 for intermediate products: coef * m * level_scale * (1 << qp_per)
+    // can exceed i32 range with large QP and scaling matrix values.
+    let qp_scale = 1i64 << qp_per;
 
     if bd_shift >= 0 {
         for (i, coef) in coeffs.iter_mut().enumerate() {
-            let m = scaling_matrix.get(i).copied().unwrap_or(16) as i32;
-            let value = (*coef as i32 * m * level_scale * (1 << qp_per) + add) >> bd_shift;
+            let m = scaling_matrix.get(i).copied().unwrap_or(16) as i64;
+            let value = (*coef as i64 * m * level_scale as i64 * qp_scale + add) >> bd_shift;
             *coef = value.clamp(-32768, 32767) as i16;
         }
     } else {
         let neg_shift = -bd_shift;
         for (i, coef) in coeffs.iter_mut().enumerate() {
-            let m = scaling_matrix.get(i).copied().unwrap_or(16) as i32;
-            let value = (*coef as i32 * m * level_scale * (1 << qp_per)) << neg_shift;
+            let m = scaling_matrix.get(i).copied().unwrap_or(16) as i64;
+            let value = (*coef as i64 * m * level_scale as i64 * qp_scale) << neg_shift;
             *coef = value.clamp(-32768, 32767) as i16;
         }
     }

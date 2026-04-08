@@ -120,7 +120,7 @@ pub(crate) fn decode_to_frame(
                 .copied()
         });
     if let Some(alpha_id) = alpha_id
-        && let Some(alpha_plane) = decode_alpha_plane(&container, alpha_id, &frame, limits)
+        && let Some(alpha_plane) = decode_alpha_plane(&container, alpha_id, &frame, limits, stop)
     {
         frame.alpha_plane = Some(alpha_plane);
     }
@@ -147,17 +147,64 @@ fn decode_item(
     check_stop(stop)?;
 
     let mut frame = match item.item_type {
-        ItemType::Grid => decode_grid(container, item, limits, stop, max_threads)?,
+        ItemType::Grid => decode_grid(container, item, depth, limits, stop, max_threads)?,
         ItemType::Iden => decode_iden(container, item, depth, limits, stop, max_threads)?,
         ItemType::Iovl => decode_iovl(container, item, depth, limits, stop, max_threads)?,
-        _ => {
+        ItemType::Hvc1 | ItemType::Unknown(_) => {
+            // HEVC path — Unknown falls through to HEVC for backwards compat
+            // Check limits before HEVC decode to avoid OOM from crafted SPS
+            if let Some((w, h)) = item.dimensions {
+                limits.check_dimensions(w, h)?;
+            }
             let image_data = container.get_item_data(item.id)?;
-
             if let Some(ref config) = item.hevc_config {
                 crate::hevc::decode_with_config(config, &image_data)?
-            } else {
+            } else if item.item_type == ItemType::Hvc1 {
                 crate::hevc::decode(&image_data)?
+            } else {
+                return Err(at!(HeicError::UnsupportedCodec(
+                    "unknown item type with no decoder config"
+                )));
             }
+        }
+        ItemType::Av01 => {
+            #[cfg(feature = "av1")]
+            {
+                let image_data = container.get_item_data(item.id)?;
+                decode_av1_item(item, &image_data, limits, stop)?
+            }
+            #[cfg(not(feature = "av1"))]
+            {
+                return Err(at!(HeicError::UnsupportedCodec(
+                    "AV1 codec requires the 'av1' feature"
+                )));
+            }
+        }
+        ItemType::Unci => {
+            #[cfg(feature = "unci")]
+            {
+                let image_data = container.get_item_data(item.id)?;
+                decode_unci_item(item, &image_data, limits, stop)?
+            }
+            #[cfg(not(feature = "unci"))]
+            {
+                return Err(at!(HeicError::UnsupportedCodec(
+                    "uncompressed HEIF requires the 'unci' feature"
+                )));
+            }
+        }
+        ItemType::Avc1 => {
+            return Err(at!(HeicError::UnsupportedCodec(
+                "H.264/AVC codec not supported"
+            )));
+        }
+        ItemType::Jpeg => {
+            return Err(at!(HeicError::UnsupportedCodec("JPEG codec not supported")));
+        }
+        ItemType::Exif | ItemType::Mime => {
+            return Err(at!(HeicError::InvalidData(
+                "metadata item type cannot be decoded as image"
+            )));
         }
     };
 
@@ -183,16 +230,16 @@ fn decode_item(
             }
             Transform::Mirror(mirror) => {
                 frame = match mirror.axis {
-                    0 => frame.mirror_vertical(),
-                    1 => frame.mirror_horizontal(),
+                    0 => frame.mirror_vertical()?,
+                    1 => frame.mirror_horizontal()?,
                     _ => frame,
                 };
             }
             Transform::Rotation(rotation) => {
                 frame = match rotation.angle {
-                    90 => frame.rotate_90_cw(),
-                    180 => frame.rotate_180(),
-                    270 => frame.rotate_270_cw(),
+                    90 => frame.rotate_90_cw()?,
+                    180 => frame.rotate_180()?,
+                    270 => frame.rotate_270_cw()?,
                     _ => frame,
                 };
             }
@@ -350,13 +397,15 @@ fn decode_iovl(
     let first_tile_item = container
         .get_item(tile_ids[0])
         .ok_or_else(|| at!(HeicError::InvalidData("Missing overlay tile item")))?;
-    let first_tile_config = first_tile_item
-        .hevc_config
-        .as_ref()
-        .ok_or_else(|| at!(HeicError::InvalidData("Missing overlay tile hvcC")))?;
 
-    let bit_depth = first_tile_config.bit_depth_luma_minus8 + 8;
-    let chroma_format = first_tile_config.chroma_format;
+    let (bit_depth, chroma_format) = if let Some(ref config) = first_tile_item.hevc_config {
+        (config.bit_depth_luma_minus8 + 8, config.chroma_format)
+    } else if let Some(ref config) = first_tile_item.av1_config {
+        (config.bit_depth(), config.chroma_format())
+    } else {
+        // Default to 8-bit 4:2:0 for unknown codecs
+        (8u8, 1u8)
+    };
 
     let mut output = crate::hevc::DecodedFrame::with_params(
         canvas_width,
@@ -460,10 +509,414 @@ fn decode_iovl(
     Ok(output)
 }
 
+/// Decode an AV1-coded image item using rav1d-safe.
+///
+/// Prepends the av1C configOBUs to the image data, feeds the combined OBU
+/// stream to the rav1d decoder, and converts the resulting frame to a
+/// `DecodedFrame` with Y/Cb/Cr planes.
+#[cfg(feature = "av1")]
+fn decode_av1_item(
+    item: &heif::Item,
+    image_data: &[u8],
+    limits: &Limits,
+    stop: &dyn Stop,
+) -> Result<crate::hevc::DecodedFrame> {
+    use rav1d_safe::src::managed::{Decoder, Planes, Settings};
+
+    let config = item
+        .av1_config
+        .as_ref()
+        .ok_or_else(|| at!(HeicError::InvalidData("AV1 item has no av1C config")))?;
+
+    // Build combined OBU data: config_obus + image_data
+    let total_len = config
+        .config_obus
+        .len()
+        .checked_add(image_data.len())
+        .ok_or_else(|| at!(HeicError::LimitExceeded("AV1 OBU data size overflow")))?;
+    if total_len > 256 * 1024 * 1024 {
+        return Err(at!(HeicError::LimitExceeded(
+            "AV1 OBU data exceeds 256 MiB"
+        )));
+    }
+
+    let mut obu_data = Vec::new();
+    obu_data
+        .try_reserve(total_len)
+        .map_err(|_| at!(HeicError::OutOfMemory))?;
+    obu_data.extend_from_slice(&config.config_obus);
+    obu_data.extend_from_slice(image_data);
+
+    // Pre-decode limits check: use ispe dimensions if available, and feed
+    // max_pixels to rav1d's frame_size_limit so it rejects oversized frames
+    // during OBU parsing — before allocating the decoded frame.
+    if let Some((w, h)) = item.dimensions {
+        limits.check_dimensions(w, h)?;
+        let estimated = DecoderConfig::estimate_memory(w, h, PixelLayout::Rgba8);
+        limits.check_memory(estimated)?;
+    }
+
+    check_stop(stop)?;
+
+    // Set rav1d frame_size_limit from user limits so the decoder rejects
+    // oversized frames during OBU parsing, before allocating pixel buffers.
+    // Set rav1d frame_size_limit from user limits
+    let mut settings = Settings::default();
+    if let Some(max_pixels) = limits.max_pixels {
+        settings.frame_size_limit = max_pixels.min(u32::MAX as u64) as u32;
+    }
+    let mut decoder = Decoder::with_settings(settings).map_err(|e| {
+        at!(HeicError::InvalidData(match e {
+            rav1d_safe::src::managed::Error::OutOfMemory => "AV1 decoder init: out of memory",
+            _ => "AV1 decoder initialization failed",
+        }))
+    })?;
+
+    // Feed the OBU data
+    let frame_opt = decoder
+        .decode(&obu_data)
+        .map_err(|_| at!(HeicError::InvalidData("AV1 decode failed")))?;
+
+    // Get the frame — it may come from decode() or flush()
+    let frame = if let Some(f) = frame_opt {
+        f
+    } else {
+        // Try flushing to get buffered frames
+        let flushed = decoder
+            .flush()
+            .map_err(|_| at!(HeicError::InvalidData("AV1 flush failed")))?;
+        flushed
+            .into_iter()
+            .next()
+            .ok_or_else(|| at!(HeicError::InvalidData("AV1 decoder produced no frames")))?
+    };
+
+    let width = frame.width();
+    let height = frame.height();
+    let bit_depth = frame.bit_depth();
+
+    check_stop(stop)?;
+
+    // Map rav1d PixelLayout to our chroma_format
+    let chroma_format = match frame.pixel_layout() {
+        rav1d_safe::src::managed::PixelLayout::I400 => 0u8,
+        rav1d_safe::src::managed::PixelLayout::I420 => 1,
+        rav1d_safe::src::managed::PixelLayout::I422 => 2,
+        rav1d_safe::src::managed::PixelLayout::I444 => 3,
+    };
+
+    let mut output =
+        crate::hevc::DecodedFrame::with_params(width, height, bit_depth, chroma_format)?;
+
+    // Copy planes from rav1d frame to our DecodedFrame
+    match frame.planes() {
+        Planes::Depth8(planes) => {
+            // Copy Y plane
+            let y_view = planes.y();
+            for y in 0..height as usize {
+                let src_row = y_view.row(y);
+                let dst_start = y * output.y_stride();
+                for (i, &val) in src_row.iter().take(width as usize).enumerate() {
+                    output.y_plane[dst_start + i] = val as u16;
+                }
+            }
+
+            // Copy Cb/Cr planes if not monochrome
+            if chroma_format > 0
+                && let (Some(cb_view), Some(cr_view)) = (planes.u(), planes.v())
+            {
+                let c_height = cb_view.height();
+                let c_width = cb_view.width();
+                for y in 0..c_height {
+                    let cb_row = cb_view.row(y);
+                    let cr_row = cr_view.row(y);
+                    let dst_start = y * output.c_stride();
+                    for (i, (&cb, &cr)) in cb_row
+                        .iter()
+                        .take(c_width)
+                        .zip(cr_row.iter().take(c_width))
+                        .enumerate()
+                    {
+                        output.cb_plane[dst_start + i] = cb as u16;
+                        output.cr_plane[dst_start + i] = cr as u16;
+                    }
+                }
+            }
+        }
+        Planes::Depth16(planes) => {
+            // Copy Y plane (16-bit)
+            let y_view = planes.y();
+            for y in 0..height as usize {
+                let src_row = y_view.row(y);
+                let dst_start = y * output.y_stride();
+                for (i, &val) in src_row.iter().take(width as usize).enumerate() {
+                    output.y_plane[dst_start + i] = val;
+                }
+            }
+
+            // Copy Cb/Cr planes if not monochrome
+            if chroma_format > 0
+                && let (Some(cb_view), Some(cr_view)) = (planes.u(), planes.v())
+            {
+                let c_height = cb_view.height();
+                let c_width = cb_view.width();
+                for y in 0..c_height {
+                    let cb_row = cb_view.row(y);
+                    let cr_row = cr_view.row(y);
+                    let dst_start = y * output.c_stride();
+                    for (i, (&cb, &cr)) in cb_row
+                        .iter()
+                        .take(c_width)
+                        .zip(cr_row.iter().take(c_width))
+                        .enumerate()
+                    {
+                        output.cb_plane[dst_start + i] = cb;
+                        output.cr_plane[dst_start + i] = cr;
+                    }
+                }
+            }
+        }
+    }
+
+    // Set color info from the AV1 frame
+    let color_info = frame.color_info();
+    output.full_range = color_info.color_range == rav1d_safe::src::managed::ColorRange::Full;
+    output.matrix_coeffs = color_info.matrix_coefficients as u8;
+    output.color_primaries = color_info.primaries as u8;
+    output.transfer_characteristics = color_info.transfer_characteristics as u8;
+
+    Ok(output)
+}
+
+/// Decode an uncompressed HEIF (unci) image item.
+///
+/// Handles both compressed (deflate/zlib via zenflate) and raw uncompressed
+/// pixel data as defined in ISO 23001-17. Supports pixel-interleaved and
+/// component-planar layouts for 8-bit unsigned integer components.
+#[cfg(feature = "unci")]
+fn decode_unci_item(
+    item: &heif::Item,
+    image_data: &[u8],
+    limits: &Limits,
+    stop: &dyn Stop,
+) -> Result<crate::hevc::DecodedFrame> {
+    let unc_config = item
+        .uncompressed_config
+        .as_ref()
+        .ok_or_else(|| at!(HeicError::InvalidData("unci item has no uncC config")))?;
+
+    let (width, height) = item
+        .dimensions
+        .ok_or_else(|| at!(HeicError::InvalidData("unci item has no dimensions")))?;
+
+    if width == 0 || height == 0 {
+        return Err(at!(HeicError::InvalidData("unci item has zero dimensions")));
+    }
+
+    // Check limits on unci dimensions before allocating
+    limits.check_dimensions(width, height)?;
+    let estimated = DecoderConfig::estimate_memory(width, height, PixelLayout::Rgba8);
+    limits.check_memory(estimated)?;
+
+    let num_components = unc_config.components.len();
+    if num_components == 0 {
+        return Err(at!(HeicError::InvalidData("unci item has no components")));
+    }
+
+    // Calculate expected decompressed size with overflow checks
+    let bits_per_pixel: u32 = unc_config
+        .components
+        .iter()
+        .try_fold(0u32, |acc, c| {
+            acc.checked_add(c.component_bit_depth_minus_one as u32 + 1)
+        })
+        .ok_or_else(|| at!(HeicError::InvalidData("unci bit depth overflow")))?;
+
+    // For now, only support 8-bit unsigned integer components
+    let all_8bit = unc_config
+        .components
+        .iter()
+        .all(|c| c.component_bit_depth_minus_one == 7 && c.component_format == 0);
+    if !all_8bit {
+        return Err(at!(HeicError::Unsupported(
+            "unci: only 8-bit unsigned integer components supported"
+        )));
+    }
+
+    let bytes_per_pixel = bits_per_pixel.div_ceil(8);
+    let expected_size = (width as u64)
+        .checked_mul(height as u64)
+        .and_then(|n| n.checked_mul(bytes_per_pixel as u64))
+        .ok_or_else(|| at!(HeicError::LimitExceeded("unci decompressed size overflow")))?;
+
+    // Security: limit decompressed size to min(512 MiB, limits.max_memory_bytes)
+    let decompress_cap = limits
+        .max_memory_bytes
+        .map_or(512 * 1024 * 1024, |m| m.min(512 * 1024 * 1024));
+    if expected_size > decompress_cap {
+        return Err(at!(HeicError::LimitExceeded(
+            "unci decompressed size exceeds limit"
+        )));
+    }
+    let expected_size = expected_size as usize;
+
+    check_stop(stop)?;
+
+    // Decompress if compression config is present
+    let pixel_data: alloc::borrow::Cow<'_, [u8]> =
+        if let Some(ref cmp_config) = item.compression_config {
+            let mut decompressed = Vec::new();
+            decompressed
+                .try_reserve(expected_size)
+                .map_err(|_| at!(HeicError::OutOfMemory))?;
+            decompressed.resize(expected_size, 0);
+
+            let mut decompressor = zenflate::Decompressor::new();
+            let result = match &cmp_config.compression_type.0 {
+                b"defl" => decompressor
+                    .deflate_decompress(image_data, &mut decompressed, stop)
+                    .map_err(|_| at!(HeicError::InvalidData("unci deflate decompression failed"))),
+                b"zlib" => decompressor
+                    .zlib_decompress(image_data, &mut decompressed, stop)
+                    .map_err(|_| at!(HeicError::InvalidData("unci zlib decompression failed"))),
+                _ => {
+                    return Err(at!(HeicError::UnsupportedCodec(
+                        "unci compression type not supported (only deflate and zlib)"
+                    )));
+                }
+            }?;
+
+            decompressed.truncate(result.output_written);
+            alloc::borrow::Cow::Owned(decompressed)
+        } else {
+            // No compression — use raw data
+            alloc::borrow::Cow::Borrowed(image_data)
+        };
+
+    if pixel_data.len() < expected_size {
+        return Err(at!(HeicError::InvalidData(
+            "unci decompressed data smaller than expected"
+        )));
+    }
+
+    // Create output frame — use RGB (chroma_format=3 = 4:4:4) for unci
+    let mut output = crate::hevc::DecodedFrame::with_params(width, height, 8, 3)?;
+
+    // Set full-range since unci pixels are typically full-range
+    output.full_range = true;
+
+    // Determine component layout → map component indices to R, G, B channels
+    // ISO 23001-17 component_index: 0=Y/R, 1=Cb/G, 2=Cr/B, 3=A, 4=R, 5=G, 6=B
+    let interleave = unc_config.interleave_type;
+
+    match interleave {
+        0 => {
+            // Component-planar: each component stored as a complete plane
+            let plane_size = (width as usize) * (height as usize);
+            for (comp_idx, comp) in unc_config.components.iter().enumerate() {
+                check_stop(stop)?;
+                let plane_offset = comp_idx * plane_size;
+                if plane_offset + plane_size > pixel_data.len() {
+                    return Err(at!(HeicError::InvalidData(
+                        "unci component plane extends past data"
+                    )));
+                }
+                let plane_data = &pixel_data[plane_offset..plane_offset + plane_size];
+
+                // Map component_index to Y/Cb/Cr plane
+                let target = match comp.component_index {
+                    0 | 4 => Some(&mut output.y_plane),  // Y or R
+                    1 | 5 => Some(&mut output.cb_plane), // Cb or G
+                    2 | 6 => Some(&mut output.cr_plane), // Cr or B
+                    _ => None,                           // alpha or unknown — skip
+                };
+
+                if let Some(target_plane) = target {
+                    for (i, &val) in plane_data.iter().enumerate() {
+                        if i < target_plane.len() {
+                            target_plane[i] = val as u16;
+                        }
+                    }
+                }
+            }
+        }
+        1 => {
+            // Pixel-interleaved: R,G,B,R,G,B,...
+            let stride = num_components;
+            let mut comp_to_plane: [Option<u8>; 8] = [None; 8];
+            for (i, comp) in unc_config.components.iter().enumerate() {
+                if i < 8 {
+                    comp_to_plane[i] = match comp.component_index {
+                        0 | 4 => Some(0), // Y/R
+                        1 | 5 => Some(1), // Cb/G
+                        2 | 6 => Some(2), // Cr/B
+                        _ => None,
+                    };
+                }
+            }
+
+            for y in 0..height as usize {
+                check_stop(stop)?;
+                for x in 0..width as usize {
+                    let pixel_offset = (y * width as usize + x) * stride;
+                    if pixel_offset + stride > pixel_data.len() {
+                        return Err(at!(HeicError::InvalidData("unci pixel data truncated")));
+                    }
+                    let dst_idx = y * output.y_stride() + x;
+                    for (c, &mapping) in comp_to_plane.iter().enumerate().take(num_components) {
+                        if let Some(plane_id) = mapping {
+                            let val = pixel_data[pixel_offset + c] as u16;
+                            match plane_id {
+                                0 => {
+                                    if dst_idx < output.y_plane.len() {
+                                        output.y_plane[dst_idx] = val;
+                                    }
+                                }
+                                1 => {
+                                    if dst_idx < output.cb_plane.len() {
+                                        output.cb_plane[dst_idx] = val;
+                                    }
+                                }
+                                2 => {
+                                    if dst_idx < output.cr_plane.len() {
+                                        output.cr_plane[dst_idx] = val;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {
+            return Err(at!(HeicError::Unsupported(
+                "unci interleave type not supported (only component-planar and pixel-interleaved)"
+            )));
+        }
+    }
+
+    // For unci RGB data, set identity matrix (no YCbCr conversion needed)
+    // The output planes contain R, G, B directly when component indices are 4, 5, 6
+    // or Y, Cb, Cr when indices are 0, 1, 2
+    let has_rgb_indices = unc_config
+        .components
+        .iter()
+        .any(|c| c.component_index >= 4 && c.component_index <= 6);
+
+    if has_rgb_indices {
+        // Direct RGB in Y/Cb/Cr planes — use identity matrix (0)
+        output.matrix_coeffs = 0;
+    }
+
+    Ok(output)
+}
+
 /// Decode a grid-based HEIC image
 fn decode_grid(
     container: &heif::HeifContainer<'_>,
     grid_item: &heif::Item,
+    depth: u32,
     limits: &Limits,
     stop: &dyn Stop,
     max_threads: Option<usize>,
@@ -505,23 +958,35 @@ fn decode_grid(
         return Err(at!(HeicError::InvalidData("Grid tile count mismatch")));
     }
 
-    // Get hvcC config from the first tile item
+    // Get config from the first tile item — supports HEVC, AV1, and unci tiles
     let first_tile = container
         .get_item(tile_ids[0])
         .ok_or_else(|| at!(HeicError::InvalidData("Missing tile item")))?;
-    let tile_config = first_tile
-        .hevc_config
-        .as_ref()
-        .ok_or_else(|| at!(HeicError::InvalidData("Missing tile hvcC config")))?;
+
+    // Determine bit depth and chroma format from the tile's codec config
+    let (bit_depth, chroma_format) = if let Some(ref config) = first_tile.hevc_config {
+        (config.bit_depth_luma_minus8 + 8, config.chroma_format)
+    } else if let Some(ref config) = first_tile.av1_config {
+        (config.bit_depth(), config.chroma_format())
+    } else if first_tile.uncompressed_config.is_some() {
+        // unci tiles: assume 8-bit RGB (chroma_format 3 = 4:4:4)
+        let bd = first_tile
+            .uncompressed_config
+            .as_ref()
+            .and_then(|c| c.components.first())
+            .map(|c| c.component_bit_depth_minus_one + 1)
+            .unwrap_or(8);
+        (bd, 3)
+    } else {
+        return Err(at!(HeicError::InvalidData(
+            "Missing tile decoder config (no hvcC, av1C, or uncC)"
+        )));
+    };
 
     // Get tile dimensions from ispe
     let (tile_width, tile_height) = first_tile
         .dimensions
         .ok_or_else(|| at!(HeicError::InvalidData("Missing tile dimensions")))?;
-
-    // Create output frame at the grid's output dimensions
-    let bit_depth = tile_config.bit_depth_luma_minus8 + 8;
-    let chroma_format = tile_config.chroma_format;
     let mut output = crate::hevc::DecodedFrame::with_params(
         output_width,
         output_height,
@@ -538,27 +1003,57 @@ fn decode_grid(
         .map(|&tid| container.get_item_data(tid))
         .collect::<core::result::Result<_, _>>()?;
 
+    // For HEVC grids, use the parallel decode path when available
+    let hevc_tile_config = first_tile.hevc_config.as_ref();
+
     #[cfg(feature = "parallel")]
     {
-        // Parallel: decode tiles concurrently (respecting max_threads), then blit.
-        let all_tiles = decode_tiles_parallel(&tile_data_list, tile_config, max_threads)?;
+        if let Some(tile_config) = hevc_tile_config {
+            // Parallel HEVC: decode tiles concurrently (respecting max_threads), then blit.
+            let all_tiles = decode_tiles_parallel(&tile_data_list, tile_config, max_threads)?;
 
-        for (tile_idx, tile_frame) in all_tiles.iter().enumerate() {
-            if tile_idx == 0 {
-                output.full_range = tile_frame.full_range;
-                output.matrix_coeffs = tile_frame.matrix_coeffs;
+            for (tile_idx, tile_frame) in all_tiles.iter().enumerate() {
+                if tile_idx == 0 {
+                    output.full_range = tile_frame.full_range;
+                    output.matrix_coeffs = tile_frame.matrix_coeffs;
+                }
+                blit_tile_to_grid(
+                    &mut output,
+                    tile_frame,
+                    tile_idx,
+                    cols,
+                    tile_width,
+                    tile_height,
+                    output_width,
+                    output_height,
+                    chroma_format,
+                );
             }
-            blit_tile_to_grid(
-                &mut output,
-                tile_frame,
-                tile_idx,
-                cols,
-                tile_width,
-                tile_height,
-                output_width,
-                output_height,
-                chroma_format,
-            );
+        } else {
+            // Non-HEVC tiles: sequential decode via decode_item per tile
+            for (tile_idx, &tile_id) in tile_ids.iter().enumerate() {
+                check_stop(stop)?;
+                let tile_item = container
+                    .get_item(tile_id)
+                    .ok_or_else(|| at!(HeicError::InvalidData("Missing grid tile")))?;
+                let tile_frame =
+                    decode_item(container, &tile_item, depth + 1, limits, stop, max_threads)?;
+                if tile_idx == 0 {
+                    output.full_range = tile_frame.full_range;
+                    output.matrix_coeffs = tile_frame.matrix_coeffs;
+                }
+                blit_tile_to_grid(
+                    &mut output,
+                    &tile_frame,
+                    tile_idx,
+                    cols,
+                    tile_width,
+                    tile_height,
+                    output_width,
+                    output_height,
+                    chroma_format,
+                );
+            }
         }
     }
 
@@ -568,7 +1063,16 @@ fn decode_grid(
         // Sequential: decode one tile, blit, drop — only 1 tile in memory at a time.
         for (tile_idx, tile_data) in tile_data_list.iter().enumerate() {
             check_stop(stop)?;
-            let tile_frame = crate::hevc::decode_with_config(tile_config, tile_data)?;
+            let tile_frame = if let Some(tile_config) = hevc_tile_config {
+                crate::hevc::decode_with_config(tile_config, tile_data)?
+            } else {
+                // Non-HEVC tiles: look up the tile item and dispatch
+                let tile_id = tile_ids[tile_idx];
+                let tile_item = container
+                    .get_item(tile_id)
+                    .ok_or_else(|| at!(HeicError::InvalidData("Missing grid tile")))?;
+                decode_item(container, &tile_item, depth + 1, limits, stop, None)?
+            };
             if tile_idx == 0 {
                 output.full_range = tile_frame.full_range;
                 output.matrix_coeffs = tile_frame.matrix_coeffs;
@@ -769,10 +1273,13 @@ pub(crate) fn try_decode_grid_streaming(
     let first_tile = container
         .get_item(tile_ids[0])
         .ok_or_else(|| at!(HeicError::InvalidData("Missing tile item")))?;
-    let tile_config = first_tile
-        .hevc_config
-        .as_ref()
-        .ok_or_else(|| at!(HeicError::InvalidData("Missing tile hvcC config")))?;
+
+    // Streaming grid path only supports HEVC tiles
+    let tile_config = match first_tile.hevc_config.as_ref() {
+        Some(config) => config,
+        None => return Ok(None),
+    };
+
     let (tile_width, tile_height) = first_tile
         .dimensions
         .ok_or_else(|| at!(HeicError::InvalidData("Missing tile dimensions")))?;
@@ -956,10 +1463,13 @@ pub(crate) fn try_decode_grid_to_sink(
     let first_tile = container
         .get_item(tile_ids[0])
         .ok_or_else(|| at!(HeicError::InvalidData("Missing tile item")))?;
-    let tile_config = first_tile
-        .hevc_config
-        .as_ref()
-        .ok_or_else(|| at!(HeicError::InvalidData("Missing tile hvcC config")))?;
+
+    // Streaming grid path only supports HEVC tiles
+    let tile_config = match first_tile.hevc_config.as_ref() {
+        Some(config) => config,
+        None => return Ok(None),
+    };
+
     let (tile_width, tile_height) = first_tile
         .dimensions
         .ok_or_else(|| at!(HeicError::InvalidData("Missing tile dimensions")))?;
@@ -1195,10 +1705,10 @@ fn decode_alpha_plane(
     alpha_id: u32,
     primary_frame: &crate::hevc::DecodedFrame,
     limits: &Limits,
+    stop: &dyn Stop,
 ) -> Option<Vec<u16>> {
     let alpha_item = container.get_item(alpha_id)?;
     let alpha_data = container.get_item_data(alpha_id).ok()?;
-    let alpha_config = alpha_item.hevc_config.as_ref()?;
 
     // Check limits on alpha image dimensions before decoding
     if let Some((w, h)) = alpha_item.dimensions {
@@ -1207,7 +1717,25 @@ fn decode_alpha_plane(
         limits.check_memory(estimated).ok()?;
     }
 
-    let alpha_frame = crate::hevc::decode_with_config(alpha_config, &alpha_data).ok()?;
+    check_stop(stop).ok()?;
+
+    // Multi-codec dispatch: try HEVC first, then AV1
+    let alpha_frame = if let Some(ref config) = alpha_item.hevc_config {
+        crate::hevc::decode_with_config(config, &alpha_data).ok()?
+    } else {
+        #[cfg(feature = "av1")]
+        {
+            if alpha_item.av1_config.is_some() {
+                decode_av1_item(&alpha_item, &alpha_data, limits, stop).ok()?
+            } else {
+                return None;
+            }
+        }
+        #[cfg(not(feature = "av1"))]
+        {
+            return None;
+        }
+    };
 
     let primary_w = primary_frame.cropped_width();
     let primary_h = primary_frame.cropped_height();
@@ -1460,10 +1988,10 @@ pub(crate) fn decode_thumbnail(data: &[u8], layout: PixelLayout) -> Result<Optio
     let height = frame.cropped_height();
 
     let pixels = match layout {
-        PixelLayout::Rgb8 => frame.to_rgb(),
-        PixelLayout::Rgba8 => frame.to_rgba(),
-        PixelLayout::Bgr8 => frame.to_bgr(),
-        PixelLayout::Bgra8 => frame.to_bgra(),
+        PixelLayout::Rgb8 => frame.to_rgb()?,
+        PixelLayout::Rgba8 => frame.to_rgba()?,
+        PixelLayout::Bgr8 => frame.to_bgr()?,
+        PixelLayout::Bgra8 => frame.to_bgra()?,
     };
 
     Ok(Some(DecodeOutput {
@@ -1638,10 +2166,10 @@ pub(crate) fn decode_auxiliary_item(
     let height = frame.cropped_height();
 
     let pixels = match layout {
-        PixelLayout::Rgb8 => frame.to_rgb(),
-        PixelLayout::Rgba8 => frame.to_rgba(),
-        PixelLayout::Bgr8 => frame.to_bgr(),
-        PixelLayout::Bgra8 => frame.to_bgra(),
+        PixelLayout::Rgb8 => frame.to_rgb()?,
+        PixelLayout::Rgba8 => frame.to_rgba()?,
+        PixelLayout::Bgr8 => frame.to_bgr()?,
+        PixelLayout::Bgra8 => frame.to_bgra()?,
     };
 
     Ok(DecodeOutput {

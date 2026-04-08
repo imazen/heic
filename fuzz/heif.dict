@@ -1,0 +1,88 @@
+# ISOBMFF / HEIF box types
+"ftyp"
+"meta"
+"hdlr"
+"pitm"
+"iloc"
+"iinf"
+"infe"
+"iprp"
+"ipco"
+"ipma"
+"iref"
+"idat"
+"mdat"
+"moov"
+"trak"
+"tkhd"
+"mdia"
+"mdhd"
+"minf"
+"stbl"
+"stsd"
+"stsz"
+"stco"
+"co64"
+"stsc"
+"stss"
+"free"
+
+# HEIF item/codec types
+"hvc1"
+"hev1"
+"av01"
+"avc1"
+"jpeg"
+"unci"
+"grid"
+"iovl"
+"iden"
+"Exif"
+"mime"
+
+# Property box types
+"hvcC"
+"av1C"
+"uncC"
+"cmpC"
+"ispe"
+"colr"
+"clap"
+"irot"
+"imir"
+"auxC"
+"cLLi"
+"mDCv"
+
+# Brands
+"heic"
+"heix"
+"mif1"
+"mif2"
+"mif3"
+"avif"
+"avis"
+"msf1"
+
+# HEVC NAL prefixes
+"\x00\x00\x00\x01"
+"\x00\x00\x01"
+
+# Color types
+"nclx"
+"rICC"
+"prof"
+
+# Compression types
+"defl"
+"zlib"
+"brot"
+
+# Reference types
+"dimg"
+"thmb"
+"auxl"
+
+# Handler types
+"pict"
+"vide"

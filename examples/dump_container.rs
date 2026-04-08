@@ -113,6 +113,28 @@ fn main() {
                     mdcv.min_luminance
                 );
             }
+            ItemProperty::Av1Config(config) => {
+                eprintln!(
+                    "  [{}]: av1C profile={} level={} bit_depth={} chroma={}",
+                    i,
+                    config.seq_profile,
+                    config.seq_level_idx_0,
+                    config.bit_depth(),
+                    config.chroma_format()
+                );
+            }
+            ItemProperty::UncompressedConfig(config) => {
+                eprintln!(
+                    "  [{}]: uncC profile={} components={} interleave={}",
+                    i,
+                    config.profile,
+                    config.components.len(),
+                    config.interleave_type
+                );
+            }
+            ItemProperty::CompressionConfig(config) => {
+                eprintln!("  [{}]: cmpC type={}", i, config.compression_type);
+            }
             ItemProperty::Unknown => {
                 eprintln!("  [{}]: (unknown)", i);
             }

@@ -415,7 +415,8 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
         // Negotiate output format
         let available = available_descriptors(has_alpha, bit_depth);
         let negotiated =
-            negotiate_pixel_format(preferred, &available).expect("pixel format negotiation failed");
+            negotiate_pixel_format(preferred, &available)
+                .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
 
         if is_16bit(negotiated) {
             // 16-bit: full decode, then push rows
@@ -640,7 +641,8 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
         // Negotiate output format
         let available = available_descriptors(has_alpha, bit_depth);
         let negotiated =
-            negotiate_pixel_format(preferred, &available).expect("pixel format negotiation failed");
+            negotiate_pixel_format(preferred, &available)
+                .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
 
         let (buf, width, height, has_alpha): (PixelBuffer, u32, u32, bool) = if is_16bit(negotiated)
         {
@@ -668,16 +670,8 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
                     frame.color_primaries as u16,
                     frame.transfer_characteristics as u16,
                 );
-                let rgba_data = frame.to_rgba16();
-                let pixels: alloc::vec::Vec<Rgba<u16>> = rgba_data
-                    .chunks_exact(4)
-                    .map(|c| Rgba {
-                        r: c[0],
-                        g: c[1],
-                        b: c[2],
-                        a: c[3],
-                    })
-                    .collect();
+                let rgba_data = frame.to_rgba16()?;
+                let pixels = u16_vec_to_rgba(rgba_data);
                 let pb = PixelBuffer::from_pixels_erased(pixels, w, h)
                     .map_err_at(|_| HeicError::InvalidData("pixel count mismatch"))?
                     .with_descriptor(desc);
@@ -688,15 +682,8 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
                     frame.color_primaries as u16,
                     frame.transfer_characteristics as u16,
                 );
-                let rgb_data = frame.to_rgb16();
-                let pixels: alloc::vec::Vec<Rgb<u16>> = rgb_data
-                    .chunks_exact(3)
-                    .map(|c| Rgb {
-                        r: c[0],
-                        g: c[1],
-                        b: c[2],
-                    })
-                    .collect();
+                let rgb_data = frame.to_rgb16()?;
+                let pixels = u16_vec_to_rgb(rgb_data);
                 let pb = PixelBuffer::from_pixels_erased(pixels, w, h)
                     .map_err_at(|_| HeicError::InvalidData("pixel count mismatch"))?
                     .with_descriptor(desc);
@@ -739,7 +726,11 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
 
         // Build ImageInfo with all available metadata.
         // Parse the HEIF container once for all metadata extraction.
-        let container = crate::heif::parse(data, &enough::Unstoppable).ok();
+        let stop_ref: &dyn enough::Stop = self
+            .stop
+            .as_ref()
+            .map_or(&enough::Unstoppable as &dyn enough::Stop, |s| s);
+        let container = crate::heif::parse(data, stop_ref).ok();
         let fallback_info = crate::ImageInfo {
             width,
             height,
@@ -893,7 +884,8 @@ impl HeicStreamDecoder {
         // Non-grid fallback: full decode upfront
         let available = available_descriptors(pi.has_alpha, pi.bit_depth);
         let negotiated =
-            negotiate_pixel_format(preferred, &available).expect("pixel format negotiation failed");
+            negotiate_pixel_format(preferred, &available)
+                .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
 
         let pixels: PixelBuffer = if is_16bit(negotiated) {
             let mut req = config.decode_request(data);
@@ -914,7 +906,7 @@ impl HeicStreamDecoder {
                     frame.color_primaries as u16,
                     frame.transfer_characteristics as u16,
                 );
-                let rgba_data = frame.to_rgba16();
+                let rgba_data = frame.to_rgba16()?;
                 let pixels: alloc::vec::Vec<Rgba<u16>> = rgba_data
                     .chunks_exact(4)
                     .map(|c| Rgba {
@@ -935,15 +927,8 @@ impl HeicStreamDecoder {
                     frame.color_primaries as u16,
                     frame.transfer_characteristics as u16,
                 );
-                let rgb_data = frame.to_rgb16();
-                let pixels: alloc::vec::Vec<Rgb<u16>> = rgb_data
-                    .chunks_exact(3)
-                    .map(|c| Rgb {
-                        r: c[0],
-                        g: c[1],
-                        b: c[2],
-                    })
-                    .collect();
+                let rgb_data = frame.to_rgb16()?;
+                let pixels = u16_vec_to_rgb(rgb_data);
                 let w = frame.cropped_width();
                 let h = frame.cropped_height();
                 PixelBuffer::from_pixels_erased(pixels, w, h)
@@ -1105,7 +1090,8 @@ impl HeicStreamDecoder {
         // Negotiate 8-bit layout for grid tiles (no alpha, ≤8-bit)
         let available = available_descriptors(false, 8);
         let negotiated =
-            negotiate_pixel_format(preferred, &available).expect("pixel format negotiation failed");
+            negotiate_pixel_format(preferred, &available)
+                .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
         let layout = descriptor_to_layout(negotiated);
 
         Ok(Some(GridState {
@@ -1500,6 +1486,26 @@ fn probe_error_to_heic(e: crate::ProbeError) -> At<HeicError> {
             at!(HeicError::InvalidData("not a valid HEIC/HEIF file"))
         }
         crate::ProbeError::Corrupt(inner) => inner,
+    }
+}
+
+/// Reinterpret `Vec<u16>` as `Vec<Rgb<u16>>` via bytemuck.
+/// Zero-copy when alignment is compatible (always for u16→Rgb<u16>),
+/// falls back to a single memcpy otherwise.
+fn u16_vec_to_rgb(data: alloc::vec::Vec<u16>) -> alloc::vec::Vec<Rgb<u16>> {
+    match bytemuck::try_cast_vec(data) {
+        Ok(pixels) => pixels,
+        Err((_err, data)) => bytemuck::cast_slice::<u16, Rgb<u16>>(&data).to_vec(),
+    }
+}
+
+/// Reinterpret `Vec<u16>` as `Vec<Rgba<u16>>` via bytemuck.
+/// Zero-copy when alignment is compatible (always for u16→Rgba<u16>),
+/// falls back to a single memcpy otherwise.
+fn u16_vec_to_rgba(data: alloc::vec::Vec<u16>) -> alloc::vec::Vec<Rgba<u16>> {
+    match bytemuck::try_cast_vec(data) {
+        Ok(pixels) => pixels,
+        Err((_err, data)) => bytemuck::cast_slice::<u16, Rgba<u16>>(&data).to_vec(),
     }
 }
 

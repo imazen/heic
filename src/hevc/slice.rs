@@ -429,9 +429,21 @@ impl SliceHeader {
             // num_ref_idx_active_override_flag
             let override_flag = reader.read_bit()? != 0;
             if override_flag {
-                num_ref_idx_l0_active = reader.read_ue()? as u8 + 1;
+                let v = reader.read_ue()?;
+                if v > 14 {
+                    return Err(HevcError::InvalidBitstream(
+                        "num_ref_idx_l0_active_minus1 exceeds 14",
+                    ));
+                }
+                num_ref_idx_l0_active = v as u8 + 1;
                 if slice_type == SliceType::B {
-                    num_ref_idx_l1_active = reader.read_ue()? as u8 + 1;
+                    let v = reader.read_ue()?;
+                    if v > 14 {
+                        return Err(HevcError::InvalidBitstream(
+                            "num_ref_idx_l1_active_minus1 exceeds 14",
+                        ));
+                    }
+                    num_ref_idx_l1_active = v as u8 + 1;
                 }
             }
 
@@ -677,6 +689,14 @@ fn parse_pred_weight_table(
     num_ref_l0: u8,
     num_ref_l1: u8,
 ) -> Result<super::inter::PredWeightTable> {
+    // Defense-in-depth: ensure indices fit in weight table arrays
+    if num_ref_l0 as usize > super::inter::MAX_NUM_REF_PICS
+        || num_ref_l1 as usize > super::inter::MAX_NUM_REF_PICS
+    {
+        return Err(HevcError::InvalidBitstream(
+            "num_ref_idx exceeds MAX_NUM_REF_PICS",
+        ));
+    }
     let luma_log2_weight_denom = reader.read_ue()? as u8;
     let chroma_log2_weight_denom = if sps.chroma_array_type() != 0 {
         let delta = reader.read_se()?;

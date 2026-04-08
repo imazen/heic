@@ -506,8 +506,28 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
     };
 
     let bit_depth_luma_minus8 = reader.read_ue()? as u8;
+    if bit_depth_luma_minus8 > 8 {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!("bit_depth_luma_minus8={bit_depth_luma_minus8} exceeds 8"),
+        });
+    }
     let bit_depth_chroma_minus8 = reader.read_ue()? as u8;
+    if bit_depth_chroma_minus8 > 8 {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!("bit_depth_chroma_minus8={bit_depth_chroma_minus8} exceeds 8"),
+        });
+    }
     let log2_max_pic_order_cnt_lsb_minus4 = reader.read_ue()? as u8;
+    if log2_max_pic_order_cnt_lsb_minus4 > 12 {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!(
+                "log2_max_pic_order_cnt_lsb_minus4={log2_max_pic_order_cnt_lsb_minus4} exceeds 12"
+            ),
+        });
+    }
 
     let sub_layer_ordering_info_present_flag = reader.read_bit()? != 0;
 
@@ -523,12 +543,50 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
         let _max_latency_increase_plus1 = reader.read_ue()?;
     }
 
+    // Validate log2 block sizes against HEVC spec ranges.
+    // Reject out-of-range values rather than clamping — they indicate a corrupt bitstream.
     let log2_min_luma_coding_block_size_minus3 = reader.read_ue()? as u8;
+    if log2_min_luma_coding_block_size_minus3 > 3 {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!("log2_min_cb_size_minus3={log2_min_luma_coding_block_size_minus3} exceeds 3"),
+        });
+    }
     let log2_diff_max_min_luma_coding_block_size = reader.read_ue()? as u8;
+    if log2_diff_max_min_luma_coding_block_size > 3 {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!("log2_diff_max_min_cb={log2_diff_max_min_luma_coding_block_size} exceeds 3"),
+        });
+    }
     let log2_min_luma_transform_block_size_minus2 = reader.read_ue()? as u8;
+    if log2_min_luma_transform_block_size_minus2 > 3 {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!("log2_min_tb_size_minus2={log2_min_luma_transform_block_size_minus2} exceeds 3"),
+        });
+    }
     let log2_diff_max_min_luma_transform_block_size = reader.read_ue()? as u8;
+    if log2_diff_max_min_luma_transform_block_size > 3 {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!("log2_diff_max_min_tb={log2_diff_max_min_luma_transform_block_size} exceeds 3"),
+        });
+    }
     let max_transform_hierarchy_depth_inter = reader.read_ue()? as u8;
+    if max_transform_hierarchy_depth_inter > 5 {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!("max_transform_depth_inter={max_transform_hierarchy_depth_inter} exceeds 5"),
+        });
+    }
     let max_transform_hierarchy_depth_intra = reader.read_ue()? as u8;
+    if max_transform_hierarchy_depth_intra > 5 {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!("max_transform_depth_intra={max_transform_hierarchy_depth_intra} exceeds 5"),
+        });
+    }
 
     let scaling_list_enabled_flag = reader.read_bit()? != 0;
     let scaling_list = if scaling_list_enabled_flag {
@@ -590,7 +648,7 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
                 ),
             });
         }
-        let poc_bits = log2_max_pic_order_cnt_lsb_minus4 + 4;
+        let poc_bits = log2_max_pic_order_cnt_lsb_minus4.saturating_add(4);
         long_term_ref_pics_sps
             .lt_ref_pic_poc_lsb
             .reserve(num_long_term_ref_pics_sps);
@@ -697,7 +755,19 @@ pub fn parse_pps(data: &[u8]) -> Result<Pps> {
     let sign_data_hiding_enabled_flag = reader.read_bit()? != 0;
     let cabac_init_present_flag = reader.read_bit()? != 0;
     let num_ref_idx_l0_default_active_minus1 = reader.read_ue()? as u8;
+    if num_ref_idx_l0_default_active_minus1 > 14 {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "PPS",
+            msg: alloc::format!("num_ref_idx_l0_default_active_minus1={num_ref_idx_l0_default_active_minus1} exceeds 14"),
+        });
+    }
     let num_ref_idx_l1_default_active_minus1 = reader.read_ue()? as u8;
+    if num_ref_idx_l1_default_active_minus1 > 14 {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "PPS",
+            msg: alloc::format!("num_ref_idx_l1_default_active_minus1={num_ref_idx_l1_default_active_minus1} exceeds 14"),
+        });
+    }
     let init_qp_minus26 = reader.read_se()? as i8;
     let constrained_intra_pred_flag = reader.read_bit()? != 0;
     let transform_skip_enabled_flag = reader.read_bit()? != 0;
@@ -912,7 +982,7 @@ fn parse_scaling_list_data(reader: &mut BitstreamReader<'_>) -> Result<ScalingLi
                 }
                 for i in 0..coef_num {
                     let delta = reader.read_se()?;
-                    next_coef = (next_coef + delta + 256) % 256;
+                    next_coef = (next_coef.wrapping_add(delta).wrapping_add(256)) & 255;
                     data.lists[size_id][matrix_id][i] = next_coef as u8;
                 }
             }

@@ -1136,9 +1136,10 @@ fn decode_coeff_abs_level_remaining(
     rice_param: u8,
     base_level: i16,
 ) -> Result<(i16, u8)> {
-    // Decode prefix (unary part)
+    // Decode prefix (unary part). HEVC limits prefix to ~20 for coefficients;
+    // cap at 24 to prevent overflow in EGk while allowing valid extended values.
     let mut prefix = 0u32;
-    while cabac.decode_bypass()? != 0 && prefix < 32 {
+    while cabac.decode_bypass()? != 0 && prefix < 24 {
         prefix += 1;
     }
 
@@ -1155,13 +1156,14 @@ fn decode_coeff_abs_level_remaining(
         let suffix_bits = (prefix - 3 + rice_param as u32) as u8;
         let suffix = cabac.decode_bypass_bits(suffix_bits)?;
         // value = (((1 << (prefix-3)) + 3 - 1) << rice_param) + suffix
+        // With prefix max 24 and rice_param max 4: (1<<21 + 2) << 4 = ~33M, fits u32.
         let base = ((1u32 << (prefix - 3)) + 2) << rice_param;
         (base + suffix) as i16
     };
 
     // Update rice parameter: if baseLevel + value > 3 * (1 << rice_param), increase
     let threshold = 3 * (1 << rice_param);
-    let new_rice_param = if (base_level.unsigned_abs() as u32 + value as u32) > threshold {
+    let new_rice_param = if (base_level.unsigned_abs() as u32).saturating_add(value.unsigned_abs() as u32) > threshold {
         (rice_param + 1).min(4)
     } else {
         rice_param

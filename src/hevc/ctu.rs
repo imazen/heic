@@ -44,6 +44,8 @@ use super::transform;
 use super::transform_simd::add_residual_block_scalar;
 #[cfg(target_arch = "x86_64")]
 use super::transform_simd::add_residual_block_v3;
+#[cfg(target_arch = "wasm32")]
+use super::transform_simd::add_residual_block_wasm128;
 #[cfg(target_arch = "aarch64")]
 use super::transform_simd_neon::add_residual_block_neon;
 use crate::error::HevcError;
@@ -681,9 +683,19 @@ impl<'a> SliceContext<'a> {
 
         // Build reverse mapping: given (ctb_x, ctb_y), what is the tile-scan index?
         let tile_scan_idx: Vec<u32> = if tiles {
-            let mut idx = vec![0u32; (pic_width_in_ctbs * pic_height_in_ctbs) as usize];
+            let map_size = (pic_width_in_ctbs * pic_height_in_ctbs) as usize;
+            let mut idx = try_vec![0u32; map_size]?;
             for (ts, &(cx, cy)) in tile_scan.iter().enumerate() {
-                idx[(cy * pic_width_in_ctbs + cx) as usize] = ts as u32;
+                let i = (cy * pic_width_in_ctbs + cx) as usize;
+                if i >= map_size {
+                    return Err(HevcError::InvalidParameterSet {
+                        kind: "PPS",
+                        msg: alloc::format!(
+                            "tile scan coordinate ({cx},{cy}) exceeds picture CTB dimensions"
+                        ),
+                    });
+                }
+                idx[i] = ts as u32;
             }
             idx
         } else {
@@ -1158,7 +1170,9 @@ impl<'a> SliceContext<'a> {
             info
         };
 
-        *self.sao_map.get_mut(x_ctb, y_ctb) = sao_info;
+        if let Some(entry) = self.sao_map.get_mut(x_ctb, y_ctb) {
+            *entry = sao_info;
+        }
         Ok(())
     }
 
@@ -1912,7 +1926,7 @@ impl<'a> SliceContext<'a> {
 
                 // Predict Cb (intra only)
                 if is_intra_cu {
-                    intra::predict_intra(frame, x0 / 2, y0 / 2, 2, intra_chroma_mode, 1, sis);
+                    intra::predict_intra(frame, x0 / 2, y0 / 2, 2, intra_chroma_mode, 1, sis)?;
                 }
                 if cbf_cb {
                     self.decode_and_apply_residual(x0 / 2, y0 / 2, 2, 1, scan_order, frame)?;
@@ -1920,7 +1934,7 @@ impl<'a> SliceContext<'a> {
 
                 // Predict Cr (intra only)
                 if is_intra_cu {
-                    intra::predict_intra(frame, x0 / 2, y0 / 2, 2, intra_chroma_mode, 2, sis);
+                    intra::predict_intra(frame, x0 / 2, y0 / 2, 2, intra_chroma_mode, 2, sis)?;
                 }
                 if cbf_cr {
                     self.decode_and_apply_residual(x0 / 2, y0 / 2, 2, 2, scan_order, frame)?;
@@ -2020,7 +2034,7 @@ impl<'a> SliceContext<'a> {
         // Predict luma at TU level BEFORE residual application
         // Only for intra CUs — inter CUs already have MC prediction in the frame
         if is_intra_cu {
-            intra::predict_intra(frame, x0, y0, log2_size, actual_luma_mode, 0, sis);
+            intra::predict_intra(frame, x0, y0, log2_size, actual_luma_mode, 0, sis)?;
         }
 
         let scan_order = if is_intra_cu {
@@ -2071,7 +2085,7 @@ impl<'a> SliceContext<'a> {
 
             // Predict Cb (intra only — inter MC already wrote prediction)
             if is_intra_cu {
-                intra::predict_intra(frame, cx, cy, chroma_log2_size, intra_chroma_mode, 1, sis);
+                intra::predict_intra(frame, cx, cy, chroma_log2_size, intra_chroma_mode, 1, sis)?;
             }
             if cbf_cb {
                 self.decode_and_apply_residual(
@@ -2086,7 +2100,7 @@ impl<'a> SliceContext<'a> {
 
             // Predict Cr (intra only)
             if is_intra_cu {
-                intra::predict_intra(frame, cx, cy, chroma_log2_size, intra_chroma_mode, 2, sis);
+                intra::predict_intra(frame, cx, cy, chroma_log2_size, intra_chroma_mode, 2, sis)?;
             }
             if cbf_cr {
                 self.decode_and_apply_residual(
@@ -2249,7 +2263,7 @@ impl<'a> SliceContext<'a> {
                     size,
                     max_val
                 ),
-                [v3, neon, scalar]
+                [v3, neon, wasm128, scalar]
             );
         } else {
             for py in 0..size {

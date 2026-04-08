@@ -1,8 +1,12 @@
-//! AVX2 SIMD implementations of HEVC inverse transforms (IDCT 8/16/32)
+//! SIMD implementations of HEVC inverse transforms (IDCT 8/16/32)
 //!
-//! Uses the interleave + madd_epi16 approach from libde265, adapted for AVX2.
+//! x86_64: Uses the interleave + madd_epi16 approach from libde265, adapted for AVX2.
 //! The key operation is `_mm256_madd_epi16`: multiply 16 pairs of i16, sum adjacent
 //! pairs → 8 i32. This perfectly matches the DCT butterfly's multiply-accumulate pattern.
+//!
+//! wasm32: Uses 128-bit SIMD (`v128`) with i32x4 multiply-accumulate for IDST4 and IDCT8.
+//! Since wasm128 lacks `madd_epi16`, the butterfly uses i32x4 arithmetic (widen, multiply,
+//! add/sub) processing 4 columns in parallel per pass. IDCT16/32 delegate to scalar.
 
 // The `#[arcane]` macro generates multiple function variants for SIMD dispatch;
 // the allow attribute on individual functions does not propagate to generated code.
@@ -14,6 +18,9 @@ use archmage::prelude::*;
 use safe_unaligned_simd::x86_64::{
     _mm_loadu_si128, _mm_storeu_si128, _mm256_loadu_si256, _mm256_storeu_si256,
 };
+
+#[cfg(target_arch = "wasm32")]
+use safe_unaligned_simd::wasm32::{v128_load, v128_store};
 
 /// Pack two i16 coefficients into one i32 for `_mm256_set1_epi32` + `_mm256_madd_epi16`.
 /// `a` goes in the low 16 bits (multiplies the first element of each interleaved pair),
@@ -1442,4 +1449,555 @@ pub(crate) fn dequantize_scalar(
         let value = (*coef as i32 * combined_scale + add) >> shift;
         *coef = value.clamp(-32768, 32767) as i16;
     }
+}
+
+// =============================================================================
+// Generic SIMD implementations using magetypes
+// =============================================================================
+
+/// Generic add_residual_block using i16x8 with u16↔i16 bitcast.
+///
+/// Processes 8 pixels per iteration: load u16 prediction as u16x8, bitcast to i16x8,
+/// add i16 residual, clamp to [0, max_val], bitcast back to u16x8, store.
+/// Values are safe to reinterpret as i16 since max_val ≤ 1023 for 10-bit HEVC.
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn add_residual_block_generic<T>(
+    token: T,
+    plane: &mut [u16],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    residual: &[i16],
+    size: usize,
+    max_val: i32,
+) where
+    T: magetypes::simd::backends::I16x8Bitcast,
+{
+    use magetypes::simd::generic::{i16x8, u16x8};
+
+    let zero = i16x8::zero(token);
+    let max_v = i16x8::splat(token, max_val as i16);
+
+    for py in 0..size {
+        let row_start = (y0 + py) * stride + x0;
+        let row = &mut plane[row_start..row_start + size];
+        let res_row = &residual[py * size..(py + 1) * size];
+
+        let chunks = size / 8;
+        for c in 0..chunks {
+            let offset = c * 8;
+            // Load prediction as u16x8, bitcast to i16x8
+            let pred_u = u16x8::load(token, row[offset..offset + 8].try_into().unwrap());
+            let pred = pred_u.bitcast_i16x8();
+            let res = i16x8::load(token, res_row[offset..offset + 8].try_into().unwrap());
+            // Add and clamp with signed operations
+            let sum = pred + res;
+            let clamped = sum.max(zero).min(max_v);
+            // Store back as u16
+            let clamped_u = clamped.bitcast_u16x8();
+            clamped_u.store((&mut row[offset..offset + 8]).try_into().unwrap());
+        }
+        // Scalar remainder
+        for i in (chunks * 8)..size {
+            let pred = row[i] as i32;
+            let r = res_row[i] as i32;
+            row[i] = (pred + r).clamp(0, max_val) as u16;
+        }
+    }
+}
+
+// =============================================================================
+// WASM128 SIMD implementations — native v128 intrinsics
+// =============================================================================
+
+// Helper: widen low 4 i16 lanes of v128 to i32x4
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+fn wasm_extend_low_i16(v: v128) -> v128 {
+    i32x4_extend_low_i16x8(v)
+}
+
+// Helper: widen high 4 i16 lanes of v128 to i32x4
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+fn wasm_extend_high_i16(v: v128) -> v128 {
+    i32x4_extend_high_i16x8(v)
+}
+
+// Helper: saturating narrow two i32x4 to one i16x8 (clamps to [-32768, 32767])
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+fn wasm_narrow_i32_to_i16(lo: v128, hi: v128) -> v128 {
+    i16x8_narrow_i32x4(lo, hi)
+}
+
+/// Transpose a 4x4 i16 matrix stored in two v128 registers.
+///
+/// Input: `ab` = `[r0c0..r0c3, r1c0..r1c3]`, `cd` = `[r2c0..r2c3, r3c0..r3c3]`
+/// Output: transposed so columns become rows in the same layout.
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+fn wasm_transpose_4x4_i16(ab: v128, cd: v128) -> (v128, v128) {
+    // Phase 1: interleave 16-bit pairs
+    let a = i16x8_shuffle::<0, 8, 1, 9, 2, 10, 3, 11>(ab, cd);
+    let b = i16x8_shuffle::<4, 12, 5, 13, 6, 14, 7, 15>(ab, cd);
+    // Phase 2: interleave again
+    let lo = i16x8_shuffle::<0, 8, 1, 9, 2, 10, 3, 11>(a, b);
+    let hi = i16x8_shuffle::<4, 12, 5, 13, 6, 14, 7, 15>(a, b);
+    (lo, hi)
+}
+
+/// WASM128 inverse DST 4x4: processes all 4 columns in parallel using 128-bit SIMD.
+///
+/// Two-pass approach identical to the SSE4.1/NEON versions:
+/// - Pass 1 (vertical): load 4 rows as i32, multiply by DST4 coefficients, shift/clamp
+/// - Transpose 4x4 i16 matrix
+/// - Pass 2 (horizontal): same multiply pattern, pack and store
+#[cfg(target_arch = "wasm32")]
+#[arcane]
+pub(crate) fn idst4_wasm128(
+    _token: Wasm128Token,
+    coeffs: &[i16; 16],
+    output: &mut [i16; 16],
+    bit_depth: u8,
+) {
+    // Load all 16 i16 coefficients as two v128
+    let load01 = v128_load::<[i16; 8]>(coeffs[0..8].try_into().unwrap());
+    let load23 = v128_load::<[i16; 8]>(coeffs[8..16].try_into().unwrap());
+
+    // Widen to i32: row0 = low4(load01), row1 = high4(load01), etc.
+    let row0 = wasm_extend_low_i16(load01);
+    let row1 = wasm_extend_high_i16(load01);
+    let row2 = wasm_extend_low_i16(load23);
+    let row3 = wasm_extend_high_i16(load23);
+
+    // === Pass 1 (vertical): DST4^T x COEFFS, 4 columns in parallel ===
+    let add1 = i32x4_splat(64); // 1 << (7 - 1)
+
+    // j=0: 29*r0 + 74*r1 + 84*r2 + 55*r3
+    let t0 = i32x4_shr(
+        i32x4_add(
+            i32x4_add(
+                i32x4_add(
+                    i32x4_mul(row0, i32x4_splat(29)),
+                    i32x4_mul(row1, i32x4_splat(74)),
+                ),
+                i32x4_add(
+                    i32x4_mul(row2, i32x4_splat(84)),
+                    i32x4_mul(row3, i32x4_splat(55)),
+                ),
+            ),
+            add1,
+        ),
+        7,
+    );
+
+    // j=1: 55*r0 + 74*r1 - 29*r2 - 84*r3
+    let t1 = i32x4_shr(
+        i32x4_add(
+            i32x4_add(
+                i32x4_add(
+                    i32x4_mul(row0, i32x4_splat(55)),
+                    i32x4_mul(row1, i32x4_splat(74)),
+                ),
+                i32x4_add(
+                    i32x4_mul(row2, i32x4_splat(-29)),
+                    i32x4_mul(row3, i32x4_splat(-84)),
+                ),
+            ),
+            add1,
+        ),
+        7,
+    );
+
+    // j=2: 74*(r0 - r2 + r3)
+    let t2 = i32x4_shr(
+        i32x4_add(
+            i32x4_mul(i32x4_add(i32x4_sub(row0, row2), row3), i32x4_splat(74)),
+            add1,
+        ),
+        7,
+    );
+
+    // j=3: 84*r0 - 74*r1 + 55*r2 - 29*r3
+    let t3 = i32x4_shr(
+        i32x4_add(
+            i32x4_add(
+                i32x4_add(
+                    i32x4_mul(row0, i32x4_splat(84)),
+                    i32x4_mul(row1, i32x4_splat(-74)),
+                ),
+                i32x4_add(
+                    i32x4_mul(row2, i32x4_splat(55)),
+                    i32x4_mul(row3, i32x4_splat(-29)),
+                ),
+            ),
+            add1,
+        ),
+        7,
+    );
+
+    // Clamp to i16 range via saturating narrow (i16x8_narrow_i32x4)
+    let packed01 = wasm_narrow_i32_to_i16(t0, t1);
+    let packed23 = wasm_narrow_i32_to_i16(t2, t3);
+
+    // Transpose 4x4 i16 matrix for pass 2
+    let (tp_lo, tp_hi) = wasm_transpose_4x4_i16(packed01, packed23);
+
+    // === Pass 2 (horizontal): DST4^T x TMP^T ===
+    let r0 = wasm_extend_low_i16(tp_lo);
+    let r1 = wasm_extend_high_i16(tp_lo);
+    let r2 = wasm_extend_low_i16(tp_hi);
+    let r3 = wasm_extend_high_i16(tp_hi);
+
+    let shift2 = (20 - bit_depth as i32) as u32;
+    let add2 = i32x4_splat(1i32 << (shift2 - 1));
+
+    let o0 = i32x4_shr(
+        i32x4_add(
+            i32x4_add(
+                i32x4_add(
+                    i32x4_mul(r0, i32x4_splat(29)),
+                    i32x4_mul(r1, i32x4_splat(74)),
+                ),
+                i32x4_add(
+                    i32x4_mul(r2, i32x4_splat(84)),
+                    i32x4_mul(r3, i32x4_splat(55)),
+                ),
+            ),
+            add2,
+        ),
+        shift2,
+    );
+
+    let o1 = i32x4_shr(
+        i32x4_add(
+            i32x4_add(
+                i32x4_add(
+                    i32x4_mul(r0, i32x4_splat(55)),
+                    i32x4_mul(r1, i32x4_splat(74)),
+                ),
+                i32x4_add(
+                    i32x4_mul(r2, i32x4_splat(-29)),
+                    i32x4_mul(r3, i32x4_splat(-84)),
+                ),
+            ),
+            add2,
+        ),
+        shift2,
+    );
+
+    let o2 = i32x4_shr(
+        i32x4_add(
+            i32x4_mul(i32x4_add(i32x4_sub(r0, r2), r3), i32x4_splat(74)),
+            add2,
+        ),
+        shift2,
+    );
+
+    let o3 = i32x4_shr(
+        i32x4_add(
+            i32x4_add(
+                i32x4_add(
+                    i32x4_mul(r0, i32x4_splat(84)),
+                    i32x4_mul(r1, i32x4_splat(-74)),
+                ),
+                i32x4_add(
+                    i32x4_mul(r2, i32x4_splat(55)),
+                    i32x4_mul(r3, i32x4_splat(-29)),
+                ),
+            ),
+            add2,
+        ),
+        shift2,
+    );
+
+    // Pack to i16 and transpose back to row-major
+    let out01 = wasm_narrow_i32_to_i16(o0, o1);
+    let out23 = wasm_narrow_i32_to_i16(o2, o3);
+
+    let (final_lo, final_hi) = wasm_transpose_4x4_i16(out01, out23);
+
+    v128_store::<[i16; 8]>((&mut output[0..8]).try_into().unwrap(), final_lo);
+    v128_store::<[i16; 8]>((&mut output[8..16]).try_into().unwrap(), final_hi);
+}
+
+// --- WASM128 IDCT 8x8 ---
+// Two-pass (vertical + horizontal) with 8x8 transpose.
+// Each 1D pass processes 4 columns at a time using i32x4 arithmetic (two iterations
+// per pass to cover all 8 columns), since wasm128 lacks madd_epi16.
+
+/// IDCT8 1D pass on 4 columns. Takes the 8 input rows as v128 i32x4 values.
+/// Returns 8 output rows as i32x4 values.
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+fn idct8_1d_4col_wasm(src: [v128; 8], shift: u32, add: v128) -> [v128; 8] {
+    // Odd part: O[k] = sum of coefficient * odd_row products
+    let o0 = i32x4_add(
+        i32x4_add(
+            i32x4_mul(src[1], i32x4_splat(89)),
+            i32x4_mul(src[3], i32x4_splat(75)),
+        ),
+        i32x4_add(
+            i32x4_mul(src[5], i32x4_splat(50)),
+            i32x4_mul(src[7], i32x4_splat(18)),
+        ),
+    );
+    let o1 = i32x4_add(
+        i32x4_add(
+            i32x4_mul(src[1], i32x4_splat(75)),
+            i32x4_mul(src[3], i32x4_splat(-18)),
+        ),
+        i32x4_add(
+            i32x4_mul(src[5], i32x4_splat(-89)),
+            i32x4_mul(src[7], i32x4_splat(-50)),
+        ),
+    );
+    let o2 = i32x4_add(
+        i32x4_add(
+            i32x4_mul(src[1], i32x4_splat(50)),
+            i32x4_mul(src[3], i32x4_splat(-89)),
+        ),
+        i32x4_add(
+            i32x4_mul(src[5], i32x4_splat(18)),
+            i32x4_mul(src[7], i32x4_splat(75)),
+        ),
+    );
+    let o3 = i32x4_add(
+        i32x4_add(
+            i32x4_mul(src[1], i32x4_splat(18)),
+            i32x4_mul(src[3], i32x4_splat(-50)),
+        ),
+        i32x4_add(
+            i32x4_mul(src[5], i32x4_splat(75)),
+            i32x4_mul(src[7], i32x4_splat(-89)),
+        ),
+    );
+
+    // Even-even: EE[0] = 64*r0 + 64*r4, EE[1] = 64*r0 - 64*r4
+    let r0_64 = i32x4_mul(src[0], i32x4_splat(64));
+    let r4_64 = i32x4_mul(src[4], i32x4_splat(64));
+    let ee0 = i32x4_add(r0_64, r4_64);
+    let ee1 = i32x4_sub(r0_64, r4_64);
+
+    // Even-odd: EO[0] = 83*r2 + 36*r6, EO[1] = 36*r2 - 83*r6
+    let eo0 = i32x4_add(
+        i32x4_mul(src[2], i32x4_splat(83)),
+        i32x4_mul(src[6], i32x4_splat(36)),
+    );
+    let eo1 = i32x4_sub(
+        i32x4_mul(src[2], i32x4_splat(36)),
+        i32x4_mul(src[6], i32x4_splat(83)),
+    );
+
+    // Even combination
+    let e0 = i32x4_add(ee0, eo0);
+    let e1 = i32x4_add(ee1, eo1);
+    let e2 = i32x4_sub(ee1, eo1);
+    let e3 = i32x4_sub(ee0, eo0);
+
+    // Butterfly + round + shift
+    [
+        i32x4_shr(i32x4_add(i32x4_add(e0, o0), add), shift),
+        i32x4_shr(i32x4_add(i32x4_add(e1, o1), add), shift),
+        i32x4_shr(i32x4_add(i32x4_add(e2, o2), add), shift),
+        i32x4_shr(i32x4_add(i32x4_add(e3, o3), add), shift),
+        i32x4_shr(i32x4_add(i32x4_sub(e3, o3), add), shift),
+        i32x4_shr(i32x4_add(i32x4_sub(e2, o2), add), shift),
+        i32x4_shr(i32x4_add(i32x4_sub(e1, o1), add), shift),
+        i32x4_shr(i32x4_add(i32x4_sub(e0, o0), add), shift),
+    ]
+}
+
+/// Transpose an 8x8 matrix of i16 values stored in 8 v128 registers (each = i16x8).
+/// Uses the same 3-phase interleave approach as the SSE/NEON versions.
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+fn transpose_8x8_wasm(rows: &[v128; 8]) -> [v128; 8] {
+    // Phase 1: interleave 16-bit pairs
+    let t0 = i16x8_shuffle::<0, 8, 1, 9, 2, 10, 3, 11>(rows[0], rows[1]);
+    let t1 = i16x8_shuffle::<4, 12, 5, 13, 6, 14, 7, 15>(rows[0], rows[1]);
+    let t2 = i16x8_shuffle::<0, 8, 1, 9, 2, 10, 3, 11>(rows[2], rows[3]);
+    let t3 = i16x8_shuffle::<4, 12, 5, 13, 6, 14, 7, 15>(rows[2], rows[3]);
+    let t4 = i16x8_shuffle::<0, 8, 1, 9, 2, 10, 3, 11>(rows[4], rows[5]);
+    let t5 = i16x8_shuffle::<4, 12, 5, 13, 6, 14, 7, 15>(rows[4], rows[5]);
+    let t6 = i16x8_shuffle::<0, 8, 1, 9, 2, 10, 3, 11>(rows[6], rows[7]);
+    let t7 = i16x8_shuffle::<4, 12, 5, 13, 6, 14, 7, 15>(rows[6], rows[7]);
+
+    // Phase 2: interleave 32-bit pairs (treat as i32x4 lanes)
+    let u0 = i32x4_shuffle::<0, 4, 1, 5>(t0, t2);
+    let u1 = i32x4_shuffle::<2, 6, 3, 7>(t0, t2);
+    let u2 = i32x4_shuffle::<0, 4, 1, 5>(t1, t3);
+    let u3 = i32x4_shuffle::<2, 6, 3, 7>(t1, t3);
+    let u4 = i32x4_shuffle::<0, 4, 1, 5>(t4, t6);
+    let u5 = i32x4_shuffle::<2, 6, 3, 7>(t4, t6);
+    let u6 = i32x4_shuffle::<0, 4, 1, 5>(t5, t7);
+    let u7 = i32x4_shuffle::<2, 6, 3, 7>(t5, t7);
+
+    // Phase 3: interleave 64-bit pairs
+    [
+        i64x2_shuffle::<0, 2>(u0, u4),
+        i64x2_shuffle::<1, 3>(u0, u4),
+        i64x2_shuffle::<0, 2>(u1, u5),
+        i64x2_shuffle::<1, 3>(u1, u5),
+        i64x2_shuffle::<0, 2>(u2, u6),
+        i64x2_shuffle::<1, 3>(u2, u6),
+        i64x2_shuffle::<0, 2>(u3, u7),
+        i64x2_shuffle::<1, 3>(u3, u7),
+    ]
+}
+
+/// WASM128 8x8 IDCT: processes 4 columns at a time using i32x4 arithmetic.
+///
+/// Two-pass approach: vertical transform → transpose → horizontal transform → transpose → store.
+/// Each 1D pass runs twice (low 4 columns then high 4 columns) since we use i32x4 not i16x8.
+#[cfg(target_arch = "wasm32")]
+#[arcane]
+pub(crate) fn idct8_wasm128(
+    _token: Wasm128Token,
+    coeffs: &[i16; 64],
+    output: &mut [i16; 64],
+    bit_depth: u8,
+) {
+    // Load 8 input rows as i16x8
+    let rows: [v128; 8] = core::array::from_fn(|i| {
+        v128_load::<[i16; 8]>(coeffs[i * 8..(i + 1) * 8].try_into().unwrap())
+    });
+
+    // Pass 1: vertical (column transform), shift = 7
+    // Process columns 0-3 (low halves)
+    let lo_src: [v128; 8] = core::array::from_fn(|i| wasm_extend_low_i16(rows[i]));
+    let add1 = i32x4_splat(1 << 6); // 1 << (7-1) = 64
+    let lo_out = idct8_1d_4col_wasm(lo_src, 7, add1);
+
+    // Process columns 4-7 (high halves)
+    let hi_src: [v128; 8] = core::array::from_fn(|i| wasm_extend_high_i16(rows[i]));
+    let hi_out = idct8_1d_4col_wasm(hi_src, 7, add1);
+
+    // Pack i32 results back to i16 (saturating narrow provides the clamp)
+    let pass1: [v128; 8] = core::array::from_fn(|i| wasm_narrow_i32_to_i16(lo_out[i], hi_out[i]));
+
+    // Transpose for horizontal pass
+    let transposed = transpose_8x8_wasm(&pass1);
+
+    // Pass 2: horizontal (row transform), shift = 20 - bit_depth
+    let shift2 = (20 - bit_depth as i32) as u32;
+    let add2 = i32x4_splat(1i32 << (shift2 - 1));
+
+    let lo_src2: [v128; 8] = core::array::from_fn(|i| wasm_extend_low_i16(transposed[i]));
+    let lo_out2 = idct8_1d_4col_wasm(lo_src2, shift2, add2);
+
+    let hi_src2: [v128; 8] = core::array::from_fn(|i| wasm_extend_high_i16(transposed[i]));
+    let hi_out2 = idct8_1d_4col_wasm(hi_src2, shift2, add2);
+
+    let pass2: [v128; 8] = core::array::from_fn(|i| wasm_narrow_i32_to_i16(lo_out2[i], hi_out2[i]));
+
+    // Transpose back for row-major storage
+    let final_rows = transpose_8x8_wasm(&pass2);
+
+    // Store 8 output rows
+    for i in 0..8 {
+        v128_store::<[i16; 8]>(
+            (&mut output[i * 8..(i + 1) * 8]).try_into().unwrap(),
+            final_rows[i],
+        );
+    }
+}
+
+// --- WASM128 IDCT 16x16 and 32x32 ---
+// Delegate to scalar _inner functions. The 16/32-point butterflies are hundreds of
+// lines of multiply-accumulate that don't benefit much from 4-wide i32 SIMD without
+// madd. LLVM auto-vectorizes the scalar loops when targeting simd128.
+
+/// WASM128 16x16 IDCT — delegates to scalar inner implementation.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn idct16_wasm128(
+    _token: Wasm128Token,
+    coeffs: &[i16; 256],
+    output: &mut [i16; 256],
+    bit_depth: u8,
+) {
+    super::transform::idct16_inner(coeffs, output, bit_depth);
+}
+
+/// WASM128 32x32 IDCT — delegates to scalar inner implementation.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn idct32_wasm128(
+    _token: Wasm128Token,
+    coeffs: &[i16; 1024],
+    output: &mut [i16; 1024],
+    bit_depth: u8,
+) {
+    super::transform::idct32_inner(coeffs, output, bit_depth);
+}
+
+// --- WASM128 dequantize ---
+// Uses native v128 intrinsics for 8-wide processing with variable shift.
+// wasm128 has i32x4_shr(v, shift) which takes a runtime shift count, unlike
+// magetypes' const-only shift — so we get proper 8-wide SIMD for the full pipeline.
+
+/// Dequantize i16 coefficients using WASM128 SIMD.
+/// Processes 8 coefficients per iteration (two i32x4 halves).
+#[cfg(target_arch = "wasm32")]
+#[arcane]
+pub(crate) fn dequantize_wasm128(
+    _token: Wasm128Token,
+    coeffs: &mut [i16],
+    combined_scale: i32,
+    shift: i32,
+    add: i32,
+) {
+    let scale_v = i32x4_splat(combined_scale);
+    let add_v = i32x4_splat(add);
+    let shift_u = shift as u32;
+
+    let chunks = coeffs.len() / 8;
+    for c in 0..chunks {
+        let offset = c * 8;
+        let src: v128 = v128_load::<[i16; 8]>(coeffs[offset..offset + 8].try_into().unwrap());
+
+        // Widen low/high 4 i16 to i32
+        let lo_32 = wasm_extend_low_i16(src);
+        let hi_32 = wasm_extend_high_i16(src);
+
+        // Multiply by combined_scale
+        let prod_lo = i32x4_mul(lo_32, scale_v);
+        let prod_hi = i32x4_mul(hi_32, scale_v);
+
+        // Add rounding and shift right (wasm128 has runtime-variable shift)
+        let shifted_lo = i32x4_shr(i32x4_add(prod_lo, add_v), shift_u);
+        let shifted_hi = i32x4_shr(i32x4_add(prod_hi, add_v), shift_u);
+
+        // Pack back to i16 with saturation (clamps to [-32768, 32767])
+        let result = wasm_narrow_i32_to_i16(shifted_lo, shifted_hi);
+
+        v128_store::<[i16; 8]>(
+            (&mut coeffs[offset..offset + 8]).try_into().unwrap(),
+            result,
+        );
+    }
+
+    // Scalar remainder
+    for coef in coeffs.iter_mut().skip(chunks * 8) {
+        let value = (*coef as i32 * combined_scale + add) >> shift;
+        *coef = value.clamp(-32768, 32767) as i16;
+    }
+}
+
+/// WASM128 add_residual_block: real i16x8 SIMD via magetypes generic implementation.
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn add_residual_block_wasm128(
+    token: Wasm128Token,
+    plane: &mut [u16],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    residual: &[i16],
+    size: usize,
+    max_val: i32,
+) {
+    add_residual_block_generic(token, plane, stride, x0, y0, residual, size, max_val);
 }

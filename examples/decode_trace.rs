@@ -15,7 +15,7 @@ fn main() {
     if let Some(ppm_path) = &output_path {
         let w = frame.cropped_width();
         let h = frame.cropped_height();
-        let rgb = frame.to_rgb();
+        let rgb = frame.to_rgb().expect("color conversion failed");
         let header = format!("P6\n{} {}\n255\n", w, h);
         let mut ppm = Vec::with_capacity(header.len() + rgb.len());
         ppm.extend_from_slice(header.as_bytes());
