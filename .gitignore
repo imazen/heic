@@ -51,3 +51,4 @@ Thumbs.db
 *.iml
 *.profraw
 fuzz-*.log
+!fuzz/Cargo.lock
