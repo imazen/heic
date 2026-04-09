@@ -608,8 +608,20 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
     let pcm_params = if pcm_enabled_flag {
         let pcm_sample_bit_depth_luma_minus1 = reader.read_bits(4)? as u8;
         let pcm_sample_bit_depth_chroma_minus1 = reader.read_bits(4)? as u8;
-        let log2_min_pcm_luma_coding_block_size_minus3 = reader.read_ue()? as u8;
-        let log2_diff_max_min_pcm_luma_coding_block_size = reader.read_ue()? as u8;
+        let log2_min_pcm_val = reader.read_ue()?;
+        if log2_min_pcm_val > 2 {
+            return Err(HevcError::InvalidBitstream(
+                "log2_min_pcm_luma_coding_block_size_minus3 exceeds 2",
+            ));
+        }
+        let log2_min_pcm_luma_coding_block_size_minus3 = log2_min_pcm_val as u8;
+        let log2_diff_val = reader.read_ue()?;
+        if log2_diff_val > 2 {
+            return Err(HevcError::InvalidBitstream(
+                "log2_diff_max_min_pcm_luma_coding_block_size exceeds 2",
+            ));
+        }
+        let log2_diff_max_min_pcm_luma_coding_block_size = log2_diff_val as u8;
         let pcm_loop_filter_disabled_flag = reader.read_bit()? != 0;
         Some(PcmParams {
             pcm_sample_bit_depth_luma_minus1,

@@ -583,7 +583,13 @@ impl SliceHeader {
             if pps.tiles_enabled_flag || pps.entropy_coding_sync_enabled_flag {
                 let n = reader.read_ue()?;
                 if n > 0 {
-                    let offset_len = reader.read_ue()? as u8 + 1;
+                    let offset_len_minus1 = reader.read_ue()?;
+                    if offset_len_minus1 > 31 {
+                        return Err(HevcError::InvalidBitstream(
+                            "offset_len_minus1 exceeds 31",
+                        ));
+                    }
+                    let offset_len = offset_len_minus1 as u8 + 1;
                     for _ in 0..n {
                         let offset = reader.read_bits(offset_len)? + 1; // offset_minus1 + 1
                         entry_point_offsets.push(offset);
@@ -697,7 +703,13 @@ fn parse_pred_weight_table(
             "num_ref_idx exceeds MAX_NUM_REF_PICS",
         ));
     }
-    let luma_log2_weight_denom = reader.read_ue()? as u8;
+    let luma_log2_weight_denom = reader.read_ue()?;
+    if luma_log2_weight_denom > 7 {
+        return Err(HevcError::InvalidBitstream(
+            "luma_log2_weight_denom exceeds 7",
+        ));
+    }
+    let luma_log2_weight_denom = luma_log2_weight_denom as u8;
     let chroma_log2_weight_denom = if sps.chroma_array_type() != 0 {
         let delta = reader.read_se()?;
         (luma_log2_weight_denom as i32 + delta).clamp(0, 7) as u8
@@ -738,12 +750,12 @@ fn parse_pred_weight_table(
                 wt.chroma_weight[0][i][j] = chroma_denom + delta;
                 let offset = reader.read_se()? as i16;
                 // H.265 eq: ChromaOffset = Clip3(-128, 127, offset - ((128*w + 2^(wd-1)) >> wd) + 128)
-                let wp_offset = offset
-                    - ((128 * wt.chroma_weight[0][i][j] as i32
-                        + (1 << (wt.chroma_log2_weight_denom - 1))) as i16
-                        >> wt.chroma_log2_weight_denom)
+                let wd = wt.chroma_log2_weight_denom;
+                let round = if wd > 0 { 1i32 << (wd - 1) } else { 0 };
+                let wp_offset = offset as i32
+                    - ((128 * wt.chroma_weight[0][i][j] as i32 + round) >> wd)
                     + 128;
-                wt.chroma_offset[0][i][j] = wp_offset.clamp(-128, 127);
+                wt.chroma_offset[0][i][j] = wp_offset.clamp(-128, 127) as i16;
             }
         } else {
             for j in 0..2 {
@@ -779,13 +791,13 @@ fn parse_pred_weight_table(
                     let delta = reader.read_se()? as i16;
                     wt.chroma_weight[1][i][j] = chroma_denom + delta;
                     let offset = reader.read_se()? as i16;
-                    let wp_offset = offset
-                        - ((128 * wt.chroma_weight[1][i][j] as i32
-                            + (1 << (wt.chroma_log2_weight_denom - 1)))
-                            as i16
-                            >> wt.chroma_log2_weight_denom)
+                    let wd = wt.chroma_log2_weight_denom;
+                    let round = if wd > 0 { 1i32 << (wd - 1) } else { 0 };
+                    let wp_offset = offset as i32
+                        - ((128 * wt.chroma_weight[1][i][j] as i32 + round)
+                            >> wd)
                         + 128;
-                    wt.chroma_offset[1][i][j] = wp_offset.clamp(-128, 127);
+                    wt.chroma_offset[1][i][j] = wp_offset.clamp(-128, 127) as i16;
                 }
             } else {
                 for j in 0..2 {
