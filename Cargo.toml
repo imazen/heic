@@ -10,6 +10,7 @@ keywords = ["heic", "heif", "hevc", "image", "decoder"]
 categories = ["multimedia::images", "parser-implementations"]
 exclude = [
     "CLAUDE.md",
+    "CONTEXT-HANDOFF.md",
     "FEEDBACK.md",
     "CABAC-DEBUG-HANDOFF.md",
     "heaptrack.*",
@@ -26,6 +27,15 @@ exclude = [
     "tests/compare_reference.rs",
     "tests/trace_bad_pixel.rs",
     "benches/compare.rs",
+    ".claude/",
+    ".superwork/",
+    ".zenbench/",
+    "copter-report/",
+    ".github/",
+    "Cross.toml",
+    "justfile",
+    "Cargo.toml.original.txt",
+    "fuzz/",
 ]
 autoexamples = false
 
