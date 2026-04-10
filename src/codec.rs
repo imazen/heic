@@ -414,9 +414,8 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
 
         // Negotiate output format
         let available = available_descriptors(has_alpha, bit_depth);
-        let negotiated =
-            negotiate_pixel_format(preferred, &available)
-                .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
+        let negotiated = negotiate_pixel_format(preferred, &available)
+            .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
 
         if is_16bit(negotiated) {
             // 16-bit: full decode, then push rows
@@ -640,9 +639,8 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
 
         // Negotiate output format
         let available = available_descriptors(has_alpha, bit_depth);
-        let negotiated =
-            negotiate_pixel_format(preferred, &available)
-                .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
+        let negotiated = negotiate_pixel_format(preferred, &available)
+            .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
 
         let (buf, width, height, has_alpha): (PixelBuffer, u32, u32, bool) = if is_16bit(negotiated)
         {
@@ -883,9 +881,8 @@ impl HeicStreamDecoder {
 
         // Non-grid fallback: full decode upfront
         let available = available_descriptors(pi.has_alpha, pi.bit_depth);
-        let negotiated =
-            negotiate_pixel_format(preferred, &available)
-                .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
+        let negotiated = negotiate_pixel_format(preferred, &available)
+            .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
 
         let pixels: PixelBuffer = if is_16bit(negotiated) {
             let mut req = config.decode_request(data);
@@ -1089,9 +1086,8 @@ impl HeicStreamDecoder {
 
         // Negotiate 8-bit layout for grid tiles (no alpha, ≤8-bit)
         let available = available_descriptors(false, 8);
-        let negotiated =
-            negotiate_pixel_format(preferred, &available)
-                .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
+        let negotiated = negotiate_pixel_format(preferred, &available)
+            .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
         let layout = descriptor_to_layout(negotiated);
 
         Ok(Some(GridState {
