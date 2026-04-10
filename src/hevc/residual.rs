@@ -1163,7 +1163,10 @@ fn decode_coeff_abs_level_remaining(
 
     // Update rice parameter: if baseLevel + value > 3 * (1 << rice_param), increase
     let threshold = 3 * (1 << rice_param);
-    let new_rice_param = if (base_level.unsigned_abs() as u32).saturating_add(value.unsigned_abs() as u32) > threshold {
+    let new_rice_param = if (base_level.unsigned_abs() as u32)
+        .saturating_add(value.unsigned_abs() as u32)
+        > threshold
+    {
         (rice_param + 1).min(4)
     } else {
         rice_param

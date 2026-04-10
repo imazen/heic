@@ -44,7 +44,10 @@ fn fuzz_regression_decode() {
 
         count += 1;
     }
-    assert!(count >= 10, "expected at least 10 regression files, got {count}");
+    assert!(
+        count >= 10,
+        "expected at least 10 regression files, got {count}"
+    );
 }
 
 /// Run all regression inputs through the probe pipeline.

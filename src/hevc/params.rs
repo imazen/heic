@@ -549,42 +549,54 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
     if log2_min_luma_coding_block_size_minus3 > 3 {
         return Err(HevcError::InvalidParameterSet {
             kind: "SPS",
-            msg: alloc::format!("log2_min_cb_size_minus3={log2_min_luma_coding_block_size_minus3} exceeds 3"),
+            msg: alloc::format!(
+                "log2_min_cb_size_minus3={log2_min_luma_coding_block_size_minus3} exceeds 3"
+            ),
         });
     }
     let log2_diff_max_min_luma_coding_block_size = reader.read_ue()? as u8;
     if log2_diff_max_min_luma_coding_block_size > 3 {
         return Err(HevcError::InvalidParameterSet {
             kind: "SPS",
-            msg: alloc::format!("log2_diff_max_min_cb={log2_diff_max_min_luma_coding_block_size} exceeds 3"),
+            msg: alloc::format!(
+                "log2_diff_max_min_cb={log2_diff_max_min_luma_coding_block_size} exceeds 3"
+            ),
         });
     }
     let log2_min_luma_transform_block_size_minus2 = reader.read_ue()? as u8;
     if log2_min_luma_transform_block_size_minus2 > 3 {
         return Err(HevcError::InvalidParameterSet {
             kind: "SPS",
-            msg: alloc::format!("log2_min_tb_size_minus2={log2_min_luma_transform_block_size_minus2} exceeds 3"),
+            msg: alloc::format!(
+                "log2_min_tb_size_minus2={log2_min_luma_transform_block_size_minus2} exceeds 3"
+            ),
         });
     }
     let log2_diff_max_min_luma_transform_block_size = reader.read_ue()? as u8;
     if log2_diff_max_min_luma_transform_block_size > 3 {
         return Err(HevcError::InvalidParameterSet {
             kind: "SPS",
-            msg: alloc::format!("log2_diff_max_min_tb={log2_diff_max_min_luma_transform_block_size} exceeds 3"),
+            msg: alloc::format!(
+                "log2_diff_max_min_tb={log2_diff_max_min_luma_transform_block_size} exceeds 3"
+            ),
         });
     }
     let max_transform_hierarchy_depth_inter = reader.read_ue()? as u8;
     if max_transform_hierarchy_depth_inter > 5 {
         return Err(HevcError::InvalidParameterSet {
             kind: "SPS",
-            msg: alloc::format!("max_transform_depth_inter={max_transform_hierarchy_depth_inter} exceeds 5"),
+            msg: alloc::format!(
+                "max_transform_depth_inter={max_transform_hierarchy_depth_inter} exceeds 5"
+            ),
         });
     }
     let max_transform_hierarchy_depth_intra = reader.read_ue()? as u8;
     if max_transform_hierarchy_depth_intra > 5 {
         return Err(HevcError::InvalidParameterSet {
             kind: "SPS",
-            msg: alloc::format!("max_transform_depth_intra={max_transform_hierarchy_depth_intra} exceeds 5"),
+            msg: alloc::format!(
+                "max_transform_depth_intra={max_transform_hierarchy_depth_intra} exceeds 5"
+            ),
         });
     }
 
@@ -770,14 +782,18 @@ pub fn parse_pps(data: &[u8]) -> Result<Pps> {
     if num_ref_idx_l0_default_active_minus1 > 14 {
         return Err(HevcError::InvalidParameterSet {
             kind: "PPS",
-            msg: alloc::format!("num_ref_idx_l0_default_active_minus1={num_ref_idx_l0_default_active_minus1} exceeds 14"),
+            msg: alloc::format!(
+                "num_ref_idx_l0_default_active_minus1={num_ref_idx_l0_default_active_minus1} exceeds 14"
+            ),
         });
     }
     let num_ref_idx_l1_default_active_minus1 = reader.read_ue()? as u8;
     if num_ref_idx_l1_default_active_minus1 > 14 {
         return Err(HevcError::InvalidParameterSet {
             kind: "PPS",
-            msg: alloc::format!("num_ref_idx_l1_default_active_minus1={num_ref_idx_l1_default_active_minus1} exceeds 14"),
+            msg: alloc::format!(
+                "num_ref_idx_l1_default_active_minus1={num_ref_idx_l1_default_active_minus1} exceeds 14"
+            ),
         });
     }
     let init_qp_minus26 = reader.read_se()? as i8;

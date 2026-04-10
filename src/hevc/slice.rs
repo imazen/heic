@@ -585,9 +585,7 @@ impl SliceHeader {
                 if n > 0 {
                     let offset_len_minus1 = reader.read_ue()?;
                     if offset_len_minus1 > 31 {
-                        return Err(HevcError::InvalidBitstream(
-                            "offset_len_minus1 exceeds 31",
-                        ));
+                        return Err(HevcError::InvalidBitstream("offset_len_minus1 exceeds 31"));
                     }
                     let offset_len = offset_len_minus1 as u8 + 1;
                     for _ in 0..n {
@@ -752,9 +750,8 @@ fn parse_pred_weight_table(
                 // H.265 eq: ChromaOffset = Clip3(-128, 127, offset - ((128*w + 2^(wd-1)) >> wd) + 128)
                 let wd = wt.chroma_log2_weight_denom;
                 let round = if wd > 0 { 1i32 << (wd - 1) } else { 0 };
-                let wp_offset = offset as i32
-                    - ((128 * wt.chroma_weight[0][i][j] as i32 + round) >> wd)
-                    + 128;
+                let wp_offset =
+                    offset as i32 - ((128 * wt.chroma_weight[0][i][j] as i32 + round) >> wd) + 128;
                 wt.chroma_offset[0][i][j] = wp_offset.clamp(-128, 127) as i16;
             }
         } else {
@@ -794,8 +791,7 @@ fn parse_pred_weight_table(
                     let wd = wt.chroma_log2_weight_denom;
                     let round = if wd > 0 { 1i32 << (wd - 1) } else { 0 };
                     let wp_offset = offset as i32
-                        - ((128 * wt.chroma_weight[1][i][j] as i32 + round)
-                            >> wd)
+                        - ((128 * wt.chroma_weight[1][i][j] as i32 + round) >> wd)
                         + 128;
                     wt.chroma_offset[1][i][j] = wp_offset.clamp(-128, 127) as i16;
                 }

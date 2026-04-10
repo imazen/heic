@@ -721,7 +721,11 @@ pub fn dequantize_scaled(coeffs: &mut [i16], params: DequantParams, scaling_matr
     // Full bdShift = BitDepth + Log2(nTbS) - 5 (H.265 Eq 8-309)
     // Clamp to prevent shift overflow from crafted parameters.
     let bd_shift = (params.bit_depth as i32 + params.log2_tr_size as i32 - 5).min(30);
-    let add = if bd_shift > 0 { 1i64 << (bd_shift - 1) } else { 0 };
+    let add = if bd_shift > 0 {
+        1i64 << (bd_shift - 1)
+    } else {
+        0
+    };
 
     // Use i64 for intermediate products: coef * m * level_scale * (1 << qp_per)
     // can exceed i32 range with large QP and scaling matrix values.
