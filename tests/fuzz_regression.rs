@@ -33,7 +33,7 @@ fn fuzz_regression_decode() {
             continue;
         }
         let data = std::fs::read(&path).expect("read file");
-        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let _name = path.file_name().unwrap().to_string_lossy().to_string();
 
         // Must not panic — any Result (Ok or Err) is acceptable
         let _ = DecoderConfig::new()

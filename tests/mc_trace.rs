@@ -188,7 +188,7 @@ fn trace_girlshy_frame1() {
 
     // Frame 0: I-frame
     let our_f0 = &frames[0];
-    let ref_f0: Vec<u16> = ref_data[..luma_size].iter().map(|&b| b as u16).collect();
+    let _ref_f0: Vec<u16> = ref_data[..luma_size].iter().map(|&b| b as u16).collect();
 
     // Frame 1: first inter frame
     let our_f1 = &frames[1];
@@ -262,7 +262,7 @@ fn trace_girlshy_frame1() {
                         let gx = bx * 4 + dx;
                         if gy < h && gx < w {
                             let ref_val = ref_f4[(gy * w + gx) as usize];
-                            let our_val = our_f4.y_plane[(gy as usize * stride4 + gx as usize)];
+                            let our_val = our_f4.y_plane[gy as usize * stride4 + gx as usize];
                             if our_val != ref_val {
                                 all_exact = false;
                             }
@@ -288,7 +288,7 @@ fn trace_girlshy_frame1() {
         for y in 0..h {
             for x in 0..w {
                 let ref_val = ref_f4[(y * w + x) as usize];
-                let our_val = our_f4.y_plane[(y as usize * stride4 + x as usize)];
+                let our_val = our_f4.y_plane[y as usize * stride4 + x as usize];
                 if our_val != ref_val && first_diff_pos.is_none() {
                     first_diff_pos = Some((x, y, our_val, ref_val));
                 }

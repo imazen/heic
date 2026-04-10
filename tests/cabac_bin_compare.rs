@@ -202,8 +202,8 @@ fn compare_merge_a_bins() {
 
     eprintln!("\n=== Bin-by-bin comparison (dec265 left | ours right) ===");
     eprintln!(
-        "{:>5} | {:>4} {:>6} {:>8} {:>3} {:>4} | {:>4} {:>6} {:>8} {:>3} {:>4} | {}",
-        "bin", "type", "range", "value", "b", "bp", "type", "range", "value", "b", "bp", "match?"
+        "{:>5} | {:>4} {:>6} {:>8} {:>3} {:>4} | {:>4} {:>6} {:>8} {:>3} {:>4} | match?",
+        "bin", "type", "range", "value", "b", "bp", "type", "range", "value", "b", "bp"
     );
     eprintln!("{}", "-".repeat(85));
 
