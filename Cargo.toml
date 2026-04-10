@@ -66,7 +66,7 @@ zenflate = { version = "0.3.4", optional = true, default-features = false }
 
 [dev-dependencies]
 criterion = "0.8.2"
-fast-ssim2 = { version = "0.7.1", features = ["imgref"] }
+fast-ssim2 = { version = "0.8.0", features = ["imgref"] }
 imgref = "1.12.0"
 # heic-wasm-rs: reference decoder for comparison tests
 # Uncomment + RUSTFLAGS='--cfg heic_reference' cargo test to enable
