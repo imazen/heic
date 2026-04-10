@@ -65,7 +65,7 @@
 //! | `load_from_memory` with `mif1` major brand | No -- use `ImageReader::with_format` |
 //!
 //! The `image` crate's own built-in AVIF detection has the same limitation: it
-//! only matches `avif` as major brand, not `mif1` with AVIF in compatible
+//! only matches `avif` as a major brand, not `mif1` with AVIF in compatible
 //! brands. This is a fundamental constraint of the 16-byte detection window.
 //!
 //! # Coexistence with AVIF
@@ -75,13 +75,7 @@
 //! brands, so AVIF files (`avif`/`avis` major brand) fall through to the
 //! built-in AVIF detector. There is no conflict.
 
-// TODO: the current implementation decodes eagerly in the constructor.
-// The image crate expects:  new() → set_limits() → read_image()
-// We should defer decoding to read_image() and implement set_limits()
-// to forward limits to heic::Limits. This would also let read_image()
-// use decode_into() for zero-copy output.
-
-use crate::{At, DecodeOutput, DecoderConfig, HeicError, ImageInfo, PixelLayout, ProbeError};
+use crate::{At, DecoderConfig, HeicError, ImageInfo, Limits, PixelLayout, ProbeError};
 use ::image::error::{DecodingError, ImageFormatHint, ParameterError, ParameterErrorKind};
 use ::image::{ColorType, ImageDecoder, ImageError, ImageResult};
 use image::hooks::GenericReader;
@@ -113,7 +107,7 @@ pub fn register_decoding_hook() -> bool {
     // Format detection hooks: one per HEVC brand, all mapping to "heic".
     //
     // Each signature is 12 bytes: [0x00 × 4][ftyp][brand]
-    // The mask ignores bytes 0-3 (variable box size) and requires exact
+    // The mask ignores bytes 0-3 (variable box size) and requires an exact
     // match on bytes 4-11 ("ftyp" + brand).
     const MASK: &[u8] = b"\x00\x00\x00\x00\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF";
 
@@ -177,8 +171,8 @@ fn map_probe_error(err: ProbeError) -> ImageError {
 
 struct HeicImageDecoder {
     info: ImageInfo,
-    color_type: ColorType,
-    out: DecodeOutput,
+    bytes: Vec<u8>,
+    limits: Limits,
 }
 
 impl HeicImageDecoder {
@@ -189,20 +183,10 @@ impl HeicImageDecoder {
 
         let info = ImageInfo::from_bytes(&bytes).map_err(map_probe_error)?;
 
-        let (layout, color_type) = if info.has_alpha {
-            (PixelLayout::Rgba8, ColorType::Rgba8)
-        } else {
-            (PixelLayout::Rgb8, ColorType::Rgb8)
-        };
-
-        let out = DecoderConfig::new()
-            .decode(&bytes, layout)
-            .map_err(map_heic_error)?;
-
         Ok(Self {
             info,
-            color_type,
-            out,
+            bytes,
+            limits: Default::default(),
         })
     }
 }
@@ -213,7 +197,11 @@ impl ImageDecoder for HeicImageDecoder {
     }
 
     fn color_type(&self) -> ColorType {
-        self.color_type
+        if self.info.has_alpha {
+            ColorType::Rgba8
+        } else {
+            ColorType::Rgb8
+        }
     }
 
     fn icc_profile(&mut self) -> ImageResult<Option<Vec<u8>>> {
@@ -228,17 +216,35 @@ impl ImageDecoder for HeicImageDecoder {
         Ok(self.info.xmp.clone())
     }
 
-    fn total_bytes(&self) -> u64 {
-        self.out.data.len() as u64
+    fn read_image(self, buf: &mut [u8]) -> ImageResult<()> {
+        let layout = if self.info.has_alpha {
+            PixelLayout::Rgba8
+        } else {
+            PixelLayout::Rgb8
+        };
+
+        DecoderConfig::new()
+            .decode_request(&self.bytes)
+            .with_output_layout(layout)
+            .with_limits(&self.limits)
+            .decode_into(buf)
+            .map(|_| ())
+            .map_err(map_heic_error)
     }
 
-    fn read_image(self, buf: &mut [u8]) -> ImageResult<()> {
-        if buf.len() != self.out.data.len() {
-            return Err(ImageError::Parameter(ParameterError::from_kind(
-                ParameterErrorKind::DimensionMismatch,
-            )));
-        }
-        buf.copy_from_slice(&self.out.data);
+    fn set_limits(&mut self, limits: image::Limits) -> ImageResult<()> {
+        limits.check_support(&image::LimitSupport::default())?;
+
+        let (width, height) = self.dimensions();
+        limits.check_dimensions(width, height)?;
+
+        self.limits = Limits {
+            max_width: limits.max_image_width.map(|w| w as u64),
+            max_height: limits.max_image_height.map(|w| w as u64),
+            max_pixels: None,
+            max_memory_bytes: limits.max_alloc,
+        };
+
         Ok(())
     }
 

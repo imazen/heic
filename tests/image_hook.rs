@@ -4,8 +4,8 @@
 fn register_hook_and_decode_heic_via_image() {
     let _ = heic::register_decoding_hook();
 
-    let data = include_bytes!("../testdata/libheif-examples/example.heic");
-    let img = image::load_from_memory(data).expect("image hook failed to decode HEIC");
+    let img = image::open("testdata/libheif-examples/example.heic")
+        .expect("image hook failed to decode HEIC");
 
     assert_eq!(img.width(), 1280);
     assert_eq!(img.height(), 854);
