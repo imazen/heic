@@ -112,3 +112,7 @@ harness = false
 # [[bench]]
 # name = "compare"
 # harness = false
+
+[patch.crates-io]
+zencodec = { path = "../zencodec" }
+zenpixels = { path = "../zenpixels/zenpixels" }
