@@ -50,4 +50,22 @@ Thumbs.db
 .vscode/
 *.iml
 *.profraw
+*.profdata
 fuzz-*.log
+
+# libFuzzer crash/leak/oom/timeout artifacts dropped in the working directory
+crash-*
+leak-*
+oom-*
+timeout-*
+slow-unit-*
+!fuzz/Cargo.lock
+
+# Tooling noise
+.superwork/
+.claude/
+copter-report/
+.zenbench/
+.external-cache/
+Cargo.toml.original.txt
+*.rs.local
