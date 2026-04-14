@@ -1283,12 +1283,14 @@ fn build_image_info_lightweight(pi: &crate::ImageInfo) -> ImageInfo {
 
     // Set CICP if we have non-default values
     if pi.color_primaries != 2 || pi.transfer_characteristics != 2 || pi.matrix_coefficients != 2 {
-        info = info.with_cicp(Cicp::new(
-            pi.color_primaries as u8,
-            pi.transfer_characteristics as u8,
-            pi.matrix_coefficients as u8,
-            pi.video_full_range,
-        ));
+        info = info
+            .with_cicp(Cicp::new(
+                pi.color_primaries as u8,
+                pi.transfer_characteristics as u8,
+                pi.matrix_coefficients as u8,
+                pi.video_full_range,
+            ))
+            .with_color_authority(zencodec::ColorAuthority::Cicp);
     }
 
     // Set gain map presence based on probe info
@@ -1338,12 +1340,14 @@ fn build_image_info_full(
 
     // Set CICP if we have non-default values
     if pi.color_primaries != 2 || pi.transfer_characteristics != 2 || pi.matrix_coefficients != 2 {
-        info = info.with_cicp(Cicp::new(
-            pi.color_primaries as u8,
-            pi.transfer_characteristics as u8,
-            pi.matrix_coefficients as u8,
-            pi.video_full_range,
-        ));
+        info = info
+            .with_cicp(Cicp::new(
+                pi.color_primaries as u8,
+                pi.transfer_characteristics as u8,
+                pi.matrix_coefficients as u8,
+                pi.video_full_range,
+            ))
+            .with_color_authority(zencodec::ColorAuthority::Cicp);
     }
 
     // Extract all metadata from the pre-parsed container
