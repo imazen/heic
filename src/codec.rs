@@ -21,8 +21,8 @@ use zencodec::decode::{
     negotiate_pixel_format,
 };
 use zencodec::{
-    ContentLightLevel, GainMapPresence, ImageFormat, ImageInfo, ImageSequence, MasteringDisplay,
-    Orientation, ResourceLimits, Supplements, ThreadingPolicy, Unsupported,
+    ContentLightLevel, GainMapInfo, GainMapPresence, ImageFormat, ImageInfo, ImageSequence,
+    MasteringDisplay, Orientation, ResourceLimits, Supplements, ThreadingPolicy, Unsupported,
 };
 use zenpixels::{Cicp, ColorPrimaries, PixelBuffer, PixelDescriptor, TransferFunction};
 
@@ -1354,6 +1354,16 @@ fn build_image_info_full(
     if let Some(container) = container {
         let primary_item = container.primary_item();
 
+        // Upgrade gain map presence from Unknown to Available when we can parse
+        // the Apple HDR auxiliary item's XMP metadata. Falls back to Unknown if
+        // the aux item, dimensions, or hdrgm namespace is missing.
+        if pi.has_gain_map
+            && let Some(ref pri) = primary_item
+            && let Some(gm_info) = extract_apple_gain_map_info(container, pri.id)
+        {
+            info.gain_map = GainMapPresence::Available(alloc::boxed::Box::new(gm_info));
+        }
+
         // ICC profile from colr box
         if pi.has_icc_profile
             && let Some(ref item) = primary_item
@@ -1455,6 +1465,53 @@ fn extract_xmp_from_container(
 /// Convert a [`zencodec::LimitExceeded`] to a static error message for [`HeicError::LimitExceeded`].
 fn limit_exceeded_msg(_e: zencodec::LimitExceeded) -> &'static str {
     "input data size exceeds max_input_bytes"
+}
+
+/// Build a [`GainMapInfo`] from an Apple HDR HEIC auxiliary gain map item.
+///
+/// Looks up the `urn:com:apple:photo:2020:aux:hdrgainmap` aux item for the
+/// primary, reads its `ispe` dimensions, parses the attached XMP via
+/// `ultrahdr_core::metadata::parse_xmp` (Adobe `hdrgm:` namespace), and builds
+/// the canonical zencodec gain map metadata. Returns `None` if any prerequisite
+/// (aux item, dimensions, parseable XMP) is missing — caller falls back to
+/// `GainMapPresence::Unknown`.
+fn extract_apple_gain_map_info(
+    container: &crate::heif::HeifContainer<'_>,
+    primary_id: u32,
+) -> Option<GainMapInfo> {
+    let aux_ids =
+        container.find_auxiliary_items(primary_id, "urn:com:apple:photo:2020:aux:hdrgainmap");
+    let &gainmap_id = aux_ids.first()?;
+    let aux_item = container.get_item(gainmap_id)?;
+    let (width, height) = aux_item.dimensions?;
+    let xmp_bytes = container.find_xmp_for_item(gainmap_id)?;
+    let xmp_str = core::str::from_utf8(&xmp_bytes).ok()?;
+    let (uhdr_md, _len) = ultrahdr_core::metadata::parse_xmp(xmp_str).ok()?;
+    let params = uhdr_metadata_to_zencodec(&uhdr_md);
+    // Apple HDR gain maps are luma-only (single channel).
+    Some(GainMapInfo::new(params, width, height, 1))
+}
+
+/// Convert published `ultrahdr_core::GainMapMetadata` (flat per-axis arrays)
+/// to canonical [`zencodec::GainMapParams`] (per-channel structs). When
+/// ultrahdr-core publishes a release that uses zencodec types directly, this
+/// adapter can be deleted.
+fn uhdr_metadata_to_zencodec(md: &ultrahdr_core::GainMapMetadata) -> zencodec::GainMapParams {
+    let mut params = zencodec::GainMapParams::default();
+    for i in 0..3 {
+        params.channels[i] = zencodec::GainMapChannel {
+            min: md.gain_map_min[i],
+            max: md.gain_map_max[i],
+            gamma: md.gamma[i],
+            base_offset: md.base_offset[i],
+            alternate_offset: md.alternate_offset[i],
+        };
+    }
+    params.base_hdr_headroom = md.base_hdr_headroom;
+    params.alternate_hdr_headroom = md.alternate_hdr_headroom;
+    params.use_base_color_space = md.use_base_color_space;
+    params.backward_direction = md.backward_direction;
+    params
 }
 
 /// Derive TransferFunction and ColorPrimaries from native CICP values.
