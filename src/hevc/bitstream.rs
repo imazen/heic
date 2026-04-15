@@ -2,6 +2,7 @@
 
 use crate::error::HevcError;
 use alloc::vec::Vec;
+use memchr::memchr;
 
 type Result<T> = core::result::Result<T, HevcError>;
 
@@ -238,17 +239,25 @@ fn parse_annexb(data: &[u8]) -> Result<Vec<NalUnit<'_>>> {
 
             let nal_start = i + start_code_len;
 
-            // Find next start code or end
+            // Find next start code (0x00 0x00 0x01 or 0x00 0x00 0x00 0x01) or end.
+            // Use memchr to skip over non-zero bytes quickly — H.265 emulation
+            // prevention keeps 0x00 density low, so this typically jumps kB at a time.
             let mut nal_end = data.len();
-            for j in nal_start..data.len().saturating_sub(2) {
-                if data[j] == 0
-                    && data[j + 1] == 0
+            let mut search = nal_start;
+            while search + 2 < data.len() {
+                let Some(rel) = memchr(0, &data[search..data.len() - 2]) else {
+                    break;
+                };
+                let j = search + rel;
+                // Need at least 3 bytes available at j; the slice bound above guarantees j+2 < data.len().
+                if data[j + 1] == 0
                     && (data[j + 2] == 1
                         || (j + 3 < data.len() && data[j + 2] == 0 && data[j + 3] == 1))
                 {
                     nal_end = j;
                     break;
                 }
+                search = j + 1;
             }
 
             if nal_end > nal_start + 2 {
