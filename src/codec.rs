@@ -67,30 +67,9 @@ impl zencodec::SourceEncodingDetails for HeicSourceEncoding {
 
 // ── Threading helpers ────────────────────────────────────────────────────
 
-/// Convert a [`ThreadingPolicy`] to a concrete thread count.
-///
-/// Returns `0` for unlimited (use rayon default / global pool),
-/// `1` for single-threaded, or `n` for a specific limit.
+/// Convert a [`ThreadingPolicy`] to a concrete thread count for rav1d.
 fn policy_to_threads(policy: ThreadingPolicy) -> usize {
-    match policy {
-        ThreadingPolicy::SingleThread => 1,
-        ThreadingPolicy::LimitOrSingle { max_threads } => max_threads as usize,
-        ThreadingPolicy::LimitOrAny {
-            preferred_max_threads,
-        } => preferred_max_threads as usize,
-        ThreadingPolicy::Balanced => {
-            #[cfg(feature = "std")]
-            {
-                std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1))
-            }
-            #[cfg(not(feature = "std"))]
-            {
-                1
-            }
-        }
-        ThreadingPolicy::Unlimited => 0,
-        _ => 0, // future variants default to unlimited
-    }
+    if policy.is_parallel() { 0 } else { 1 }
 }
 
 // ── Capabilities ─────────────────────────────────────────────────────────
@@ -1783,41 +1762,15 @@ mod tests {
     }
 
     #[test]
-    fn policy_to_threads_single() {
-        assert_eq!(policy_to_threads(ThreadingPolicy::SingleThread), 1);
+    fn policy_to_threads_sequential() {
+        assert_eq!(policy_to_threads(ThreadingPolicy::Sequential), 1);
     }
 
     #[test]
-    fn policy_to_threads_unlimited() {
-        assert_eq!(policy_to_threads(ThreadingPolicy::Unlimited), 0);
+    fn policy_to_threads_parallel() {
+        assert_eq!(policy_to_threads(ThreadingPolicy::Parallel), 0);
     }
 
-    #[test]
-    fn policy_to_threads_limit_or_single() {
-        assert_eq!(
-            policy_to_threads(ThreadingPolicy::LimitOrSingle { max_threads: 4 }),
-            4
-        );
-    }
-
-    #[test]
-    fn policy_to_threads_limit_or_any() {
-        assert_eq!(
-            policy_to_threads(ThreadingPolicy::LimitOrAny {
-                preferred_max_threads: 8
-            }),
-            8
-        );
-    }
-
-    #[test]
-    fn policy_to_threads_balanced() {
-        let n = policy_to_threads(ThreadingPolicy::Balanced);
-        // Balanced should be at least 1 and at most available parallelism
-        assert!(n >= 1);
-    }
-
-    /// Verify SingleThread decode produces valid output through the zencodec adapter.
     #[test]
     fn single_thread_decode_via_adapter() {
         use zencodec::decode::{Decode, DecodeJob as _, DecoderConfig as _};
@@ -1831,7 +1784,7 @@ mod tests {
         };
 
         let config = HeicDecoderConfig::new();
-        let limits = ResourceLimits::none().with_threading(ThreadingPolicy::SingleThread);
+        let limits = ResourceLimits::none().with_threading(ThreadingPolicy::Sequential);
         let job = config.job().with_limits(limits);
         let decoder = job
             .decoder(Cow::Borrowed(&data), &[PixelDescriptor::RGB8_SRGB])
