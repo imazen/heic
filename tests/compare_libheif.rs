@@ -82,6 +82,7 @@ fn extract_reference(input_path: &Path) -> PathBuf {
 
 /// Parsed subset of info.json relevant for comparison.
 #[derive(Debug)]
+#[allow(dead_code)]
 struct RefInfo {
     width: u32,
     height: u32,
@@ -111,6 +112,7 @@ struct RefInfo {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct AuxInfo {
     aux_type: String,
     width: u32,
@@ -148,6 +150,7 @@ fn json_bool(json: &str, key: &str) -> Option<bool> {
     }
 }
 
+#[allow(dead_code)]
 fn json_float(json: &str, key: &str) -> Option<f64> {
     let pattern = format!("\"{key}\": ");
     let start = json.find(&pattern)? + pattern.len();
@@ -540,8 +543,8 @@ fn compare_hdr_sample_gain_map() {
         let mut total_diff: u64 = 0;
         let mut max_diff: u32 = 0;
         let mut exact = 0u64;
-        for i in 0..expected_size {
-            let diff = (our_gm.data[i] as i32 - ref_gm_pixels[i] as i32).unsigned_abs();
+        for (i, &ref_px) in ref_gm_pixels.iter().enumerate().take(expected_size) {
+            let diff = (our_gm.data[i] as i32 - ref_px as i32).unsigned_abs();
             total_diff += diff as u64;
             if diff > max_diff {
                 max_diff = diff;

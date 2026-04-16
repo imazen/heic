@@ -21,8 +21,8 @@ use zencodec::decode::{
     negotiate_pixel_format,
 };
 use zencodec::{
-    ContentLightLevel, GainMapPresence, ImageFormat, ImageInfo, ImageSequence, MasteringDisplay,
-    Orientation, ResourceLimits, Supplements, ThreadingPolicy, Unsupported,
+    ContentLightLevel, GainMapInfo, GainMapPresence, ImageFormat, ImageInfo, ImageSequence,
+    MasteringDisplay, Orientation, ResourceLimits, Supplements, ThreadingPolicy, Unsupported,
 };
 use zenpixels::{Cicp, ColorPrimaries, PixelBuffer, PixelDescriptor, TransferFunction};
 
@@ -67,30 +67,9 @@ impl zencodec::SourceEncodingDetails for HeicSourceEncoding {
 
 // ── Threading helpers ────────────────────────────────────────────────────
 
-/// Convert a [`ThreadingPolicy`] to a concrete thread count.
-///
-/// Returns `0` for unlimited (use rayon default / global pool),
-/// `1` for single-threaded, or `n` for a specific limit.
+/// Convert a [`ThreadingPolicy`] to a concrete thread count for rav1d.
 fn policy_to_threads(policy: ThreadingPolicy) -> usize {
-    match policy {
-        ThreadingPolicy::SingleThread => 1,
-        ThreadingPolicy::LimitOrSingle { max_threads } => max_threads as usize,
-        ThreadingPolicy::LimitOrAny {
-            preferred_max_threads,
-        } => preferred_max_threads as usize,
-        ThreadingPolicy::Balanced => {
-            #[cfg(feature = "std")]
-            {
-                std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1))
-            }
-            #[cfg(not(feature = "std"))]
-            {
-                1
-            }
-        }
-        ThreadingPolicy::Unlimited => 0,
-        _ => 0, // future variants default to unlimited
-    }
+    if policy.is_parallel() { 0 } else { 1 }
 }
 
 // ── Capabilities ─────────────────────────────────────────────────────────
@@ -414,9 +393,8 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
 
         // Negotiate output format
         let available = available_descriptors(has_alpha, bit_depth);
-        let negotiated =
-            negotiate_pixel_format(preferred, &available)
-                .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
+        let negotiated = negotiate_pixel_format(preferred, &available)
+            .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
 
         if is_16bit(negotiated) {
             // 16-bit: full decode, then push rows
@@ -640,9 +618,8 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
 
         // Negotiate output format
         let available = available_descriptors(has_alpha, bit_depth);
-        let negotiated =
-            negotiate_pixel_format(preferred, &available)
-                .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
+        let negotiated = negotiate_pixel_format(preferred, &available)
+            .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
 
         let (buf, width, height, has_alpha): (PixelBuffer, u32, u32, bool) = if is_16bit(negotiated)
         {
@@ -883,9 +860,8 @@ impl HeicStreamDecoder {
 
         // Non-grid fallback: full decode upfront
         let available = available_descriptors(pi.has_alpha, pi.bit_depth);
-        let negotiated =
-            negotiate_pixel_format(preferred, &available)
-                .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
+        let negotiated = negotiate_pixel_format(preferred, &available)
+            .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
 
         let pixels: PixelBuffer = if is_16bit(negotiated) {
             let mut req = config.decode_request(data);
@@ -1089,9 +1065,8 @@ impl HeicStreamDecoder {
 
         // Negotiate 8-bit layout for grid tiles (no alpha, ≤8-bit)
         let available = available_descriptors(false, 8);
-        let negotiated =
-            negotiate_pixel_format(preferred, &available)
-                .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
+        let negotiated = negotiate_pixel_format(preferred, &available)
+            .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
         let layout = descriptor_to_layout(negotiated);
 
         Ok(Some(GridState {
@@ -1287,12 +1262,14 @@ fn build_image_info_lightweight(pi: &crate::ImageInfo) -> ImageInfo {
 
     // Set CICP if we have non-default values
     if pi.color_primaries != 2 || pi.transfer_characteristics != 2 || pi.matrix_coefficients != 2 {
-        info = info.with_cicp(Cicp::new(
-            pi.color_primaries as u8,
-            pi.transfer_characteristics as u8,
-            pi.matrix_coefficients as u8,
-            pi.video_full_range,
-        ));
+        info = info
+            .with_cicp(Cicp::new(
+                pi.color_primaries as u8,
+                pi.transfer_characteristics as u8,
+                pi.matrix_coefficients as u8,
+                pi.video_full_range,
+            ))
+            .with_color_authority(zencodec::ColorAuthority::Cicp);
     }
 
     // Set gain map presence based on probe info
@@ -1342,17 +1319,29 @@ fn build_image_info_full(
 
     // Set CICP if we have non-default values
     if pi.color_primaries != 2 || pi.transfer_characteristics != 2 || pi.matrix_coefficients != 2 {
-        info = info.with_cicp(Cicp::new(
-            pi.color_primaries as u8,
-            pi.transfer_characteristics as u8,
-            pi.matrix_coefficients as u8,
-            pi.video_full_range,
-        ));
+        info = info
+            .with_cicp(Cicp::new(
+                pi.color_primaries as u8,
+                pi.transfer_characteristics as u8,
+                pi.matrix_coefficients as u8,
+                pi.video_full_range,
+            ))
+            .with_color_authority(zencodec::ColorAuthority::Cicp);
     }
 
     // Extract all metadata from the pre-parsed container
     if let Some(container) = container {
         let primary_item = container.primary_item();
+
+        // Upgrade gain map presence from Unknown to Available when we can parse
+        // the Apple HDR auxiliary item's XMP metadata. Falls back to Unknown if
+        // the aux item, dimensions, or hdrgm namespace is missing.
+        if pi.has_gain_map
+            && let Some(ref pri) = primary_item
+            && let Some(gm_info) = extract_apple_gain_map_info(container, pri.id)
+        {
+            info.gain_map = GainMapPresence::Available(alloc::boxed::Box::new(gm_info));
+        }
 
         // ICC profile from colr box
         if pi.has_icc_profile
@@ -1455,6 +1444,53 @@ fn extract_xmp_from_container(
 /// Convert a [`zencodec::LimitExceeded`] to a static error message for [`HeicError::LimitExceeded`].
 fn limit_exceeded_msg(_e: zencodec::LimitExceeded) -> &'static str {
     "input data size exceeds max_input_bytes"
+}
+
+/// Build a [`GainMapInfo`] from an Apple HDR HEIC auxiliary gain map item.
+///
+/// Looks up the `urn:com:apple:photo:2020:aux:hdrgainmap` aux item for the
+/// primary, reads its `ispe` dimensions, parses the attached XMP via
+/// `ultrahdr_core::metadata::parse_xmp` (Adobe `hdrgm:` namespace), and builds
+/// the canonical zencodec gain map metadata. Returns `None` if any prerequisite
+/// (aux item, dimensions, parseable XMP) is missing — caller falls back to
+/// `GainMapPresence::Unknown`.
+fn extract_apple_gain_map_info(
+    container: &crate::heif::HeifContainer<'_>,
+    primary_id: u32,
+) -> Option<GainMapInfo> {
+    let aux_ids =
+        container.find_auxiliary_items(primary_id, "urn:com:apple:photo:2020:aux:hdrgainmap");
+    let &gainmap_id = aux_ids.first()?;
+    let aux_item = container.get_item(gainmap_id)?;
+    let (width, height) = aux_item.dimensions?;
+    let xmp_bytes = container.find_xmp_for_item(gainmap_id)?;
+    let xmp_str = core::str::from_utf8(&xmp_bytes).ok()?;
+    let (uhdr_md, _len) = ultrahdr_core::metadata::parse_xmp(xmp_str).ok()?;
+    let params = uhdr_metadata_to_zencodec(&uhdr_md);
+    // Apple HDR gain maps are luma-only (single channel).
+    Some(GainMapInfo::new(params, width, height, 1))
+}
+
+/// Convert published `ultrahdr_core::GainMapMetadata` (flat per-axis arrays)
+/// to canonical [`zencodec::GainMapParams`] (per-channel structs). When
+/// ultrahdr-core publishes a release that uses zencodec types directly, this
+/// adapter can be deleted.
+fn uhdr_metadata_to_zencodec(md: &ultrahdr_core::GainMapMetadata) -> zencodec::GainMapParams {
+    let mut params = zencodec::GainMapParams::default();
+    for i in 0..3 {
+        params.channels[i] = zencodec::GainMapChannel {
+            min: md.gain_map_min[i],
+            max: md.gain_map_max[i],
+            gamma: md.gamma[i],
+            base_offset: md.base_offset[i],
+            alternate_offset: md.alternate_offset[i],
+        };
+    }
+    params.base_hdr_headroom = md.base_hdr_headroom;
+    params.alternate_hdr_headroom = md.alternate_hdr_headroom;
+    params.use_base_color_space = md.use_base_color_space;
+    params.backward_direction = md.backward_direction;
+    params
 }
 
 /// Derive TransferFunction and ColorPrimaries from native CICP values.
@@ -1726,41 +1762,15 @@ mod tests {
     }
 
     #[test]
-    fn policy_to_threads_single() {
-        assert_eq!(policy_to_threads(ThreadingPolicy::SingleThread), 1);
+    fn policy_to_threads_sequential() {
+        assert_eq!(policy_to_threads(ThreadingPolicy::Sequential), 1);
     }
 
     #[test]
-    fn policy_to_threads_unlimited() {
-        assert_eq!(policy_to_threads(ThreadingPolicy::Unlimited), 0);
+    fn policy_to_threads_parallel() {
+        assert_eq!(policy_to_threads(ThreadingPolicy::Parallel), 0);
     }
 
-    #[test]
-    fn policy_to_threads_limit_or_single() {
-        assert_eq!(
-            policy_to_threads(ThreadingPolicy::LimitOrSingle { max_threads: 4 }),
-            4
-        );
-    }
-
-    #[test]
-    fn policy_to_threads_limit_or_any() {
-        assert_eq!(
-            policy_to_threads(ThreadingPolicy::LimitOrAny {
-                preferred_max_threads: 8
-            }),
-            8
-        );
-    }
-
-    #[test]
-    fn policy_to_threads_balanced() {
-        let n = policy_to_threads(ThreadingPolicy::Balanced);
-        // Balanced should be at least 1 and at most available parallelism
-        assert!(n >= 1);
-    }
-
-    /// Verify SingleThread decode produces valid output through the zencodec adapter.
     #[test]
     fn single_thread_decode_via_adapter() {
         use zencodec::decode::{Decode, DecodeJob as _, DecoderConfig as _};
@@ -1774,7 +1784,7 @@ mod tests {
         };
 
         let config = HeicDecoderConfig::new();
-        let limits = ResourceLimits::none().with_threading(ThreadingPolicy::SingleThread);
+        let limits = ResourceLimits::none().with_threading(ThreadingPolicy::Sequential);
         let job = config.job().with_limits(limits);
         let decoder = job
             .decoder(Cow::Borrowed(&data), &[PixelDescriptor::RGB8_SRGB])

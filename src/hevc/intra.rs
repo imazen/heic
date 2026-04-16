@@ -53,7 +53,9 @@ pub fn predict_intra(
     strong_intra_smoothing_enabled: bool,
 ) -> core::result::Result<(), crate::error::HevcError> {
     if log2_size > 5 {
-        return Err(crate::error::HevcError::DecodingError("log2_size > 5 in intra prediction"));
+        return Err(crate::error::HevcError::DecodingError(
+            "log2_size > 5 in intra prediction",
+        ));
     }
     let size = 1u32 << log2_size;
     let bit_depth = frame.bit_depth;
@@ -66,8 +68,8 @@ pub fn predict_intra(
     {
         let (p, s) = frame.plane(c_idx);
         if !p.is_empty() {
-            let last_row_end = (y as usize + size as usize).saturating_sub(1) * s
-                + x as usize + size as usize;
+            let last_row_end =
+                (y as usize + size as usize).saturating_sub(1) * s + x as usize + size as usize;
             if last_row_end > p.len() {
                 return Err(crate::error::HevcError::DecodingError(
                     "intra prediction block extends past plane allocation",

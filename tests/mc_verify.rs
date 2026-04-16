@@ -1,6 +1,7 @@
 //! Manual MC verification: compute expected MC output from known MV and reference frame
 //!
 //! Run: cargo test --release --test mc_verify -- --nocapture --ignored
+#![allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 
 use std::path::Path;
 
@@ -35,7 +36,7 @@ fn manual_mc_luma_pixel(
     let fetch = |x: i32, y: i32| -> i32 {
         let sx = x.clamp(0, pic_w - 1);
         let sy = y.clamp(0, pic_h - 1);
-        ref_y[(sy as usize * stride + sx as usize)] as i32
+        ref_y[sy as usize * stride + sx as usize] as i32
     };
 
     if frac_x == 0 && frac_y == 0 {
@@ -104,8 +105,8 @@ fn verify_mc_first_pu() {
         return;
     }
     let ref_data = std::fs::read(ref_path).unwrap();
-    let w = 316u32;
-    let h = 240u32;
+    let _w = 316u32;
+    let _h = 240u32;
     let luma_size = (320 * 240) as usize; // coded dimensions in reference YUV
     let frame_size = luma_size + 2 * ((320 / 2) * (240 / 2)) as usize;
     // IMPORTANT: dec265 outputs in DECODE order, not display order!

@@ -33,7 +33,7 @@ fn fuzz_regression_decode() {
             continue;
         }
         let data = std::fs::read(&path).expect("read file");
-        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let _name = path.file_name().unwrap().to_string_lossy().to_string();
 
         // Must not panic — any Result (Ok or Err) is acceptable
         let _ = DecoderConfig::new()
@@ -44,7 +44,10 @@ fn fuzz_regression_decode() {
 
         count += 1;
     }
-    assert!(count >= 10, "expected at least 10 regression files, got {count}");
+    assert!(
+        count >= 10,
+        "expected at least 10 regression files, got {count}"
+    );
 }
 
 /// Run all regression inputs through the probe pipeline.

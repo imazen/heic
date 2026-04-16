@@ -666,7 +666,7 @@ fn merge_a_deblock_debug() {
     for frame_idx in 0..frames.len().min(ref_frames.len()) {
         let f = &frames[frame_idx];
         let cw = f.cropped_width();
-        let ch = f.cropped_height();
+        let _ch = f.cropped_height();
         let stride = f.width as usize;
         let mut our_y = Vec::new();
         for y in f.crop_top..(f.height - f.crop_bottom) {

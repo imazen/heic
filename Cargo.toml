@@ -1,6 +1,6 @@
 [package]
 name = "heic"
-version = "0.2.0"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.89"
 license = "AGPL-3.0-only OR LicenseRef-Imazen-Commercial"
@@ -41,10 +41,10 @@ autoexamples = false
 
 [features]
 default = ["std"]
-std = ["archmage/std"]
+std = ["archmage/std", "ultrahdr-core?/std"]
 fallible-alloc = []
 parallel = ["std", "dep:rayon"]
-zencodec = ["dep:zencodec", "dep:zenpixels", "dep:rgb", "dep:imgref", "dep:garb", "dep:bytemuck"]
+zencodec = ["dep:zencodec", "dep:zenpixels", "dep:rgb", "dep:imgref", "dep:garb", "dep:bytemuck", "dep:ultrahdr-core"]
 av1 = ["std", "dep:rav1d-safe"]
 unci = ["dep:zenflate"]
 image = ["std", "dep:image"]
@@ -55,20 +55,22 @@ whereat = { version = "0.1.5"}
 archmage = { version = "0.9.16", default-features = false, features = ["macros"] }
 magetypes = { version = "0.9.16", default-features = false }
 safe_unaligned_simd = "0.2.5"
+memchr = { version = "2.8.0", default-features = false }
 rayon = { version = "1.11.0", optional = true }
-zencodec = { version = "0.1.13", optional = true }
-zenpixels = { version = "0.2.2", default-features = false, features = ["rgb", "imgref"], optional = true }
+zencodec = { version = "0.1.18", optional = true }
+zenpixels = { version = "0.2.7", default-features = false, features = ["rgb", "imgref"], optional = true }
 rgb = { version = "0.8.53", default-features = false, features = ["as-bytes"], optional = true }
 bytemuck = { version = "1.21", default-features = false, features = ["extern_crate_alloc"], optional = true }
 imgref = { version = "1.12.0", optional = true }
 garb = { version = "0.2.5", default-features = false, optional = true }
 rav1d-safe = { version = "0.5.3", optional = true, default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
 zenflate = { version = "0.3.4", optional = true, default-features = false }
+ultrahdr-core = { version = "0.4.1", optional = true, default-features = false }
 image = { version = "0.25.10" , default-features = false, optional = true }
 
 [dev-dependencies]
 criterion = "0.8.2"
-fast-ssim2 = { version = "0.7.1", features = ["imgref"] }
+fast-ssim2 = { version = "0.8.0", features = ["imgref"] }
 imgref = "1.12.0"
 # heic-wasm-rs: reference decoder for comparison tests
 # Uncomment + RUSTFLAGS='--cfg heic_reference' cargo test to enable
@@ -104,6 +106,8 @@ name = "dump_container"
 name = "extract_hevc"
 [[example]]
 name = "test_all"
+[[example]]
+name = "bench_parse_annexb"
 # compare_support requires heic-wasm-rs (uncomment dep + add [[example]] to use)
 
 [[bench]]
@@ -114,3 +118,5 @@ harness = false
 # [[bench]]
 # name = "compare"
 # harness = false
+
+

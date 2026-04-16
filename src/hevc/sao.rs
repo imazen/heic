@@ -65,7 +65,8 @@ impl SaoMap {
 
     #[inline]
     pub fn get_mut(&mut self, ctb_x: u32, ctb_y: u32) -> Option<&mut SaoInfo> {
-        self.data.get_mut((ctb_y * self.width_ctbs + ctb_x) as usize)
+        self.data
+            .get_mut((ctb_y * self.width_ctbs + ctb_x) as usize)
     }
 }
 
