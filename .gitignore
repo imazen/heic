@@ -1,6 +1,8 @@
 Cargo.lock
 heaptrack.*.zst
 conformance/vectors/
+.workongoing
+.jj/
 
 # === Standard exclusions (do not depend on user ~/.gitignore) ===
 

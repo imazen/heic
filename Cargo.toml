@@ -8,34 +8,14 @@ description = "Pure Rust HEIC/HEIF image decoder with SIMD acceleration"
 repository = "https://github.com/imazen/heic"
 keywords = ["heic", "heif", "hevc", "image", "decoder"]
 categories = ["multimedia::images", "parser-implementations"]
-exclude = [
-    "CLAUDE.md",
-    "CONTEXT-HANDOFF.md",
-    "FEEDBACK.md",
-    "CABAC-DEBUG-HANDOFF.md",
-    "heaptrack.*",
-    "examples/batch_test.rs",
-    "examples/compare_support.rs",
-    "examples/compare_yuv.rs",
-    "examples/debug_edges.rs",
-    "examples/debug_qp.rs",
-    "examples/decode_trace.rs",
-    "examples/dump_container.rs",
-    "examples/dump_hevc.rs",
-    "examples/extract_hevc.rs",
-    "examples/test_all.rs",
-    "tests/compare_reference.rs",
-    "tests/trace_bad_pixel.rs",
-    "benches/compare.rs",
-    ".claude/",
-    ".superwork/",
-    ".zenbench/",
-    "copter-report/",
-    ".github/",
-    "Cross.toml",
-    "justfile",
-    "Cargo.toml.original.txt",
-    "fuzz/",
+include = [
+    "/src/**",
+    "/tests/**",
+    "/benches/**",
+    "/examples/**",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE*",
 ]
 autoexamples = false
 
