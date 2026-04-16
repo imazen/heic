@@ -13,9 +13,13 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 ### Changed
 - Set `ColorAuthority::Cicp` for HEIC nclx precedence (#6, 394e94f)
+- Migrate `ThreadingPolicy` handling to the `is_parallel()` helper; prefer `Sequential`/`Parallel` over the deprecated `SingleThread`/`Unlimited` variants (339d59b)
 
 ### Performance
 - `memchr`-based NAL start-code scan in `parse_annexb` (#9, 8115b3e, 134067b)
+
+### Dependencies
+- Bump `zencodec` to 0.1.18 (339d59b)
 
 ### Tests
 - Probe-vs-decode parity test (5aa84e2)
