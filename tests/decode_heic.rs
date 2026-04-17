@@ -242,12 +242,11 @@ fn test_raw_yuv_values() {
             }
         }
 
-        if count > 0 {
+        if let (Some(cb_avg), Some(cr_avg)) = (cb_sum.checked_div(count), cr_sum.checked_div(count))
+        {
             println!(
                 "  CTU row {:2}: Cb avg={:3}, Cr avg={:3}",
-                ctu_row,
-                cb_sum / count,
-                cr_sum / count
+                ctu_row, cb_avg, cr_avg
             );
         }
     }
@@ -274,12 +273,11 @@ fn test_raw_yuv_values() {
             }
         }
 
-        if count > 0 {
+        if let (Some(cb_avg), Some(cr_avg)) = (cb_sum.checked_div(count), cr_sum.checked_div(count))
+        {
             println!(
                 "  CTU col {:2}: Cb avg={:3}, Cr avg={:3}",
-                ctu_col,
-                cb_sum / count,
-                cr_sum / count
+                ctu_col, cb_avg, cr_avg
             );
         }
     }
