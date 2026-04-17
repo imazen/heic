@@ -8,6 +8,8 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 <!-- Breaking changes that will ship together in the next major (or minor for 0.x) release.
      Add items here as you discover them. Do NOT ship these piecemeal — batch them. -->
 
+## [0.1.3] - 2026-04-17
+
 ### Added
 - Parse Apple HDR gain map metadata into `GainMapPresence::Available` (#10, 8e6ecaf)
 
@@ -19,7 +21,7 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 - `memchr`-based NAL start-code scan in `parse_annexb` (#9, 8115b3e, 134067b)
 
 ### Dependencies
-- Bump `zencodec` to 0.1.18 (339d59b)
+- Bump `zencodec` to 0.1.19 (339d59b)
 
 ### Tests
 - Probe-vs-decode parity test (5aa84e2)
