@@ -1891,7 +1891,10 @@ fn apply_clean_aperture(frame: &mut crate::hevc::DecodedFrame, clap: &CleanApert
     let conf_height = frame.cropped_height();
 
     let clean_width = clap.width_n.checked_div(clap.width_d).unwrap_or(conf_width);
-    let clean_height = clap.height_n.checked_div(clap.height_d).unwrap_or(conf_height);
+    let clean_height = clap
+        .height_n
+        .checked_div(clap.height_d)
+        .unwrap_or(conf_height);
 
     if clean_width >= conf_width && clean_height >= conf_height {
         return;
