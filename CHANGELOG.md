@@ -8,6 +8,14 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 <!-- Breaking changes that will ship together in the next major (or minor for 0.x) release.
      Add items here as you discover them. Do NOT ship these piecemeal — batch them. -->
 
+## [0.1.4] - 2026-04-20
+
+### Documentation
+- Add patent notice to README and crate docs clarifying that HEVC/HEIF may be covered by third-party patents (Access Advance pool), Imazen holds none, and this codec is decode-only (6df7070)
+
+### Dependencies
+- Bump minimum `zenpixels` and `zenpixels-convert` to 0.2.10, picking up the TF-change planner fix, `AlphaPolicy::CompositeOnto` correctness on premultiplied sources, and first-class Gamma 2.2 transfer in the fast path (ee363a2)
+
 ## [0.1.3] - 2026-04-17
 
 ### Added
