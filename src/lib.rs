@@ -92,6 +92,19 @@
 //! decoding. For grid-based images, [`DecodeRequest::decode_into`] reduces peak
 //! memory by ~60% compared to [`DecodeRequest::decode`] by streaming tiles
 //! directly to the output buffer.
+//!
+//! # Patents
+//!
+//! HEVC (H.265) and its use in HEIF containers may be covered by patents
+//! held by third parties, including members of the Access Advance HEVC
+//! patent pool. This decoder may or may not be subject to those patents
+//! depending on jurisdiction and use.
+//!
+//! **Imazen holds no patents** and grants only **copyright** permissions
+//! for the implementation in this crate (AGPL-3.0 or commercial). No
+//! patent rights are granted. This codec is **decode-only**. We are not
+//! lawyers; consult a patent attorney to determine whether a patent
+//! license is required for your use.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]

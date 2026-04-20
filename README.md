@@ -2,6 +2,10 @@
 
 Pure Rust HEIC/HEIF image decoder. No C/C++ dependencies, no unsafe code.
 
+> ⚠️ **Patent notice:** HEVC/HEIF may be covered by third-party patents
+> (Access Advance and others). Imazen grants copyright permissions
+> only — see [Patents](#patents).
+
 - `#![forbid(unsafe_code)]` — zero unsafe blocks in the entire codebase
 - `no_std + alloc` compatible (compiles for wasm32-unknown-unknown)
 - Multi-codec: HEVC (built-in), AV1 via [rav1d-safe] (`av1` feature), uncompressed HEIF via [zenflate] (`unci` feature)
@@ -200,6 +204,24 @@ Use `DecoderConfig::estimate_memory()` to check memory requirements before decod
 [archmage] · [magetypes] · [enough] · [whereat] · [zenbench] · [cargo-copter]
 
 [And other projects](https://www.imazen.io/open-source) · [GitHub @imazen](https://github.com/imazen) · [GitHub @lilith](https://github.com/lilith) · [lib.rs/~lilith](https://lib.rs/~lilith) · [NuGet](https://www.nuget.org/profiles/imazen) (over 30 million downloads / 87 packages)
+
+## Patents
+
+HEVC (H.265) and its use in HEIF containers may be covered by patents
+held by third parties, including (but not limited to) members of the
+[Access Advance](https://accessadvance.com/) HEVC patent pool. This
+decoder may or may not be subject to those patents depending on your
+jurisdiction, use case, and distribution model.
+
+**Imazen holds no patents** — only copyrights on the code we wrote.
+The dual license (AGPL-3.0 / commercial) grants **copyright** permissions
+for the implementation in this repository. It does **not** grant, and
+cannot grant, any rights under third-party patents.
+
+This codec is **decode-only**. If you ship this crate in a product,
+you may need to determine whether a patent license is required for your
+use and obtain one if so. We are not lawyers; consult a patent attorney
+for legal advice.
 
 ## License
 
