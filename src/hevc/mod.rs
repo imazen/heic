@@ -147,11 +147,15 @@ fn decode_nal_units(nal_units: &[bitstream::NalUnit<'_>]) -> Result<DecodedFrame
             3 => (1, 1), // 4:4:4
             _ => (2, 2), // Default to 4:2:0
         };
+        // SPS parser already rejects offsets that would overflow these
+        // multiplications or underflow the frame, but use saturating_mul
+        // here so the rest of the decoder cannot panic on debug-overflow
+        // even if a future caller injects an unvalidated SPS.
         frame.set_crop(
-            sps.conf_win_offset.0 * sub_width_c,  // left
-            sps.conf_win_offset.1 * sub_width_c,  // right
-            sps.conf_win_offset.2 * sub_height_c, // top
-            sps.conf_win_offset.3 * sub_height_c, // bottom
+            sps.conf_win_offset.0.saturating_mul(sub_width_c), // left
+            sps.conf_win_offset.1.saturating_mul(sub_width_c), // right
+            sps.conf_win_offset.2.saturating_mul(sub_height_c), // top
+            sps.conf_win_offset.3.saturating_mul(sub_height_c), // bottom
         );
     }
 
@@ -746,10 +750,10 @@ fn create_frame(sps: &params::Sps) -> Result<DecodedFrame> {
             _ => (2, 2),
         };
         frame.set_crop(
-            sps.conf_win_offset.0 * sub_width_c,
-            sps.conf_win_offset.1 * sub_width_c,
-            sps.conf_win_offset.2 * sub_height_c,
-            sps.conf_win_offset.3 * sub_height_c,
+            sps.conf_win_offset.0.saturating_mul(sub_width_c),
+            sps.conf_win_offset.1.saturating_mul(sub_width_c),
+            sps.conf_win_offset.2.saturating_mul(sub_height_c),
+            sps.conf_win_offset.3.saturating_mul(sub_height_c),
         );
     }
     Ok(frame)

@@ -1741,6 +1741,13 @@ const MAX_SAMPLES: u32 = 1_000_000;
 const MAX_CHUNKS: u32 = 1_000_000;
 /// Maximum number of stsc entries
 const MAX_STSC_ENTRIES: u32 = 1_000_000;
+/// Maximum number of `trak` boxes processed inside a single `moov`. Each
+/// track carries up-to-MAX_SAMPLES sample tables, MAX_CHUNKS chunk tables
+/// etc., so an unbounded track count multiplies parser memory cost
+/// without bound. HEIC image-sequence files in the wild rarely have more
+/// than a single `pict` track plus optional thumbnail / aux tracks; 16
+/// is generous for legitimate input.
+const MAX_TRACKS: usize = 16;
 /// Maximum number of sync samples
 const MAX_SYNC_SAMPLES: u32 = 1_000_000;
 
@@ -1784,10 +1791,17 @@ fn parse_moov<'a>(
 
     for child in BoxIterator::new(moov.content) {
         check_stop(stop)?;
-        if child.box_type() == FourCC::TRAK
-            && let Ok(track) = parse_trak(&child, stop)
-        {
-            tracks.push(track);
+        if child.box_type() == FourCC::TRAK {
+            // Cap the number of accepted tracks: each track holds
+            // independent sample / chunk / stsc tables individually
+            // bounded by `MAX_SAMPLES` etc., but the total parser cost
+            // is the *product* of per-track caps and the track count.
+            if tracks.len() >= MAX_TRACKS {
+                break;
+            }
+            if let Ok(track) = parse_trak(&child, stop) {
+                tracks.push(track);
+            }
         }
     }
 
@@ -2456,8 +2470,13 @@ fn resolve_sample_offset(
             return Err(at!(HeicError::InvalidData("invalid stsc first_chunk")));
         }
 
-        // Iterate through chunks in this stsc run
+        // Iterate through chunks in this stsc run. Poll the cancellation
+        // token periodically so a 1M-chunk run does not block a stop
+        // request for the duration of the inner loop.
         for chunk_1based in first_chunk..next_first_chunk {
+            if chunk_1based.is_multiple_of(4096) {
+                check_stop(stop)?;
+            }
             let chunk_end_sample = current_sample
                 .checked_add(samples_per_chunk)
                 .ok_or_else(|| at!(HeicError::InvalidData("sample count overflow")))?;

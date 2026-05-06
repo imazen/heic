@@ -3,6 +3,7 @@
 
 use alloc::borrow::Cow;
 use alloc::vec::Vec;
+use core::cell::Cell;
 
 use enough::{Stop, Unstoppable};
 
@@ -14,6 +15,70 @@ use crate::{
     DecodeOutput, DecoderConfig, HdrGainMap, HeicError, Limits, PixelLayout, Result, floor_f64,
     round_f64,
 };
+
+/// Maximum derived-image (iden/grid/iovl) recursion depth.
+///
+/// HEIF's derived-item graph is shallow in practice — primary→grid→tiles
+/// is depth 2 — so a tight cap is appropriate. This kills the
+/// `(tiles_per_level)^N` blow-up an attacker can otherwise drive through
+/// crafted dimg references.
+const MAX_DERIVED_DEPTH: u32 = 3;
+
+/// Maximum total number of `decode_item` calls within a single decode
+/// request, summed across all recursion paths. Even with a tight depth
+/// cap, a flat fan-out of thousands of grid tiles each with their own
+/// derived-image chain can still consume excessive CPU on the linear
+/// `get_item`/`get_item_data` scans inside the parser. This counter
+/// caps the total work irrespective of graph shape.
+const MAX_DERIVED_INVOCATIONS: u32 = 32_768;
+
+/// Shared total-invocation counter. Lives at the top-level entry and
+/// is borrowed by every `decode_item` frame on the call stack so the
+/// total is an honest sum across siblings, not a per-frame copy.
+type DerivedCounter = Cell<u32>;
+
+/// Per-decode-request budget tracking recursion depth and a borrowed
+/// total-invocation counter. Single-threaded interior mutability via
+/// `Cell` is fine — the budget is consumed sequentially from a single
+/// decoder thread, and per-tile rayon parallelism in `decode_grid`
+/// only fans out *after* `decode_item` has accepted the grid item
+/// (the per-tile decode does not recurse through `decode_item`).
+#[derive(Debug, Clone, Copy)]
+struct DecodeBudget<'a> {
+    /// Current recursion depth (0 at the top-level entry).
+    depth: u32,
+    /// Shared counter of total `decode_item` calls in this request.
+    invocations: &'a DerivedCounter,
+}
+
+impl<'a> DecodeBudget<'a> {
+    fn root(invocations: &'a DerivedCounter) -> Self {
+        Self {
+            depth: 0,
+            invocations,
+        }
+    }
+
+    fn deeper(&self) -> Self {
+        Self {
+            depth: self.depth + 1,
+            invocations: self.invocations,
+        }
+    }
+
+    /// Account for one `decode_item` invocation, returning Err when the
+    /// per-request budget is exhausted.
+    fn charge(&self) -> Result<()> {
+        let n = self.invocations.get().saturating_add(1);
+        if n > MAX_DERIVED_INVOCATIONS {
+            return Err(at!(HeicError::InvalidData(
+                "Derived-image graph exceeds maximum invocation budget"
+            )));
+        }
+        self.invocations.set(n);
+        Ok(())
+    }
+}
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -67,12 +132,22 @@ fn decode_tiles_parallel(
     }
 }
 
-/// Sentinel for no limits
+/// Default safety caps applied when a caller does not supply explicit
+/// `Limits`. These numbers are intentionally generous — well above any
+/// real-world HEIC image — but they put a hard ceiling on the
+/// allocations a crafted file can trigger through SPS-driven
+/// dimension and memory estimates.
+///
+/// `max_width` / `max_height` are above HEVC Level 6.2 (8192×4320) so
+/// any conforming HEIC decodes; `max_pixels` is the same 256 Mpx ceiling
+/// some other zen codecs use; `max_memory_bytes` is 1 GiB, generous for
+/// 8K/16K stills but well below the multi-GiB OOM the previous
+/// `NO_LIMITS` (all-`None`) configuration permitted.
 static NO_LIMITS: Limits = Limits {
-    max_width: None,
-    max_height: None,
-    max_pixels: None,
-    max_memory_bytes: None,
+    max_width: Some(16_384),
+    max_height: Some(16_384),
+    max_pixels: Some(256 * 1024 * 1024),
+    max_memory_bytes: Some(1024 * 1024 * 1024),
 };
 
 /// Core decode-to-frame implementation shared by all entry points.
@@ -101,7 +176,9 @@ pub(crate) fn decode_to_frame(
 
     check_stop(stop)?;
 
-    let mut frame = decode_item(&container, &primary_item, 0, limits, stop, max_threads)?;
+    let counter = DerivedCounter::new(0);
+    let budget = DecodeBudget::root(&counter);
+    let mut frame = decode_item(&container, &primary_item, budget, limits, stop, max_threads)?;
 
     check_stop(stop)?;
 
@@ -133,23 +210,24 @@ pub(crate) fn decode_to_frame(
 fn decode_item(
     container: &heif::HeifContainer<'_>,
     item: &heif::Item,
-    depth: u32,
+    budget: DecodeBudget<'_>,
     limits: &Limits,
     stop: &dyn Stop,
     max_threads: Option<usize>,
 ) -> Result<crate::hevc::DecodedFrame> {
-    if depth > 8 {
+    if budget.depth > MAX_DERIVED_DEPTH {
         return Err(at!(HeicError::InvalidData(
             "Derived image reference chain too deep"
         )));
     }
+    budget.charge()?;
 
     check_stop(stop)?;
 
     let mut frame = match item.item_type {
-        ItemType::Grid => decode_grid(container, item, depth, limits, stop, max_threads)?,
-        ItemType::Iden => decode_iden(container, item, depth, limits, stop, max_threads)?,
-        ItemType::Iovl => decode_iovl(container, item, depth, limits, stop, max_threads)?,
+        ItemType::Grid => decode_grid(container, item, budget, limits, stop, max_threads)?,
+        ItemType::Iden => decode_iden(container, item, budget, limits, stop, max_threads)?,
+        ItemType::Iovl => decode_iovl(container, item, budget, limits, stop, max_threads)?,
         ItemType::Hvc1 | ItemType::Unknown(_) => {
             // HEVC path — Unknown falls through to HEVC for backwards compat
             // Check limits before HEVC decode to avoid OOM from crafted SPS
@@ -253,7 +331,7 @@ fn decode_item(
 fn decode_iden(
     container: &heif::HeifContainer<'_>,
     iden_item: &heif::Item,
-    depth: u32,
+    budget: DecodeBudget<'_>,
     limits: &Limits,
     stop: &dyn Stop,
     max_threads: Option<usize>,
@@ -270,7 +348,7 @@ fn decode_iden(
     decode_item(
         container,
         &source_item,
-        depth + 1,
+        budget.deeper(),
         limits,
         stop,
         max_threads,
@@ -281,7 +359,7 @@ fn decode_iden(
 fn decode_iovl(
     container: &heif::HeifContainer<'_>,
     iovl_item: &heif::Item,
-    depth: u32,
+    budget: DecodeBudget<'_>,
     limits: &Limits,
     stop: &dyn Stop,
     max_threads: Option<usize>,
@@ -439,7 +517,14 @@ fn decode_iovl(
             .get_item(tile_id)
             .ok_or_else(|| at!(HeicError::InvalidData("Missing overlay tile")))?;
 
-        let tile_frame = decode_item(container, &tile_item, depth + 1, limits, stop, max_threads)?;
+        let tile_frame = decode_item(
+            container,
+            &tile_item,
+            budget.deeper(),
+            limits,
+            stop,
+            max_threads,
+        )?;
 
         // Propagate color conversion settings from first tile
         if idx == 0 {
@@ -916,7 +1001,7 @@ fn decode_unci_item(
 fn decode_grid(
     container: &heif::HeifContainer<'_>,
     grid_item: &heif::Item,
-    depth: u32,
+    budget: DecodeBudget<'_>,
     limits: &Limits,
     stop: &dyn Stop,
     max_threads: Option<usize>,
@@ -1036,8 +1121,14 @@ fn decode_grid(
                 let tile_item = container
                     .get_item(tile_id)
                     .ok_or_else(|| at!(HeicError::InvalidData("Missing grid tile")))?;
-                let tile_frame =
-                    decode_item(container, &tile_item, depth + 1, limits, stop, max_threads)?;
+                let tile_frame = decode_item(
+                    container,
+                    &tile_item,
+                    budget.deeper(),
+                    limits,
+                    stop,
+                    max_threads,
+                )?;
                 if tile_idx == 0 {
                     output.full_range = tile_frame.full_range;
                     output.matrix_coeffs = tile_frame.matrix_coeffs;
@@ -1071,7 +1162,7 @@ fn decode_grid(
                 let tile_item = container
                     .get_item(tile_id)
                     .ok_or_else(|| at!(HeicError::InvalidData("Missing grid tile")))?;
-                decode_item(container, &tile_item, depth + 1, limits, stop, None)?
+                decode_item(container, &tile_item, budget.deeper(), limits, stop, None)?
             };
             if tile_idx == 0 {
                 output.full_range = tile_frame.full_range;
@@ -1747,12 +1838,16 @@ fn decode_alpha_plane(
     let mut alpha_plane = Vec::with_capacity(total_pixels);
 
     if alpha_w == primary_w && alpha_h == primary_h {
-        // Same dimensions — direct copy of Y plane from cropped region
+        // Same dimensions — direct copy of Y plane from cropped region.
+        // Promote each coordinate to usize before multiplication so the
+        // index cannot wrap when alpha_frame.width is large.
         let y_start = alpha_frame.crop_top;
         let x_start = alpha_frame.crop_left;
+        let stride = alpha_frame.width as usize;
         for y in 0..primary_h {
             for x in 0..primary_w {
-                let src_idx = ((y_start + y) * alpha_frame.width + (x_start + x)) as usize;
+                let src_idx =
+                    (y_start as usize + y as usize) * stride + (x_start as usize + x as usize);
                 alpha_plane.push(alpha_frame.y_plane[src_idx]);
             }
         }
@@ -1770,12 +1865,12 @@ fn decode_alpha_plane(
                 let fx = sx - x0 as f64;
                 let fy = sy - y0 as f64;
 
-                let stride = alpha_frame.width;
-                let off_y = alpha_frame.crop_top;
-                let off_x = alpha_frame.crop_left;
+                let stride = alpha_frame.width as usize;
+                let off_y = alpha_frame.crop_top as usize;
+                let off_x = alpha_frame.crop_left as usize;
 
                 let get = |px: u32, py: u32| -> f64 {
-                    let idx = ((off_y + py) * stride + (off_x + px)) as usize;
+                    let idx = (off_y + py as usize) * stride + (off_x + px as usize);
                     alpha_frame.y_plane.get(idx).copied().unwrap_or(0) as f64
                 };
 
@@ -1819,10 +1914,11 @@ pub(crate) fn decode_gain_map(data: &[u8]) -> Result<HdrGainMap> {
         .ok_or_else(|| at!(HeicError::InvalidData("Missing gain map item")))?;
 
     // Use decode_item to handle grids, iden, and plain HEVC gain maps
+    let counter = DerivedCounter::new(0);
     let frame = decode_item(
         &container,
         &gainmap_item,
-        0,
+        DecodeBudget::root(&counter),
         &Limits::default(),
         &Unstoppable,
         None,
@@ -1977,7 +2073,15 @@ pub(crate) fn decode_thumbnail(data: &[u8], layout: PixelLayout) -> Result<Optio
         .ok_or_else(|| at!(HeicError::InvalidData("Thumbnail item not found")))?;
 
     let stop: &dyn Stop = &Unstoppable;
-    let frame = decode_item(&container, &thumb_item, 0, &NO_LIMITS, stop, None)?;
+    let counter = DerivedCounter::new(0);
+    let frame = decode_item(
+        &container,
+        &thumb_item,
+        DecodeBudget::root(&counter),
+        &NO_LIMITS,
+        stop,
+        None,
+    )?;
 
     let width = frame.cropped_width();
     let height = frame.cropped_height();
@@ -2100,10 +2204,11 @@ pub(crate) fn decode_depth(data: &[u8]) -> Result<crate::DepthMap> {
         .unwrap_or_default();
 
     // Decode the depth image using the same item decode pipeline
+    let counter = DerivedCounter::new(0);
     let frame = decode_item(
         &container,
         &depth_item,
-        0,
+        DecodeBudget::root(&counter),
         &Limits::default(),
         &Unstoppable,
         None,
@@ -2155,7 +2260,15 @@ pub(crate) fn decode_auxiliary_item(
         .get_item(item_id)
         .ok_or_else(|| at!(HeicError::InvalidData("auxiliary item not found")))?;
 
-    let frame = decode_item(&container, &item, 0, &Limits::default(), &Unstoppable, None)?;
+    let counter = DerivedCounter::new(0);
+    let frame = decode_item(
+        &container,
+        &item,
+        DecodeBudget::root(&counter),
+        &Limits::default(),
+        &Unstoppable,
+        None,
+    )?;
 
     let width = frame.cropped_width();
     let height = frame.cropped_height();
@@ -2187,7 +2300,15 @@ fn decode_aux_to_grayscale(
         .get_item(item_id)
         .ok_or_else(|| at!(HeicError::InvalidData("auxiliary item not found")))?;
 
-    let frame = decode_item(container, &item, 0, &Limits::default(), &Unstoppable, None)?;
+    let counter = DerivedCounter::new(0);
+    let frame = decode_item(
+        container,
+        &item,
+        DecodeBudget::root(&counter),
+        &Limits::default(),
+        &Unstoppable,
+        None,
+    )?;
 
     let width = frame.cropped_width();
     let height = frame.cropped_height();
@@ -2290,4 +2411,61 @@ pub(crate) fn decode_matte(
         height,
         matte_type: matte_type.clone(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// H-2 regression: the per-decode-request `decode_item` budget caps
+    /// the total number of derived-image traversals, so a crafted graph
+    /// with shallow depth but enormous fan-out cannot drive the
+    /// container parser into multi-second linear scans.
+    #[test]
+    fn decode_budget_charges_until_exhausted() {
+        let counter = DerivedCounter::new(0);
+        let budget = DecodeBudget::root(&counter);
+        // The counter should accept exactly MAX_DERIVED_INVOCATIONS calls.
+        for _ in 0..MAX_DERIVED_INVOCATIONS {
+            budget.charge().expect("under cap should succeed");
+        }
+        assert!(budget.charge().is_err(), "must reject past the cap");
+    }
+
+    /// H-2 regression: deeper budgets share the same counter, so fan-out
+    /// at depth 2 with thousands of children is accounted for in the
+    /// same total as the parent.
+    #[test]
+    fn decode_budget_shared_counter_across_depths() {
+        let counter = DerivedCounter::new(0);
+        let parent = DecodeBudget::root(&counter);
+        let child = parent.deeper();
+        let grandchild = child.deeper();
+        for _ in 0..10 {
+            parent.charge().unwrap();
+            child.charge().unwrap();
+            grandchild.charge().unwrap();
+        }
+        assert_eq!(counter.get(), 30, "all charges share the same counter");
+        assert_eq!(parent.depth, 0);
+        assert_eq!(child.depth, 1);
+        assert_eq!(grandchild.depth, 2);
+    }
+
+    /// CR-2 regression: the default `Limits` applied when a caller
+    /// passes `None` reject obvious OOM-bait dimensions like
+    /// 65535x65535.
+    #[test]
+    fn default_no_limits_rejects_large_dimensions() {
+        // The audit's CR-2 example: pic_width=65535, pic_height=65535.
+        // Under the old NO_LIMITS (all None), check_dimensions returned
+        // Ok and the decoder went on to allocate ~8 GiB. The new
+        // defaults must reject this.
+        let res = NO_LIMITS.check_dimensions(65535, 65535);
+        assert!(res.is_err(), "default limits must reject 65535x65535");
+
+        // A reasonable still (8K) is accepted.
+        let ok = NO_LIMITS.check_dimensions(7680, 4320);
+        assert!(ok.is_ok(), "default limits must accept 8K");
+    }
 }
