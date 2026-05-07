@@ -259,8 +259,17 @@ impl DecodedFrame {
         }
     }
 
-    /// Set conformance window cropping
+    /// Set conformance window cropping. Crop offsets that would underflow
+    /// the frame are clamped to leave a non-empty cropped region, so
+    /// downstream `cropped_width`/`cropped_height` cannot wrap around even
+    /// if a caller bypasses the SPS-parse-time validation.
     pub(crate) fn set_crop(&mut self, left: u32, right: u32, top: u32, bottom: u32) {
+        let horiz_room = self.width.saturating_sub(1);
+        let vert_room = self.height.saturating_sub(1);
+        let left = left.min(horiz_room);
+        let right = right.min(horiz_room.saturating_sub(left));
+        let top = top.min(vert_room);
+        let bottom = bottom.min(vert_room.saturating_sub(top));
         self.crop_left = left;
         self.crop_right = right;
         self.crop_top = top;
@@ -268,13 +277,25 @@ impl DecodedFrame {
     }
 
     /// Width after conformance window cropping. This is the visible image width.
+    ///
+    /// Saturates to zero if the crop offsets ever exceed `width` — the SPS
+    /// parser rejects such input, but the getters use `saturating_sub` as
+    /// defence in depth so a stray crop assignment cannot produce a
+    /// near-`u32::MAX` cropped value that downstream `Vec::with_capacity`
+    /// callers would treat as a multi-GiB allocation request.
     pub fn cropped_width(&self) -> u32 {
-        self.width - self.crop_left - self.crop_right
+        self.width
+            .saturating_sub(self.crop_left)
+            .saturating_sub(self.crop_right)
     }
 
     /// Height after conformance window cropping. This is the visible image height.
+    ///
+    /// See [`cropped_width`](Self::cropped_width) for saturation rationale.
     pub fn cropped_height(&self) -> u32 {
-        self.height - self.crop_top - self.crop_bottom
+        self.height
+            .saturating_sub(self.crop_top)
+            .saturating_sub(self.crop_bottom)
     }
 
     /// Luma plane stride in pixels (equal to the un-cropped `width`).
@@ -432,9 +453,10 @@ impl DecodedFrame {
         let x_end = self.width - self.crop_right;
 
         let mut pixel_idx = 0usize;
+        let w = self.width as usize;
         for y in y_start..y_end {
             for x in x_start..x_end {
-                let y_idx = (y * self.width + x) as usize;
+                let y_idx = y as usize * w + x as usize;
                 let y_val = (self.y_plane[y_idx] >> shift) as i32;
 
                 let (cb_val, cr_val) = self.get_chroma(x, y, shift);
@@ -473,10 +495,11 @@ impl DecodedFrame {
         let y_end = self.height - self.crop_bottom;
         let x_start = self.crop_left;
         let x_end = self.width - self.crop_right;
+        let w = self.width as usize;
 
         for y in y_start..y_end {
             for x in x_start..x_end {
-                let y_idx = (y * self.width + x) as usize;
+                let y_idx = y as usize * w + x as usize;
                 let y_val = (self.y_plane[y_idx] >> shift) as i32;
                 let (cb_val, cr_val) = self.get_chroma(x, y, shift);
 
@@ -560,7 +583,7 @@ impl DecodedFrame {
         let mut pixel_idx = 0usize;
         for y in y_start..y_end {
             for x in x_start..x_end {
-                let y_idx = (y * self.width + x) as usize;
+                let y_idx = y as usize * self.width as usize + x as usize;
                 let y_val = (self.y_plane[y_idx] >> shift) as i32;
                 let (cb_val, cr_val) = self.get_chroma(x, y, shift);
                 let (r, g, b) = self.ycbcr_to_rgb(y_val, cb_val, cr_val);
@@ -602,7 +625,7 @@ impl DecodedFrame {
         let mut pixel_idx = 0usize;
         for y in y_start..y_end {
             for x in x_start..x_end {
-                let y_idx = (y * self.width + x) as usize;
+                let y_idx = y as usize * self.width as usize + x as usize;
                 let y_val = (self.y_plane[y_idx] >> shift) as i32;
                 let (cb_val, cr_val) = self.get_chroma(x, y, shift);
                 let (r, g, b) = self.ycbcr_to_rgb(y_val, cb_val, cr_val);
@@ -643,7 +666,7 @@ impl DecodedFrame {
         let mut offset = 0;
         for y in y_start..y_end {
             for x in x_start..x_end {
-                let y_idx = (y * self.width + x) as usize;
+                let y_idx = y as usize * self.width as usize + x as usize;
                 let y_val = (self.y_plane[y_idx] >> shift) as i32;
                 let (cb_val, cr_val) = self.get_chroma(x, y, shift);
                 let (r, g, b) = self.ycbcr_to_rgb(y_val, cb_val, cr_val);
@@ -675,7 +698,7 @@ impl DecodedFrame {
         let mut pixel_idx = 0usize;
         for y in y_start..y_end {
             for x in x_start..x_end {
-                let y_idx = (y * self.width + x) as usize;
+                let y_idx = y as usize * self.width as usize + x as usize;
                 let y_val = (self.y_plane[y_idx] >> shift) as i32;
 
                 let (cb_val, cr_val) = self.get_chroma(x, y, shift);
@@ -744,7 +767,7 @@ impl DecodedFrame {
             }
             3 => {
                 // 4:4:4 - full resolution
-                let c_idx = (y * self.width + x) as usize;
+                let c_idx = y as usize * self.width as usize + x as usize;
                 let cb = if c_idx < self.cb_plane.len() {
                     (self.cb_plane[c_idx] >> shift) as i32
                 } else {
@@ -767,7 +790,9 @@ impl DecodedFrame {
     /// The returned value has `bit_depth` significant bits.
     #[inline]
     pub fn get_y(&self, x: u32, y: u32) -> u16 {
-        let idx = (y * self.width + x) as usize;
+        // Promote to usize before multiplication so a near-u32::MAX width
+        // cannot wrap and produce a wrong-but-in-bounds index.
+        let idx = y as usize * self.width as usize + x as usize;
         if idx < self.y_plane.len() {
             self.y_plane[idx]
         } else {
@@ -919,7 +944,7 @@ impl DecodedFrame {
         let mut pixel_idx = 0usize;
         for y in y_start..y_end {
             for x in x_start..x_end {
-                let y_idx = (y * self.width + x) as usize;
+                let y_idx = y as usize * self.width as usize + x as usize;
                 let y_val = self.y_plane[y_idx] as i32;
                 let (cb_val, cr_val) = self.get_chroma_native(x, y);
                 let (r, g, b) = self.ycbcr_to_rgb_native(y_val, cb_val, cr_val, max_val, neutral);
@@ -984,7 +1009,7 @@ impl DecodedFrame {
                 (cb, cr)
             }
             3 => {
-                let c_idx = (y * self.width + x) as usize;
+                let c_idx = y as usize * self.width as usize + x as usize;
                 let cb = if c_idx < self.cb_plane.len() {
                     self.cb_plane[c_idx] as i32
                 } else {
@@ -1170,5 +1195,49 @@ mod tests {
         assert_eq!(frame.total_cropped_pixels(), 20_000);
         assert_eq!(frame.total_cropped_bytes(3), 60_000);
         assert_eq!(frame.total_cropped_bytes(4), 80_000);
+    }
+
+    /// Regression for CR-1: a frame where the conformance crop offsets
+    /// would underflow `width - crop_left - crop_right` must NOT panic
+    /// on subtraction. `cropped_width` saturates to zero rather than
+    /// wrapping to `~u32::MAX`.
+    #[test]
+    fn cropped_width_saturates_on_oversized_crop() {
+        let mut frame = frame_with_cropped_dims(16, 16);
+        // Bypass `set_crop` clamping and assign the raw fields so the
+        // getters' saturation behaviour itself is verified.
+        frame.crop_left = 0;
+        frame.crop_right = 200;
+        frame.crop_top = 0;
+        frame.crop_bottom = 0;
+        // `width - crop_left - crop_right` would underflow; we must get
+        // 0, not `u32::MAX - 183`.
+        assert_eq!(frame.cropped_width(), 0);
+        // total_cropped_pixels and bytes must therefore be 0, not many GiB.
+        assert_eq!(frame.total_cropped_pixels(), 0);
+        assert_eq!(frame.total_cropped_bytes(4), 0);
+    }
+
+    /// Regression for CR-1 (companion): same as above but vertical.
+    #[test]
+    fn cropped_height_saturates_on_oversized_crop() {
+        let mut frame = frame_with_cropped_dims(16, 16);
+        frame.crop_top = 100;
+        frame.crop_bottom = 100;
+        assert_eq!(frame.cropped_height(), 0);
+    }
+
+    /// Regression for CR-1: `set_crop` itself clamps so callers cannot
+    /// install offsets that wrap the cropped getters even if the SPS
+    /// parse-time validation is bypassed.
+    #[test]
+    fn set_crop_clamps_oversized_offsets() {
+        let mut frame = frame_with_cropped_dims(16, 16);
+        frame.set_crop(100, 100, 100, 100);
+        // After clamping: cropped width >= 1 and height >= 1, never wraps.
+        assert!(frame.cropped_width() >= 1);
+        assert!(frame.cropped_height() >= 1);
+        assert!(frame.cropped_width() <= frame.width);
+        assert!(frame.cropped_height() <= frame.height);
     }
 }

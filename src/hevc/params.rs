@@ -9,6 +9,16 @@ use crate::error::HevcError;
 
 type Result<T> = core::result::Result<T, HevcError>;
 
+/// Upper bound for `pic_width_in_luma_samples` and
+/// `pic_height_in_luma_samples` enforced at SPS parse time.
+///
+/// HEVC Level 6.2 caps luma dimensions at 8192×4320; we accept up to
+/// 16384 on each axis to allow some headroom for non-conforming but
+/// plausible content while rejecting crafted u32-scale values that
+/// would otherwise feed the picture-buffer allocator with attacker-
+/// chosen sizes.
+pub const MAX_SPS_DIM: u32 = 16384;
+
 /// Video Parameter Set
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -494,12 +504,65 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
     let pic_width_in_luma_samples = reader.read_ue()?;
     let pic_height_in_luma_samples = reader.read_ue()?;
 
+    // Cap luma dimensions before they feed allocators downstream. The HEVC
+    // spec's highest non-extension level (6.2) is 8192x4320; we accept up
+    // to MAX_SPS_DIM on each axis to leave headroom for unusual but
+    // plausible content while still rejecting attacker-crafted u32::MAX
+    // values that would drive the picture-buffer allocator into OOM.
+    if pic_width_in_luma_samples == 0 || pic_width_in_luma_samples > MAX_SPS_DIM {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!(
+                "pic_width_in_luma_samples={pic_width_in_luma_samples} out of range (1..={MAX_SPS_DIM})"
+            ),
+        });
+    }
+    if pic_height_in_luma_samples == 0 || pic_height_in_luma_samples > MAX_SPS_DIM {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!(
+                "pic_height_in_luma_samples={pic_height_in_luma_samples} out of range (1..={MAX_SPS_DIM})"
+            ),
+        });
+    }
+
     let conformance_window_flag = reader.read_bit()? != 0;
     let conf_win_offset = if conformance_window_flag {
         let left = reader.read_ue()?;
         let right = reader.read_ue()?;
         let top = reader.read_ue()?;
         let bottom = reader.read_ue()?;
+
+        // Validate conformance-window offsets against the picture dimensions
+        // *at parse time*, in luma-sample units (i.e. multiplied by SubWidthC/
+        // SubHeightC). Without this gate, `cropped_width()` and the crop
+        // multiplications in mod.rs underflow / wrap on crafted input.
+        let (sub_width_c, sub_height_c) = match chroma_format_idc {
+            0 => (1u32, 1u32),
+            1 => (2, 2),
+            2 => (2, 1),
+            3 => (1, 1),
+            _ => (2, 2),
+        };
+        let left_luma = left.checked_mul(sub_width_c);
+        let right_luma = right.checked_mul(sub_width_c);
+        let top_luma = top.checked_mul(sub_height_c);
+        let bottom_luma = bottom.checked_mul(sub_height_c);
+        let horiz = left_luma.and_then(|l| right_luma.and_then(|r| l.checked_add(r)));
+        let vert = top_luma.and_then(|t| bottom_luma.and_then(|b| t.checked_add(b)));
+        match (horiz, vert) {
+            (Some(h), Some(v))
+                if h < pic_width_in_luma_samples && v < pic_height_in_luma_samples => {}
+            _ => {
+                return Err(HevcError::InvalidParameterSet {
+                    kind: "SPS",
+                    msg: alloc::format!(
+                        "conformance window offsets ({left},{right},{top},{bottom}) exceed picture dimensions {pic_width_in_luma_samples}x{pic_height_in_luma_samples}"
+                    ),
+                });
+            }
+        }
+
         (left, right, top, bottom)
     } else {
         (0, 0, 0, 0)
