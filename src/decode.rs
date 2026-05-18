@@ -12,9 +12,8 @@ use whereat::at;
 use crate::error::check_stop;
 use crate::heif::{self, CleanAperture, ColorInfo, FourCC, ItemType, Transform};
 use crate::{
-    DecodeOutput, DecoderConfig, GainMapOrigin, HdrGainMap, HeicError, Limits, PixelLayout,
-    Result, floor_f64,
-    round_f64,
+    DecodeOutput, DecoderConfig, GainMapOrigin, HdrGainMap, HeicError, Limits, PixelLayout, Result,
+    floor_f64, round_f64,
 };
 
 /// Maximum derived-image (iden/grid/iovl) recursion depth.
@@ -380,7 +379,14 @@ fn decode_tmap(
         .get_item(base_id)
         .ok_or_else(|| at!(HeicError::InvalidData("tmap base image not found")))?;
 
-    decode_item(container, &base_item, budget.deeper(), limits, stop, max_threads)
+    decode_item(
+        container,
+        &base_item,
+        budget.deeper(),
+        limits,
+        stop,
+        max_threads,
+    )
 }
 
 /// Decode an image overlay (iovl) by compositing referenced tiles onto a canvas.
@@ -1949,7 +1955,9 @@ pub(crate) fn decode_gain_map(data: &[u8]) -> Result<HdrGainMap> {
         return decode_gainmap_image_item(
             &container,
             &gainmap_item,
-            container.find_xmp_for_item(gainmap_id).map(|c| c.into_owned()),
+            container
+                .find_xmp_for_item(gainmap_id)
+                .map(|c| c.into_owned()),
             None,
             GainMapOrigin::AppleAuxItem,
         );
