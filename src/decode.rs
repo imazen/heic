@@ -12,8 +12,8 @@ use whereat::at;
 use crate::error::check_stop;
 use crate::heif::{self, CleanAperture, ColorInfo, FourCC, ItemType, Transform};
 use crate::{
-    DecodeOutput, DecoderConfig, HdrGainMap, HeicError, Limits, PixelLayout, Result, floor_f64,
-    round_f64,
+    DecodeOutput, DecoderConfig, GainMapOrigin, HdrGainMap, HeicError, Limits, PixelLayout, Result,
+    floor_f64, round_f64,
 };
 
 /// Maximum derived-image (iden/grid/iovl) recursion depth.
@@ -228,6 +228,7 @@ fn decode_item(
         ItemType::Grid => decode_grid(container, item, budget, limits, stop, max_threads)?,
         ItemType::Iden => decode_iden(container, item, budget, limits, stop, max_threads)?,
         ItemType::Iovl => decode_iovl(container, item, budget, limits, stop, max_threads)?,
+        ItemType::Tmap => decode_tmap(container, item, budget, limits, stop, max_threads)?,
         ItemType::Hvc1 | ItemType::Unknown(_) => {
             // HEVC path — Unknown falls through to HEVC for backwards compat
             // Check limits before HEVC decode to avoid OOM from crafted SPS
@@ -348,6 +349,39 @@ fn decode_iden(
     decode_item(
         container,
         &source_item,
+        budget.deeper(),
+        limits,
+        stop,
+        max_threads,
+    )
+}
+
+/// Decode a `tmap` derived image item (HEIF Amendment 1 / ISO 23008-12:2025).
+///
+/// The displayed result of a `tmap` item is its **base** image (first `dimg`
+/// reference). The other reference is the gain map image, reached via
+/// [`DecoderConfig::decode_gain_map`]. The `tmap` payload itself is the
+/// ISO 21496-1 binary metadata blob — also surfaced via `decode_gain_map`.
+fn decode_tmap(
+    container: &heif::HeifContainer<'_>,
+    tmap_item: &heif::Item,
+    budget: DecodeBudget<'_>,
+    limits: &Limits,
+    stop: &dyn Stop,
+    max_threads: Option<usize>,
+) -> Result<crate::hevc::DecodedFrame> {
+    let source_ids = container.get_item_references(tmap_item.id, FourCC::DIMG);
+    let &base_id = source_ids
+        .first()
+        .ok_or_else(|| at!(HeicError::InvalidData("tmap item has no dimg reference")))?;
+
+    let base_item = container
+        .get_item(base_id)
+        .ok_or_else(|| at!(HeicError::InvalidData("tmap base image not found")))?;
+
+    decode_item(
+        container,
+        &base_item,
         budget.deeper(),
         limits,
         stop,
@@ -1886,32 +1920,96 @@ fn decode_alpha_plane(
     Some(alpha_plane)
 }
 
-/// Decode gain map from Apple HDR HEIC.
+/// Decode the HDR gain map from a HEIC/HEIF file.
 ///
-/// Returns the grayscale gain map pixels scaled to 8-bit, along with
-/// the source bit depth and any XMP metadata associated with the gain map item.
+/// Detects both gain map carriage mechanisms:
+/// 1. **Apple aux item** (iOS 14+) — `urn:com:apple:photo:2020:aux:hdrgainmap`
+///    auxiliary image with XMP metadata. The grayscale Y plane is the gain
+///    map; metadata is parsed from `xmp`.
+/// 2. **HEIF Amendment 1 `tmap`** (ISO 23008-12:2025) — `tmap` derived image
+///    item whose payload is the ISO 21496-1 binary blob (AVIF tmap variant).
+///    `dimg` references point at `[base_image, gain_map_image]`; the second
+///    reference is decoded as the grayscale gain map.
+///
+/// The Apple path is preferred when both are present.
 pub(crate) fn decode_gain_map(data: &[u8]) -> Result<HdrGainMap> {
     let container = heif::parse(data, &Unstoppable)?;
     let primary_item = container
         .primary_item()
         .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
 
-    let gainmap_ids =
-        container.find_auxiliary_items(primary_item.id, "urn:com:apple:photo:2020:aux:hdrgainmap");
-
-    let &gainmap_id = gainmap_ids
+    // 1. Apple aux item path (existing).
+    if let Some(&gainmap_id) = container
+        .find_auxiliary_items(primary_item.id, "urn:com:apple:photo:2020:aux:hdrgainmap")
         .first()
-        .ok_or_else(|| at!(HeicError::InvalidData("No HDR gain map found")))?;
+    {
+        let gainmap_item = container
+            .get_item(gainmap_id)
+            .ok_or_else(|| at!(HeicError::InvalidData("Missing gain map item")))?;
+        return decode_gainmap_image_item(
+            &container,
+            &gainmap_item,
+            container
+                .find_xmp_for_item(gainmap_id)
+                .map(|c| c.into_owned()),
+            None,
+            GainMapOrigin::AppleAuxItem,
+        );
+    }
 
-    let gainmap_item = container
-        .get_item(gainmap_id)
-        .ok_or_else(|| at!(HeicError::InvalidData("Missing gain map item")))?;
+    // 2. HEIF Amendment 1 `tmap` path.
+    if let Some((tmap_item, gainmap_id, iso_bytes)) = find_tmap_gain_map(&container) {
+        let gainmap_item = container
+            .get_item(gainmap_id)
+            .ok_or_else(|| at!(HeicError::InvalidData("Missing tmap gain map item")))?;
+        // Optional XMP attached to the tmap item itself (rare but allowed).
+        let xmp = container
+            .find_xmp_for_item(tmap_item)
+            .map(|c| c.into_owned());
+        return decode_gainmap_image_item(
+            &container,
+            &gainmap_item,
+            xmp,
+            Some(iso_bytes),
+            GainMapOrigin::HeifTmap,
+        );
+    }
 
-    // Use decode_item to handle grids, iden, and plain HEVC gain maps
+    Err(at!(HeicError::InvalidData("No HDR gain map found")))
+}
+
+/// Locate a `tmap` derived item plus its gain map image reference, if any.
+///
+/// Returns `(tmap_item_id, gainmap_item_id, iso21496_bytes)`. Per
+/// av1-avif §4.2.2 and ISO 21496-1, `tmap` references `[base, gainmap]`
+/// via `dimg`; the second reference is the gain map image.
+fn find_tmap_gain_map(container: &heif::HeifContainer<'_>) -> Option<(u32, u32, Vec<u8>)> {
+    for tmap in container.items().filter(|i| i.item_type == ItemType::Tmap) {
+        let refs = container.get_item_references(tmap.id, FourCC::DIMG);
+        // Need at least two references (base + gain map); skip otherwise.
+        let &gainmap_id = refs.get(1)?;
+        let iso_bytes = container.get_item_data(tmap.id).ok()?.into_owned();
+        if iso_bytes.is_empty() {
+            continue;
+        }
+        return Some((tmap.id, gainmap_id, iso_bytes));
+    }
+    None
+}
+
+/// Shared post-processing: decode the gain map HEVC item, take its Y plane,
+/// scale to 8-bit, and assemble the public [`HdrGainMap`].
+fn decode_gainmap_image_item(
+    container: &heif::HeifContainer<'_>,
+    gainmap_item: &heif::Item,
+    xmp: Option<Vec<u8>>,
+    iso21496: Option<Vec<u8>>,
+    origin: GainMapOrigin,
+) -> Result<HdrGainMap> {
     let counter = DerivedCounter::new(0);
     let frame = decode_item(
-        &container,
-        &gainmap_item,
+        container,
+        gainmap_item,
         DecodeBudget::root(&counter),
         &Limits::default(),
         &Unstoppable,
@@ -1922,7 +2020,6 @@ pub(crate) fn decode_gain_map(data: &[u8]) -> Result<HdrGainMap> {
     let height = frame.cropped_height();
     let bit_depth = frame.bit_depth;
 
-    // Extract Y plane as grayscale, scale to 8-bit if needed
     let total_pixels = (width as usize)
         .checked_mul(height as usize)
         .ok_or_else(|| at!(HeicError::LimitExceeded("gain map dimensions overflow")))?;
@@ -1949,30 +2046,31 @@ pub(crate) fn decode_gain_map(data: &[u8]) -> Result<HdrGainMap> {
         }
     }
 
-    // Extract XMP metadata associated with the gain map item (if any)
-    let xmp = container
-        .find_xmp_for_item(gainmap_id)
-        .map(|cow| cow.into_owned());
-
     Ok(HdrGainMap {
         data: grayscale,
         width,
         height,
         bit_depth,
         xmp,
+        iso21496,
+        origin,
     })
 }
 
-/// Check if the primary image has an HDR gain map auxiliary image.
+/// Check if the primary image has an HDR gain map, by either mechanism.
 pub(crate) fn has_gain_map(data: &[u8]) -> Result<bool> {
     let container = heif::parse(data, &Unstoppable)?;
     let primary_item = container
         .primary_item()
         .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
 
-    let gainmap_ids =
-        container.find_auxiliary_items(primary_item.id, "urn:com:apple:photo:2020:aux:hdrgainmap");
-    Ok(!gainmap_ids.is_empty())
+    if !container
+        .find_auxiliary_items(primary_item.id, "urn:com:apple:photo:2020:aux:hdrgainmap")
+        .is_empty()
+    {
+        return Ok(true);
+    }
+    Ok(find_tmap_gain_map(&container).is_some())
 }
 
 /// Apply clean aperture (clap box) crop to a decoded frame
