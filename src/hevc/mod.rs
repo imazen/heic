@@ -8,6 +8,7 @@ pub(crate) mod cabac;
 pub(crate) mod color_convert;
 #[cfg(target_arch = "aarch64")]
 mod color_convert_neon;
+mod color_convert_wasm;
 mod ctu;
 mod deblock;
 pub(crate) mod debug;
