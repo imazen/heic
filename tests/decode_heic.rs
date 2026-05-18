@@ -501,7 +501,10 @@ fn test_wpp_with_emulation_prevention_bytes() {
     let frame = DecoderConfig::new()
         .decode_to_frame(&data)
         .expect("decode_to_frame");
-    assert_eq!((frame.cropped_width(), frame.cropped_height()), (3024, 4032));
+    assert_eq!(
+        (frame.cropped_width(), frame.cropped_height()),
+        (3024, 4032)
+    );
 
     // (rotated_x, rotated_y, expected Y, expected Cb, expected Cr) at points
     // inside what used to be the corrupted tile #39. Tile 39 sits at
