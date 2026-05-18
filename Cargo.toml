@@ -11,6 +11,8 @@ categories = ["multimedia::images", "parser-implementations"]
 include = [
     "/src/**",
     "/tests/**",
+    "/testdata/**",
+    "/fuzz/regression/**",
     "/benches/**",
     "/examples/**",
     "/README.md",

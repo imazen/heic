@@ -1,20 +1,55 @@
-//! Integration tests for HEIC decoding
+//! Integration tests for HEIC decoding.
+//!
+//! `example_heic()` reads `testdata/libheif-examples/example.heic` which ships
+//! with the crate. The other helpers (`iphone_heic`, `nokia_path_or_skip`,
+//! ...) reach into a developer corpus selected via `HEIC_TEST_DIR`. Tests
+//! that need such files return early with an `eprintln!` when the file is
+//! absent rather than failing — the env-var-controlled skip is the
+//! caller-visible toggle.
 
 use heic::DecoderConfig;
+use std::path::PathBuf;
 
-fn heic_base_dir() -> String {
-    std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into())
+/// Directory holding committed test data inside the crate (`testdata/`).
+fn testdata_dir() -> PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata")
 }
 
-fn example_heic() -> String {
-    format!("{}/libheif/examples/example.heic", heic_base_dir())
+/// Root for developer-only corpora (iPhone shots, Nokia stills, issue
+/// reproducers). Resolved via `HEIC_TEST_DIR` so the test suite skips
+/// without failing when the corpus is not present.
+fn heic_base_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("HEIC_TEST_DIR") {
+        return Some(PathBuf::from(dir));
+    }
+    let default = PathBuf::from("/home/lilith/work/heic");
+    default.exists().then_some(default)
 }
 
-fn iphone_heic() -> String {
-    format!(
-        "{}/test-images/classic-car-iphone12pro.heic",
-        heic_base_dir()
-    )
+/// Path to the libheif example image. Shipped under `testdata/`.
+fn example_heic() -> PathBuf {
+    testdata_dir().join("libheif-examples/example.heic")
+}
+
+/// Path to the iPhone reference image, or `None` if the developer corpus is
+/// not configured.
+fn iphone_heic() -> Option<PathBuf> {
+    Some(heic_base_dir()?.join("test-images/classic-car-iphone12pro.heic"))
+}
+
+/// Skip helper: returns the path, or prints a SKIP message and `None`.
+fn require_path(path: Option<PathBuf>, name: &str) -> Option<PathBuf> {
+    match path {
+        Some(p) if p.exists() => Some(p),
+        Some(p) => {
+            eprintln!("SKIP {name}: {} not found (set HEIC_TEST_DIR)", p.display());
+            None
+        }
+        None => {
+            eprintln!("SKIP {name}: HEIC_TEST_DIR not set");
+            None
+        }
+    }
 }
 
 #[test]
@@ -320,7 +355,10 @@ fn test_raw_yuv_values() {
 
 #[test]
 fn test_extract_exif() {
-    let data = std::fs::read(iphone_heic()).expect("read");
+    let Some(path) = require_path(iphone_heic(), "test_extract_exif") else {
+        return;
+    };
+    let data = std::fs::read(&path).expect("read");
     let decoder = DecoderConfig::new();
 
     let exif = decoder.extract_exif(&data).expect("extract_exif");
@@ -369,7 +407,10 @@ fn test_image_info_no_exif() {
 #[test]
 fn test_image_info_grid_with_exif() {
     // iPhone HEIC: grid image with EXIF + XMP
-    let data = std::fs::read(iphone_heic()).expect("read");
+    let Some(path) = require_path(iphone_heic(), "test_image_info_grid_with_exif") else {
+        return;
+    };
+    let data = std::fs::read(&path).expect("read");
     let info = heic::ImageInfo::from_bytes(&data).expect("probe grid image");
     assert!(info.has_exif, "iPhone HEIC should have EXIF");
     assert!(info.has_xmp, "iPhone HEIC should have XMP");
@@ -385,7 +426,10 @@ fn test_image_info_grid_with_exif() {
 
 #[test]
 fn test_extract_xmp() {
-    let data = std::fs::read(iphone_heic()).expect("read");
+    let Some(path) = require_path(iphone_heic(), "test_extract_xmp") else {
+        return;
+    };
+    let data = std::fs::read(&path).expect("read");
     let decoder = DecoderConfig::new();
     let xmp = decoder.extract_xmp(&data).expect("extract_xmp");
     // XMP may or may not be present; just ensure no crash
@@ -432,8 +476,12 @@ fn test_image_info_has_thumbnail() {
 #[test]
 fn test_decode_thumbnail_none() {
     // Nokia test files typically don't have thumbnails
-    let nokia_path = format!("{}/test-images/nokia/C001.heic", heic_base_dir());
-    if let Ok(data) = std::fs::read(nokia_path) {
+    let Some(base) = heic_base_dir() else {
+        eprintln!("SKIP test_decode_thumbnail_none: HEIC_TEST_DIR not set");
+        return;
+    };
+    let nokia_path = base.join("test-images/nokia/C001.heic");
+    if let Ok(data) = std::fs::read(&nokia_path) {
         let decoder = DecoderConfig::new();
         let thumb = decoder
             .decode_thumbnail(&data, heic::PixelLayout::Rgb8)
@@ -451,7 +499,11 @@ fn test_image_info_matches_decoded_dimensions() {
     // Regression: ImageInfo returned raw (pre-transform) dimensions while decoder
     // applied irot/imir/clap transforms, causing dimension mismatch panics.
     // iPhone photos have irot 90°, making raw 4032x3024 → decoded 3024x4032.
-    let data = std::fs::read(iphone_heic()).expect("read");
+    let Some(path) = require_path(iphone_heic(), "test_image_info_matches_decoded_dimensions")
+    else {
+        return;
+    };
+    let data = std::fs::read(&path).expect("read");
     let info = heic::ImageInfo::from_bytes(&data).expect("probe");
 
     let decoder = DecoderConfig::new();
@@ -483,11 +535,14 @@ fn test_wpp_with_emulation_prevention_bytes() {
     // and produces garbled pixels for the rest of that tile.
     //
     // The image is gated on HEIC_TEST_DIR because it is too large to commit.
-    let path = format!("{}/test-images/issue12/IMG_1411.HEIC", heic_base_dir());
-    if !std::path::Path::new(&path).exists() {
-        eprintln!("SKIP: {path} not available — set HEIC_TEST_DIR or place the file");
+    let Some(base) = heic_base_dir() else {
+        eprintln!("SKIP test_wpp_with_emulation_prevention_bytes: HEIC_TEST_DIR not set");
         return;
-    }
+    };
+    let path = base.join("test-images/issue12/IMG_1411.HEIC");
+    let Some(path) = require_path(Some(path), "test_wpp_with_emulation_prevention_bytes") else {
+        return;
+    };
     let data = std::fs::read(&path).expect("read IMG_1411.HEIC");
 
     let info = heic::ImageInfo::from_bytes(&data).expect("probe");
