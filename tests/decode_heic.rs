@@ -355,7 +355,9 @@ fn test_raw_yuv_values() {
 
 #[test]
 fn test_extract_exif() {
-    let Some(path) = require_path(iphone_heic(), "test_extract_exif") else { return };
+    let Some(path) = require_path(iphone_heic(), "test_extract_exif") else {
+        return;
+    };
     let data = std::fs::read(&path).expect("read");
     let decoder = DecoderConfig::new();
 
@@ -405,7 +407,9 @@ fn test_image_info_no_exif() {
 #[test]
 fn test_image_info_grid_with_exif() {
     // iPhone HEIC: grid image with EXIF + XMP
-    let Some(path) = require_path(iphone_heic(), "test_image_info_grid_with_exif") else { return };
+    let Some(path) = require_path(iphone_heic(), "test_image_info_grid_with_exif") else {
+        return;
+    };
     let data = std::fs::read(&path).expect("read");
     let info = heic::ImageInfo::from_bytes(&data).expect("probe grid image");
     assert!(info.has_exif, "iPhone HEIC should have EXIF");
@@ -422,7 +426,9 @@ fn test_image_info_grid_with_exif() {
 
 #[test]
 fn test_extract_xmp() {
-    let Some(path) = require_path(iphone_heic(), "test_extract_xmp") else { return };
+    let Some(path) = require_path(iphone_heic(), "test_extract_xmp") else {
+        return;
+    };
     let data = std::fs::read(&path).expect("read");
     let decoder = DecoderConfig::new();
     let xmp = decoder.extract_xmp(&data).expect("extract_xmp");
@@ -493,7 +499,10 @@ fn test_image_info_matches_decoded_dimensions() {
     // Regression: ImageInfo returned raw (pre-transform) dimensions while decoder
     // applied irot/imir/clap transforms, causing dimension mismatch panics.
     // iPhone photos have irot 90°, making raw 4032x3024 → decoded 3024x4032.
-    let Some(path) = require_path(iphone_heic(), "test_image_info_matches_decoded_dimensions") else { return };
+    let Some(path) = require_path(iphone_heic(), "test_image_info_matches_decoded_dimensions")
+    else {
+        return;
+    };
     let data = std::fs::read(&path).expect("read");
     let info = heic::ImageInfo::from_bytes(&data).expect("probe");
 
