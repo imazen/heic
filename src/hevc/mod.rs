@@ -198,25 +198,26 @@ fn compute_ep_positions_in_slice_data(
     payload_ep_positions: &[usize],
     data_offset_rbsp: usize,
 ) -> alloc::vec::Vec<u32> {
-    // For each EP byte at EBSP position e_i (0-indexed by i), the
-    // corresponding RBSP position of the byte that was AT e_i in the
-    // pre-strip stream would have been e_i - i. So an EP byte belongs to the
-    // slice header iff e_i - i < data_offset_rbsp.
+    // For each EP byte at EBSP position e_i (0-indexed by i), the RBSP
+    // position the byte WOULD have occupied if not stripped is e_i - i. An
+    // EP byte belongs to the slice header iff that position is below
+    // data_offset_rbsp. The EBSP starting offset of slice_data is then
+    // data_offset_rbsp plus the count of header-internal EP bytes; once
+    // we've seen a slice_data EP, all later ones are also slice_data (EP
+    // positions are strictly increasing, so rbsp_pos_of_ep is monotonic).
     //
-    // The EBSP starting offset of slice_data is data_offset_rbsp plus the
-    // number of EP bytes that fell inside the slice header.
+    // EP positions are spaced at least 3 bytes apart (the 0x00 0x00 0x03
+    // pattern), so ep_pos >= 2 + 3*i > i and the subtraction never wraps.
     let mut result = alloc::vec::Vec::new();
     let mut ep_in_header: usize = 0;
     for (i, &ep_pos) in payload_ep_positions.iter().enumerate() {
-        let rbsp_pos_of_ep = ep_pos.saturating_sub(i);
+        let rbsp_pos_of_ep = ep_pos - i;
         if rbsp_pos_of_ep < data_offset_rbsp {
             ep_in_header += 1;
             continue;
         }
         let slice_data_ebsp_start = data_offset_rbsp + ep_in_header;
-        if ep_pos >= slice_data_ebsp_start {
-            result.push((ep_pos - slice_data_ebsp_start) as u32);
-        }
+        result.push((ep_pos - slice_data_ebsp_start) as u32);
     }
     result
 }
