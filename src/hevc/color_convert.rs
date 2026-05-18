@@ -17,6 +17,9 @@ use safe_unaligned_simd::x86_64::{_mm_loadu_si64, _mm_loadu_si128, _mm256_storeu
 #[cfg(target_arch = "aarch64")]
 use super::color_convert_neon::convert_420_to_rgb_neon;
 
+#[cfg(target_arch = "wasm32")]
+use super::color_convert_wasm::convert_420_to_rgb_wasm128;
+
 /// Get color matrix coefficients for YCbCr→RGB conversion.
 ///
 /// Returns (cr_r, cb_g, cr_g, cb_b, y_bias, y_scale, rounding, shift_bits).
@@ -134,43 +137,6 @@ pub fn convert_420_to_rgb(
         ),
         [v3, neon, wasm128, scalar]
     )
-}
-
-/// WASM128 variant — delegates to scalar (auto-vectorized by LLVM)
-#[cfg(target_arch = "wasm32")]
-#[allow(clippy::too_many_arguments)]
-fn convert_420_to_rgb_wasm128(
-    _token: Wasm128Token,
-    y_plane: &[u16],
-    cb_plane: &[u16],
-    cr_plane: &[u16],
-    y_stride: usize,
-    c_stride: usize,
-    y_start: u32,
-    y_end: u32,
-    x_start: u32,
-    x_end: u32,
-    shift: u32,
-    full_range: bool,
-    matrix_coeffs: u8,
-    rgb: &mut [u8],
-) {
-    convert_420_to_rgb_scalar(
-        ScalarToken,
-        y_plane,
-        cb_plane,
-        cr_plane,
-        y_stride,
-        c_stride,
-        y_start,
-        y_end,
-        x_start,
-        x_end,
-        shift,
-        full_range,
-        matrix_coeffs,
-        rgb,
-    );
 }
 
 /// Scalar YCbCr→RGB conversion (fallback for all platforms)
