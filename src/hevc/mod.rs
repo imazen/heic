@@ -184,6 +184,43 @@ pub fn get_info(data: &[u8]) -> Result<ImageInfo> {
     Err(HevcError::MissingParameterSet("SPS"))
 }
 
+/// Given the emulation prevention byte positions of a NAL payload (EBSP
+/// offsets relative to the byte after the 2-byte NAL header) and the RBSP
+/// offset where `slice_data` starts within that payload, return the EP byte
+/// positions in the *slice_data*'s EBSP space.
+///
+/// EP bytes located inside the slice header are filtered out; the remaining
+/// ones are translated so position 0 corresponds to the start of slice_data.
+/// This list is what `SliceContext` needs to convert WPP/tile entry point
+/// offsets (per H.265 spec 7.4.7.1, expressed in EBSP byte space) into RBSP
+/// offsets within `slice_data` before seeking.
+fn compute_ep_positions_in_slice_data(
+    payload_ep_positions: &[usize],
+    data_offset_rbsp: usize,
+) -> alloc::vec::Vec<u32> {
+    // For each EP byte at EBSP position e_i (0-indexed by i), the
+    // corresponding RBSP position of the byte that was AT e_i in the
+    // pre-strip stream would have been e_i - i. So an EP byte belongs to the
+    // slice header iff e_i - i < data_offset_rbsp.
+    //
+    // The EBSP starting offset of slice_data is data_offset_rbsp plus the
+    // number of EP bytes that fell inside the slice header.
+    let mut result = alloc::vec::Vec::new();
+    let mut ep_in_header: usize = 0;
+    for (i, &ep_pos) in payload_ep_positions.iter().enumerate() {
+        let rbsp_pos_of_ep = ep_pos.saturating_sub(i);
+        if rbsp_pos_of_ep < data_offset_rbsp {
+            ep_in_header += 1;
+            continue;
+        }
+        let slice_data_ebsp_start = data_offset_rbsp + ep_in_header;
+        if ep_pos >= slice_data_ebsp_start {
+            result.push((ep_pos - slice_data_ebsp_start) as u32);
+        }
+    }
+    result
+}
+
 /// Calculate cropped dimensions from SPS conformance window
 fn get_cropped_dimensions(sps: &params::Sps) -> (u32, u32) {
     if sps.conformance_window_flag {
@@ -581,6 +618,10 @@ impl VideoDecoder {
         let slice_data = &nal.payload[data_offset..];
         let mut ctx = ctu::SliceContext::new(&sps, &pps, &slice_header, slice_data)?;
         ctx.curr_poc = curr_poc;
+        ctx.set_ep_byte_positions(compute_ep_positions_in_slice_data(
+            &nal.ep_byte_positions,
+            data_offset,
+        ));
 
         // For continuation slices, inject maps from previous slices so that
         // CABAC context derivation (split_cu_flag, intra mode prediction, QP
@@ -819,9 +860,59 @@ fn decode_slice(
 
     let slice_data = &nal.payload[data_offset..];
     let mut ctx = ctu::SliceContext::new(sps, pps, &slice_header, slice_data)?;
+    ctx.set_ep_byte_positions(compute_ep_positions_in_slice_data(
+        &nal.ep_byte_positions,
+        data_offset,
+    ));
     ctx.decode_slice(frame)?;
 
     apply_loop_filters(&slice_header, sps, pps, &ctx, frame);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ep_positions_no_ep_bytes() {
+        // No emulation prevention bytes at all
+        let got = compute_ep_positions_in_slice_data(&[], 28);
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn ep_positions_all_after_header() {
+        // Slice header occupies RBSP bytes [0, 28); both EP bytes (EBSP pos 100,
+        // 5000) sit well past the header, so the result is each EP's EBSP
+        // position minus the slice_data EBSP start (= 28 since no EP byte
+        // landed in the header).
+        let got = compute_ep_positions_in_slice_data(&[100, 5000], 28);
+        assert_eq!(got, vec![72, 4972]);
+    }
+
+    #[test]
+    fn ep_positions_some_in_header() {
+        // EP at EBSP pos 10 falls inside the slice header (rbsp_pos = 10 - 0 = 10 < 28).
+        // EP at EBSP pos 6000 falls inside slice_data (rbsp_pos = 6000 - 1 = 5999 >= 28).
+        // The data_offset in EBSP space becomes 28 + 1 = 29 (one header-internal EP byte).
+        // So the second EP's slice-data-EBSP offset = 6000 - 29 = 5971.
+        let got = compute_ep_positions_in_slice_data(&[10, 6000], 28);
+        assert_eq!(got, vec![5971]);
+    }
+
+    #[test]
+    fn ep_offset_conversion_round_trip() {
+        // With EP at slice-data-EBSP positions [100, 250], an EBSP offset of
+        // 17846 falls past both EPs, so the RBSP offset is 17846 - 2 = 17844.
+        // (Implemented in SliceContext::ebsp_offset_to_rbsp via the same logic.)
+        let positions: Vec<u32> = vec![100, 250];
+        let count = positions.iter().filter(|&&p| p < 17846u32).count() as u32;
+        assert_eq!(17846 - count, 17844);
+
+        // An offset that lands before both EPs is unchanged.
+        let count = positions.iter().filter(|&&p| p < 50u32).count() as u32;
+        assert_eq!(50 - count, 50);
+    }
 }

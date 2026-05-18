@@ -242,6 +242,10 @@ pub struct SliceContext<'a> {
     /// Rice parameter initialization states (H.265 StatCoeff[0..3])
     /// Persists across TUs within a substream; saved/restored for WPP
     pub stat_coeff: [u8; 4],
+    /// Emulation prevention byte positions in slice_data EBSP space.
+    /// Used to convert WPP/tile entry point offsets (EBSP-relative per spec
+    /// 7.4.7.1) to positions within `slice_data` (RBSP) before seeking.
+    ep_byte_positions: Vec<u32>,
     /// Reusable scratch buffer for motion compensation two-pass filtering
     mc_scratch: mc::McScratch,
 
@@ -566,6 +570,7 @@ impl<'a> SliceContext<'a> {
             residual_buf: [0i16; 1024],
             scaling_buf: [16u8; 1024],
             stat_coeff: [0u8; 4],
+            ep_byte_positions: Vec::new(),
             mc_scratch: mc::McScratch::default(),
             pred_mode_map: try_vec![PredMode::Intra; pu_map_size]?,
             mv_info: try_vec![PbMotion::UNAVAILABLE; pu_map_size]?,
@@ -595,6 +600,28 @@ impl<'a> SliceContext<'a> {
                 vec![0, sps.pic_height_in_ctbs()]
             },
         })
+    }
+
+    /// Provide emulation prevention byte positions for this slice's data.
+    ///
+    /// `positions` must list, in ascending order, the EBSP positions (within
+    /// `slice_data`) of the 0x03 bytes that were stripped from the RBSP.
+    /// Used by the WPP / tile boundary seek logic to convert the
+    /// EBSP-relative entry point offsets from the slice header into RBSP
+    /// offsets within `slice_data`.
+    pub fn set_ep_byte_positions(&mut self, positions: Vec<u32>) {
+        self.ep_byte_positions = positions;
+    }
+
+    /// Convert an EBSP byte offset within `slice_data` to the corresponding
+    /// RBSP offset, accounting for stripped emulation prevention bytes.
+    fn ebsp_offset_to_rbsp(&self, ebsp_offset: u32) -> u32 {
+        let count = self
+            .ep_byte_positions
+            .iter()
+            .filter(|&&p| p < ebsp_offset)
+            .count() as u32;
+        ebsp_offset - count
     }
 
     /// Inject picture-level maps from a previous slice into this slice context.
@@ -778,9 +805,14 @@ impl<'a> SliceContext<'a> {
                     // No saved state: reset to 0 per spec
                     self.stat_coeff = [0; 4];
                 }
-                // Reinitialize CABAC at the substream entry point
+                // Reinitialize CABAC at the substream entry point.
+                // Spec 7.4.7.1: entry point offsets are in EBSP byte space
+                // (i.e. they count emulation prevention bytes that are part of
+                // the bitstream). Our slice_data is RBSP, so convert before
+                // seeking.
                 if entry_idx < entry_byte_offsets.len() {
-                    let target_byte = entry_byte_offsets[entry_idx] as usize;
+                    let ebsp_target = entry_byte_offsets[entry_idx];
+                    let target_byte = self.ebsp_offset_to_rbsp(ebsp_target) as usize;
                     self.cabac.seek_to(target_byte);
                     self.cabac.reinit();
                     #[cfg(feature = "std")]
@@ -788,8 +820,8 @@ impl<'a> SliceContext<'a> {
                         let (post_pos, _, _) = self.cabac.get_position();
                         let (r, v, bn) = self.cabac.get_state_extended();
                         eprintln!(
-                            "WPP: row {} seek {}→{} (entry={}) after_reinit_pos={} cabac(r={},v={},bn={})",
-                            self.ctb_y, pre_seek_pos, target_byte, target_byte, post_pos, r, v, bn
+                            "WPP: row {} seek {}→{} (entry_ebsp={}) after_reinit_pos={} cabac(r={},v={},bn={})",
+                            self.ctb_y, pre_seek_pos, target_byte, ebsp_target, post_pos, r, v, bn
                         );
                         // Print first few context model states
                         let ctx_sum: u32 = self.ctx.iter().map(|c| c.get_state().0 as u32).sum();
@@ -925,9 +957,11 @@ impl<'a> SliceContext<'a> {
                         );
                     }
 
-                    // Reinitialize CABAC at the entry point for this tile
+                    // Reinitialize CABAC at the entry point for this tile.
+                    // Entry point offsets are EBSP-relative; convert to RBSP.
                     if entry_idx < entry_byte_offsets.len() {
-                        let target_byte = entry_byte_offsets[entry_idx] as usize;
+                        let ebsp_target = entry_byte_offsets[entry_idx];
+                        let target_byte = self.ebsp_offset_to_rbsp(ebsp_target) as usize;
                         self.cabac.seek_to(target_byte);
                         self.cabac.reinit();
                         entry_idx += 1;

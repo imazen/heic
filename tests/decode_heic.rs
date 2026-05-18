@@ -470,3 +470,72 @@ fn test_image_info_matches_decoded_dimensions() {
         info.height, decoded.height
     );
 }
+
+#[test]
+fn test_wpp_with_emulation_prevention_bytes() {
+    // Regression for github.com/imazen/heic#12: an iPhone HEIC tile whose
+    // HEVC slice data contains an emulation prevention byte (0x03) located
+    // *within* a WPP substream after the first one. Entry point offsets in
+    // the slice header are spec'd in EBSP space (per H.265 7.4.7.1, they
+    // count emulation prevention bytes), but the decoder seeks within the
+    // already-stripped RBSP buffer. Without converting EBSP→RBSP at seek
+    // time, every WPP substream after the EP byte starts one byte too late
+    // and produces garbled pixels for the rest of that tile.
+    //
+    // The image is gated on HEIC_TEST_DIR because it is too large to commit.
+    let path = format!("{}/test-images/issue12/IMG_1411.HEIC", heic_base_dir());
+    if !std::path::Path::new(&path).exists() {
+        eprintln!("SKIP: {path} not available — set HEIC_TEST_DIR or place the file");
+        return;
+    }
+    let data = std::fs::read(&path).expect("read IMG_1411.HEIC");
+
+    let info = heic::ImageInfo::from_bytes(&data).expect("probe");
+    assert_eq!((info.width, info.height), (3024, 4032));
+
+    let decoded = DecoderConfig::new()
+        .decode(&data, heic::PixelLayout::Rgb8)
+        .expect("decode");
+    assert_eq!((decoded.width, decoded.height), (3024, 4032));
+    assert_eq!(decoded.data.len(), 3024 * 4032 * 3);
+
+    // Sanity check inside the previously-corrupted tile (rotated y≈3024–3528,
+    // rotated x≈376–940). Each 16×16 average below is taken from a position
+    // libheif decodes deterministically; the values are stable to color
+    // conversion rounding. Pre-fix decode produced wildly different (CABAC-
+    // garbled) values here.
+    let stride = (decoded.width * 3) as usize;
+    let avg16 = |y0: usize, x0: usize| -> [f32; 3] {
+        let mut acc = [0u32; 3];
+        for dy in 0..16 {
+            for dx in 0..16 {
+                let idx = (y0 + dy) * stride + (x0 + dx) * 3;
+                acc[0] += decoded.data[idx] as u32;
+                acc[1] += decoded.data[idx + 1] as u32;
+                acc[2] += decoded.data[idx + 2] as u32;
+            }
+        }
+        [acc[0] as f32 / 256.0, acc[1] as f32 / 256.0, acc[2] as f32 / 256.0]
+    };
+    // (y, x, expected_rgb) — 16×16 averages measured against libheif for
+    // this image. Pre-fix decode produced very different values here.
+    let samples: &[(usize, usize, [f32; 3])] = &[
+        (3100, 500, [157.4, 149.2, 154.0]),
+        (3200, 600, [174.1, 105.2, 114.8]),
+        (3300, 700, [152.8, 70.1, 64.0]),
+        (3400, 750, [165.9, 98.0, 107.3]),
+    ];
+    for &(y, x, expected) in samples {
+        let got = avg16(y, x);
+        for c in 0..3 {
+            let diff = (got[c] - expected[c]).abs();
+            assert!(
+                diff < 5.0,
+                "IMG_1411 16x16 avg at ({y},{x}) channel {c}: got {:.1}, expected {:.1} (diff {:.1})",
+                got[c],
+                expected[c],
+                diff
+            );
+        }
+    }
+}

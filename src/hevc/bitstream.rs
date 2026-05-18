@@ -195,6 +195,12 @@ pub struct NalUnit<'a> {
     pub nuh_temporal_id_plus1: u8,
     /// NAL unit payload (after header, emulation bytes removed)
     pub payload: Vec<u8>,
+    /// EBSP positions (in the payload's pre-removal byte stream, i.e. relative
+    /// to the byte after the 2-byte NAL header) of emulation prevention bytes
+    /// that were stripped from `payload`. WPP / tile entry point offsets are
+    /// specified in EBSP byte space, so converting EBSP→RBSP at seek time
+    /// requires this list.
+    pub ep_byte_positions: Vec<usize>,
     /// Raw data reference
     pub raw_data: &'a [u8],
 }
@@ -346,20 +352,28 @@ fn parse_nal_header(raw_data: &[u8]) -> Result<NalUnit<'_>> {
     }
 
     // Remove emulation prevention bytes (0x00 0x00 0x03 -> 0x00 0x00)
-    let payload = remove_emulation_prevention(&raw_data[2..]);
+    let (payload, ep_byte_positions) = remove_emulation_prevention(&raw_data[2..]);
 
     Ok(NalUnit {
         nal_type,
         nuh_layer_id,
         nuh_temporal_id_plus1,
         payload,
+        ep_byte_positions,
         raw_data,
     })
 }
 
-/// Remove emulation prevention bytes (0x03) from RBSP
-fn remove_emulation_prevention(data: &[u8]) -> Vec<u8> {
+/// Remove emulation prevention bytes (0x03) from RBSP.
+///
+/// Returns the RBSP and a list of EBSP byte positions (in the input `data`)
+/// where 0x03 emulation prevention bytes were stripped. The positions are
+/// strictly increasing. Callers that need to convert EBSP-relative offsets
+/// (such as WPP/tile entry points per H.265 spec) to RBSP-relative offsets
+/// can subtract the count of EP positions strictly less than the EBSP offset.
+fn remove_emulation_prevention(data: &[u8]) -> (Vec<u8>, Vec<usize>) {
     let mut result = Vec::with_capacity(data.len());
+    let mut ep_positions = Vec::new();
     let mut i = 0;
 
     while i < data.len() {
@@ -367,6 +381,7 @@ fn remove_emulation_prevention(data: &[u8]) -> Vec<u8> {
             // Emulation prevention byte found
             result.push(0);
             result.push(0);
+            ep_positions.push(i + 2); // EBSP position of the 0x03 byte
             i += 3; // Skip the 0x03
         } else {
             result.push(data[i]);
@@ -374,7 +389,7 @@ fn remove_emulation_prevention(data: &[u8]) -> Vec<u8> {
         }
     }
 
-    result
+    (result, ep_positions)
 }
 
 /// Bitstream reader for parsing RBSP data
