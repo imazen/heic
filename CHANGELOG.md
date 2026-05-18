@@ -9,6 +9,7 @@ All notable changes to the `heic` crate are documented in this file. Format foll
      Add items here as you discover them. Do NOT ship these piecemeal — batch them. -->
 
 ### Fixed
+- Image overlay (`iovl`) descriptor parsing now matches ISO/IEC 23008-12: 2-byte version+flags (not 4), always four u16 canvas fill entries (not a variable count derived from descriptor length). Fill values are interpreted as RGB and converted to YCbCr via the first tile's matrix/range before filling the canvas planes, matching libheif's RGB-space compositing. The Nokia `overlay_1000x680.heic` reference jumps from 13.1 dB PSNR to 74.6 dB.
 - Convert WPP / tile entry point offsets from EBSP byte space to RBSP before seeking, so HEIC tiles whose slice data contains an emulation prevention byte (`0x000003`) inside a WPP substream no longer produce garbled rows past the first 0x03 byte (#12)
 - Reject SPS with `pic_width_in_luma_samples` / `pic_height_in_luma_samples` outside `1..=16384` and conformance-window offsets that exceed picture dimensions, closing a panic / multi-GiB allocation reachable from the default no-limits decode path (security audit CR-1, CR-2, H-3)
 - `cropped_width` / `cropped_height` now use `saturating_sub` and `set_crop` clamps oversized offsets, so out-of-range crops cannot wrap to ~`u32::MAX` and reach `Vec::with_capacity` (CR-1)
