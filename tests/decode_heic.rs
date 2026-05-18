@@ -493,53 +493,40 @@ fn test_wpp_with_emulation_prevention_bytes() {
     let info = heic::ImageInfo::from_bytes(&data).expect("probe");
     assert_eq!((info.width, info.height), (3024, 4032));
 
-    let decoded = DecoderConfig::new()
-        .decode(&data, heic::PixelLayout::Rgb8)
-        .expect("decode");
-    assert_eq!((decoded.width, decoded.height), (3024, 4032));
-    assert_eq!(decoded.data.len(), 3024 * 4032 * 3);
+    // Decode to YCbCr directly. Our HEVC tile decode is bit-exact against
+    // dec265, so the expected Y/Cb/Cr values below are the exact byte values
+    // dec265 produced for tile 39 of the image. Asserting on the YUV plane
+    // (rather than RGB output) keeps the regression test stable across any
+    // future tweak to the YCbCr→RGB conversion path.
+    let frame = DecoderConfig::new()
+        .decode_to_frame(&data)
+        .expect("decode_to_frame");
+    assert_eq!(
+        (frame.cropped_width(), frame.cropped_height()),
+        (3024, 4032)
+    );
 
-    // Sanity check inside the previously-corrupted tile (rotated y≈3024–3528,
-    // rotated x≈376–940). Each 16×16 average below is taken from a position
-    // libheif decodes deterministically; the values are stable to color
-    // conversion rounding. Pre-fix decode produced wildly different (CABAC-
-    // garbled) values here.
-    let stride = (decoded.width * 3) as usize;
-    let avg16 = |y0: usize, x0: usize| -> [f32; 3] {
-        let mut acc = [0u32; 3];
-        for dy in 0..16 {
-            for dx in 0..16 {
-                let idx = (y0 + dy) * stride + (x0 + dx) * 3;
-                acc[0] += decoded.data[idx] as u32;
-                acc[1] += decoded.data[idx + 1] as u32;
-                acc[2] += decoded.data[idx + 2] as u32;
-            }
-        }
-        [
-            acc[0] as f32 / 256.0,
-            acc[1] as f32 / 256.0,
-            acc[2] as f32 / 256.0,
-        ]
-    };
-    // (y, x, expected_rgb) — 16×16 averages measured against libheif for
-    // this image. Pre-fix decode produced very different values here.
-    let samples: &[(usize, usize, [f32; 3])] = &[
-        (3100, 500, [157.4, 149.2, 154.0]),
-        (3200, 600, [174.1, 105.2, 114.8]),
-        (3300, 700, [152.8, 70.1, 64.0]),
-        (3400, 750, [165.9, 98.0, 107.3]),
+    // (rotated_x, rotated_y, expected Y, expected Cb, expected Cr) at points
+    // inside what used to be the corrupted tile #39. Tile 39 sits at
+    // unrotated (col=6, row=4) → unrotated x∈[3072,3584), y∈[2048,2560).
+    // irot=90 maps unrotated (ux, uy) to rotated (3023-uy, ux).
+    let samples: &[(usize, usize, u8, u8, u8)] = &[
+        (925, 3122, 14, 130, 127),
+        (875, 3272, 10, 129, 132),
+        (775, 3172, 154, 123, 132),
+        (725, 3372, 91, 121, 162),
+        (675, 3472, 105, 121, 164),
     ];
-    for &(y, x, expected) in samples {
-        let got = avg16(y, x);
-        for c in 0..3 {
-            let diff = (got[c] - expected[c]).abs();
-            assert!(
-                diff < 5.0,
-                "IMG_1411 16x16 avg at ({y},{x}) channel {c}: got {:.1}, expected {:.1} (diff {:.1})",
-                got[c],
-                expected[c],
-                diff
-            );
-        }
+    let y_stride = frame.y_stride();
+    let c_stride = frame.c_stride();
+    for &(rx, ry, exp_y, exp_cb, exp_cr) in samples {
+        let y = frame.y_plane[ry * y_stride + rx] as u8;
+        let cb = frame.cb_plane[(ry / 2) * c_stride + rx / 2] as u8;
+        let cr = frame.cr_plane[(ry / 2) * c_stride + rx / 2] as u8;
+        assert_eq!(
+            (y, cb, cr),
+            (exp_y, exp_cb, exp_cr),
+            "IMG_1411 YUV mismatch at rotated ({rx},{ry})"
+        );
     }
 }
