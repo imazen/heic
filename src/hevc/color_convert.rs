@@ -43,6 +43,59 @@ pub(crate) fn get_coefficients(
     }
 }
 
+/// Forward conversion: RGB888 → YCbCr (returned as u16 in the canvas bit
+/// depth's natural range, but the caller is responsible for shifting up if
+/// the canvas bit depth differs from 8). Used by overlay (`iovl`) canvas
+/// fill, where the descriptor stores fill values in the canvas RGB color
+/// space (per ISO/IEC 23008-12) and we composite in YCbCr.
+///
+/// `matrix_coeffs` follows the CICP convention (1=BT.709, 9=BT.2020, all
+/// other values fall through to BT.601, matching the inverse table in
+/// `get_coefficients`).
+#[must_use]
+pub(crate) fn rgb_to_ycbcr8(
+    r: u8,
+    g: u8,
+    b: u8,
+    full_range: bool,
+    matrix_coeffs: u8,
+) -> (u8, u8, u8) {
+    // Coefficients in ×1024 fixed point. Y row is fully positive, chroma
+    // rows are zero-sum modulo rounding. Pulled from ITU-R BT.601-7 §2.5.1
+    // (limited range) and the equivalent full-range derivations used by
+    // get_coefficients.
+    let (cy_r, cy_g, cy_b, cb_r, cb_g, cb_b, cr_r, cr_g, cr_b) = match (full_range, matrix_coeffs) {
+        // BT.709 limited (×1024)
+        (false, 1) => (187, 629, 63, -103, -347, 450, 450, -409, -41),
+        // BT.2020 limited (×1024)
+        (false, 9) => (230, 595, 51, -123, -319, 450, 450, -413, -36),
+        // BT.601 limited (×1024)
+        (false, _) => (263, 516, 100, -152, -298, 450, 450, -377, -73),
+        // BT.709 full (×1024)
+        (true, 1) => (218, 732, 74, -118, -394, 512, 512, -465, -47),
+        // BT.2020 full (×1024)
+        (true, 9) => (269, 692, 60, -141, -369, 512, 512, -469, -41),
+        // BT.601 full (×1024)
+        (true, _) => (306, 601, 117, -173, -339, 512, 512, -429, -83),
+    };
+    let (y_bias, c_bias) = if full_range { (0, 128) } else { (16, 128) };
+
+    let r32 = i32::from(r);
+    let g32 = i32::from(g);
+    let b32 = i32::from(b);
+    let rnd = 512; // 0.5 * 1024
+
+    let y = ((cy_r * r32 + cy_g * g32 + cy_b * b32 + rnd) >> 10) + y_bias;
+    let cb = ((cb_r * r32 + cb_g * g32 + cb_b * b32 + rnd) >> 10) + c_bias;
+    let cr = ((cr_r * r32 + cr_g * g32 + cr_b * b32 + rnd) >> 10) + c_bias;
+
+    (
+        y.clamp(0, 255) as u8,
+        cb.clamp(0, 255) as u8,
+        cr.clamp(0, 255) as u8,
+    )
+}
+
 /// Convert 4:2:0 YCbCr planes to interleaved RGB bytes.
 ///
 /// Dispatches to AVX2 when available, scalar fallback otherwise.

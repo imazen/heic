@@ -400,13 +400,23 @@ fn decode_iovl(
 ) -> Result<crate::hevc::DecodedFrame> {
     let iovl_data = container.get_item_data(iovl_item.id)?;
 
-    // Parse iovl descriptor:
-    // - version (1 byte) + flags (3 bytes)
-    // - canvas_fill_value: 2 bytes * num_channels (flags & 0x01 determines 32-bit offsets)
-    if iovl_data.len() < 6 {
+    // ISO/IEC 23008-12 ImageOverlay layout (sample-style descriptor, not a
+    // FullBox — the version/flags pair is 2 bytes, not 4):
+    //   u8 version (=0); u8 flags;
+    //   u16 canvas_fill_value[4];           // R/G/B/A or Y/Cb/Cr/A
+    //   uN  output_width;  uN  output_height;        // N = (flags&1)? 32 : 16
+    //   for tile in dimg: sN horizontal_off; sN vertical_off;
+    // libheif always emits four canvas_fill_values; readers must do the same.
+    if iovl_data.len() < 2 + 4 * 2 + 4 {
         return Err(at!(HeicError::InvalidData("Overlay descriptor too short")));
     }
 
+    let version = iovl_data[0];
+    if version != 0 {
+        return Err(at!(HeicError::Unsupported(
+            "Overlay descriptor version != 0",
+        )));
+    }
     let flags = iovl_data[1];
     let large = (flags & 1) != 0;
 
@@ -417,34 +427,25 @@ fn decode_iovl(
         )));
     }
 
-    // Calculate expected layout
     let off_size = if large { 4usize } else { 2 };
     let per_tile = 2 * off_size;
-    let fixed_end = 4 + 2 * off_size; // version/flags + width/height
-    let tile_data_size = tile_ids.len() * per_tile;
-    let fill_bytes = iovl_data
-        .len()
-        .checked_sub(fixed_end + tile_data_size)
-        .ok_or_else(|| {
-            at!(HeicError::InvalidData(
-                "Overlay descriptor too short for tiles",
-            ))
-        })?;
-
-    // Parse canvas fill values (16-bit per channel)
-    let num_fill_channels = fill_bytes / 2;
-    let mut fill_values = [0u16; 4];
-    for i in 0..num_fill_channels.min(4) {
-        fill_values[i] = u16::from_be_bytes([iovl_data[4 + i * 2], iovl_data[4 + i * 2 + 1]]);
+    let expected_len = 2 + 8 + 2 * off_size + tile_ids.len() * per_tile;
+    if iovl_data.len() < expected_len {
+        return Err(at!(HeicError::InvalidData(
+            "Overlay descriptor too short for tiles",
+        )));
     }
 
-    let mut pos = 4 + fill_bytes;
+    // Canvas fill values: always 4 u16 entries.
+    let mut fill_values = [0u16; 4];
+    for (i, v) in fill_values.iter_mut().enumerate() {
+        let off = 2 + i * 2;
+        *v = u16::from_be_bytes([iovl_data[off], iovl_data[off + 1]]);
+    }
 
-    // Read canvas dimensions
+    let mut pos = 2 + 8;
+
     let (canvas_width, canvas_height) = if large {
-        if pos + 8 > iovl_data.len() {
-            return Err(at!(HeicError::InvalidData("Overlay descriptor truncated")));
-        }
         let w = u32::from_be_bytes([
             iovl_data[pos],
             iovl_data[pos + 1],
@@ -460,9 +461,6 @@ fn decode_iovl(
         pos += 8;
         (w, h)
     } else {
-        if pos + 4 > iovl_data.len() {
-            return Err(at!(HeicError::InvalidData("Overlay descriptor truncated")));
-        }
         let w = u16::from_be_bytes([iovl_data[pos], iovl_data[pos + 1]]) as u32;
         let h = u16::from_be_bytes([iovl_data[pos + 2], iovl_data[pos + 3]]) as u32;
         pos += 4;
@@ -526,45 +524,61 @@ fn decode_iovl(
         chroma_format,
     )?;
 
-    // Apply canvas fill values (16-bit values scaled to bit depth)
-    let fill_shift = 16u32.saturating_sub(bit_depth as u32);
-    let y_fill = fill_values[0] >> fill_shift;
-    let cb_fill = if num_fill_channels > 1 {
-        fill_values[1] >> fill_shift
-    } else {
-        1u16 << (bit_depth - 1) // neutral chroma
-    };
-    let cr_fill = if num_fill_channels > 2 {
-        fill_values[2] >> fill_shift
-    } else {
-        1u16 << (bit_depth - 1) // neutral chroma
-    };
-    output.y_plane.fill(y_fill);
-    output.cb_plane.fill(cb_fill);
-    output.cr_plane.fill(cr_fill);
+    // Per ISO/IEC 23008-12 the four u16 entries are R/G/B/A in the
+    // canvas's *RGB* color space; libheif composites in 4:4:4 RGB and only
+    // converts at the end. Since we composite in YCbCr, convert the fill
+    // RGB → YCbCr first so background pixels round-trip correctly.
+    // libheif uses the high 8 bits of each u16 fill value; we do the same.
+    let fill_r = (fill_values[0] >> 8) as u8;
+    let fill_g = (fill_values[1] >> 8) as u8;
+    let fill_b = (fill_values[2] >> 8) as u8;
 
-    // Decode each tile and composite onto the canvas
+    // We need the color-conversion matrix and range to map RGB→YCbCr. They
+    // come from the first decoded tile, so decode tile 0 up front, then
+    // fill, then blit tile 0 plus the remaining tiles.
+    let first_tile = decode_item(
+        container,
+        &first_tile_item,
+        budget.deeper(),
+        limits,
+        stop,
+        max_threads,
+    )?;
+    output.full_range = first_tile.full_range;
+    output.matrix_coeffs = first_tile.matrix_coeffs;
+    let (fill_y, fill_cb, fill_cr) = crate::hevc::color_convert::rgb_to_ycbcr8(
+        fill_r,
+        fill_g,
+        fill_b,
+        output.full_range,
+        output.matrix_coeffs,
+    );
+    // Scale 8-bit fill up to the canvas bit depth (no-op for 8-bit canvases).
+    let bd_shift = (bit_depth as u32).saturating_sub(8);
+    output.y_plane.fill((fill_y as u16) << bd_shift);
+    output.cb_plane.fill((fill_cb as u16) << bd_shift);
+    output.cr_plane.fill((fill_cr as u16) << bd_shift);
+
+    // Composite tiles, treating tile 0 specially so we don't decode it twice.
+    let mut decoded_first: Option<crate::hevc::DecodedFrame> = Some(first_tile);
     for (idx, &tile_id) in tile_ids.iter().enumerate() {
         check_stop(stop)?;
 
-        let tile_item = container
-            .get_item(tile_id)
-            .ok_or_else(|| at!(HeicError::InvalidData("Missing overlay tile")))?;
-
-        let tile_frame = decode_item(
-            container,
-            &tile_item,
-            budget.deeper(),
-            limits,
-            stop,
-            max_threads,
-        )?;
-
-        // Propagate color conversion settings from first tile
-        if idx == 0 {
-            output.full_range = tile_frame.full_range;
-            output.matrix_coeffs = tile_frame.matrix_coeffs;
-        }
+        let tile_frame = if idx == 0 {
+            decoded_first.take().expect("first tile present")
+        } else {
+            let tile_item = container
+                .get_item(tile_id)
+                .ok_or_else(|| at!(HeicError::InvalidData("Missing overlay tile")))?;
+            decode_item(
+                container,
+                &tile_item,
+                budget.deeper(),
+                limits,
+                stop,
+                max_threads,
+            )?
+        };
 
         let (off_x, off_y) = offsets[idx];
         let dst_x = off_x.max(0) as u32;
