@@ -952,20 +952,14 @@ fn decode_unci_item(
                         if let Some(plane_id) = mapping {
                             let val = pixel_data[pixel_offset + c] as u16;
                             match plane_id {
-                                0 => {
-                                    if dst_idx < output.y_plane.len() {
-                                        output.y_plane[dst_idx] = val;
-                                    }
+                                0 if dst_idx < output.y_plane.len() => {
+                                    output.y_plane[dst_idx] = val;
                                 }
-                                1 => {
-                                    if dst_idx < output.cb_plane.len() {
-                                        output.cb_plane[dst_idx] = val;
-                                    }
+                                1 if dst_idx < output.cb_plane.len() => {
+                                    output.cb_plane[dst_idx] = val;
                                 }
-                                2 => {
-                                    if dst_idx < output.cr_plane.len() {
-                                        output.cr_plane[dst_idx] = val;
-                                    }
+                                2 if dst_idx < output.cr_plane.len() => {
+                                    output.cr_plane[dst_idx] = val;
                                 }
                                 _ => {}
                             }
