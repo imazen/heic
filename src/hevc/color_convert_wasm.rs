@@ -61,8 +61,23 @@ pub(crate) fn convert_420_to_rgb_wasm128(
         // Scalar prefix
         for x in x_start..x_simd_start.min(x_end) {
             super::color_convert::scalar_pixel(
-                y_plane, cb_plane, cr_plane, y_row, c_row, x as usize, shift, y_bias, y_scale,
-                cr_r, cb_g, cr_g, cb_b, rnd, shr, rgb, &mut out_idx,
+                y_plane,
+                cb_plane,
+                cr_plane,
+                y_row,
+                c_row,
+                x as usize,
+                shift,
+                y_bias,
+                y_scale,
+                cr_r,
+                cb_g,
+                cr_g,
+                cb_b,
+                rnd,
+                shr,
+                rgb,
+                &mut out_idx,
             );
         }
 
@@ -72,7 +87,8 @@ pub(crate) fn convert_420_to_rgb_wasm128(
             let cx = x / 2;
 
             // Load 8 Y values (u16) — widen to two i32x4
-            let y_raw: v128 = v128_load::<[u16; 8]>(y_plane[y_row + x..y_row + x + 8].try_into().unwrap());
+            let y_raw: v128 =
+                v128_load::<[u16; 8]>(y_plane[y_row + x..y_row + x + 8].try_into().unwrap());
             let mut y_lo = u32x4_extend_low_u16x8(y_raw);
             let mut y_hi = u32x4_extend_high_u16x8(y_raw);
 
@@ -183,8 +199,23 @@ pub(crate) fn convert_420_to_rgb_wasm128(
         // Scalar tail
         for x in x_simd_end..x_end {
             super::color_convert::scalar_pixel(
-                y_plane, cb_plane, cr_plane, y_row, c_row, x as usize, shift, y_bias, y_scale,
-                cr_r, cb_g, cr_g, cb_b, rnd, shr, rgb, &mut out_idx,
+                y_plane,
+                cb_plane,
+                cr_plane,
+                y_row,
+                c_row,
+                x as usize,
+                shift,
+                y_bias,
+                y_scale,
+                cr_r,
+                cb_g,
+                cr_g,
+                cb_b,
+                rnd,
+                shr,
+                rgb,
+                &mut out_idx,
             );
         }
     }
