@@ -474,10 +474,16 @@ impl ImageInfo {
                 )
                 .is_empty();
 
-        // Check for HDR gain map
+        // Check for HDR gain map. Either the Apple aux-item URN, OR a
+        // `tmap` derived item (HEIF Amendment 1 / ISO 23008-12:2025) with
+        // at least two `dimg` references (base + gain map).
         let has_gain_map = !container
             .find_auxiliary_items(primary_item.id, "urn:com:apple:photo:2020:aux:hdrgainmap")
-            .is_empty();
+            .is_empty()
+            || container.items().any(|i| {
+                i.item_type == ItemType::Tmap
+                    && container.get_item_references(i.id, FourCC::DIMG).len() >= 2
+            });
 
         // Extract CICP from colr nclx box on the primary item
         let (color_primaries, transfer_characteristics, matrix_coefficients, video_full_range) =
@@ -730,7 +736,27 @@ impl ImageInfo {
     }
 }
 
-/// HDR gain map data extracted from an auxiliary image.
+/// Which container mechanism produced the [`HdrGainMap`].
+///
+/// HEIC stores gain maps via either Apple's iOS 14+ auxiliary item path
+/// (XMP metadata, `urn:com:apple:photo:2020:aux:hdrgainmap`) or the
+/// HEIF Amendment 1 / ISO 23008-12:2025 `tmap` derived image item
+/// (ISO 21496-1 binary metadata, the canonical AVIF tmap variant).
+/// Consumers branch on this when interpreting the metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GainMapOrigin {
+    /// Apple HEIC auxiliary item with the
+    /// `urn:com:apple:photo:2020:aux:hdrgainmap` URN.
+    /// Metadata lives in [`HdrGainMap::xmp`].
+    AppleAuxItem,
+    /// HEIF Amendment 1 `tmap` derived image item. Metadata lives in
+    /// [`HdrGainMap::iso21496`] as the AVIF tmap byte payload (per
+    /// ISO 21496-1, version byte first).
+    HeifTmap,
+}
+
+/// HDR gain map data extracted from an auxiliary image or tone-map item.
 ///
 /// The gain map is a grayscale image (typically lower resolution than the
 /// primary) used with the Apple HDR or ISO 21496-1 formula to reconstruct HDR:
@@ -740,9 +766,12 @@ impl ImageInfo {
 /// scale = 1.0 + (headroom - 1.0) * gainmap_linear
 /// hdr_linear = sdr_linear * scale
 /// ```
-/// Where `headroom` and other parameters come from the XMP metadata
-/// (ISO 21496-1 / Apple HDR namespaces). Parse the [`xmp`](Self::xmp)
-/// field with `ultrahdr-core` or similar to extract those parameters.
+/// Where `headroom` and other parameters come from either [`xmp`](Self::xmp)
+/// (Apple aux-item path) or [`iso21496`](Self::iso21496) (HEIF Amendment 1
+/// tmap path). [`origin`](Self::origin) names which mechanism produced this
+/// instance. Parse the metadata with `ultrahdr-core` (for XMP) or
+/// `zencodec::gainmap::parse_iso21496_fmt(..., Iso21496Format::AvifTmap)`
+/// (for the binary payload).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct HdrGainMap {
@@ -757,11 +786,19 @@ pub struct HdrGainMap {
     pub height: u32,
     /// Significant bits per sample in the source HEVC stream (typically 8).
     pub bit_depth: u8,
-    /// Raw XMP bytes from the gain map item (contains ISO 21496-1 metadata).
+    /// Raw XMP bytes from the gain map item (contains ISO 21496-1 metadata
+    /// for Apple HDR files). `None` outside the [`AppleAuxItem`] origin.
     ///
-    /// Callers parse this with `ultrahdr-core`'s XMP parser or similar.
-    /// `None` if no XMP metadata is associated with the gain map item.
+    /// [`AppleAuxItem`]: GainMapOrigin::AppleAuxItem
     pub xmp: Option<Vec<u8>>,
+    /// Raw ISO 21496-1 binary metadata from a `tmap` derived item (AVIF
+    /// tmap byte layout: version byte first, then the ISO payload). `None`
+    /// outside the [`HeifTmap`] origin.
+    ///
+    /// [`HeifTmap`]: GainMapOrigin::HeifTmap
+    pub iso21496: Option<Vec<u8>>,
+    /// Which container mechanism this gain map was decoded from.
+    pub origin: GainMapOrigin,
 }
 
 /// Decoder configuration. Reusable across multiple decode operations.

@@ -8,6 +8,9 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 <!-- Breaking changes that will ship together in the next major (or minor for 0.x) release.
      Add items here as you discover them. Do NOT ship these piecemeal — batch them. -->
 
+### Added
+- HEIF Amendment 1 / ISO 23008-12:2025 `tmap` derived image item support (#8). `decode_gain_map` now detects either the Apple aux-item URN (existing) or a `tmap` derived item with `dimg` references to a base SDR image and a grayscale gain map. The new `HdrGainMap::iso21496` field carries the raw ISO 21496-1 binary metadata (AVIF tmap variant) when the source is `tmap`; `HdrGainMap::origin` (new `GainMapOrigin` enum) names which mechanism the gain map was decoded from. Parse the binary metadata via `zencodec::gainmap::parse_iso21496_fmt(_, Iso21496Format::AvifTmap)`. Probing via `ImageInfo::from_bytes` now reports `has_gain_map = true` for both paths.
+
 ### Fixed
 - Convert WPP / tile entry point offsets from EBSP byte space to RBSP before seeking, so HEIC tiles whose slice data contains an emulation prevention byte (`0x000003`) inside a WPP substream no longer produce garbled rows past the first 0x03 byte (#12)
 - Reject SPS with `pic_width_in_luma_samples` / `pic_height_in_luma_samples` outside `1..=16384` and conformance-window offsets that exceed picture dimensions, closing a panic / multi-GiB allocation reachable from the default no-limits decode path (security audit CR-1, CR-2, H-3)

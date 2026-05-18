@@ -82,6 +82,11 @@ pub enum ItemType {
     Iovl,
     /// Identity transform
     Iden,
+    /// Tone-mapped derived image item (HEIF Amendment 1 / ISO 23008-12:2025).
+    /// Payload is the ISO 21496-1 binary gain map metadata (AVIF tmap
+    /// variant). `dimg` references point at the SDR base image and the
+    /// gain map image.
+    Tmap,
     /// EXIF metadata
     Exif,
     /// MIME data
@@ -101,6 +106,7 @@ impl From<FourCC> for ItemType {
             b"grid" => Self::Grid,
             b"iovl" => Self::Iovl,
             b"iden" => Self::Iden,
+            b"tmap" => Self::Tmap,
             b"Exif" => Self::Exif,
             b"mime" => Self::Mime,
             _ => Self::Unknown(fourcc),
@@ -151,6 +157,15 @@ impl<'a> HeifContainer<'a> {
     /// Get the primary item
     pub fn primary_item(&self) -> Option<Item> {
         self.get_item(self.primary_item_id)
+    }
+
+    /// Iterate every item declared in `iinf`, materialised through
+    /// [`get_item`](Self::get_item). Useful for callers that need to scan
+    /// for items by type (e.g. locating `tmap` derived items).
+    pub fn items(&self) -> impl Iterator<Item = Item> + '_ {
+        self.item_infos
+            .iter()
+            .filter_map(|i| self.get_item(i.item_id))
     }
 
     /// Get an item by ID
