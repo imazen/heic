@@ -515,7 +515,11 @@ fn test_wpp_with_emulation_prevention_bytes() {
                 acc[2] += decoded.data[idx + 2] as u32;
             }
         }
-        [acc[0] as f32 / 256.0, acc[1] as f32 / 256.0, acc[2] as f32 / 256.0]
+        [
+            acc[0] as f32 / 256.0,
+            acc[1] as f32 / 256.0,
+            acc[2] as f32 / 256.0,
+        ]
     };
     // (y, x, expected_rgb) — 16×16 averages measured against libheif for
     // this image. Pre-fix decode produced very different values here.
