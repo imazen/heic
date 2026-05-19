@@ -8,6 +8,11 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 <!-- Breaking changes that will ship together in the next major (or minor for 0.x) release.
      Add items here as you discover them. Do NOT ship these piecemeal — batch them. -->
 
+## [0.1.6] - 2026-05-19
+
+### Packaging
+- Drop `testdata/` from the published crate. The directory is still present in the source repo for developer testing; tests now skip with `SKIP` messages when files are absent, so `cargo test` on the packaged crate stays green. Compressed crate shrinks from 1.2 MiB to 313 KiB (74% reduction); file count drops from 168 to 73.
+
 ## [0.1.5] - 2026-05-18
 
 ### Added

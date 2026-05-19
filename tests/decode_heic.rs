@@ -1,16 +1,17 @@
 //! Integration tests for HEIC decoding.
 //!
-//! `example_heic()` reads `testdata/libheif-examples/example.heic` which ships
-//! with the crate. The other helpers (`iphone_heic`, `nokia_path_or_skip`,
-//! ...) reach into a developer corpus selected via `HEIC_TEST_DIR`. Tests
-//! that need such files return early with an `eprintln!` when the file is
-//! absent rather than failing — the env-var-controlled skip is the
-//! caller-visible toggle.
+//! `example_heic()` looks up the libheif example image. It is NOT bundled
+//! with the published crate (kept lean); developers can drop it under
+//! `testdata/libheif-examples/example.heic` in a checkout, or point
+//! `HEIC_TEST_DIR` at a developer corpus that contains
+//! `libheif/examples/example.heic`. Tests skip with an `eprintln!` when
+//! the file is absent rather than failing.
 
 use heic::DecoderConfig;
 use std::path::PathBuf;
 
 /// Directory holding committed test data inside the crate (`testdata/`).
+/// Not shipped in the published crate; populated in the source checkout.
 fn testdata_dir() -> PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata")
 }
@@ -26,9 +27,24 @@ fn heic_base_dir() -> Option<PathBuf> {
     default.exists().then_some(default)
 }
 
-/// Path to the libheif example image. Shipped under `testdata/`.
-fn example_heic() -> PathBuf {
-    testdata_dir().join("libheif-examples/example.heic")
+/// Path to the libheif example image, if it can be located. Looks under
+/// `testdata/libheif-examples/example.heic` first (developer checkout),
+/// then `${HEIC_TEST_DIR}/libheif/examples/example.heic`. Returns `None`
+/// when neither exists.
+fn example_heic() -> Option<PathBuf> {
+    let bundled = testdata_dir().join("libheif-examples/example.heic");
+    if bundled.exists() {
+        return Some(bundled);
+    }
+    let dev = heic_base_dir()?.join("libheif/examples/example.heic");
+    dev.exists().then_some(dev)
+}
+
+/// Read the libheif example image as bytes, or print a SKIP message and
+/// return `None` when the file is unavailable.
+fn read_example(test_name: &str) -> Option<Vec<u8>> {
+    let path = require_path(example_heic(), test_name)?;
+    Some(std::fs::read(&path).expect("read example.heic"))
 }
 
 /// Path to the iPhone reference image, or `None` if the developer corpus is
@@ -54,7 +70,9 @@ fn require_path(path: Option<PathBuf>, name: &str) -> Option<PathBuf> {
 
 #[test]
 fn test_get_info() {
-    let data = std::fs::read(example_heic()).expect("Failed to read test file");
+    let Some(data) = read_example("test_get_info") else {
+        return;
+    };
 
     let info = heic::ImageInfo::from_bytes(&data).expect("Failed to get info");
     println!("Decoded info: {}x{}", info.width, info.height);
@@ -67,7 +85,9 @@ fn test_get_info() {
 #[test]
 #[ignore] // Ignore until coefficient decoding is fully implemented
 fn test_decode() {
-    let data = std::fs::read(example_heic()).expect("Failed to read test file");
+    let Some(data) = read_example("test_decode") else {
+        return;
+    };
     let decoder = DecoderConfig::new();
 
     let image = decoder
@@ -122,7 +142,9 @@ fn test_decode() {
 #[test]
 #[ignore]
 fn test_raw_yuv_values() {
-    let data = std::fs::read(example_heic()).expect("Failed to read test file");
+    let Some(data) = read_example("test_raw_yuv_values") else {
+        return;
+    };
     let decoder = DecoderConfig::new();
 
     // Decode and examine raw YCbCr
@@ -385,7 +407,9 @@ fn test_extract_exif() {
 #[test]
 fn test_extract_exif_none() {
     // example.heic has no EXIF
-    let data = std::fs::read(example_heic()).expect("read");
+    let Some(data) = read_example("test_extract_exif_none") else {
+        return;
+    };
     let decoder = DecoderConfig::new();
     let exif = decoder.extract_exif(&data).expect("extract_exif");
     assert!(exif.is_none(), "example.heic should not have EXIF");
@@ -394,7 +418,9 @@ fn test_extract_exif_none() {
 #[test]
 fn test_image_info_no_exif() {
     // example.heic: no EXIF, non-grid — probe should work
-    let data = std::fs::read(example_heic()).expect("read");
+    let Some(data) = read_example("test_image_info_no_exif") else {
+        return;
+    };
     let info = heic::ImageInfo::from_bytes(&data).expect("probe");
     assert!(!info.has_exif, "example.heic should not have EXIF");
     assert!(!info.has_xmp, "example.heic should not have XMP");
@@ -445,7 +471,9 @@ fn test_extract_xmp() {
 
 #[test]
 fn test_decode_thumbnail() {
-    let data = std::fs::read(example_heic()).expect("read");
+    let Some(data) = read_example("test_decode_thumbnail") else {
+        return;
+    };
     let decoder = DecoderConfig::new();
     let thumb = decoder
         .decode_thumbnail(&data, heic::PixelLayout::Rgb8)
@@ -465,7 +493,9 @@ fn test_decode_thumbnail() {
 
 #[test]
 fn test_image_info_has_thumbnail() {
-    let data = std::fs::read(example_heic()).expect("read");
+    let Some(data) = read_example("test_image_info_has_thumbnail") else {
+        return;
+    };
     let info = heic::ImageInfo::from_bytes(&data).expect("probe");
     assert!(
         info.has_thumbnail,
