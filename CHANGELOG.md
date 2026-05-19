@@ -8,20 +8,28 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 <!-- Breaking changes that will ship together in the next major (or minor for 0.x) release.
      Add items here as you discover them. Do NOT ship these piecemeal — batch them. -->
 
+## [0.1.5] - 2026-05-18
+
 ### Added
-- HEIF Amendment 1 / ISO 23008-12:2025 `tmap` derived image item support (#8). `decode_gain_map` now detects either the Apple aux-item URN (existing) or a `tmap` derived item with `dimg` references to a base SDR image and a grayscale gain map. The new `HdrGainMap::iso21496` field carries the raw ISO 21496-1 binary metadata (AVIF tmap variant) when the source is `tmap`; `HdrGainMap::origin` (new `GainMapOrigin` enum) names which mechanism the gain map was decoded from. Parse the binary metadata via `zencodec::gainmap::parse_iso21496_fmt(_, Iso21496Format::AvifTmap)`. Probing via `ImageInfo::from_bytes` now reports `has_gain_map = true` for both paths.
-- wasm32 SIMD parity for YCbCr→RGB 4:2:0 color conversion (#3). The wasm128 path was previously a delegation to scalar; it is now a native `v128` implementation processing 8 pixels per outer iteration with `u32x4_*` arithmetic mirroring the AArch64 NEON layout. Math matches the scalar reference bit-for-bit. Closes the only remaining gap from the SIMD-platform-parity audit.
+- HEIF Amendment 1 / ISO 23008-12:2025 `tmap` derived image item support (#8, f4156c1). `decode_gain_map` now detects either the Apple aux-item URN (existing) or a `tmap` derived item with `dimg` references to a base SDR image and a grayscale gain map. The new `HdrGainMap::iso21496` field carries the raw ISO 21496-1 binary metadata (AVIF tmap variant) when the source is `tmap`; `HdrGainMap::origin` (new `GainMapOrigin` enum) names which mechanism the gain map was decoded from. Parse the binary metadata via `zencodec::gainmap::parse_iso21496_fmt(_, Iso21496Format::AvifTmap)`. Probing via `ImageInfo::from_bytes` now reports `has_gain_map = true` for both paths.
+- wasm32 SIMD parity for YCbCr→RGB 4:2:0 color conversion (#3, 0b2662e). The wasm128 path was previously a delegation to scalar; it is now a native `v128` implementation processing 8 pixels per outer iteration with `u32x4_*` arithmetic mirroring the AArch64 NEON layout. Math matches the scalar reference bit-for-bit. Closes the only remaining gap from the SIMD-platform-parity audit.
 
 ### Fixed
-- Image overlay (`iovl`) descriptor parsing now matches ISO/IEC 23008-12: 2-byte version+flags (not 4), always four u16 canvas fill entries (not a variable count derived from descriptor length). Fill values are interpreted as RGB and converted to YCbCr via the first tile's matrix/range before filling the canvas planes, matching libheif's RGB-space compositing. The Nokia `overlay_1000x680.heic` reference jumps from 13.1 dB PSNR to 74.6 dB.
-- Convert WPP / tile entry point offsets from EBSP byte space to RBSP before seeking, so HEIC tiles whose slice data contains an emulation prevention byte (`0x000003`) inside a WPP substream no longer produce garbled rows past the first 0x03 byte (#12)
-- Reject SPS with `pic_width_in_luma_samples` / `pic_height_in_luma_samples` outside `1..=16384` and conformance-window offsets that exceed picture dimensions, closing a panic / multi-GiB allocation reachable from the default no-limits decode path (security audit CR-1, CR-2, H-3)
-- `cropped_width` / `cropped_height` now use `saturating_sub` and `set_crop` clamps oversized offsets, so out-of-range crops cannot wrap to ~`u32::MAX` and reach `Vec::with_capacity` (CR-1)
-- Promote pixel-index calculations in `to_bgra` / `to_bgr` / `to_rgba` / `to_rgb` / `get_chroma` 4:4:4 / `get_y` and `decode_alpha_plane` to `usize` before multiplication, defeating u32 overflow on 32-bit targets (H-1)
-- Lower derived-image (iden / grid / iovl) recursion depth from 8 to 3 and add a per-request `decode_item` invocation cap of 32 768 to bound CPU cost from crafted fan-out graphs (H-2)
-- Cap `parse_moov` track count at 16 so per-track sample / chunk / stsc tables cannot multiply unbounded (H-4)
-- Poll the cancellation token inside the `resolve_sample_offset` chunk loop so a 1M-chunk stsc run remains responsive (H-5)
-- Apply a sane default `Limits` (16 384×16 384, 256 Mpx, 1 GiB) when the caller does not supply one, replacing the previous all-`None` sentinel that bypassed every dimension and memory check (CR-2)
+- Image overlay (`iovl`) descriptor parsing now matches ISO/IEC 23008-12 (40d4e34): 2-byte version+flags (not 4), always four u16 canvas fill entries (not a variable count derived from descriptor length). Fill values are interpreted as RGB and converted to YCbCr via the first tile's matrix/range before filling the canvas planes, matching libheif's RGB-space compositing. The Nokia `overlay_1000x680.heic` reference jumps from 13.1 dB PSNR to 74.6 dB.
+- Convert WPP / tile entry point offsets from EBSP byte space to RBSP before seeking, so HEIC tiles whose slice data contains an emulation prevention byte (`0x000003`) inside a WPP substream no longer produce garbled rows past the first 0x03 byte (#12, 775c030)
+- Reject SPS with `pic_width_in_luma_samples` / `pic_height_in_luma_samples` outside `1..=16384` and conformance-window offsets that exceed picture dimensions, closing a panic / multi-GiB allocation reachable from the default no-limits decode path (security audit CR-1, CR-2, H-3, 13d8663)
+- `cropped_width` / `cropped_height` now use `saturating_sub` and `set_crop` clamps oversized offsets, so out-of-range crops cannot wrap to ~`u32::MAX` and reach `Vec::with_capacity` (CR-1, 13d8663)
+- Promote pixel-index calculations in `to_bgra` / `to_bgr` / `to_rgba` / `to_rgb` / `get_chroma` 4:4:4 / `get_y` and `decode_alpha_plane` to `usize` before multiplication, defeating u32 overflow on 32-bit targets (H-1, 13d8663)
+- Lower derived-image (iden / grid / iovl) recursion depth from 8 to 3 and add a per-request `decode_item` invocation cap of 32 768 to bound CPU cost from crafted fan-out graphs (H-2, 13d8663)
+- Cap `parse_moov` track count at 16 so per-track sample / chunk / stsc tables cannot multiply unbounded (H-4, 13d8663)
+- Poll the cancellation token inside the `resolve_sample_offset` chunk loop so a 1M-chunk stsc run remains responsive (H-5, 13d8663)
+- Apply a sane default `Limits` (16 384×16 384, 256 Mpx, 1 GiB) when the caller does not supply one, replacing the previous all-`None` sentinel that bypassed every dimension and memory check (CR-2, 13d8663)
+
+### Packaging
+- Ship `testdata/` and `fuzz/regression/` in the published crate; route developer-corpus tests through `HEIC_TEST_CORPUS_DIR` and skip gracefully when the corpus is absent so `cargo test` is green out of the box on the packaged crate (#7, c8a83b3)
+
+### Tests
+- Harden the `#12` WPP-EP regression to sample stable YUV plane locations via `decode_to_frame` rather than 16×16 RGB averages, and clean up clippy warnings (#14, 775c030)
 
 ## [0.1.4] - 2026-04-20
 
