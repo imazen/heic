@@ -1,0 +1,35 @@
+[package]
+name = "heic-backend-vaapi"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Linux VA-API (libva) HEVC decoder backend for the heic crate"
+keywords = ["heic", "heif", "hevc", "vaapi", "linux"]
+categories = ["multimedia::images"]
+
+[features]
+default = []
+
+[dependencies]
+heic-core = { workspace = true, features = ["std"] }
+enough = { workspace = true }
+
+# Chromium-OS's safe libva wrappers. `cros-codecs` builds on top with the
+# h265 SPS/PPS field-by-field mapping into VAPictureParameterBufferHEVC;
+# we model our impl on its `decoder/stateless/h265/vaapi.rs` reference.
+#
+# Not yet enabled — cros-libva pkg-configs against `libva.so` at build
+# time, which requires `apt install libva-dev` or equivalent on the host.
+# Adding the dep is the first task of the FFI-implementation follow-up
+# PR; for the skeleton commit we don't need it.
+# [target.'cfg(target_os = "linux")'.dependencies]
+# cros-libva = "0.0.13"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"

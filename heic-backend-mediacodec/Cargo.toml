@@ -1,0 +1,32 @@
+[package]
+name = "heic-backend-mediacodec"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Android NDK MediaCodec HEVC decoder backend for the heic crate"
+keywords = ["heic", "heif", "hevc", "mediacodec", "android"]
+categories = ["multimedia::images", "os::android-apis"]
+
+[features]
+default = []
+
+[dependencies]
+heic-core = { workspace = true, features = ["std"] }
+enough = { workspace = true }
+
+# NDK MediaCodec C API bindings. ndk-sys is the raw layer; the safer `ndk`
+# wrapper crate is preferred but its media feature is gated. Versions per
+# the platform-validation pass — ecosystem has been quiet for ~2 years, so
+# the latest published versions are 0.6 (ndk-sys) / 0.9 (ndk).
+[target.'cfg(target_os = "android")'.dependencies]
+ndk-sys = "0.6"
+ndk = { version = "0.9", features = ["media"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"

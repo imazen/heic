@@ -162,6 +162,89 @@ jobs:
       - name: Clippy heic-backend-mediafoundation
         run: cargo clippy -p heic-backend-mediafoundation --target ${{ matrix.target }} -- -D warnings
 
+  backend-d3d11va:
+    name: backend-d3d11va (${{ matrix.target }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: backend-d3d11va-${{ matrix.target }}
+      - name: Build heic-backend-d3d11va
+        run: cargo build -p heic-backend-d3d11va --target ${{ matrix.target }}
+      - name: Clippy heic-backend-d3d11va
+        run: cargo clippy -p heic-backend-d3d11va --target ${{ matrix.target }} -- -D warnings
+
+  backend-videotoolbox:
+    name: backend-videotoolbox (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest
+          - macos-15-intel
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: backend-videotoolbox-${{ matrix.os }}
+      - name: Build heic-backend-videotoolbox
+        run: cargo build -p heic-backend-videotoolbox
+      - name: Clippy heic-backend-videotoolbox
+        run: cargo clippy -p heic-backend-videotoolbox -- -D warnings
+
+  backend-mediacodec:
+    name: backend-mediacodec (android compile-only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: backend-mediacodec-android
+      - name: Build heic-backend-mediacodec (aarch64-linux-android)
+        env:
+          # nttld/setup-ndk@v1 sets ANDROID_NDK_HOME; cargo-ndk wraps the
+          # toolchain. For the skeleton (no FFI yet) we can use the bare
+          # cargo target without cargo-ndk, since the stub doesn't actually
+          # link ndk-sys.
+          CC_aarch64_linux_android: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang
+          AR_aarch64_linux_android: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang
+        run: cargo build -p heic-backend-mediacodec --target aarch64-linux-android
+
+  backend-vaapi:
+    name: backend-vaapi (linux compile-only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: backend-vaapi-linux
+      - name: Install libva-dev
+        run: sudo apt-get update && sudo apt-get install -y libva-dev libva-drm2 pkg-config
+      - name: Build heic-backend-vaapi
+        run: cargo build -p heic-backend-vaapi
+      - name: Clippy heic-backend-vaapi
+        run: cargo clippy -p heic-backend-vaapi -- -D warnings
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest

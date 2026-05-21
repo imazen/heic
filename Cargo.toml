@@ -1,5 +1,13 @@
 [workspace]
-members = [".", "heic-core", "heic-backend-mediafoundation"]
+members = [
+    ".",
+    "heic-core",
+    "heic-backend-mediafoundation",
+    "heic-backend-videotoolbox",
+    "heic-backend-mediacodec",
+    "heic-backend-vaapi",
+    "heic-backend-d3d11va",
+]
 resolver = "3"
 
 [workspace.package]
