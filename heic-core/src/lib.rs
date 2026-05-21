@@ -137,14 +137,24 @@ impl core::fmt::Display for BackendError {
 #[cfg(feature = "std")]
 impl std::error::Error for BackendError {}
 
-/// Subset of the HEIF `hvcC` HEVC Decoder Configuration Record that backends
-/// need to set up decoding.
+/// Subset of the HEIF `hvcC` HEVC Decoder Configuration Record (plus the
+/// `ispe`-derived frame dimensions) that backends need to set up decoding.
 ///
 /// The parent `heic` crate owns the full
 /// [`HevcDecoderConfig`](../heic/heif/struct.HevcDecoderConfig.html) parsed
 /// from the container and constructs an `HvccParams` view of it before
-/// dispatching to a backend.
+/// dispatching to a backend. Width and height come from the HEIF `ispe`
+/// (image spatial extent) box, which sits alongside `hvcC` in the item
+/// properties; backends use them up-front (e.g. to size Media Foundation's
+/// `MF_MT_FRAME_SIZE` or VideoToolbox's destination pixel buffer attributes)
+/// without parsing the SPS themselves.
 pub struct HvccParams<'a> {
+    /// Frame width in pixels (from HEIF `ispe`).
+    pub width: u32,
+
+    /// Frame height in pixels (from HEIF `ispe`).
+    pub height: u32,
+
     /// VPS, SPS, PPS, and any prefix-SEI NAL payloads (RBSP, no start codes,
     /// no length prefix).
     pub nal_units: &'a [&'a [u8]],

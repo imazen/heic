@@ -137,6 +137,31 @@ jobs:
       - name: Test (i686)
         run: cross test --lib --features "backend-rust,std" --target i686-unknown-linux-gnu
 
+  backend-mediafoundation:
+    # Cross-compile-check the heic-backend-mediafoundation crate for Windows
+    # targets. Runtime / decode tests await the parent-crate wiring + a
+    # Windows runner with HEVC Video Extensions installed (see spec.md).
+    name: backend-mediafoundation (${{ matrix.target }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: backend-mediafoundation-${{ matrix.target }}
+      - name: Build heic-backend-mediafoundation
+        run: cargo build -p heic-backend-mediafoundation --target ${{ matrix.target }}
+      - name: Clippy heic-backend-mediafoundation
+        run: cargo clippy -p heic-backend-mediafoundation --target ${{ matrix.target }} -- -D warnings
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest

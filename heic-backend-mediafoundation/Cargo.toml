@@ -1,0 +1,37 @@
+[package]
+name = "heic-backend-mediafoundation"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Windows Media Foundation HEVC decoder backend for the heic crate"
+keywords = ["heic", "heif", "hevc", "mediafoundation", "windows"]
+categories = ["multimedia::images", "os::windows-apis"]
+
+[features]
+default = []
+
+[dependencies]
+heic-core = { workspace = true, features = ["std"] }
+enough = { workspace = true }
+
+# Microsoft's Win32 Media Foundation bindings — synchronous COM, no async.
+# Pinning 0.62.x; this crate moves fast but the MF subset we use is stable.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Media_MediaFoundation",
+    "Win32_Media_KernelStreaming",
+    "Win32_System_Com",
+    "Win32_System_Variant",
+    "Win32_Foundation",
+] }
+
+[lints.rust]
+# Native FFI; cannot use forbid(unsafe_code). Every `unsafe` block must have
+# a SAFETY: comment per the workspace policy.
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"
