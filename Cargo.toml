@@ -52,15 +52,27 @@ default = []
 
 # ── HEVC backend selection ────────────────────────────────────────────────
 # Every build must enable at least one backend whose target_os matches the
-# host. `backend-rust` is the only backend that ships today; native backends
-# (mediafoundation, videotoolbox, mediacodec, vaapi, d3d11va) land in
-# subsequent PRs.
+# host. Native backends ship as separate workspace member crates and are
+# pulled in as optional deps; the parent feature wires the dep on and is
+# the user-facing knob.
 #
 # Backends compose: enable as many as you want. At decode time, pass an
 # ordered allowlist to `DecoderConfig::with_backends(&[...])`; the first
 # entry that reports available wins, with `BackendError::Unavailable` /
 # `BackendError::Decode` falling through to the next.
+#
+# As of this commit only `backend-rust` is wired into the parent
+# dispatcher (and only `backend-mediafoundation` has a real FFI body).
+# Selecting a native backend feature compiles the corresponding subcrate
+# but the decode pipeline doesn't yet route through it — that plumbing
+# lands in a follow-up PR. Until then, native-feature builds will
+# fall through to `backend-rust` at decode time.
 backend-rust = []
+backend-mediafoundation = ["std", "dep:heic-backend-mediafoundation"]
+backend-videotoolbox = ["std", "dep:heic-backend-videotoolbox"]
+backend-mediacodec = ["std", "dep:heic-backend-mediacodec"]
+backend-vaapi = ["std", "dep:heic-backend-vaapi"]
+backend-d3d11va = ["std", "dep:heic-backend-d3d11va"]
 
 # ── Cross-cutting flags ──────────────────────────────────────────────────
 std = ["archmage/std", "heic-core/std", "ultrahdr-core?/std"]
@@ -81,6 +93,11 @@ unci = ["dep:zenflate"]
 
 [dependencies]
 heic-core = { workspace = true }
+heic-backend-mediafoundation = { version = "0.0.0", path = "heic-backend-mediafoundation", optional = true }
+heic-backend-videotoolbox = { version = "0.0.0", path = "heic-backend-videotoolbox", optional = true }
+heic-backend-mediacodec = { version = "0.0.0", path = "heic-backend-mediacodec", optional = true }
+heic-backend-vaapi = { version = "0.0.0", path = "heic-backend-vaapi", optional = true }
+heic-backend-d3d11va = { version = "0.0.0", path = "heic-backend-d3d11va", optional = true }
 enough = "0.4.3"
 whereat = { version = "0.1.5"}
 archmage = { version = "0.9.16", default-features = false, features = ["macros"] }

@@ -121,20 +121,28 @@ extern crate alloc;
 // target_os they support.
 #[cfg(not(any(
     feature = "backend-rust",
-    // all(feature = "backend-mediafoundation", target_os = "windows"),
-    // all(feature = "backend-videotoolbox",
-    //     any(target_os = "macos", target_os = "ios",
-    //         target_os = "tvos", target_os = "visionos")),
-    // all(feature = "backend-mediacodec", target_os = "android"),
-    // all(feature = "backend-vaapi", target_os = "linux"),
-    // all(feature = "backend-d3d11va", target_os = "windows"),
+    all(feature = "backend-mediafoundation", target_os = "windows"),
+    all(
+        feature = "backend-videotoolbox",
+        any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "tvos",
+            target_os = "visionos"
+        )
+    ),
+    all(feature = "backend-mediacodec", target_os = "android"),
+    all(feature = "backend-vaapi", target_os = "linux"),
+    all(feature = "backend-d3d11va", target_os = "windows"),
 )))]
 compile_error!(
     "heic: no HEVC backend is enabled for this target. Enable at least one \
-     of: `backend-rust` (any target). \
-     Native backends land in upcoming PRs: backend-mediafoundation \
-     (windows), backend-videotoolbox (apple), backend-mediacodec (android), \
-     backend-vaapi (linux), backend-d3d11va (windows). \
+     of: `backend-rust` (any target), `backend-mediafoundation` (windows), \
+     `backend-videotoolbox` (apple), `backend-mediacodec` (android), \
+     `backend-vaapi` (linux), `backend-d3d11va` (windows). \
+     Native backends are wired but not yet plumbed through the decode \
+     dispatcher — they ship as opt-in subcrates and fall through to \
+     `backend-rust` at decode time until the next PR. \
      Example: `cargo add heic --features backend-rust`."
 );
 
