@@ -1,4 +1,11 @@
 //! Spatial transforms: rotation and mirror operations on decoded frames.
+//!
+//! Implemented as an extension trait on [`DecodedFrame`] because the type now
+//! lives in the `heic-core` crate and Rust's coherence rules forbid inherent
+//! impls on foreign types. Callers that previously wrote `frame.rotate_90_cw()`
+//! continue to work — `DecodedFrameTransformExt` is imported alongside
+//! `DecodedFrame` in `crate::hevc::mod` so method-syntax resolution picks it
+//! up automatically.
 
 use alloc::vec::Vec;
 
@@ -7,12 +14,29 @@ use crate::error::HevcError;
 
 type Result<T> = core::result::Result<T, HevcError>;
 
-impl DecodedFrame {
+/// Spatial-transform methods (`mirror_*`, `rotate_*`) on a [`DecodedFrame`].
+///
+/// Implemented for `DecodedFrame` directly; consumers reach the methods via
+/// the usual `frame.rotate_180()?` syntax once the trait is in scope.
+pub trait DecodedFrameTransformExt: Sized {
+    /// Rotate the frame 90° clockwise, returning a new frame.
+    fn rotate_90_cw(&self) -> Result<Self>;
+    /// Rotate the frame 180°.
+    fn rotate_180(&self) -> Result<Self>;
+    /// Rotate the frame 270° clockwise (= 90° counter-clockwise).
+    fn rotate_270_cw(&self) -> Result<Self>;
+    /// Mirror the frame horizontally (left ↔ right).
+    fn mirror_horizontal(&self) -> Result<Self>;
+    /// Mirror the frame vertically (top ↔ bottom).
+    fn mirror_vertical(&self) -> Result<Self>;
+}
+
+impl DecodedFrameTransformExt for DecodedFrame {
     /// Rotate the frame 90° clockwise, returning a new frame.
     ///
     /// Output dimensions are swapped: `(width, height)` becomes `(height, width)`.
     /// Crop offsets are transformed accordingly.
-    pub fn rotate_90_cw(&self) -> Result<Self> {
+    fn rotate_90_cw(&self) -> Result<Self> {
         let ow = self.width;
         let oh = self.height;
         let nw = oh;
@@ -91,7 +115,7 @@ impl DecodedFrame {
     /// Rotate the frame 180°, returning a new frame.
     ///
     /// Dimensions remain the same. Crop offsets are swapped (left↔right, top↔bottom).
-    pub fn rotate_180(&self) -> Result<Self> {
+    fn rotate_180(&self) -> Result<Self> {
         let w = self.width;
         let h = self.height;
 
@@ -168,7 +192,7 @@ impl DecodedFrame {
     ///
     /// Output dimensions are swapped: `(width, height)` becomes `(height, width)`.
     /// Crop offsets are transformed accordingly.
-    pub fn rotate_270_cw(&self) -> Result<Self> {
+    fn rotate_270_cw(&self) -> Result<Self> {
         let ow = self.width;
         let oh = self.height;
         let nw = oh;
@@ -247,7 +271,7 @@ impl DecodedFrame {
     /// Mirror the frame about the vertical axis (left-right flip), returning a new frame.
     ///
     /// Dimensions remain the same. Left and right crop offsets are swapped.
-    pub fn mirror_horizontal(&self) -> Result<Self> {
+    fn mirror_horizontal(&self) -> Result<Self> {
         let w = self.width;
         let h = self.height;
 
@@ -318,7 +342,7 @@ impl DecodedFrame {
     /// Mirror the frame about the horizontal axis (top-bottom flip), returning a new frame.
     ///
     /// Dimensions remain the same. Top and bottom crop offsets are swapped.
-    pub fn mirror_vertical(&self) -> Result<Self> {
+    fn mirror_vertical(&self) -> Result<Self> {
         let w = self.width;
         let h = self.height;
 

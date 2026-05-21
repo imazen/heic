@@ -647,7 +647,7 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
                     frame.color_primaries as u16,
                     frame.transfer_characteristics as u16,
                 );
-                let rgba_data = frame.to_rgba16()?;
+                let rgba_data = frame.to_rgba16().map_err(crate::error::at_core)?;
                 let pixels = u16_vec_to_rgba(rgba_data);
                 let pb = PixelBuffer::from_pixels_erased(pixels, w, h)
                     .map_err_at(|_| HeicError::InvalidData("pixel count mismatch"))?
@@ -659,7 +659,7 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
                     frame.color_primaries as u16,
                     frame.transfer_characteristics as u16,
                 );
-                let rgb_data = frame.to_rgb16()?;
+                let rgb_data = frame.to_rgb16().map_err(crate::error::at_core)?;
                 let pixels = u16_vec_to_rgb(rgb_data);
                 let pb = PixelBuffer::from_pixels_erased(pixels, w, h)
                     .map_err_at(|_| HeicError::InvalidData("pixel count mismatch"))?
@@ -882,7 +882,7 @@ impl HeicStreamDecoder {
                     frame.color_primaries as u16,
                     frame.transfer_characteristics as u16,
                 );
-                let rgba_data = frame.to_rgba16()?;
+                let rgba_data = frame.to_rgba16().map_err(crate::error::at_core)?;
                 let pixels: alloc::vec::Vec<Rgba<u16>> = rgba_data
                     .chunks_exact(4)
                     .map(|c| Rgba {
@@ -903,7 +903,7 @@ impl HeicStreamDecoder {
                     frame.color_primaries as u16,
                     frame.transfer_characteristics as u16,
                 );
-                let rgb_data = frame.to_rgb16()?;
+                let rgb_data = frame.to_rgb16().map_err(crate::error::at_core)?;
                 let pixels = u16_vec_to_rgb(rgb_data);
                 let w = frame.cropped_width();
                 let h = frame.cropped_height();

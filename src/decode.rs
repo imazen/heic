@@ -10,6 +10,7 @@ use enough::{Stop, Unstoppable};
 use whereat::at;
 
 use crate::error::check_stop;
+use crate::hevc::transforms::DecodedFrameTransformExt;
 use crate::heif::{self, CleanAperture, ColorInfo, FourCC, ItemType, Transform};
 use crate::{
     DecodeOutput, DecoderConfig, GainMapOrigin, HdrGainMap, HeicError, Limits, PixelLayout, Result,
@@ -522,7 +523,8 @@ fn decode_iovl(
         canvas_height,
         bit_depth,
         chroma_format,
-    )?;
+    )
+    .map_err(crate::error::at_core)?;
 
     // Per ISO/IEC 23008-12 the four u16 entries are R/G/B/A in the
     // canvas's *RGB* color space; libheif composites in 4:4:4 RGB and only
@@ -1119,7 +1121,8 @@ fn decode_grid(
         output_height,
         bit_depth,
         chroma_format,
-    )?;
+    )
+    .map_err(crate::error::at_core)?;
 
     // Streaming decode: decode tiles and blit immediately, dropping each tile
     // (or row of tiles) before decoding the next. This keeps peak memory at
@@ -2193,10 +2196,10 @@ pub(crate) fn decode_thumbnail(data: &[u8], layout: PixelLayout) -> Result<Optio
     let height = frame.cropped_height();
 
     let pixels = match layout {
-        PixelLayout::Rgb8 => frame.to_rgb()?,
-        PixelLayout::Rgba8 => frame.to_rgba()?,
-        PixelLayout::Bgr8 => frame.to_bgr()?,
-        PixelLayout::Bgra8 => frame.to_bgra()?,
+        PixelLayout::Rgb8 => frame.to_rgb().map_err(crate::error::at_core)?,
+        PixelLayout::Rgba8 => frame.to_rgba().map_err(crate::error::at_core)?,
+        PixelLayout::Bgr8 => frame.to_bgr().map_err(crate::error::at_core)?,
+        PixelLayout::Bgra8 => frame.to_bgra().map_err(crate::error::at_core)?,
     };
 
     Ok(Some(DecodeOutput {
@@ -2380,10 +2383,10 @@ pub(crate) fn decode_auxiliary_item(
     let height = frame.cropped_height();
 
     let pixels = match layout {
-        PixelLayout::Rgb8 => frame.to_rgb()?,
-        PixelLayout::Rgba8 => frame.to_rgba()?,
-        PixelLayout::Bgr8 => frame.to_bgr()?,
-        PixelLayout::Bgra8 => frame.to_bgra()?,
+        PixelLayout::Rgb8 => frame.to_rgb().map_err(crate::error::at_core)?,
+        PixelLayout::Rgba8 => frame.to_rgba().map_err(crate::error::at_core)?,
+        PixelLayout::Bgr8 => frame.to_bgr().map_err(crate::error::at_core)?,
+        PixelLayout::Bgra8 => frame.to_bgra().map_err(crate::error::at_core)?,
     };
 
     Ok(DecodeOutput {

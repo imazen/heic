@@ -11,13 +11,17 @@ categories = ["multimedia::images"]
 
 [features]
 default = []
-std = []
+std = ["archmage/std"]
 fallible-alloc = []
 
 [dependencies]
 enough = { workspace = true }
 whereat = { workspace = true }
+archmage = { version = "0.9.16", default-features = false, features = ["macros"] }
+magetypes = { version = "0.9.16", default-features = false }
+safe_unaligned_simd = "0.2.5"
 
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }

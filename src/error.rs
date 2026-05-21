@@ -101,6 +101,47 @@ impl From<HevcError> for At<HeicError> {
     }
 }
 
+// Promote heic-core's small DecodedFrame-construction error to the parent
+// HevcError so the rust decoder's `try_vec![...]?` and DecodedFrame methods
+// (now living in heic-core) compose naturally with the parent's error type.
+impl From<heic_core::error::HevcError> for HevcError {
+    fn from(e: heic_core::error::HevcError) -> Self {
+        match e {
+            heic_core::error::HevcError::AllocationFailed => Self::AllocationFailed,
+            heic_core::error::HevcError::DimensionOverflow => Self::DimensionOverflow,
+            // `heic_core::error::HevcError` is `#[non_exhaustive]`; future
+            // variants get bucketed into the closest existing parent variant
+            // until a more specific mapping is added.
+            _ => Self::AllocationFailed,
+        }
+    }
+}
+
+impl From<heic_core::error::HevcError> for HeicError {
+    fn from(e: heic_core::error::HevcError) -> Self {
+        Self::HevcDecode(HevcError::from(e))
+    }
+}
+
+// `impl From<heic_core::error::HevcError> for At<HeicError>` would be the
+// natural `?`-friendly conversion but the orphan rule forbids it: both
+// `From` and `At` are foreign, and the inner `HeicError` parameter of `At`
+// doesn't count for orphan purposes. Use [`at_core`] at call sites instead.
+
+/// Helper to convert a `heic_core::error::HevcError` into an `At<HeicError>`
+/// at the current call site, capturing the source location like `?` would.
+///
+/// Use at the boundary where the parent crate calls heic-core methods that
+/// return `heic_core::error::HevcError`:
+///
+/// ```ignore
+/// frame.to_rgb().map_err(at_core)?;
+/// ```
+#[track_caller]
+pub(crate) fn at_core(e: heic_core::error::HevcError) -> At<HeicError> {
+    at!(HeicError::from(e))
+}
+
 /// Check a `Stop` token and convert to `At<HeicError>` on cancellation.
 #[track_caller]
 pub(crate) fn check_stop(stop: &dyn enough::Stop) -> Result<()> {

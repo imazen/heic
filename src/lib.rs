@@ -1203,10 +1203,10 @@ impl<'a> DecodeRequest<'a> {
         }
 
         let data = match self.layout {
-            PixelLayout::Rgb8 => frame.to_rgb()?,
-            PixelLayout::Rgba8 => frame.to_rgba()?,
-            PixelLayout::Bgr8 => frame.to_bgr()?,
-            PixelLayout::Bgra8 => frame.to_bgra()?,
+            PixelLayout::Rgb8 => frame.to_rgb().map_err(crate::error::at_core)?,
+            PixelLayout::Rgba8 => frame.to_rgba().map_err(crate::error::at_core)?,
+            PixelLayout::Bgr8 => frame.to_bgr().map_err(crate::error::at_core)?,
+            PixelLayout::Bgra8 => frame.to_bgra().map_err(crate::error::at_core)?,
         };
 
         Ok(DecodeOutput {
@@ -1334,10 +1334,10 @@ impl<'a> DecodeRequest<'a> {
         }
 
         let data = match self.layout {
-            PixelLayout::Rgb8 => frame.to_rgb()?,
-            PixelLayout::Rgba8 => frame.to_rgba()?,
-            PixelLayout::Bgr8 => frame.to_bgr()?,
-            PixelLayout::Bgra8 => frame.to_bgra()?,
+            PixelLayout::Rgb8 => frame.to_rgb().map_err(crate::error::at_core)?,
+            PixelLayout::Rgba8 => frame.to_rgba().map_err(crate::error::at_core)?,
+            PixelLayout::Bgr8 => frame.to_bgr().map_err(crate::error::at_core)?,
+            PixelLayout::Bgra8 => frame.to_bgra().map_err(crate::error::at_core)?,
         };
 
         let bpp = self.layout.bytes_per_pixel();

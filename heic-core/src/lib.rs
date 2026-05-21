@@ -24,7 +24,7 @@
 //! Backends do NOT handle HEIF container parsing, grid assembly, alpha
 //! compositing, gain maps, EXIF/XMP/ICC extraction, transforms, or
 //! YCbCr→RGB conversion. Those concerns live in the parent crate (and color
-//! conversion lives in [`color`]).
+//! conversion lives in [`color_convert`]).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
@@ -33,13 +33,62 @@
 extern crate alloc;
 
 use alloc::string::String;
-use alloc::vec::Vec;
 
-pub mod color;
+// ── Public modules ────────────────────────────────────────────────────────
+
+pub mod color_convert;
+pub mod error;
 pub mod frame;
 pub mod nal;
 
+#[cfg(target_arch = "aarch64")]
+mod color_convert_neon;
+#[cfg(target_arch = "wasm32")]
+mod color_convert_wasm;
+
 pub use frame::DecodedFrame;
+
+// ── Internal allocation primitive (used by `try_vec!`) ────────────────────
+
+/// Fallible vec allocation — called by [`try_vec!`] when `fallible-alloc` is
+/// enabled.
+#[cfg(feature = "fallible-alloc")]
+#[doc(hidden)]
+#[inline]
+pub fn alloc_vec_fallible<T: Clone>(
+    len: usize,
+    val: T,
+) -> Result<alloc::vec::Vec<T>, error::HevcError> {
+    let mut v = alloc::vec::Vec::new();
+    v.try_reserve(len)
+        .map_err(|_| error::HevcError::AllocationFailed)?;
+    v.resize(len, val);
+    Ok(v)
+}
+
+/// Allocate a `Vec<T>` filled with `len` copies of `val`, returning
+/// `Result<Vec<T>, error::HevcError>`.
+///
+/// With `fallible-alloc` feature: uses `try_reserve` + `resize` (never panics
+/// on OOM). Without `fallible-alloc` (default): uses `vec![val; len]` (fast
+/// memset path, panics on OOM, but wraps result in `Ok` so callers always
+/// write `try_vec![...]?`).
+#[doc(hidden)]
+#[macro_export]
+macro_rules! try_vec {
+    ($val:expr; $len:expr) => {{
+        #[cfg(feature = "fallible-alloc")]
+        {
+            $crate::alloc_vec_fallible($len, $val)
+        }
+        #[cfg(not(feature = "fallible-alloc"))]
+        {
+            Ok::<::alloc::vec::Vec<_>, $crate::error::HevcError>(::alloc::vec![$val; $len])
+        }
+    }};
+}
+
+// ── Backend contract ──────────────────────────────────────────────────────
 
 /// Errors a backend can return from [`HevcBackend::decode_hevc`].
 ///
@@ -116,11 +165,11 @@ pub struct HvccParams<'a> {
 
 /// HEVC backend implementation.
 ///
-/// Implementors decode one HEIF tile (one HEVC access unit) from hvcC config
-/// + length-prefixed slice data into a planar YCbCr [`DecodedFrame`]. The
-/// parent `heic` crate constructs backends, holds the allowlist, and routes
-/// container-level concerns (grid assembly, alpha plane, gain map) to
-/// individual backend calls.
+/// Implementors decode one HEIF tile (one HEVC access unit) from an hvcC
+/// config plus length-prefixed slice data into a planar YCbCr
+/// [`DecodedFrame`]. The parent `heic` crate constructs backends, holds the
+/// allowlist, and routes container-level concerns (grid assembly, alpha
+/// plane, gain map) to individual backend calls.
 pub trait HevcBackend: Send {
     /// Stable identifier for the backend, used in logs and error messages.
     /// Examples: `"rust"`, `"mediafoundation"`, `"videotoolbox"`,
@@ -147,27 +196,4 @@ pub trait HevcBackend: Send {
         image_data: &[u8],
         stop: &dyn enough::Stop,
     ) -> Result<DecodedFrame, BackendError>;
-}
-
-/// Helper: allocate a `Vec<T>` of `len` copies of `val`.
-///
-/// Mirrors the parent crate's `try_vec!` macro so backend crates that don't
-/// pull in the parent can use the same allocation discipline. With the
-/// `fallible-alloc` feature, uses `try_reserve` + `resize`; otherwise uses
-/// `vec![val; len]` (fast memset, panics on OOM).
-#[doc(hidden)]
-#[inline]
-pub fn alloc_vec<T: Clone>(len: usize, val: T) -> Result<Vec<T>, BackendError> {
-    #[cfg(feature = "fallible-alloc")]
-    {
-        let mut v = Vec::new();
-        v.try_reserve(len)
-            .map_err(|_| BackendError::LimitsExceeded("allocation failed"))?;
-        v.resize(len, val);
-        Ok(v)
-    }
-    #[cfg(not(feature = "fallible-alloc"))]
-    {
-        Ok(alloc::vec![val; len])
-    }
 }

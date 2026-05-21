@@ -6,9 +6,6 @@
 pub(crate) mod bitstream;
 pub(crate) mod cabac;
 pub(crate) mod color_convert;
-#[cfg(target_arch = "aarch64")]
-mod color_convert_neon;
-mod color_convert_wasm;
 mod ctu;
 mod deblock;
 pub(crate) mod debug;
@@ -26,7 +23,7 @@ mod transform;
 mod transform_simd;
 #[cfg(target_arch = "aarch64")]
 mod transform_simd_neon;
-mod transforms;
+pub(crate) mod transforms;
 
 pub use picture::DecodedFrame;
 
@@ -746,29 +743,16 @@ impl VideoDecoder {
     }
 }
 
-/// Clone a DecodedFrame's planes for use as a reference (no deblock/qp metadata needed)
+/// Clone a DecodedFrame's planes for use as a reference (no deblock/qp metadata needed).
 fn clone_frame_for_ref(f: &DecodedFrame) -> DecodedFrame {
-    DecodedFrame {
-        width: f.width,
-        height: f.height,
-        y_plane: f.y_plane.clone(),
-        cb_plane: f.cb_plane.clone(),
-        cr_plane: f.cr_plane.clone(),
-        bit_depth: f.bit_depth,
-        chroma_format: f.chroma_format,
-        crop_left: f.crop_left,
-        crop_right: f.crop_right,
-        crop_top: f.crop_top,
-        crop_bottom: f.crop_bottom,
-        deblock_flags: Vec::new(),
-        deblock_stride: 0,
-        qp_map: Vec::new(),
-        alpha_plane: None,
-        full_range: f.full_range,
-        matrix_coeffs: f.matrix_coeffs,
-        color_primaries: f.color_primaries,
-        transfer_characteristics: f.transfer_characteristics,
-    }
+    // Clone everything, then drop the transient decode-time metadata that
+    // reference frames don't need (saves memory across the DPB).
+    let mut out = f.clone();
+    out.deblock_flags = Vec::new();
+    out.deblock_stride = 0;
+    out.qp_map = Vec::new();
+    out.alpha_plane = None;
+    out
 }
 
 /// Create a frame from SPS parameters

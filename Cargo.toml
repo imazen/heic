@@ -46,6 +46,7 @@ av1 = ["std", "dep:rav1d-safe"]
 unci = ["dep:zenflate"]
 
 [dependencies]
+heic-core = { workspace = true }
 enough = "0.4.3"
 whereat = { version = "0.1.5"}
 archmage = { version = "0.9.16", default-features = false, features = ["macros"] }
