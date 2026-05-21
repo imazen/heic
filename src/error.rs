@@ -43,6 +43,21 @@ pub enum HeicError {
     Sink(alloc::boxed::Box<dyn core::error::Error + Send + Sync>),
     /// Codec not supported (e.g., AV1 without the `av1` feature, or JPEG, or H.264)
     UnsupportedCodec(&'static str),
+    /// `DecoderConfig` had an empty backend allowlist when decode was called.
+    ///
+    /// Pass an ordered list to
+    /// [`DecoderConfig::with_backends`](crate::DecoderConfig::with_backends),
+    /// or use [`DecoderConfig::new()`](crate::DecoderConfig::new) which
+    /// installs [`recommended_backends`](crate::recommended_backends) by
+    /// default.
+    NoBackendSelected,
+    /// Every backend in the allowlist either reported unavailable or failed
+    /// on this bitstream.
+    ///
+    /// The string captures each backend's reason in order so users can tell
+    /// whether the failure was "no decoder installed" vs "decoder rejected
+    /// the bitstream".
+    AllBackendsFailed(alloc::string::String),
 }
 
 impl fmt::Display for HeicError {
@@ -61,6 +76,15 @@ impl fmt::Display for HeicError {
             Self::Cancelled(reason) => write!(f, "{reason}"),
             Self::Sink(e) => write!(f, "decode sink error: {e}"),
             Self::UnsupportedCodec(msg) => write!(f, "unsupported codec: {msg}"),
+            Self::NoBackendSelected => write!(
+                f,
+                "no HEVC backend selected in DecoderConfig (use \
+                 DecoderConfig::with_backends or rely on \
+                 DecoderConfig::new which installs the recommended allowlist)"
+            ),
+            Self::AllBackendsFailed(detail) => {
+                write!(f, "every HEVC backend in the allowlist failed: {detail}")
+            }
         }
     }
 }

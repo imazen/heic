@@ -37,8 +37,25 @@ include = [
 autoexamples = false
 
 [features]
-default = ["std"]
-std = ["archmage/std", "ultrahdr-core?/std"]
+# DEFAULT IS EMPTY. The crate requires at least one HEVC backend feature to
+# compile; default `cargo build` emits a `compile_error!` from src/lib.rs. See
+# the README for the available backends and their target_os requirements.
+default = []
+
+# ── HEVC backend selection ────────────────────────────────────────────────
+# Every build must enable at least one backend whose target_os matches the
+# host. `backend-rust` is the only backend that ships today; native backends
+# (mediafoundation, videotoolbox, mediacodec, vaapi, d3d11va) land in
+# subsequent PRs.
+#
+# Backends compose: enable as many as you want. At decode time, pass an
+# ordered allowlist to `DecoderConfig::with_backends(&[...])`; the first
+# entry that reports available wins, with `BackendError::Unavailable` /
+# `BackendError::Decode` falling through to the next.
+backend-rust = []
+
+# ── Cross-cutting flags ──────────────────────────────────────────────────
+std = ["archmage/std", "heic-core/std", "ultrahdr-core?/std"]
 fallible-alloc = []
 parallel = ["std", "dep:rayon"]
 zencodec = ["dep:zencodec", "dep:zenpixels", "dep:rgb", "dep:imgref", "dep:garb", "dep:bytemuck", "dep:ultrahdr-core"]

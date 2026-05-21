@@ -33,14 +33,29 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: Test (default features)
-        run: cargo test --lib
+      - name: Test (backend-rust + std)
+        run: cargo test --lib --features "backend-rust,std"
 
-      - name: Test (parallel)
-        run: cargo test --lib --features parallel
+      - name: Test (backend-rust + parallel)
+        run: cargo test --lib --features "backend-rust,parallel"
 
-      - name: Check (no_std)
-        run: cargo check --no-default-features
+      - name: Check (backend-rust, no_std)
+        run: cargo check --no-default-features --features backend-rust
+
+      - name: Default build must fail with the compile_error message
+        shell: bash
+        run: |
+          set -e
+          if cargo build --no-default-features 2>build.log; then
+            echo "::error::Expected compile_error but build succeeded"
+            cat build.log
+            exit 1
+          fi
+          if ! grep -q "no HEVC backend is enabled" build.log; then
+            echo "::error::compile_error message did not match expected text"
+            cat build.log
+            exit 1
+          fi
 
   feature-perms:
     name: Feature permutations
@@ -50,20 +65,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: Check (no_std)
-        run: cargo check --no-default-features
+      - name: Check (backend-rust, no_std)
+        run: cargo check --no-default-features --features backend-rust
 
-      - name: Test (parallel)
-        run: cargo test --lib --features parallel
+      - name: Test (backend-rust + parallel)
+        run: cargo test --lib --features "backend-rust,parallel"
 
-      - name: Test (zencodec)
-        run: cargo test --lib --features zencodec
+      - name: Test (backend-rust + zencodec)
+        run: cargo test --lib --features "backend-rust,zencodec"
 
-      - name: Test (parallel,zencodec)
-        run: cargo test --lib --features "parallel,zencodec"
+      - name: Test (backend-rust + parallel + zencodec)
+        run: cargo test --lib --features "backend-rust,parallel,zencodec"
 
       - name: Test (all publishable features)
-        run: cargo test --lib --features "std,fallible-alloc,parallel,zencodec"
+        run: cargo test --lib --features "backend-rust,std,fallible-alloc,parallel,zencodec"
 
   clippy:
     name: Clippy
@@ -75,14 +90,14 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
 
-      - name: Clippy (default + parallel)
-        run: cargo clippy --lib --features parallel -- -D warnings
+      - name: Clippy (backend-rust + parallel)
+        run: cargo clippy --lib --features "backend-rust,parallel" -- -D warnings
 
-      - name: Clippy (zencodec)
-        run: cargo clippy --lib --features zencodec -- -D warnings
+      - name: Clippy (backend-rust + zencodec)
+        run: cargo clippy --lib --features "backend-rust,zencodec" -- -D warnings
 
       - name: Clippy (all publishable features)
-        run: cargo clippy --lib --features "std,fallible-alloc,parallel,zencodec" -- -D warnings
+        run: cargo clippy --lib --features "backend-rust,std,fallible-alloc,parallel,zencodec" -- -D warnings
 
   fmt:
     name: Format
@@ -120,7 +135,7 @@ jobs:
           key: cross-i686
 
       - name: Test (i686)
-        run: cross test --lib --target i686-unknown-linux-gnu
+        run: cross test --lib --features "backend-rust,std" --target i686-unknown-linux-gnu
 
   coverage:
     name: Coverage
@@ -132,7 +147,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Generate coverage
-        run: cargo llvm-cov --lib --lcov --output-path lcov.info
+        run: cargo llvm-cov --lib --features "backend-rust,std" --lcov --output-path lcov.info
 
       - name: Upload coverage
         uses: codecov/codecov-action@v5

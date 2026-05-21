@@ -111,6 +111,33 @@
 #![warn(missing_docs)]
 extern crate alloc;
 
+// At least one backend feature must be active for the current target, or the
+// crate is useless — a `heic` build with no HEVC decoder cannot decode HEIC
+// images. Fail loudly with a list of available backends; user picks at least
+// one in their `Cargo.toml`.
+//
+// As new native backends land (mediafoundation, videotoolbox, mediacodec,
+// vaapi, d3d11va), they get added to the cfg-any list below paired with the
+// target_os they support.
+#[cfg(not(any(
+    feature = "backend-rust",
+    // all(feature = "backend-mediafoundation", target_os = "windows"),
+    // all(feature = "backend-videotoolbox",
+    //     any(target_os = "macos", target_os = "ios",
+    //         target_os = "tvos", target_os = "visionos")),
+    // all(feature = "backend-mediacodec", target_os = "android"),
+    // all(feature = "backend-vaapi", target_os = "linux"),
+    // all(feature = "backend-d3d11va", target_os = "windows"),
+)))]
+compile_error!(
+    "heic: no HEVC backend is enabled for this target. Enable at least one \
+     of: `backend-rust` (any target). \
+     Native backends land in upcoming PRs: backend-mediafoundation \
+     (windows), backend-videotoolbox (apple), backend-mediacodec (android), \
+     backend-vaapi (linux), backend-d3d11va (windows). \
+     Example: `cargo add heic --features backend-rust`."
+);
+
 whereat::define_at_crate_info!();
 
 /// Allocate a `Vec<T>` filled with `len` copies of `val`, returning `Result`.
@@ -149,12 +176,15 @@ pub(crate) fn alloc_vec_fallible<T: Clone>(
 }
 
 mod auxiliary;
+mod backend;
 mod decode;
 mod error;
 #[doc(hidden)]
 pub mod heif;
 #[doc(hidden)]
 pub mod hevc;
+
+pub use backend::{Backend, recommended_backends};
 
 #[cfg(feature = "zencodec")]
 mod codec;
@@ -816,7 +846,18 @@ pub struct HdrGainMap {
 /// ```
 #[derive(Debug, Clone)]
 pub struct DecoderConfig {
-    _private: (),
+    /// Ordered allowlist of HEVC backends to try for each decode.
+    ///
+    /// Empty by default — `DecoderConfig::new()` populates the list with
+    /// [`recommended_backends`] so the most common case (`config.decode(...)`)
+    /// just works. Override with [`Self::with_backends`] or
+    /// [`Self::with_backend`].
+    ///
+    /// See the [`backend`](crate::backend) module for fallthrough semantics.
+    /// As of PR2 the dispatcher is not yet plumbed through the internal
+    /// decode pipeline (still always uses `backend-rust`); subsequent PRs
+    /// land that wiring as the native backends arrive.
+    backends: Vec<Backend>,
 }
 
 impl Default for DecoderConfig {
@@ -827,9 +868,54 @@ impl Default for DecoderConfig {
 
 impl DecoderConfig {
     /// Create a new decoder configuration with sensible defaults.
+    ///
+    /// The default backend allowlist is [`recommended_backends`]: native
+    /// platform backends (when compiled in for the host target) followed by
+    /// the pure-Rust decoder as a last-resort fallback.
     #[must_use]
     pub fn new() -> Self {
-        Self { _private: () }
+        Self {
+            backends: recommended_backends(),
+        }
+    }
+
+    /// Set the ordered allowlist of HEVC backends.
+    ///
+    /// The first entry whose `is_available()` returns true is tried first;
+    /// recoverable failures (backend unavailable, bitstream rejection)
+    /// fall through to subsequent entries. An empty list causes decode to
+    /// return [`HeicError::NoBackendSelected`].
+    ///
+    /// See [`Backend`] for the available variants and the
+    /// [`backend`](crate::backend) module for fallthrough semantics.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use heic::{Backend, DecoderConfig};
+    ///
+    /// // Prefer the platform decoder; fall back to pure-Rust if it can't run.
+    /// let config = DecoderConfig::new()
+    ///     .with_backends(&[Backend::VideoToolbox, Backend::Rust]);
+    /// ```
+    #[must_use]
+    pub fn with_backends(mut self, backends: &[Backend]) -> Self {
+        self.backends = backends.to_vec();
+        self
+    }
+
+    /// Convenience shortcut for [`Self::with_backends`] with a single entry.
+    #[must_use]
+    pub fn with_backend(self, backend: Backend) -> Self {
+        self.with_backends(&[backend])
+    }
+
+    /// Return the backend allowlist currently set on this config.
+    ///
+    /// The decode pipeline consults this in order on every HEVC tile.
+    #[must_use]
+    pub fn backends(&self) -> &[Backend] {
+        &self.backends
     }
 
     /// One-shot decode: decode HEIC data to pixels in the requested layout.
