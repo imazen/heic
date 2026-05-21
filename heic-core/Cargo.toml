@@ -1,0 +1,23 @@
+[package]
+name = "heic-core"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared types and traits for the heic decoder backends (HevcBackend trait, DecodedFrame, color conversion)"
+keywords = ["heic", "heif", "hevc", "image", "decoder"]
+categories = ["multimedia::images"]
+
+[features]
+default = []
+std = []
+fallible-alloc = []
+
+[dependencies]
+enough = { workspace = true }
+whereat = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"

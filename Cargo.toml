@@ -1,11 +1,27 @@
-[package]
-name = "heic"
-version = "0.1.6"
+[workspace]
+members = [".", "heic-core"]
+resolver = "3"
+
+[workspace.package]
 edition = "2024"
 rust-version = "1.89"
 license = "AGPL-3.0-only OR LicenseRef-Imazen-Commercial"
-description = "Pure Rust HEIC/HEIF image decoder with SIMD acceleration"
 repository = "https://github.com/imazen/heic"
+authors = ["Imazen LLC"]
+
+[workspace.dependencies]
+heic-core = { version = "0.0.0", path = "heic-core" }
+enough = "0.4.3"
+whereat = "0.1.5"
+
+[package]
+name = "heic"
+version = "0.1.6"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pure Rust HEIC/HEIF image decoder with SIMD acceleration"
+repository.workspace = true
 keywords = ["heic", "heif", "hevc", "image", "decoder"]
 categories = ["multimedia::images", "parser-implementations"]
 include = [
