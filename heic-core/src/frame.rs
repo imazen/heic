@@ -98,12 +98,7 @@ impl DecodedFrame {
     /// Pure-Rust-decoder construction primitive. Native backends construct
     /// their own [`DecodedFrame`] directly with already-decoded planes.
     #[doc(hidden)]
-    pub fn with_params(
-        width: u32,
-        height: u32,
-        bit_depth: u8,
-        chroma_format: u8,
-    ) -> Result<Self> {
+    pub fn with_params(width: u32, height: u32, bit_depth: u8, chroma_format: u8) -> Result<Self> {
         let luma_size = width
             .checked_mul(height)
             .ok_or(HevcError::DimensionOverflow)? as usize;
@@ -230,14 +225,7 @@ impl DecodedFrame {
     /// separately from transform block boundaries. The bS derivation (8.7.2.4) checks
     /// CBF only at transform block edges, not at PB-only edges.
     #[doc(hidden)]
-    pub fn mark_pb_boundary(
-        &mut self,
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
-        vertical: bool,
-    ) {
+    pub fn mark_pb_boundary(&mut self, x: u32, y: u32, width: u32, height: u32, vertical: bool) {
         if vertical {
             // Mark vertical PB edge at column x, spanning height rows from y
             if x == 0 {

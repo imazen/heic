@@ -57,13 +57,7 @@ pub fn get_coefficients(
 /// other values fall through to BT.601, matching the inverse table in
 /// `get_coefficients`).
 #[must_use]
-pub fn rgb_to_ycbcr8(
-    r: u8,
-    g: u8,
-    b: u8,
-    full_range: bool,
-    matrix_coeffs: u8,
-) -> (u8, u8, u8) {
+pub fn rgb_to_ycbcr8(r: u8, g: u8, b: u8, full_range: bool, matrix_coeffs: u8) -> (u8, u8, u8) {
     // Coefficients in ×1024 fixed point. Y row is fully positive, chroma
     // rows are zero-sum modulo rounding. Pulled from ITU-R BT.601-7 §2.5.1
     // (limited range) and the equivalent full-range derivations used by

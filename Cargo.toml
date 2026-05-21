@@ -66,7 +66,16 @@ backend-rust = []
 std = ["archmage/std", "heic-core/std", "ultrahdr-core?/std"]
 fallible-alloc = []
 parallel = ["std", "dep:rayon"]
-zencodec = ["dep:zencodec", "dep:zenpixels", "dep:rgb", "dep:imgref", "dep:garb", "dep:bytemuck", "dep:ultrahdr-core"]
+zencodec = [
+    "std",
+    "dep:zencodec",
+    "dep:zenpixels",
+    "dep:rgb",
+    "dep:imgref",
+    "dep:garb",
+    "dep:bytemuck",
+    "dep:ultrahdr-core",
+]
 av1 = ["std", "dep:rav1d-safe"]
 unci = ["dep:zenflate"]
 

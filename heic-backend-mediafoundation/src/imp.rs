@@ -13,20 +13,20 @@ use std::vec::Vec;
 
 use heic_core::{BackendError, DecodedFrame, HvccParams, nal};
 
-use windows::core::Interface;
 use windows::Win32::Media::MediaFoundation::{
     IMF2DBuffer, IMFActivate, IMFAttributes, IMFMediaBuffer, IMFMediaType, IMFSample, IMFTransform,
-    MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE,
-    MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG_SEQUENCE_HEADER,
-    MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
-    MFMediaType_Video, MFStartup, MFTEnumEx, MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_FLAG_LOCALMFT,
-    MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_DRAIN,
-    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
-    MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_INFO, MFT_REGISTER_TYPE_INFO,
-    MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoFormat_P010, MFVideoInterlace_Progressive,
-    MFSTARTUP_NOSOCKET, MF_VERSION,
+    MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_FRAME_SIZE,
+    MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG_SEQUENCE_HEADER, MF_MT_PIXEL_ASPECT_RATIO,
+    MF_MT_SUBTYPE, MF_VERSION, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
+    MFMediaType_Video, MFSTARTUP_NOSOCKET, MFStartup, MFT_CATEGORY_VIDEO_DECODER,
+    MFT_ENUM_FLAG_LOCALMFT, MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT,
+    MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_INFO,
+    MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoFormat_P010,
+    MFVideoInterlace_Progressive,
 };
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
+use windows::core::Interface;
 
 // ────────────────────────────────────────────────────────────────────────
 // Process / thread initialization
@@ -61,7 +61,9 @@ fn init_mf() -> Result<(), BackendError> {
             // counted; we leave the deinit to thread exit (acceptable for a
             // long-lived worker thread in a HEIC decode app).
             let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-            if hr.is_ok() || hr.0 == 0x0000_0001 /* S_FALSE: already inited */ {
+            if hr.is_ok() || hr.0 == 0x0000_0001
+            /* S_FALSE: already inited */
+            {
                 c.set(true);
             }
         }
@@ -227,8 +229,8 @@ fn activate_hevc_decoder() -> Result<IMFTransform, BackendError> {
 
     // SAFETY: IMFActivate::ActivateObject for IMFTransform is the documented
     // MFT instantiation entry point.
-    let transform: IMFTransform = unsafe { activate.ActivateObject() }
-        .map_err(decode_err("IMFActivate::ActivateObject"))?;
+    let transform: IMFTransform =
+        unsafe { activate.ActivateObject() }.map_err(decode_err("IMFActivate::ActivateObject"))?;
 
     Ok(transform)
 }
@@ -386,8 +388,8 @@ fn build_input_sample(annexb: &[u8]) -> Result<IMFSample, BackendError> {
     let size = annexb.len() as u32;
     // SAFETY: MFCreateMemoryBuffer allocates a heap buffer of the requested
     // size and returns an IMFMediaBuffer.
-    let buffer: IMFMediaBuffer = unsafe { MFCreateMemoryBuffer(size) }
-        .map_err(decode_err("MFCreateMemoryBuffer"))?;
+    let buffer: IMFMediaBuffer =
+        unsafe { MFCreateMemoryBuffer(size) }.map_err(decode_err("MFCreateMemoryBuffer"))?;
 
     // Lock the buffer and memcpy the Annex B bytes in.
     let mut ptr: *mut u8 = core::ptr::null_mut();
@@ -554,8 +556,7 @@ fn read_planes_2d(
     let mut stride: i32 = 0;
     // SAFETY: Lock2D returns the row-stride and a pointer to the top-left
     // pixel of the buffer per the MF docs.
-    unsafe { buf2d.Lock2D(&mut ptr, &mut stride) }
-        .map_err(decode_err("IMF2DBuffer::Lock2D"))?;
+    unsafe { buf2d.Lock2D(&mut ptr, &mut stride) }.map_err(decode_err("IMF2DBuffer::Lock2D"))?;
 
     // Stride can be negative (bottom-up), but for NV12/P010 from the HEVC
     // MFT it's typically positive. Handle negative for completeness.
@@ -679,12 +680,20 @@ fn set_guid(
     unsafe { attrs.SetGUID(key, value) }.map_err(decode_err("IMFAttributes::SetGUID"))
 }
 
-fn set_u64(attrs: &IMFAttributes, key: &windows::core::GUID, value: u64) -> Result<(), BackendError> {
+fn set_u64(
+    attrs: &IMFAttributes,
+    key: &windows::core::GUID,
+    value: u64,
+) -> Result<(), BackendError> {
     // SAFETY: SetUINT64 with a valid attribute key.
     unsafe { attrs.SetUINT64(key, value) }.map_err(decode_err("IMFAttributes::SetUINT64"))
 }
 
-fn set_u32(attrs: &IMFAttributes, key: &windows::core::GUID, value: u32) -> Result<(), BackendError> {
+fn set_u32(
+    attrs: &IMFAttributes,
+    key: &windows::core::GUID,
+    value: u32,
+) -> Result<(), BackendError> {
     // SAFETY: SetUINT32 with a valid attribute key.
     unsafe { attrs.SetUINT32(key, value) }.map_err(decode_err("IMFAttributes::SetUINT32"))
 }
