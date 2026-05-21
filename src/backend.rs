@@ -51,25 +51,47 @@ pub enum Backend {
     /// The pure-Rust HEVC decoder bundled with this crate.
     #[cfg(feature = "backend-rust")]
     Rust,
-    // Native backends (placeholder — each is added in its own PR alongside
-    // the matching subcrate / FFI surface). Keep these as comments so the
-    // public-API shape is visible in source code review without breaking
-    // build for users who haven't enabled them yet.
-    //
-    // #[cfg(all(feature = "backend-mediafoundation", target_os = "windows"))]
-    // MediaFoundation,
-    // #[cfg(all(
-    //     feature = "backend-videotoolbox",
-    //     any(target_os = "macos", target_os = "ios",
-    //         target_os = "tvos", target_os = "visionos")
-    // ))]
-    // VideoToolbox,
-    // #[cfg(all(feature = "backend-mediacodec", target_os = "android"))]
-    // MediaCodec,
-    // #[cfg(all(feature = "backend-vaapi", target_os = "linux"))]
-    // Vaapi,
-    // #[cfg(all(feature = "backend-d3d11va", target_os = "windows"))]
-    // D3d11va,
+    /// Windows Media Foundation HEVC decoder MFT.
+    ///
+    /// Requires the Microsoft "HEVC Video Extensions" Store package on
+    /// the host (free "Device Manufacturer" variant 9N4WGH0Z6VHQ). Not
+    /// available on Windows Server SKUs.
+    #[cfg(all(feature = "backend-mediafoundation", target_os = "windows"))]
+    MediaFoundation,
+    /// Apple VideoToolbox HEVC decoder.
+    ///
+    /// Built into every shipping macOS 10.13+, iOS 11+, tvOS 11+, and
+    /// visionOS 1+ release; no extra install needed.
+    #[cfg(all(
+        feature = "backend-videotoolbox",
+        any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "tvos",
+            target_os = "visionos"
+        )
+    ))]
+    VideoToolbox,
+    /// Android MediaCodec HEVC decoder (NDK C API).
+    ///
+    /// Available since API 21; software fallback (`c2.android.hevc.decoder`)
+    /// ships on every modern device.
+    #[cfg(all(feature = "backend-mediacodec", target_os = "android"))]
+    MediaCodec,
+    /// Linux VA-API HEVC decoder (`libva`).
+    ///
+    /// Requires a libva-capable GPU driver (iHD / radeonsi /
+    /// nvidia-vaapi-driver).
+    #[cfg(all(feature = "backend-vaapi", target_os = "linux"))]
+    Vaapi,
+    /// Windows Direct3D 11 Video Acceleration HEVC decoder.
+    ///
+    /// Covers Intel + NVIDIA + AMD on Windows via a single API; ships in
+    /// every Windows install since 8.1, no Store extension required.
+    /// Requires hardware GPU (the WARP software D3D11 device does not
+    /// support video decode).
+    #[cfg(all(feature = "backend-d3d11va", target_os = "windows"))]
+    D3d11va,
 }
 
 impl Backend {
@@ -79,6 +101,24 @@ impl Backend {
         match self {
             #[cfg(feature = "backend-rust")]
             Self::Rust => "rust",
+            #[cfg(all(feature = "backend-mediafoundation", target_os = "windows"))]
+            Self::MediaFoundation => "mediafoundation",
+            #[cfg(all(
+                feature = "backend-videotoolbox",
+                any(
+                    target_os = "macos",
+                    target_os = "ios",
+                    target_os = "tvos",
+                    target_os = "visionos"
+                )
+            ))]
+            Self::VideoToolbox => "videotoolbox",
+            #[cfg(all(feature = "backend-mediacodec", target_os = "android"))]
+            Self::MediaCodec => "mediacodec",
+            #[cfg(all(feature = "backend-vaapi", target_os = "linux"))]
+            Self::Vaapi => "vaapi",
+            #[cfg(all(feature = "backend-d3d11va", target_os = "windows"))]
+            Self::D3d11va => "d3d11va",
         }
     }
 }
@@ -99,8 +139,36 @@ impl Backend {
 #[must_use]
 pub fn recommended_backends() -> Vec<Backend> {
     let mut out: Vec<Backend> = Vec::new();
-    // Native backends will be pushed first when they exist for this target.
-    // For now, only Rust is reachable.
+    // Native backends first (when feature + target_os both match), then
+    // backend-rust as a last-resort fallback.
+    #[cfg(all(feature = "backend-mediafoundation", target_os = "windows"))]
+    {
+        out.push(Backend::MediaFoundation);
+    }
+    #[cfg(all(feature = "backend-d3d11va", target_os = "windows"))]
+    {
+        out.push(Backend::D3d11va);
+    }
+    #[cfg(all(
+        feature = "backend-videotoolbox",
+        any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "tvos",
+            target_os = "visionos"
+        )
+    ))]
+    {
+        out.push(Backend::VideoToolbox);
+    }
+    #[cfg(all(feature = "backend-mediacodec", target_os = "android"))]
+    {
+        out.push(Backend::MediaCodec);
+    }
+    #[cfg(all(feature = "backend-vaapi", target_os = "linux"))]
+    {
+        out.push(Backend::Vaapi);
+    }
     #[cfg(feature = "backend-rust")]
     {
         out.push(Backend::Rust);
