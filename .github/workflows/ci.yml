@@ -121,7 +121,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Check MSRV
-        run: cargo hack check --rust-version
+        # cargo-hack defaults to no features which now fails the
+        # compile_error gate. Pin --features so MSRV checks the actual
+        # supported configurations rather than the unbuildable empty one.
+        run: cargo hack check --rust-version --features backend-rust
 
   i686:
     name: Test (i686)
