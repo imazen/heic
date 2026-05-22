@@ -119,6 +119,11 @@ ultrahdr-core = { version = "0.4.1", optional = true, default-features = false }
 criterion = "0.8.2"
 fast-ssim2 = { version = "0.8.0", features = ["imgref"] }
 imgref = "1.12.0"
+# Perceptual cross-backend RGBA comparison for the dispatcher integration
+# tests — zensim does multi-scale XYB similarity scoring; zensim-regress
+# wraps it with structured tolerance / report semantics for diff testing.
+zensim = "0.2.7"
+zensim-regress = "0.3.1"
 # heic-wasm-rs: reference decoder for comparison tests
 # Uncomment + RUSTFLAGS='--cfg heic_reference' cargo test to enable
 # heic-wasm-rs = { path = "../../heic/heic-wasm-rs" }
