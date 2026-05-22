@@ -459,21 +459,27 @@ apple-hdr/hdr-sample.heic dropped from max_delta=49 to max_delta=1
 midgray — i.e. the GPU isn't writing decoded pixels at all,
 unrelated to scaling-list math.
 
-Suspect: example.heic's SPS likely has features the picture-parameter
-populator misses entirely (not in `dwCodingParamToolFlags` /
-`dwCodingSettingPicturePropertyFlags`). Candidates:
-1. `pps_scaling_list_data_present_flag` bit position in
-   `dwCodingSettingPicturePropertyFlags` — chromium sets it; my
-   `from_sps_pps` doesn't.
-2. `sps_scaling_list_data_present_flag` bit position similar.
-3. `ucNumDeltaPocsOfRefRpsIdx` / `wNumBitsForShortTermRPSInSlice`
-   computed from slice header — currently 0; might mis-set for the
-   specific RPS structure example.heic encodes.
+Triage update (after commit `b16dcd28`): individual 512×512 tile
+decodes for example.heic produce REAL CONTENT (debug dump:
+y0=[180, 180, 180, ...] for tile 1, y0=[94, 93, ...] for tile 2,
+y0=[153, 153, ...] for tile 3 — clearly varied photo content). So
+the GRID-TILE decode path through D3D11VA is fully working.
 
-Next session: add `HEIC_D3D11VA_DEBUG=1` `Inner::decode` dump of
-the picture-parameter buffer bytes for synth_q95 vs example.heic
-to diff at the byte level. The struct is 192 bytes — a side-by-side
-hex compare will reveal the specific field that differs.
+The corpus_diff failure (max_delta=255 against rust output) comes
+from a DIFFERENT decode call the parent makes for example.heic:
+debug shows a 1280×854 "full image" decode with spsW=1280
+spsH=856, nals=2, first_nal_type=39 (SEI prefix), and Y plane
+showing y0=[16, 16, 16, ...] (BT.709 limited-range black).
+
+That suggests example.heic contains BOTH a grid layout (6× 512×512
+tiles) AND a separate single-image item (1280×856 coded → 1280×854
+visible). The parent picks the single-image path for the actual
+decode, and D3D11VA produces all-black on that specific bitstream.
+
+Next session: hex-dump the FULL-IMAGE pic_params for the
+example.heic 1280×854 decode (not the tile decodes) and find why
+this bitstream specifically goes black. Different fix path than
+the scaling-list one.
 
 Reproduce: `HEIC_D3D11VA_HW=1 HEIC_D3D11VA_DEBUG=1 cargo test ...
 d3d11va_vs_rust_corpus_diff` to see the full corpus output;
