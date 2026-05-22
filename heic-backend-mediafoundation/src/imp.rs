@@ -346,7 +346,13 @@ fn decode_one_frame(
     // Some MFTs reject samples without timestamps; pin a zero PTS + 1/60s
     // duration since for a still image the values are irrelevant but the
     // transform may require them to be set at all. SAFETY: API contract.
+    // SAFETY: SetSampleTime / SetSampleDuration are documented IMFSample
+    // setters; we own `sample` from the MFCreateSample above. Some HEVC
+    // MFTs reject inputs without timing; pin a 60Hz frame's worth of
+    // 100ns ticks (the values themselves are immaterial for still
+    // decode, but they must be set).
     unsafe { sample.SetSampleTime(0) }.map_err(decode_err("IMFSample::SetSampleTime"))?;
+    // SAFETY: see above — same contract on the same sample.
     unsafe { sample.SetSampleDuration(166_667) }
         .map_err(decode_err("IMFSample::SetSampleDuration"))?;
 
@@ -601,11 +607,10 @@ fn read_planes_2d(
     // documented inspection call.
     let total_bytes = unsafe { buf2d.GetContiguousLength() }
         .map_err(decode_err("IMF2DBuffer::GetContiguousLength"))? as usize;
-    let aligned_height = if stride_abs > 0 {
-        ((total_bytes * 2 / 3) / stride_abs).max(height as usize)
-    } else {
-        height as usize
-    };
+    let aligned_height = (total_bytes * 2 / 3)
+        .checked_div(stride_abs)
+        .unwrap_or(0)
+        .max(height as usize);
 
     // Handle negative-stride (bottom-up) buffers: Lock2D's pointer
     // points at the visual top-left of the image even when the
@@ -687,8 +692,9 @@ unsafe fn unpack_nv12_or_p010(
         for y in 0..half_h {
             // SAFETY: UV row y occupies [base + (h+y)*stride,
             // base + (h+y)*stride + stride).
-            let row =
-                unsafe { core::slice::from_raw_parts(base.add((h + y) * row_stride), row_stride) };
+            let row = unsafe {
+                core::slice::from_raw_parts(base.add((h_aligned + y) * row_stride), row_stride)
+            };
             for x in 0..half_w {
                 cb_plane[y * half_w + x] = u16::from(row[2 * x]);
                 cr_plane[y * half_w + x] = u16::from(row[2 * x + 1]);
@@ -711,8 +717,9 @@ unsafe fn unpack_nv12_or_p010(
         for y in 0..half_h {
             // SAFETY: UV row y occupies [base + (h+y)*stride,
             // base + (h+y)*stride + stride). 4 bytes per chroma pair.
-            let row =
-                unsafe { core::slice::from_raw_parts(base.add((h + y) * row_stride), row_stride) };
+            let row = unsafe {
+                core::slice::from_raw_parts(base.add((h_aligned + y) * row_stride), row_stride)
+            };
             for x in 0..half_w {
                 let cb = (u16::from(row[4 * x + 1]) << 8) | u16::from(row[4 * x]);
                 let cr = (u16::from(row[4 * x + 3]) << 8) | u16::from(row[4 * x + 2]);
