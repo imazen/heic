@@ -58,13 +58,13 @@ use objc2_video_toolbox::{
     VTDecompressionSession,
 };
 
-/// Output state captured by the VT decode callback. Filled in
-/// `decode_callback`, drained by [`Inner::decode`] after the
-/// `WaitForAsynchronousFrames` fence.
-///
-/// Thread-local because the callback runs on whatever thread VT schedules
-/// it on; we don't need cross-thread visibility — the synchronous decode
-/// path keeps everything single-threaded per call.
+// Output state captured by the VT decode callback. Filled in
+// `decode_callback`, drained by `Inner::decode` after the
+// `wait_for_asynchronous_frames` fence.
+//
+// Thread-local because the callback runs on whatever thread VT schedules
+// it on; we don't need cross-thread visibility — the synchronous decode
+// path keeps everything single-threaded per call.
 thread_local! {
     static CALLBACK_SLOT: Cell<Option<CFRetained<CVPixelBuffer>>> = const { Cell::new(None) };
     static CALLBACK_STATUS: Cell<i32> = const { Cell::new(0) };
@@ -363,12 +363,12 @@ fn decode_one_frame(
     // source_frame_refcon is null because we don't track frame identity
     // here (single-shot decode).
     let status = unsafe {
-        objc2_video_toolbox::VTDecompressionSessionDecodeFrame(
+        VTDecompressionSession::decode_frame(
             &cached.session,
             &sample_buffer,
             VTDecodeFrameFlags::empty(),
             ptr::null_mut(),
-            &raw mut info_flags,
+            Some(NonNull::new_unchecked(&raw mut info_flags)),
         )
     };
     if status != 0 {
@@ -379,9 +379,8 @@ fn decode_one_frame(
 
     // Fence on any queued async work.
     // SAFETY: standard VT API; session is alive.
-    let wait_status = unsafe {
-        objc2_video_toolbox::VTDecompressionSessionWaitForAsynchronousFrames(&cached.session)
-    };
+    let wait_status =
+        unsafe { VTDecompressionSession::wait_for_asynchronous_frames(&cached.session) };
     if wait_status != 0 {
         return Err(BackendError::Decode(format!(
             "VTDecompressionSessionWaitForAsynchronousFrames failed: OSStatus {wait_status}"
@@ -402,14 +401,13 @@ fn decode_one_frame(
 }
 
 fn build_block_buffer(data: &[u8]) -> Result<CFRetained<CMBlockBuffer>, BackendError> {
-    use objc2_core_media::CMBlockBufferCreateWithMemoryBlock;
     let mut bb: *mut CMBlockBuffer = ptr::null_mut();
-    // SAFETY: passing the data pointer with block_allocator = null and
-    // kCMBlockBufferAssureMemoryNowFlag = 0 tells CM to wrap the memory
-    // without copying or freeing it. The caller (decode_one_frame)
-    // holds the &[u8] borrow until the sample buffer is dropped.
+    // SAFETY: block_allocator = None + custom_block_source = null +
+    // flags = 0 tells CM to wrap the memory without copying or
+    // freeing it. The caller (decode_one_frame) holds the &[u8]
+    // borrow until the sample buffer is dropped.
     let status = unsafe {
-        CMBlockBufferCreateWithMemoryBlock(
+        CMBlockBuffer::create_with_memory_block(
             None,
             data.as_ptr() as *mut c_void,
             data.len(),
@@ -417,17 +415,17 @@ fn build_block_buffer(data: &[u8]) -> Result<CFRetained<CMBlockBuffer>, BackendE
             ptr::null(),
             0,
             data.len(),
-            0, /* CMBlockBufferFlags is a type alias for u32; no flags */
+            0,
             NonNull::new_unchecked(&raw mut bb),
         )
     };
     if status != 0 {
         return Err(BackendError::Decode(format!(
-            "CMBlockBufferCreateWithMemoryBlock failed: OSStatus {status}"
+            "CMBlockBuffer::create_with_memory_block failed: OSStatus {status}"
         )));
     }
     let bb = NonNull::new(bb)
-        .ok_or_else(|| BackendError::Decode("CMBlockBufferCreate returned null".into()))?;
+        .ok_or_else(|| BackendError::Decode("CMBlockBuffer::create returned null".into()))?;
     // SAFETY: Create Rule transfer.
     Ok(unsafe { CFRetained::from_raw(bb) })
 }
