@@ -1,4 +1,4 @@
-//! Windows Direct3D 11 Video Acceleration (D3D11VA) HEVC decoder backend for `heic`.
+//! Windows Direct3D 11 Video Acceleration (D3D11VA) HEVC decoder backend.
 //!
 //! D3D11VA is the modern replacement for DXVA2 and gives a single decoder
 //! API that works across **all** Windows GPU vendors (Intel iGPU, NVIDIA,
@@ -9,40 +9,41 @@
 //! Microsoft's Media Foundation Transform layer and requires the Store
 //! extension package.
 //!
+//! # Availability — what [`Self::is_available`] checks
+//!
+//! 1. `D3D11CreateDevice` succeeds against the default hardware adapter.
+//! 2. The resulting `ID3D11Device` can be queried for `ID3D11VideoDevice`.
+//! 3. At least one decoder profile in `GetVideoDecoderProfile` matches
+//!    the HEVC Main / Main10 GUIDs.
+//! 4. `CheckVideoDecoderFormat` reports support for the selected
+//!    profile + `DXGI_FORMAT_NV12` (8-bit) or `DXGI_FORMAT_P010` (10-bit).
+//!
+//! If any step fails, the parent's allowlist dispatcher falls through
+//! to the next backend.
+//!
 //! # When to choose D3D11VA vs. Media Foundation
 //!
 //! * **Server SKUs (Windows Server 2025)**: D3D11VA still works if the
 //!   server has a GPU; MF is structurally unavailable (Microsoft's docs
 //!   say "Minimum supported server: None supported" for the HEVC MFT).
-//! * **Headless / hyper-V VMs without a GPU**: neither works — D3D11VA
+//! * **Headless / Hyper-V VMs without a GPU**: neither works — D3D11VA
 //!   needs hardware acceleration (the WARP software D3D11 device does
-//!   **not** support video decode; `CreateVideoDecoder` returns
+//!   *not* support video decode; `CreateVideoDecoder` returns
 //!   `E_NOTIMPL` for HEVC).
 //! * **Per-vendor control**: D3D11VA exposes the underlying GPU adapter
-//!   directly, so callers who want to pin decode to a specific GPU on a
-//!   multi-GPU laptop can do so via DXGI adapter enumeration.
+//!   directly, so callers can pin decode to a specific GPU on a
+//!   multi-GPU laptop via DXGI adapter enumeration.
 //!
-//! # Replacing AMF
+//! # Decode status
 //!
-//! This backend replaces the originally-planned `heic-backend-amf`. AMF
-//! requires the proprietary `amdgpu-pro` Linux drivers and has
-//! known-broken Main10 decode on NAVI1x/NAVI2x/VCN2.x (AMF issue #348).
-//! D3D11VA covers AMD on Windows alongside Intel and NVIDIA, with a
-//! cleaner availability story and no vendor SDK dependency. AMD-specific
-//! AMF support could land as a separate `heic-backend-amf` crate in the
-//! future for users with specialized needs (encoder reuse, hardware tone
-//! mapping); it is not on the critical path.
-//!
-//! # Status — skeleton
-//!
-//! This commit lands the crate structure and the `HevcBackend` trait
-//! implementation as a stub that returns
-//! [`BackendError::Unavailable`](heic_core::BackendError::Unavailable).
-//! The real FFI (`D3D11CreateDevice`, `ID3D11VideoDevice::CreateVideoDecoder`
-//! with `D3D11_DECODER_PROFILE_HEVC_VLD_MAIN`, video decoder input/output
-//! views, NV12/P010 staging texture readback → planar u16) lands in a
-//! follow-up PR with Windows + GPU CI hardware (compile-only CI in this
-//! commit).
+//! [`Self::decode_hevc`] is a stub. The full HEVC decode pipeline
+//! (`CreateVideoDecoder` → bitstream/picture-parameters/slice-control
+//! buffers per `DXVA_PicParams_HEVC` / `DXVA_Slice_HEVC_Short` →
+//! `SubmitDecoderBuffers` → staging texture readback) follows
+//! Chromium's `media/gpu/windows/d3d11_h265_accelerator.cc` reference
+//! but is heavy enough (~1.7k LOC of field mapping) that it ships in
+//! a follow-up PR. The probe lands first so `recommended_backends()`
+//! reports D3D11VA accurately to callers.
 
 #![cfg_attr(not(target_os = "windows"), allow(dead_code, unused_imports))]
 
@@ -56,14 +57,14 @@ pub struct D3d11VaBackend {
 }
 
 // SAFETY: D3D11 device and video decoder objects are documented thread-safe
-// when D3D11_CREATE_DEVICE_SINGLETHREADED is *not* set, but call sites
-// still need to serialize submissions. Skeleton wrapper is trivially Send.
+// when D3D11_CREATE_DEVICE_SINGLETHREADED is NOT set; call sites still need
+// to serialize submissions. The wrapper itself is trivially Send.
 #[cfg(target_os = "windows")]
 unsafe impl Send for D3d11VaBackend {}
 
 impl D3d11VaBackend {
-    /// Create a new D3D11VA backend instance. The device + video decoder
-    /// are created lazily on the first decode call.
+    /// Create a new D3D11VA backend. The device + video decoder are
+    /// constructed lazily.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -76,11 +77,14 @@ impl HevcBackend for D3d11VaBackend {
     }
 
     fn is_available(&self) -> bool {
-        // Real implementation: try `D3D11CreateDevice` with a hardware
-        // driver type, then `ID3D11VideoDevice::CheckVideoDecoderFormat`
-        // for `DXGI_FORMAT_NV12` against
-        // `D3D11_DECODER_PROFILE_HEVC_VLD_MAIN`. Skeleton: false.
-        false
+        #[cfg(target_os = "windows")]
+        {
+            probe::probe()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            false
+        }
     }
 
     fn decode_hevc(
@@ -91,7 +95,12 @@ impl HevcBackend for D3d11VaBackend {
     ) -> Result<DecodedFrame, BackendError> {
         let _ = (config, image_data, stop);
         Err(BackendError::Unavailable(
-            "heic-backend-d3d11va: FFI implementation pending (skeleton crate)",
+            "heic-backend-d3d11va: HEVC decode FFI pending — probe \
+             succeeded but the SPS/PPS → DXVA_PicParams_HEVC field \
+             mapping ships in a follow-up PR",
         ))
     }
 }
+
+#[cfg(target_os = "windows")]
+mod probe;
