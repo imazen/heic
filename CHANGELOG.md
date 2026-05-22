@@ -22,6 +22,7 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 ### Added — `heic-backend-videotoolbox` (Apple)
 - Full VideoToolbox FFI: `CMVideoFormatDescriptionCreateFromHEVCParameterSets` → `VTDecompressionSessionCreate` (cached per-dimensions across decodes) → `CMSampleBuffer`-wrapped hvcC slice → `VTDecompressionSession::decode_frame` with synchronous output callback → `CVPixelBufferLockBaseAddress` + per-plane unpack of NV12 (8-bit) or P010 (10-bit, LSB-aligned, low-10-bit masked — opposite of Windows MF's MSB alignment). Targets macOS, iOS device + simulator, tvOS, visionOS. Commit 9758e51, 8764ea7, 626adf6, 04690a8.
+- Compile + clippy verified on `macos-latest` (aarch64) and `macos-15-intel`. Runtime decode test added behind a `HEIC_RUN_VT_RUNTIME` gate after first runtime exercise tripped a SIGABRT — likely a `CVImageBuffer → CVPixelBuffer` cast in the decode callback or an `unsafe impl Send` interaction when tests run in parallel. Iteration deferred pending Apple-hardware debugging.
 
 ### Added — `heic-backend-mediacodec` (Android)
 - Full NDK `AMediaCodec` FFI: `createDecoderByType("video/hevc")` → `AMediaFormat` with KEY_WIDTH/HEIGHT + KEY_CSD_0 (Annex-B VPS+SPS+PPS) → `configure` with null surface (ByteBuffer mode) → input queue + EOS → output dequeue loop handling `INFO_OUTPUT_FORMAT_CHANGED` / `INFO_TRY_AGAIN_LATER` → per-color-format unpack for `COLOR_FormatYUV420Planar` (I420), `COLOR_FormatYUV420SemiPlanar` + `Flexible` (NV12), and `COLOR_FormatYUVP010` (10-bit). RAII teardown via `Cached`'s Drop. Commit 3352aa1.
