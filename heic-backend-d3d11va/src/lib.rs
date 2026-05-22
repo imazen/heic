@@ -53,7 +53,7 @@ use heic_core::{BackendError, DecodedFrame, HevcBackend, HvccParams};
 #[derive(Default)]
 pub struct D3d11VaBackend {
     #[cfg(target_os = "windows")]
-    _placeholder: (),
+    inner: imp::Inner,
 }
 
 // SAFETY: D3D11 device and video decoder objects are documented thread-safe
@@ -93,12 +93,17 @@ impl HevcBackend for D3d11VaBackend {
         image_data: &[u8],
         stop: &dyn enough::Stop,
     ) -> Result<DecodedFrame, BackendError> {
-        let _ = (config, image_data, stop);
-        Err(BackendError::Unavailable(
-            "heic-backend-d3d11va: HEVC decode FFI pending — probe \
-             succeeded but the SPS/PPS → DXVA_PicParams_HEVC field \
-             mapping ships in a follow-up PR",
-        ))
+        #[cfg(target_os = "windows")]
+        {
+            self.inner.decode(config, image_data, stop)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = (config, image_data, stop);
+            Err(BackendError::Unavailable(
+                "heic-backend-d3d11va: not compiled for this target",
+            ))
+        }
     }
 }
 
@@ -108,5 +113,7 @@ pub mod decoder;
 pub mod dxva;
 #[cfg(target_os = "windows")]
 pub mod dxva_read;
+#[cfg(target_os = "windows")]
+mod imp;
 #[cfg(target_os = "windows")]
 mod probe;
