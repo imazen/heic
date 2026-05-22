@@ -756,7 +756,7 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
             // Decode and attach the HDR gain map if requested and present.
             if self.extract_gain_map
                 && pi.has_gain_map
-                && let Ok(gain_map) = crate::decode::decode_gain_map(data)
+                && let Ok(gain_map) = crate::decode::decode_gain_map(data, &[crate::Backend::Rust])
             {
                 output.extensions_mut().insert(gain_map);
             }
@@ -764,7 +764,7 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
             // Decode and attach the depth map if requested and present.
             if self.extract_depth
                 && pi.has_depth
-                && let Ok(depth_map) = crate::decode::decode_depth(data)
+                && let Ok(depth_map) = crate::decode::decode_depth(data, &[crate::Backend::Rust])
             {
                 output.extensions_mut().insert(depth_map);
             }

@@ -50,13 +50,19 @@ struct DecodeBudget<'a> {
     depth: u32,
     /// Shared counter of total `decode_item` calls in this request.
     invocations: &'a DerivedCounter,
+    /// Ordered allowlist of HEVC backends to try per tile. Set at the
+    /// top-level entry from `DecoderConfig::backends()`; all recursion
+    /// (derived items, grid tiles, alpha, gain map) inherits the same
+    /// list so a single allowlist governs the whole decode request.
+    backends: &'a [crate::Backend],
 }
 
 impl<'a> DecodeBudget<'a> {
-    fn root(invocations: &'a DerivedCounter) -> Self {
+    fn root(invocations: &'a DerivedCounter, backends: &'a [crate::Backend]) -> Self {
         Self {
             depth: 0,
             invocations,
+            backends,
         }
     }
 
@@ -64,6 +70,7 @@ impl<'a> DecodeBudget<'a> {
         Self {
             depth: self.depth + 1,
             invocations: self.invocations,
+            backends: self.backends,
         }
     }
 
@@ -157,6 +164,7 @@ pub(crate) fn decode_to_frame(
     limits: Option<&Limits>,
     stop: &dyn Stop,
     max_threads: Option<usize>,
+    backends: &[crate::Backend],
 ) -> Result<crate::hevc::DecodedFrame> {
     let limits = limits.unwrap_or(&NO_LIMITS);
 
@@ -178,7 +186,7 @@ pub(crate) fn decode_to_frame(
     check_stop(stop)?;
 
     let counter = DerivedCounter::new(0);
-    let budget = DecodeBudget::root(&counter);
+    let budget = DecodeBudget::root(&counter, backends);
     let mut frame = decode_item(&container, &primary_item, budget, limits, stop, max_threads)?;
 
     check_stop(stop)?;
@@ -198,7 +206,8 @@ pub(crate) fn decode_to_frame(
                 .copied()
         });
     if let Some(alpha_id) = alpha_id
-        && let Some(alpha_plane) = decode_alpha_plane(&container, alpha_id, &frame, limits, stop)
+        && let Some(alpha_plane) =
+            decode_alpha_plane(&container, alpha_id, &frame, limits, stop, backends)
     {
         frame.alpha_plane = Some(alpha_plane);
     }
@@ -238,8 +247,12 @@ fn decode_item(
             }
             let image_data = container.get_item_data(item.id)?;
             if let Some(ref config) = item.hevc_config {
-                crate::hevc::decode_with_config(config, &image_data)?
+                crate::backend::decode_one_tile(budget.backends, config, &image_data, stop)?
             } else if item.item_type == ItemType::Hvc1 {
+                // Annex-B raw path: no hvcC config separately, so the
+                // dispatcher trait can't be used (every native backend
+                // requires VPS/SPS/PPS through HvccParams.nal_units). Stay
+                // on the Rust path.
                 crate::hevc::decode(&image_data)?
             } else {
                 return Err(at!(HeicError::UnsupportedCodec(
@@ -1200,7 +1213,7 @@ fn decode_grid(
         for (tile_idx, tile_data) in tile_data_list.iter().enumerate() {
             check_stop(stop)?;
             let tile_frame = if let Some(tile_config) = hevc_tile_config {
-                crate::hevc::decode_with_config(tile_config, tile_data)?
+                crate::backend::decode_one_tile(budget.backends, tile_config, tile_data, stop)?
             } else {
                 // Non-HEVC tiles: look up the tile item and dispatch
                 let tile_id = tile_ids[tile_idx];
@@ -1321,8 +1334,13 @@ pub(crate) fn try_decode_grid_streaming(
     layout: PixelLayout,
     output: &mut [u8],
     max_threads: Option<usize>,
+    backends: &[crate::Backend],
 ) -> Result<Option<(u32, u32)>> {
     let limits = limits.unwrap_or(&NO_LIMITS);
+    // `backends` is only consumed by the sequential fallback path that is
+    // cfg-gated to `not(feature = "parallel")`. Silence unused-var warning
+    // when parallel is on.
+    let _ = backends;
 
     check_stop(stop)?;
 
@@ -1484,7 +1502,8 @@ pub(crate) fn try_decode_grid_streaming(
         let _ = max_threads; // unused without parallel feature
         for (tile_idx, tile_data) in tile_data_list.iter().enumerate() {
             check_stop(stop)?;
-            let mut tile_frame = crate::hevc::decode_with_config(tile_config, tile_data)?;
+            let mut tile_frame =
+                crate::backend::decode_one_tile(backends, tile_config, tile_data, stop)?;
             if let Some((fr, mc)) = color_override {
                 tile_frame.full_range = fr;
                 tile_frame.matrix_coeffs = mc;
@@ -1528,8 +1547,13 @@ pub(crate) fn try_decode_grid_to_sink(
     layout: PixelLayout,
     sink: &mut dyn crate::RowSink,
     max_threads: Option<usize>,
+    backends: &[crate::Backend],
 ) -> Result<Option<(u32, u32)>> {
     let limits = limits.unwrap_or(&NO_LIMITS);
+    // `backends` is only consumed by the sequential fallback path that is
+    // cfg-gated to `not(feature = "parallel")`. Silence unused-var warning
+    // when parallel is on.
+    let _ = backends;
 
     check_stop(stop)?;
 
@@ -1842,6 +1866,7 @@ fn decode_alpha_plane(
     primary_frame: &crate::hevc::DecodedFrame,
     limits: &Limits,
     stop: &dyn Stop,
+    backends: &[crate::Backend],
 ) -> Option<Vec<u16>> {
     let alpha_item = container.get_item(alpha_id)?;
     let alpha_data = container.get_item_data(alpha_id).ok()?;
@@ -1857,7 +1882,7 @@ fn decode_alpha_plane(
 
     // Multi-codec dispatch: try HEVC first, then AV1
     let alpha_frame = if let Some(ref config) = alpha_item.hevc_config {
-        crate::hevc::decode_with_config(config, &alpha_data).ok()?
+        crate::backend::decode_one_tile(backends, config, &alpha_data, stop).ok()?
     } else {
         #[cfg(feature = "av1")]
         {
@@ -1949,7 +1974,7 @@ fn decode_alpha_plane(
 ///    reference is decoded as the grayscale gain map.
 ///
 /// The Apple path is preferred when both are present.
-pub(crate) fn decode_gain_map(data: &[u8]) -> Result<HdrGainMap> {
+pub(crate) fn decode_gain_map(data: &[u8], backends: &[crate::Backend]) -> Result<HdrGainMap> {
     let container = heif::parse(data, &Unstoppable)?;
     let primary_item = container
         .primary_item()
@@ -1971,6 +1996,7 @@ pub(crate) fn decode_gain_map(data: &[u8]) -> Result<HdrGainMap> {
                 .map(|c| c.into_owned()),
             None,
             GainMapOrigin::AppleAuxItem,
+            backends,
         );
     }
 
@@ -1989,6 +2015,7 @@ pub(crate) fn decode_gain_map(data: &[u8]) -> Result<HdrGainMap> {
             xmp,
             Some(iso_bytes),
             GainMapOrigin::HeifTmap,
+            backends,
         );
     }
 
@@ -2022,12 +2049,13 @@ fn decode_gainmap_image_item(
     xmp: Option<Vec<u8>>,
     iso21496: Option<Vec<u8>>,
     origin: GainMapOrigin,
+    backends: &[crate::Backend],
 ) -> Result<HdrGainMap> {
     let counter = DerivedCounter::new(0);
     let frame = decode_item(
         container,
         gainmap_item,
-        DecodeBudget::root(&counter),
+        DecodeBudget::root(&counter, backends),
         &Limits::default(),
         &Unstoppable,
         None,
@@ -2166,7 +2194,11 @@ pub(crate) fn extract_exif<'a>(data: &'a [u8]) -> Result<Option<Cow<'a, [u8]>>> 
 }
 
 /// Decode thumbnail image from HEIC container
-pub(crate) fn decode_thumbnail(data: &[u8], layout: PixelLayout) -> Result<Option<DecodeOutput>> {
+pub(crate) fn decode_thumbnail(
+    data: &[u8],
+    layout: PixelLayout,
+    backends: &[crate::Backend],
+) -> Result<Option<DecodeOutput>> {
     let container = heif::parse(data, &Unstoppable)?;
     let primary_item = container
         .primary_item()
@@ -2186,7 +2218,7 @@ pub(crate) fn decode_thumbnail(data: &[u8], layout: PixelLayout) -> Result<Optio
     let frame = decode_item(
         &container,
         &thumb_item,
-        DecodeBudget::root(&counter),
+        DecodeBudget::root(&counter, backends),
         &NO_LIMITS,
         stop,
         None,
@@ -2274,7 +2306,7 @@ pub(crate) fn has_depth(data: &[u8]) -> Result<bool> {
 }
 
 /// Decode the depth map auxiliary image.
-pub(crate) fn decode_depth(data: &[u8]) -> Result<crate::DepthMap> {
+pub(crate) fn decode_depth(data: &[u8], backends: &[crate::Backend]) -> Result<crate::DepthMap> {
     use crate::auxiliary::{AuxiliaryImageType, parse_depth_representation_info};
 
     let container = heif::parse(data, &Unstoppable)?;
@@ -2317,7 +2349,7 @@ pub(crate) fn decode_depth(data: &[u8]) -> Result<crate::DepthMap> {
     let frame = decode_item(
         &container,
         &depth_item,
-        DecodeBudget::root(&counter),
+        DecodeBudget::root(&counter, backends),
         &Limits::default(),
         &Unstoppable,
         None,
@@ -2363,6 +2395,7 @@ pub(crate) fn decode_auxiliary_item(
     data: &[u8],
     item_id: u32,
     layout: PixelLayout,
+    backends: &[crate::Backend],
 ) -> Result<DecodeOutput> {
     let container = heif::parse(data, &Unstoppable)?;
     let item = container
@@ -2373,7 +2406,7 @@ pub(crate) fn decode_auxiliary_item(
     let frame = decode_item(
         &container,
         &item,
-        DecodeBudget::root(&counter),
+        DecodeBudget::root(&counter, backends),
         &Limits::default(),
         &Unstoppable,
         None,
@@ -2404,6 +2437,7 @@ pub(crate) fn decode_auxiliary_item(
 fn decode_aux_to_grayscale(
     container: &heif::HeifContainer<'_>,
     item_id: u32,
+    backends: &[crate::Backend],
 ) -> Result<(Vec<u8>, u32, u32)> {
     let item = container
         .get_item(item_id)
@@ -2413,7 +2447,7 @@ fn decode_aux_to_grayscale(
     let frame = decode_item(
         container,
         &item,
-        DecodeBudget::root(&counter),
+        DecodeBudget::root(&counter, backends),
         &Limits::default(),
         &Unstoppable,
         None,
@@ -2447,7 +2481,10 @@ fn decode_aux_to_grayscale(
 ///
 /// Looks for all known matte auxiliary types (portrait, skin, hair, teeth,
 /// glasses) and decodes each to an 8-bit grayscale matte.
-pub(crate) fn decode_mattes(data: &[u8]) -> Result<Vec<crate::SegmentationMatte>> {
+pub(crate) fn decode_mattes(
+    data: &[u8],
+    backends: &[crate::Backend],
+) -> Result<Vec<crate::SegmentationMatte>> {
     use crate::auxiliary::AuxiliaryImageType;
 
     let container = heif::parse(data, &Unstoppable)?;
@@ -2483,7 +2520,7 @@ pub(crate) fn decode_mattes(data: &[u8]) -> Result<Vec<crate::SegmentationMatte>
     for (aux_type, urn) in matte_urns {
         let aux_ids = container.find_auxiliary_items(primary_item.id, urn);
         if let Some(&aux_id) = aux_ids.first() {
-            let (pixels, width, height) = decode_aux_to_grayscale(&container, aux_id)?;
+            let (pixels, width, height) = decode_aux_to_grayscale(&container, aux_id, backends)?;
             mattes.push(crate::SegmentationMatte {
                 data: pixels,
                 width,
@@ -2502,6 +2539,7 @@ pub(crate) fn decode_mattes(data: &[u8]) -> Result<Vec<crate::SegmentationMatte>
 pub(crate) fn decode_matte(
     data: &[u8],
     matte_type: &crate::auxiliary::AuxiliaryImageType,
+    backends: &[crate::Backend],
 ) -> Result<Option<crate::SegmentationMatte>> {
     let container = heif::parse(data, &Unstoppable)?;
     let primary_item = container
@@ -2513,7 +2551,7 @@ pub(crate) fn decode_matte(
         return Ok(None);
     };
 
-    let (pixels, width, height) = decode_aux_to_grayscale(&container, aux_id)?;
+    let (pixels, width, height) = decode_aux_to_grayscale(&container, aux_id, backends)?;
     Ok(Some(crate::SegmentationMatte {
         data: pixels,
         width,
@@ -2533,7 +2571,7 @@ mod tests {
     #[test]
     fn decode_budget_charges_until_exhausted() {
         let counter = DerivedCounter::new(0);
-        let budget = DecodeBudget::root(&counter);
+        let budget = DecodeBudget::root(&counter, &[]);
         // The counter should accept exactly MAX_DERIVED_INVOCATIONS calls.
         for _ in 0..MAX_DERIVED_INVOCATIONS {
             budget.charge().expect("under cap should succeed");
@@ -2547,7 +2585,7 @@ mod tests {
     #[test]
     fn decode_budget_shared_counter_across_depths() {
         let counter = DerivedCounter::new(0);
-        let parent = DecodeBudget::root(&counter);
+        let parent = DecodeBudget::root(&counter, &[]);
         let child = parent.deeper();
         let grandchild = child.deeper();
         for _ in 0..10 {

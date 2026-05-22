@@ -970,7 +970,7 @@ impl DecoderConfig {
     ///
     /// Returns an error if the data is not valid HEIC/HEIF format.
     pub fn decode_to_frame(&self, data: &[u8]) -> Result<hevc::DecodedFrame> {
-        decode::decode_to_frame(data, None, &Unstoppable, None)
+        decode::decode_to_frame(data, None, &Unstoppable, None, self.backends())
     }
 
     /// Estimate the peak memory usage for decoding an image of given dimensions.
@@ -1027,7 +1027,7 @@ impl DecoderConfig {
     ///
     /// Returns an error if the file has no gain map or decoding fails.
     pub fn decode_gain_map(&self, data: &[u8]) -> Result<HdrGainMap> {
-        decode::decode_gain_map(data)
+        decode::decode_gain_map(data, self.backends())
     }
 
     /// Extract raw EXIF (TIFF) data from a HEIC file.
@@ -1099,7 +1099,7 @@ impl DecoderConfig {
         data: &[u8],
         layout: PixelLayout,
     ) -> Result<Option<DecodeOutput>> {
-        decode::decode_thumbnail(data, layout)
+        decode::decode_thumbnail(data, layout, self.backends())
     }
 
     /// List all auxiliary images linked to the primary image.
@@ -1155,7 +1155,7 @@ impl DecoderConfig {
     /// Returns an error if the file has no depth map, the depth item
     /// cannot be located, or HEVC decoding fails.
     pub fn decode_depth(&self, data: &[u8]) -> Result<DepthMap> {
-        decode::decode_depth(data)
+        decode::decode_depth(data, self.backends())
     }
 
     /// Decode a specific auxiliary image by item ID.
@@ -1176,7 +1176,7 @@ impl DecoderConfig {
         item_id: u32,
         layout: PixelLayout,
     ) -> Result<DecodeOutput> {
-        decode::decode_auxiliary_item(data, item_id, layout)
+        decode::decode_auxiliary_item(data, item_id, layout, self.backends())
     }
 
     /// Decode all available segmentation mattes from a HEIC file.
@@ -1192,7 +1192,7 @@ impl DecoderConfig {
     /// Returns an error if the HEIF container is malformed or matte
     /// decoding fails.
     pub fn decode_mattes(&self, data: &[u8]) -> Result<Vec<SegmentationMatte>> {
-        decode::decode_mattes(data)
+        decode::decode_mattes(data, self.backends())
     }
 
     /// Decode a specific segmentation matte type from a HEIC file.
@@ -1209,7 +1209,7 @@ impl DecoderConfig {
         data: &[u8],
         matte_type: &AuxiliaryImageType,
     ) -> Result<Option<SegmentationMatte>> {
-        decode::decode_matte(data, matte_type)
+        decode::decode_matte(data, matte_type, self.backends())
     }
 }
 
@@ -1283,7 +1283,13 @@ impl<'a> DecodeRequest<'a> {
     /// or the operation is cancelled.
     pub fn decode(self) -> Result<DecodeOutput> {
         let stop: &dyn Stop = self.stop.unwrap_or(&Unstoppable);
-        let frame = decode::decode_to_frame(self.data, self.limits, stop, self.max_threads)?;
+        let frame = decode::decode_to_frame(
+            self.data,
+            self.limits,
+            stop,
+            self.max_threads,
+            self._config.backends(),
+        )?;
 
         let width = frame.cropped_width();
         let height = frame.cropped_height();
@@ -1337,12 +1343,19 @@ impl<'a> DecodeRequest<'a> {
             self.layout,
             output,
             self.max_threads,
+            self._config.backends(),
         )? {
             return Ok(result);
         }
 
         // Fallback: full-frame decode then color convert
-        let frame = decode::decode_to_frame(self.data, self.limits, stop, self.max_threads)?;
+        let frame = decode::decode_to_frame(
+            self.data,
+            self.limits,
+            stop,
+            self.max_threads,
+            self._config.backends(),
+        )?;
 
         let width = frame.cropped_width();
         let height = frame.cropped_height();
@@ -1409,12 +1422,19 @@ impl<'a> DecodeRequest<'a> {
             self.layout,
             sink,
             self.max_threads,
+            self._config.backends(),
         )? {
             return Ok(result);
         }
 
         // Fallback: full-frame decode then write to sink as one strip
-        let frame = decode::decode_to_frame(self.data, self.limits, stop, self.max_threads)?;
+        let frame = decode::decode_to_frame(
+            self.data,
+            self.limits,
+            stop,
+            self.max_threads,
+            self._config.backends(),
+        )?;
 
         let width = frame.cropped_width();
         let height = frame.cropped_height();
@@ -1454,7 +1474,13 @@ impl<'a> DecodeRequest<'a> {
     /// or the operation is cancelled.
     pub fn decode_yuv(self) -> Result<hevc::DecodedFrame> {
         let stop: &dyn Stop = self.stop.unwrap_or(&Unstoppable);
-        decode::decode_to_frame(self.data, self.limits, stop, self.max_threads)
+        decode::decode_to_frame(
+            self.data,
+            self.limits,
+            stop,
+            self.max_threads,
+            self._config.backends(),
+        )
     }
 }
 

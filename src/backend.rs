@@ -35,7 +35,18 @@
 //! - Recoverable errors (`Unavailable`, `Decode`) fall through to the next
 //!   entry; terminal errors (`LimitsExceeded`, `Cancelled`) propagate.
 
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
+
+use enough::Stop;
+use heic_core::{BackendError, DecodedFrame, HevcBackend, HvccParams};
+use whereat::at;
+
+use crate::Result;
+use crate::error::HeicError;
+use crate::heif::HevcDecoderConfig;
 
 /// A HEVC backend the parent `heic` crate can dispatch decode requests to.
 ///
@@ -174,6 +185,144 @@ pub fn recommended_backends() -> Vec<Backend> {
         out.push(Backend::Rust);
     }
     out
+}
+
+impl Backend {
+    /// Construct a boxed [`HevcBackend`] trait object for this variant.
+    ///
+    /// Each call allocates a fresh backend instance — backends with
+    /// expensive per-instance state (cached MFTransform / VTSession /
+    /// AMediaCodec) trade off setup cost across decode invocations on
+    /// the same `&mut self`, so callers that decode many tiles should
+    /// cache the result rather than re-instantiating per tile.
+    pub(crate) fn instance(self) -> Box<dyn HevcBackend> {
+        match self {
+            #[cfg(feature = "backend-rust")]
+            Self::Rust => Box::new(RustBackend),
+            #[cfg(all(feature = "backend-mediafoundation", target_os = "windows"))]
+            Self::MediaFoundation => {
+                Box::new(heic_backend_mediafoundation::MediaFoundationBackend::new())
+            }
+            #[cfg(all(
+                feature = "backend-videotoolbox",
+                any(
+                    target_os = "macos",
+                    target_os = "ios",
+                    target_os = "tvos",
+                    target_os = "visionos"
+                )
+            ))]
+            Self::VideoToolbox => Box::new(heic_backend_videotoolbox::VideoToolboxBackend::new()),
+            #[cfg(all(feature = "backend-mediacodec", target_os = "android"))]
+            Self::MediaCodec => Box::new(heic_backend_mediacodec::MediaCodecBackend::new()),
+            #[cfg(all(feature = "backend-vaapi", target_os = "linux"))]
+            Self::Vaapi => Box::new(heic_backend_vaapi::VaApiBackend::new()),
+            #[cfg(all(feature = "backend-d3d11va", target_os = "windows"))]
+            Self::D3d11va => Box::new(heic_backend_d3d11va::D3d11VaBackend::new()),
+        }
+    }
+}
+
+/// Pure-Rust `HevcBackend` wrapper around the in-crate `crate::hevc::decode_with_config`.
+#[cfg(feature = "backend-rust")]
+struct RustBackend;
+
+#[cfg(feature = "backend-rust")]
+impl HevcBackend for RustBackend {
+    fn name(&self) -> &'static str {
+        "rust"
+    }
+
+    fn is_available(&self) -> bool {
+        true
+    }
+
+    fn decode_hevc(
+        &mut self,
+        config: &HvccParams<'_>,
+        image_data: &[u8],
+        _stop: &dyn Stop,
+    ) -> core::result::Result<DecodedFrame, BackendError> {
+        // Reconstruct the parent's HevcDecoderConfig view from HvccParams.
+        // For PR2 we have only one consumer of decode_one_tile (the rust
+        // path), so we can call directly without going through the
+        // HvccParams round-trip.
+        let _ = (config, image_data);
+        unreachable!(
+            "RustBackend::decode_hevc is only reachable when decode_one_tile \
+             is called through the trait — the parent crate currently calls \
+             crate::hevc::decode_with_config directly via the fast-path \
+             shortcut in `decode_one_tile`."
+        )
+    }
+}
+
+/// Dispatch a single HEVC tile decode through the user-provided allowlist.
+///
+/// Iterates `backends` in order; for each entry, constructs the backend,
+/// probes [`HevcBackend::is_available`], and on success calls
+/// [`HevcBackend::decode_hevc`]. Recoverable errors
+/// ([`BackendError::Unavailable`] / [`BackendError::Decode`]) fall through
+/// to the next backend; terminal errors
+/// ([`BackendError::LimitsExceeded`] / [`BackendError::Cancelled`])
+/// short-circuit.
+///
+/// Fast path: when `backends == [Backend::Rust]` and `backend-rust` is
+/// compiled in, calls `crate::hevc::decode_with_config` directly without
+/// constructing a trait object — avoids the Box allocation on the hot
+/// per-tile path in the common case.
+pub(crate) fn decode_one_tile(
+    backends: &[Backend],
+    config: &HevcDecoderConfig,
+    image_data: &[u8],
+    stop: &dyn Stop,
+) -> Result<DecodedFrame> {
+    if backends.is_empty() {
+        return Err(at!(HeicError::NoBackendSelected));
+    }
+
+    // Fast path: single-Rust-backend selection skips the trait dispatch.
+    #[cfg(feature = "backend-rust")]
+    if backends.len() == 1 && backends[0] == Backend::Rust {
+        // `?` triggers the existing From<HevcError> for At<HeicError> in
+        // error.rs — no further conversion needed.
+        let _ = stop;
+        return Ok(crate::hevc::decode_with_config(config, image_data)?);
+    }
+
+    // Slow path: any backend selection that includes a non-Rust variant.
+    // Currently every native backend's HevcBackend::is_available() returns
+    // false (skeletons) or only the MF backend's reports true on Windows;
+    // we don't yet have width/height plumbed into decode_one_tile's
+    // signature to build a complete HvccParams. Until that lands, the slow
+    // path falls through to the rust backend if it's in the allowlist, or
+    // returns AllBackendsFailed otherwise.
+    let mut last_err: Option<String> = None;
+    for &b in backends {
+        #[cfg(feature = "backend-rust")]
+        if b == Backend::Rust {
+            // Fast path even when Rust is mid-allowlist.
+            let _ = stop;
+            return Ok(crate::hevc::decode_with_config(config, image_data)?);
+        }
+        let inst = b.instance();
+        if !inst.is_available() {
+            last_err = Some(format!("{}: backend reported unavailable", b.name()));
+            continue;
+        }
+        // TODO: native-backend dispatch — needs width/height threaded through
+        // decode_one_tile's signature to build a complete HvccParams. Today
+        // the only functional dispatch is the rust fast-path above.
+        last_err = Some(format!(
+            "{}: native-backend dispatch not yet plumbed (parent crate \
+             still routes through backend-rust; native backends ship as \
+             standalone subcrates pending the next PR)",
+            b.name()
+        ));
+    }
+    Err(at!(HeicError::AllBackendsFailed(
+        last_err.unwrap_or_else(|| "no backends were available".into())
+    )))
 }
 
 #[cfg(test)]
