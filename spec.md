@@ -1,7 +1,35 @@
 # Native HEVC backends for the `heic` crate — design spec
 
-> Status: design draft. Approved by user 2026-05-20.
-> Implementation will land as a multi-PR series; see "Sequencing" below.
+> Status: design draft + implementation log. Approved by user
+> 2026-05-20; active implementation through 2026-05-22 has shipped
+> 39+ commits on `main`. PRs 1-7 of the original plan are complete; PR8
+> (cross-backend conformance + docs + CHANGELOG) is partially landed
+> (workflow infra + per-backend matrix entries + corpus diff harness +
+> CHANGELOG + README), with the full nightly cross-backend conformance
+> job left as the final polish.
+
+## Implementation status (2026-05-22)
+
+| Backend | Crate | FFI | CI | Verified |
+|---|---|---|---|---|
+| Pure Rust | `heic-backend-rust` (still inline; PR2 extraction deferred) | n/a | ubuntu, windows, macOS, i686 | 118/162 corpus pass |
+| Media Foundation | `heic-backend-mediafoundation` | **complete** | windows-{latest,11-arm} compile + windows-11-arm runtime | 5/5 dispatch tests + corpus diff (every file = 0 bad pixels) |
+| VideoToolbox | `heic-backend-videotoolbox` | **complete** | macos-{latest,15-intel} compile + clippy + runtime test | Compile + clippy green on both runners |
+| MediaCodec | `heic-backend-mediacodec` | **complete** | ubuntu cross-compile to aarch64-linux-android | Cross-compile green; emulator runtime test pending |
+| VA-API | `heic-backend-vaapi` | skeleton (returns `Unavailable`) | ubuntu compile | Skeleton compiles |
+| D3D11VA | `heic-backend-d3d11va` | skeleton (returns `Unavailable`) | windows-{latest,11-arm} compile | Skeleton compiles |
+
+Beyond the original spec, two pieces landed:
+
+* **SPS metadata plumbing through `HvccParams`**: `coded_width / coded_height / crop_left / crop_right / crop_top / crop_bottom` + VUI color metadata. Native backends decode at the SPS-coded size and have the parent feed them the conformance window for visible-region copy. Fixed example.heic which previously produced 78 % wrong pixels via MF.
+* **`tests/common/compare_backends_via_zensim`**: shared corpus-sweep harness driving any pair of `Backend` variants through `zensim_regress::check_regression`. Drops 100 LOC of duplicated comparison code per backend test file.
+
+## Open items
+
+* VA-API runtime FFI — Chromium-style `VAPictureParameterBufferHEVC` (38 fields from SPS/PPS) + slice control + IQ matrix. Compile-only ships; runtime deferred to a follow-up because it requires a libva-capable Linux runner.
+* D3D11VA runtime FFI — same complexity as VA-API (`DXVA_PicParams_HEVC` ~70 fields). Same deferral reason.
+* Android emulator CI runtime test for MediaCodec — `reactivecircus/android-emulator-runner@v2` setup; the FFI compiles for `aarch64-linux-android` but isn't exercised against a real `c2.android.hevc.decoder` yet.
+* PR2 (extract `src/hevc/` → `heic-backend-rust/src/`) — the pure-Rust decoder still lives in-tree under `src/hevc/`. Functionally fine but breaks the symmetry of the workspace. Mechanical lift left for a focused PR.
 
 ## Context
 
