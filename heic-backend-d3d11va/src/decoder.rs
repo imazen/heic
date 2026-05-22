@@ -40,18 +40,20 @@
 #![cfg(target_os = "windows")]
 #![allow(missing_docs)] // documented inline + via the module header
 
+extern crate alloc;
+
 use heic_core::BackendError;
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_DECODER, D3D11_CPU_ACCESS_FLAG, D3D11_CREATE_DEVICE_FLAG, D3D11_RESOURCE_MISC_FLAG,
     D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_VDOV_DIMENSION_TEXTURE2D,
-    D3D11_VIDEO_DECODER_BUFFER_BITSTREAM, D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS,
-    D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL, D3D11_VIDEO_DECODER_BUFFER_TYPE,
-    D3D11_VIDEO_DECODER_CONFIG, D3D11_VIDEO_DECODER_DESC, D3D11_VIDEO_DECODER_OUTPUT_VIEW_DESC,
-    D3D11_VIDEO_DECODER_OUTPUT_VIEW_DESC_0, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
-    ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDecoder, ID3D11VideoDecoderOutputView,
-    ID3D11VideoDevice,
+    D3D11_VIDEO_DECODER_BUFFER_BITSTREAM, D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX,
+    D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS, D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL,
+    D3D11_VIDEO_DECODER_BUFFER_TYPE, D3D11_VIDEO_DECODER_CONFIG, D3D11_VIDEO_DECODER_DESC,
+    D3D11_VIDEO_DECODER_OUTPUT_VIEW_DESC, D3D11_VIDEO_DECODER_OUTPUT_VIEW_DESC_0,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, ID3D11VideoContext,
+    ID3D11VideoDecoder, ID3D11VideoDecoderOutputView, ID3D11VideoDevice,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT, DXGI_FORMAT_NV12, DXGI_FORMAT_P010, DXGI_SAMPLE_DESC,
@@ -311,6 +313,7 @@ impl DecoderSession {
         &self,
         pic_params: &crate::dxva::DxvaPicParamsHevc,
         slice_data_annexb: &[u8],
+        iq_matrix: Option<&crate::dxva::DxvaQmatrixHevc>,
     ) -> Result<(), BackendError> {
         // 1. DecoderBeginFrame — locks the output view for write.
         // SAFETY: decoder + output_view are live for the session.
@@ -334,6 +337,26 @@ impl DecoderSession {
                 )
             },
         )?;
+
+        // 2b. INVERSE_QUANTIZATION_MATRIX buffer (only when SPS enables
+        // scaling lists, per DXVA HEVC spec section 4.2 / chromium
+        // d3d11_h265_accelerator.cc::SubmitSlice). For HEIC fixtures we
+        // pass the HEVC default lists since the bitstream parser doesn't
+        // yet propagate custom scaling-list data.
+        if let Some(q) = iq_matrix {
+            copy_into_buffer(
+                &self.video_context,
+                &self.decoder,
+                D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX,
+                // SAFETY: DxvaQmatrixHevc is #[repr(C)] + Copy.
+                unsafe {
+                    core::slice::from_raw_parts(
+                        (q as *const _) as *const u8,
+                        core::mem::size_of::<crate::dxva::DxvaQmatrixHevc>(),
+                    )
+                },
+            )?;
+        }
 
         // 3. BITSTREAM buffer — raw Annex-B bytes.
         copy_into_buffer(
@@ -383,21 +406,29 @@ impl DecoderSession {
             },
         )?;
 
-        // 5. SubmitDecoderBuffers with the three buffer descriptors.
-        let buffer_descs = [
-            buffer_desc(
-                D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS,
-                core::mem::size_of::<crate::dxva::DxvaPicParamsHevc>() as u32,
-            ),
-            buffer_desc(
-                D3D11_VIDEO_DECODER_BUFFER_BITSTREAM,
-                u32::try_from(slice_data_annexb.len()).unwrap_or(u32::MAX),
-            ),
-            buffer_desc(
-                D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL,
-                core::mem::size_of::<DxvaSliceHevcShort>() as u32,
-            ),
-        ];
+        // 5. SubmitDecoderBuffers — include the iq_matrix descriptor
+        // when present, matching chromium's pattern of "send all
+        // committed buffers" (the order doesn't strictly matter, but
+        // PICTURE_PARAMETERS first is the spec recommendation).
+        let mut buffer_descs: alloc::vec::Vec<_> = alloc::vec::Vec::with_capacity(4);
+        buffer_descs.push(buffer_desc(
+            D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS,
+            core::mem::size_of::<crate::dxva::DxvaPicParamsHevc>() as u32,
+        ));
+        if iq_matrix.is_some() {
+            buffer_descs.push(buffer_desc(
+                D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX,
+                core::mem::size_of::<crate::dxva::DxvaQmatrixHevc>() as u32,
+            ));
+        }
+        buffer_descs.push(buffer_desc(
+            D3D11_VIDEO_DECODER_BUFFER_BITSTREAM,
+            u32::try_from(slice_data_annexb.len()).unwrap_or(u32::MAX),
+        ));
+        buffer_descs.push(buffer_desc(
+            D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL,
+            core::mem::size_of::<DxvaSliceHevcShort>() as u32,
+        ));
         // SAFETY: buffer_descs is alive through the call.
         unsafe {
             self.video_context

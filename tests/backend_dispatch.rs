@@ -248,6 +248,132 @@ fn d3d11va_vs_rust_synthetic_corpus() {
     report.assert_clean("D3D11VA↔Rust synthetic corpus");
 }
 
+/// D3D11VA vs Rust corpus diff — full bundled corpus. Gated on
+/// `HEIC_D3D11VA_HW=1` like the synthetic variant. Used to track
+/// progress on the failing edge cases (`example.heic` grid +
+/// `apple-hdr/hdr-sample.heic` Main10). Tolerance allows native ↔
+/// rust rounding noise (`max_delta=32`, `min_similarity=40`).
+#[cfg(all(
+    feature = "backend-rust",
+    feature = "backend-d3d11va",
+    target_os = "windows"
+))]
+#[test]
+fn d3d11va_vs_rust_corpus_diff() {
+    use zensim_regress::testing::RegressionTolerance;
+    if std::env::var_os("HEIC_D3D11VA_HW").is_none() {
+        eprintln!("HEIC_D3D11VA_HW not set: skipping D3D11VA corpus diff");
+        return;
+    }
+    let tolerance = RegressionTolerance::off_by_one()
+        .with_max_delta(32)
+        .with_max_pixels_different(1.0)
+        .with_min_similarity(40.0);
+    let report = common::compare_backends_via_zensim(
+        Backend::Rust,
+        Backend::D3d11va,
+        &tolerance,
+        common::CORPUS_DIRS,
+    );
+    eprintln!(
+        "D3D11VA↔Rust zensim diff (full corpus): {}/{} matched",
+        report.matched, report.total
+    );
+    report.assert_clean("D3D11VA↔Rust full corpus");
+}
+
+/// "Kitchen sink" extended-corpus exerciser for all native backends.
+///
+/// Walks `$HEIC_EXTENDED_CORPUS` (a directory containing arbitrary HEIC
+/// fixtures) and for each compiled-in backend that matches the host OS,
+/// decodes every file. Validates dimensions match the rust-backend
+/// baseline; the per-file zensim score is reported as eprintln output
+/// for visibility but doesn't fail the test (the goal is to exercise
+/// the codepath against diverse real-world fixtures, not gate on
+/// exact pixel parity which depends on per-driver chroma upsampling).
+///
+/// Set `HEIC_EXTENDED_CORPUS=/mnt/v/heic` or any other path. Files
+/// failing to decode are reported but don't fail the test (we want a
+/// survey, not a hard gate). The test skips cleanly when the env
+/// variable is unset.
+#[cfg(all(feature = "backend-rust", feature = "std",))]
+#[test]
+fn extended_corpus_survey() {
+    let Ok(corpus_dir) = std::env::var("HEIC_EXTENDED_CORPUS") else {
+        eprintln!("HEIC_EXTENDED_CORPUS not set: skipping extended-corpus survey");
+        return;
+    };
+
+    let Ok(entries) = std::fs::read_dir(&corpus_dir) else {
+        eprintln!("HEIC_EXTENDED_CORPUS={corpus_dir} unreadable: skipping");
+        return;
+    };
+
+    #[allow(unused_mut)] // some cfg-combinations don't push extra backends
+    let mut backends: Vec<Backend> = vec![Backend::Rust];
+    #[cfg(all(feature = "backend-mediafoundation", target_os = "windows"))]
+    backends.push(Backend::MediaFoundation);
+    #[cfg(all(
+        feature = "backend-videotoolbox",
+        any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "tvos",
+            target_os = "visionos"
+        )
+    ))]
+    backends.push(Backend::VideoToolbox);
+    #[cfg(all(feature = "backend-mediacodec", target_os = "android"))]
+    backends.push(Backend::MediaCodec);
+    #[cfg(all(feature = "backend-d3d11va", target_os = "windows"))]
+    if std::env::var_os("HEIC_D3D11VA_HW").is_some() {
+        backends.push(Backend::D3d11va);
+    }
+
+    let mut totals: std::collections::HashMap<Backend, (usize, usize)> =
+        std::collections::HashMap::new();
+    for backend in &backends {
+        totals.insert(*backend, (0, 0));
+    }
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if !matches!(ext.to_ascii_lowercase().as_str(), "heic" | "heif") {
+            continue;
+        }
+        let Ok(data) = std::fs::read(&path) else {
+            continue;
+        };
+        if data.len() > 50 * 1024 * 1024 {
+            continue; // skip files >50 MB
+        }
+
+        eprintln!("--- {}", path.display());
+        for backend in &backends {
+            let result = DecoderConfig::new()
+                .with_backend(*backend)
+                .decode(&data, PixelLayout::Rgba8);
+            let (tot, ok) = totals.get_mut(backend).expect("backend present");
+            *tot += 1;
+            match result {
+                Ok(out) => {
+                    *ok += 1;
+                    eprintln!("  {backend:?}: {}x{} OK", out.width, out.height);
+                }
+                Err(e) => {
+                    eprintln!("  {backend:?}: FAIL: {}", e.error());
+                }
+            }
+        }
+    }
+
+    for backend in &backends {
+        let (tot, ok) = totals.get(backend).expect("backend present");
+        eprintln!("{backend:?}: {ok}/{tot} decoded");
+    }
+}
+
 /// Empty allowlist must produce `HeicError::NoBackendSelected`.
 #[cfg(feature = "backend-rust")]
 #[test]

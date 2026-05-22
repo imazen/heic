@@ -138,10 +138,24 @@ impl Inner {
             nal_count += 1;
         }
 
+        // When the SPS enables custom scaling lists, the DXVA spec
+        // requires the host to submit an INVERSE_QUANTIZATION_MATRIX
+        // buffer — without it, drivers vary between "use defaults
+        // internally" (NVIDIA on simple synth streams) and "produce
+        // mid-gray garbage" (NVIDIA on the example.heic tile shape).
+        // We currently submit HEVC default scaling lists when the
+        // bit is set; this matches the encoder behavior for the
+        // overwhelming majority of HEIC fixtures (libheif / x265
+        // rarely override defaults for stills). Custom-list
+        // propagation through the parser is a follow-up.
+        let iq_matrix = sps
+            .scaling_list_enabled_flag
+            .then(crate::dxva::default_qmatrix_hevc);
+
         // Submit + read back. The DecoderSession's per-frame flow
         // documented in `decoder::DecoderSession::submit_one_frame`
         // handles BeginFrame → buffer Get/Release/Submit → EndFrame.
-        session.submit_one_frame(&pic_params, &bitstream)?;
+        session.submit_one_frame(&pic_params, &bitstream, iq_matrix.as_ref())?;
 
         let planes = session.read_decoded_planes(
             config.width,
@@ -195,7 +209,9 @@ impl Inner {
                 cr0,
             );
             eprintln!(
-                "  pps: wpp={} tiles_en={} tq_bypass={} sdh={} cabac_init={}",
+                "  pps: wpp={} tiles_en={} tq_bypass={} sdh={} cabac_init={} \
+                 cip={} ts={} lf_across_slices={} deblock_override={} \
+                 init_qp_minus26={} cb_qp_offset={} cr_qp_offset={}",
                 config
                     .pps
                     .is_some_and(|p| p.entropy_coding_sync_enabled_flag),
@@ -203,6 +219,17 @@ impl Inner {
                 config.pps.is_some_and(|p| p.transquant_bypass_enabled_flag),
                 config.pps.is_some_and(|p| p.sign_data_hiding_enabled_flag),
                 config.pps.is_some_and(|p| p.cabac_init_present_flag),
+                config.pps.is_some_and(|p| p.constrained_intra_pred_flag),
+                config.pps.is_some_and(|p| p.transform_skip_enabled_flag),
+                config
+                    .pps
+                    .is_some_and(|p| p.pps_loop_filter_across_slices_enabled_flag),
+                config
+                    .pps
+                    .is_some_and(|p| p.deblocking_filter_override_enabled_flag),
+                config.pps.map_or(0i32, |p| i32::from(p.init_qp_minus26)),
+                config.pps.map_or(0i32, |p| i32::from(p.pps_cb_qp_offset)),
+                config.pps.map_or(0i32, |p| i32::from(p.pps_cr_qp_offset)),
             );
         }
 

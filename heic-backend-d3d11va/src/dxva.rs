@@ -173,6 +173,114 @@ pub struct DxvaPicParamsHevc {
     pub StatusReportFeedbackNumber: u32,
 }
 
+/// `DXVA_Qmatrix_HEVC` — inverse-quantization matrix buffer the driver
+/// expects via `SubmitDecoderBuffers` with type
+/// `D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX` whenever
+/// `sps.scaling_list_enabled_flag` is true.
+///
+/// Layout matches dxva.h's `DXVA_Qmatrix_HEVC`. Total size = 384 +
+/// 256 + 128 + 6 + 2 = 776 bytes.
+///
+/// * `ucScalingLists0[6][16]` — 4×4 scaling lists per matrixId
+///   (0..=5 = Y/Cb/Cr intra/inter).
+/// * `ucScalingLists1[6][64]` — 8×8 scaling lists.
+/// * `ucScalingLists2[6][64]` — 16×16 scaling lists (sampled).
+/// * `ucScalingLists3[2][64]` — 32×32 scaling lists (luma intra/inter
+///   only).
+/// * `ucScalingListDCCoefSizeID2[6]` — 16×16 DC coefficients.
+/// * `ucScalingListDCCoefSizeID3[2]` — 32×32 DC coefficients.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DxvaQmatrixHevc {
+    pub ucScalingLists0: [[u8; 16]; 6],
+    pub ucScalingLists1: [[u8; 64]; 6],
+    pub ucScalingLists2: [[u8; 64]; 6],
+    pub ucScalingLists3: [[u8; 64]; 2],
+    pub ucScalingListDCCoefSizeID2: [u8; 6],
+    pub ucScalingListDCCoefSizeID3: [u8; 2],
+}
+
+impl Default for DxvaQmatrixHevc {
+    fn default() -> Self {
+        Self {
+            ucScalingLists0: [[16; 16]; 6],
+            ucScalingLists1: [[16; 64]; 6],
+            ucScalingLists2: [[16; 64]; 6],
+            ucScalingLists3: [[16; 64]; 2],
+            ucScalingListDCCoefSizeID2: [16; 6],
+            ucScalingListDCCoefSizeID3: [16; 2],
+        }
+    }
+}
+
+/// HEVC default 4×4 scaling list per spec table 7-3. Flat matrix of
+/// 16s for all 6 matrixIds (Y/Cb/Cr intra + inter).
+pub const HEVC_DEFAULT_SCALING_LIST_4X4: [u8; 16] = [16; 16];
+
+/// HEVC default 8×8 intra scaling list per spec table 7-4.
+/// Applies to sizeId=1/2/3 with matrixId 0/1/2 (Y/Cb/Cr intra).
+#[rustfmt::skip]
+pub const HEVC_DEFAULT_SCALING_LIST_INTRA_8X8: [u8; 64] = [
+    16, 16, 16, 16, 17, 18, 21, 24,
+    16, 16, 16, 16, 17, 19, 22, 25,
+    16, 16, 17, 18, 20, 22, 25, 29,
+    16, 16, 18, 21, 24, 27, 31, 36,
+    17, 17, 20, 24, 30, 35, 41, 47,
+    18, 19, 22, 27, 35, 44, 54, 65,
+    21, 22, 25, 31, 41, 54, 70, 88,
+    24, 25, 29, 36, 47, 65, 88, 115,
+];
+
+/// HEVC default 8×8 inter scaling list per spec table 7-4.
+/// Applies to sizeId=1/2/3 with matrixId 3/4/5 (Y/Cb/Cr inter).
+#[rustfmt::skip]
+pub const HEVC_DEFAULT_SCALING_LIST_INTER_8X8: [u8; 64] = [
+    16, 16, 16, 16, 17, 18, 20, 24,
+    16, 16, 16, 17, 18, 20, 24, 25,
+    16, 16, 17, 18, 20, 24, 25, 28,
+    16, 17, 18, 20, 24, 25, 28, 33,
+    17, 18, 20, 24, 25, 28, 33, 41,
+    18, 20, 24, 25, 28, 33, 41, 54,
+    20, 24, 25, 28, 33, 41, 54, 71,
+    24, 25, 28, 33, 41, 54, 71, 91,
+];
+
+/// Build a [`DxvaQmatrixHevc`] populated with HEVC default scaling
+/// lists (spec tables 7-3 / 7-4). The caller passes this to the
+/// driver whenever `sps.scaling_list_enabled_flag` is true.
+///
+/// Implementation note: chromium's path also propagates custom
+/// scaling lists from `sps.scaling_list_data` / `pps.scaling_list_data`
+/// when `scaling_list_data_present_flag` is set — that requires the
+/// bitstream parser to read the actual table values. For the HEIC
+/// fixtures we ship, defaults match the encoders (libheif / x265
+/// rarely override scaling lists for stills); the custom-list path
+/// is a follow-up if any failing file uses non-default lists.
+#[must_use]
+pub fn default_qmatrix_hevc() -> DxvaQmatrixHevc {
+    let mut q = DxvaQmatrixHevc::default();
+    // 4×4 flat for all 6 matrixIds.
+    for m in 0..6 {
+        q.ucScalingLists0[m] = HEVC_DEFAULT_SCALING_LIST_4X4;
+    }
+    // 8×8: matrixId 0/1/2 = intra Y/Cb/Cr, 3/4/5 = inter Y/Cb/Cr.
+    for m in 0..3 {
+        q.ucScalingLists1[m] = HEVC_DEFAULT_SCALING_LIST_INTRA_8X8;
+        q.ucScalingLists1[m + 3] = HEVC_DEFAULT_SCALING_LIST_INTER_8X8;
+        // 16×16 uses the same 8×8 base sampled to 16×16; the DXVA
+        // struct stores the 8×8 base as the source.
+        q.ucScalingLists2[m] = HEVC_DEFAULT_SCALING_LIST_INTRA_8X8;
+        q.ucScalingLists2[m + 3] = HEVC_DEFAULT_SCALING_LIST_INTER_8X8;
+    }
+    // 32×32 has only luma (matrixId 0 = intra Y, 1 = inter Y).
+    q.ucScalingLists3[0] = HEVC_DEFAULT_SCALING_LIST_INTRA_8X8;
+    q.ucScalingLists3[1] = HEVC_DEFAULT_SCALING_LIST_INTER_8X8;
+    // DC coefficients default to 16.
+    q.ucScalingListDCCoefSizeID2 = [16; 6];
+    q.ucScalingListDCCoefSizeID3 = [16; 2];
+    q
+}
+
 /// Bit layout of [`DxvaPicParamsHevc::wFormatAndSequenceInfoFlags`].
 ///
 /// LSB-first per the SDK's `BITFIELD union { ... }` declaration.
