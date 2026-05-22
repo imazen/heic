@@ -209,8 +209,12 @@ fn mediafoundation_vs_rust_corpus_diff() {
             // until the chroma-offset bug for non-16-aligned heights is
             // investigated.
             let bad_threshold = if path.ends_with("example.heic") {
-                // example.heic (1280x854): 2.045% currently. Tightening
-                // this knob will indicate the fix has landed.
+                // Known issue: 2.045% of channels exceed the 32-step bound at
+                // 1280x854, mean 4.39. Concentrated in a band — looks like the
+                // MFT lays out UV at a different offset than total/stride
+                // would suggest for this specific SPS variant. Negative-stride
+                // and aligned-height fixes didn't move the needle. Tracked;
+                // tighten this knob once root-caused.
                 0.025
             } else {
                 0.005

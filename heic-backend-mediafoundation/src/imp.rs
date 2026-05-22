@@ -593,10 +593,6 @@ fn read_planes_2d(
 
     let stride_abs = stride.unsigned_abs() as usize;
 
-    // Determine the actual Y-plane row count from the contiguous buffer
-    // length: NV12 / P010 occupy stride * aligned_height * 3/2 bytes,
-    // where `aligned_height` rounds the visible height up to whatever
-    // boundary the MFT chose (typically 16 for HEVC's CTB alignment).
     // SAFETY: GetContiguousLength on the locked IMF2DBuffer is a
     // documented inspection call.
     let total_bytes = unsafe { buf2d.GetContiguousLength() }
@@ -607,12 +603,30 @@ fn read_planes_2d(
         height as usize
     };
 
-    // SAFETY: Lock2D + GetContiguousLength guarantee the pointer is valid
-    // for total_bytes bytes; unpack_nv12_or_p010 reads strictly within
-    // [base, base + total_bytes).
+    // Handle negative-stride (bottom-up) buffers: Lock2D's pointer
+    // points at the visual top-left of the image even when the
+    // underlying memory grows downward. To present a contiguous
+    // positive-stride view to `unpack_nv12_or_p010`, rebase the
+    // pointer at the physical first byte (top of memory) and rewrite
+    // stride to its absolute value.
+    let positive_base = if stride < 0 {
+        // The Y plane physically occupies `aligned_height` rows ending
+        // at the row `ptr` points to. The first byte in memory is
+        // `aligned_height - 1` rows back from `ptr`.
+        // SAFETY: ptr is the Lock2D pointer; we walk back within the
+        // buffer the lock owns.
+        unsafe { ptr.offset(-(stride_abs as isize * (aligned_height as isize - 1))) }
+    } else {
+        ptr
+    };
+
+    // SAFETY: Lock2D + GetContiguousLength guarantee the pointer (after
+    // negative-stride rebase) is valid for total_bytes bytes;
+    // unpack_nv12_or_p010 reads strictly within
+    // [positive_base, positive_base + total_bytes).
     let planes = unsafe {
         unpack_nv12_or_p010(
-            ptr,
+            positive_base,
             stride_abs,
             width,
             height,
