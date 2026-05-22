@@ -34,7 +34,7 @@
 #![allow(non_snake_case)] // matches the Win32 SDK field names exactly
 #![allow(missing_docs)] // documented inline via comments + the module headers
 
-use heic_core::sps::ParsedSps;
+use heic_core::sps::{ParsedPps, ParsedSps};
 
 /// `DXVA_PicEntry_HEVC` — single entry in the reference picture list
 /// or the current-picture identifier.
@@ -193,6 +193,29 @@ pub mod format_seq {
     pub const NO_BI_PRED_FLAG: u16 = 1 << 14;
 }
 
+/// Bit layout of [`DxvaPicParamsHevc::dwCodingSettingPicturePropertyFlags`].
+pub mod coding_setting_picture_property {
+    pub const CONSTRAINED_INTRA_PRED_FLAG: u32 = 1 << 0;
+    pub const TRANSFORM_SKIP_ENABLED_FLAG: u32 = 1 << 1;
+    pub const CU_QP_DELTA_ENABLED_FLAG: u32 = 1 << 2;
+    pub const PPS_SLICE_CHROMA_QP_OFFSETS_PRESENT_FLAG: u32 = 1 << 3;
+    pub const WEIGHTED_PRED_FLAG: u32 = 1 << 4;
+    pub const WEIGHTED_BIPRED_FLAG: u32 = 1 << 5;
+    pub const TRANSQUANT_BYPASS_ENABLED_FLAG: u32 = 1 << 6;
+    pub const TILES_ENABLED_FLAG: u32 = 1 << 7;
+    pub const ENTROPY_CODING_SYNC_ENABLED_FLAG: u32 = 1 << 8;
+    pub const UNIFORM_SPACING_FLAG: u32 = 1 << 9;
+    pub const LOOP_FILTER_ACROSS_TILES_ENABLED_FLAG: u32 = 1 << 10;
+    pub const PPS_LOOP_FILTER_ACROSS_SLICES_ENABLED_FLAG: u32 = 1 << 11;
+    pub const DEBLOCKING_FILTER_OVERRIDE_ENABLED_FLAG: u32 = 1 << 12;
+    pub const PPS_DEBLOCKING_FILTER_DISABLED_FLAG: u32 = 1 << 13;
+    pub const LISTS_MODIFICATION_PRESENT_FLAG: u32 = 1 << 14;
+    pub const SLICE_SEGMENT_HEADER_EXTENSION_PRESENT_FLAG: u32 = 1 << 15;
+    pub const IRAP_PIC_FLAG: u32 = 1 << 16;
+    pub const IDR_PIC_FLAG: u32 = 1 << 17;
+    pub const INTRA_PIC_FLAG: u32 = 1 << 18;
+}
+
 /// Bit layout of [`DxvaPicParamsHevc::dwCodingParamToolFlags`].
 pub mod coding_param_tool {
     pub const SCALING_LIST_ENABLED_FLAG: u32 = 1 << 0;
@@ -219,15 +242,21 @@ pub mod coding_param_tool {
     pub const CABAC_INIT_PRESENT_FLAG: u32 = 1 << 26;
 }
 
-/// Build a partially-populated [`DxvaPicParamsHevc`] from the SPS fields.
+/// Build a [`DxvaPicParamsHevc`] from the SPS + PPS fields.
 ///
-/// Only the SPS-derived fields are populated; PPS-derived fields
-/// (tile layout, deblocking offsets, weighted prediction) plus
-/// per-slice / per-picture fields (`CurrPic`, `CurrPicOrderCntVal`,
-/// `RefPicList`) stay at their `Default::default()` values and must
-/// be filled in by the caller before submitting the buffer.
+/// Per-slice / per-picture fields (`CurrPic`, `CurrPicOrderCntVal`,
+/// `RefPicList`, `RefPicSetSt*` / `RefPicSetLt*` indices,
+/// `ucNumDeltaPocsOfRefRpsIdx`, `wNumBitsForShortTermRPSInSlice`)
+/// stay at their `Default::default()` values and must be filled in
+/// by the caller before submitting the buffer; HEIC tiles are
+/// IDR-only so the ref-list values are all-INVALID.
+///
+/// Pass `pps = None` to populate only the SPS-derived half (useful
+/// for unit tests against a synthetic SPS). The driver requires both
+/// halves filled before accepting the buffer, so production callers
+/// should pass `Some(pps)`.
 #[must_use]
-pub fn from_sps(sps: &ParsedSps) -> DxvaPicParamsHevc {
+pub fn from_sps_pps(sps: &ParsedSps, pps: Option<&ParsedPps>) -> DxvaPicParamsHevc {
     let chroma = (u16::from(sps.chroma_format_idc) & format_seq::CHROMA_FORMAT_IDC_MASK)
         << format_seq::CHROMA_FORMAT_IDC_SHIFT;
     let scp = if sps.separate_colour_plane_flag {
@@ -285,12 +314,174 @@ pub fn from_sps(sps: &ParsedSps) -> DxvaPicParamsHevc {
     // dependent_slice_segments / output_flag / num_extra_slice_header_bits /
     // sign_data_hiding / cabac_init come from PPS — caller fills them.
 
+    // PPS-derived fields. Mirror chromium's PicParamsFromPPS at
+    // media/gpu/windows/d3d11_h265_accelerator.cc:272 — the second
+    // bitfield union (`dwCodingSettingPicturePropertyFlags`) plus a
+    // handful of u8 / i8 fields.
+    use coding_setting_picture_property::*;
+    let mut setting_flags: u32 = 0;
+    let (
+        init_qp_minus26,
+        num_ref_idx_l0_default_active_minus1,
+        num_ref_idx_l1_default_active_minus1,
+        pps_cb_qp_offset,
+        pps_cr_qp_offset,
+        diff_cu_qp_delta_depth,
+        pps_beta_offset_div2,
+        pps_tc_offset_div2,
+        log2_parallel_merge_level_minus2,
+        num_tile_columns_minus1,
+        num_tile_rows_minus1,
+        mut column_width_minus1,
+        mut row_height_minus1,
+    ): (
+        i8,
+        u8,
+        u8,
+        i8,
+        i8,
+        u8,
+        i8,
+        i8,
+        u8,
+        u8,
+        u8,
+        [u16; 19],
+        [u16; 21],
+    ) = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, [0u16; 19], [0u16; 21]);
+    let (
+        init_qp_minus26,
+        num_ref_idx_l0_default_active_minus1,
+        num_ref_idx_l1_default_active_minus1,
+        pps_cb_qp_offset,
+        pps_cr_qp_offset,
+        diff_cu_qp_delta_depth,
+        pps_beta_offset_div2,
+        pps_tc_offset_div2,
+        log2_parallel_merge_level_minus2,
+        num_tile_columns_minus1,
+        num_tile_rows_minus1,
+    ) = if let Some(p) = pps {
+        if p.constrained_intra_pred_flag {
+            setting_flags |= CONSTRAINED_INTRA_PRED_FLAG;
+        }
+        if p.transform_skip_enabled_flag {
+            setting_flags |= TRANSFORM_SKIP_ENABLED_FLAG;
+        }
+        if p.cu_qp_delta_enabled_flag {
+            setting_flags |= CU_QP_DELTA_ENABLED_FLAG;
+        }
+        if p.pps_slice_chroma_qp_offsets_present_flag {
+            setting_flags |= PPS_SLICE_CHROMA_QP_OFFSETS_PRESENT_FLAG;
+        }
+        if p.weighted_pred_flag {
+            setting_flags |= WEIGHTED_PRED_FLAG;
+        }
+        if p.weighted_bipred_flag {
+            setting_flags |= WEIGHTED_BIPRED_FLAG;
+        }
+        if p.transquant_bypass_enabled_flag {
+            setting_flags |= TRANSQUANT_BYPASS_ENABLED_FLAG;
+        }
+        if p.tiles_enabled_flag {
+            setting_flags |= TILES_ENABLED_FLAG;
+        }
+        if p.entropy_coding_sync_enabled_flag {
+            setting_flags |= ENTROPY_CODING_SYNC_ENABLED_FLAG;
+        }
+        if p.uniform_spacing_flag {
+            setting_flags |= UNIFORM_SPACING_FLAG;
+        }
+        if p.loop_filter_across_tiles_enabled_flag {
+            setting_flags |= LOOP_FILTER_ACROSS_TILES_ENABLED_FLAG;
+        }
+        if p.pps_loop_filter_across_slices_enabled_flag {
+            setting_flags |= PPS_LOOP_FILTER_ACROSS_SLICES_ENABLED_FLAG;
+        }
+        if p.deblocking_filter_override_enabled_flag {
+            setting_flags |= DEBLOCKING_FILTER_OVERRIDE_ENABLED_FLAG;
+        }
+        if p.pps_deblocking_filter_disabled_flag {
+            setting_flags |= PPS_DEBLOCKING_FILTER_DISABLED_FLAG;
+        }
+        if p.lists_modification_present_flag {
+            setting_flags |= LISTS_MODIFICATION_PRESENT_FLAG;
+        }
+        if p.slice_segment_header_extension_present_flag {
+            setting_flags |= SLICE_SEGMENT_HEADER_EXTENSION_PRESENT_FLAG;
+        }
+        // Copy explicit tile dimensions when non-uniform spacing.
+        if p.tiles_enabled_flag && !p.uniform_spacing_flag {
+            for (i, w) in p
+                .column_widths
+                .iter()
+                .take(column_width_minus1.len())
+                .enumerate()
+            {
+                column_width_minus1[i] = *w;
+            }
+            for (i, h) in p
+                .row_heights
+                .iter()
+                .take(row_height_minus1.len())
+                .enumerate()
+            {
+                row_height_minus1[i] = *h;
+            }
+        }
+        (
+            p.init_qp_minus26,
+            p.num_ref_idx_l0_default_active_minus1,
+            p.num_ref_idx_l1_default_active_minus1,
+            p.pps_cb_qp_offset,
+            p.pps_cr_qp_offset,
+            p.diff_cu_qp_delta_depth,
+            p.pps_beta_offset_div2,
+            p.pps_tc_offset_div2,
+            p.log2_parallel_merge_level_minus2,
+            p.num_tile_columns_minus1,
+            p.num_tile_rows_minus1,
+        )
+    } else {
+        (
+            init_qp_minus26,
+            num_ref_idx_l0_default_active_minus1,
+            num_ref_idx_l1_default_active_minus1,
+            pps_cb_qp_offset,
+            pps_cr_qp_offset,
+            diff_cu_qp_delta_depth,
+            pps_beta_offset_div2,
+            pps_tc_offset_div2,
+            log2_parallel_merge_level_minus2,
+            num_tile_columns_minus1,
+            num_tile_rows_minus1,
+        )
+    };
+
+    // PPS-derived bits in dwCodingParamToolFlags (the union we
+    // already started populating from SPS).
+    if let Some(p) = pps {
+        if p.dependent_slice_segments_enabled_flag {
+            coding_flags |= DEPENDENT_SLICE_SEGMENTS_ENABLED_FLAG;
+        }
+        if p.output_flag_present_flag {
+            coding_flags |= OUTPUT_FLAG_PRESENT_FLAG;
+        }
+        coding_flags |= (u32::from(p.num_extra_slice_header_bits)
+            & NUM_EXTRA_SLICE_HEADER_BITS_MASK)
+            << NUM_EXTRA_SLICE_HEADER_BITS_SHIFT;
+        if p.sign_data_hiding_enabled_flag {
+            coding_flags |= SIGN_DATA_HIDING_ENABLED_FLAG;
+        }
+        if p.cabac_init_present_flag {
+            coding_flags |= CABAC_INIT_PRESENT_FLAG;
+        }
+    }
+
     DxvaPicParamsHevc {
         PicWidthInMinCbsY: sps.pic_width_in_min_cbs_y() as u16,
         PicHeightInMinCbsY: sps.pic_height_in_min_cbs_y() as u16,
         wFormatAndSequenceInfoFlags: format_flags,
-        // sps_max_dec_pic_buffering_minus1 is per-TID; HEIC tiles always
-        // use TID 0 (single-layer). If the ParsedSps vec is empty, use 0.
         sps_max_dec_pic_buffering_minus1: sps
             .sps_max_dec_pic_buffering_minus1
             .last()
@@ -304,13 +495,31 @@ pub fn from_sps(sps: &ParsedSps) -> DxvaPicParamsHevc {
         max_transform_hierarchy_depth_intra: sps.max_transform_hierarchy_depth_intra,
         num_short_term_ref_pic_sets: sps.num_short_term_ref_pic_sets,
         num_long_term_ref_pics_sps: sps.num_long_term_ref_pics_sps,
+        num_ref_idx_l0_default_active_minus1,
+        num_ref_idx_l1_default_active_minus1,
+        init_qp_minus26,
         dwCodingParamToolFlags: coding_flags,
-        // RefPicList is sized for inter-prediction; HEIC tiles are
-        // IDR-only so every entry is INVALID. Set explicitly so the
-        // driver doesn't read garbage references.
+        dwCodingSettingPicturePropertyFlags: setting_flags,
+        pps_cb_qp_offset,
+        pps_cr_qp_offset,
+        num_tile_columns_minus1,
+        num_tile_rows_minus1,
+        column_width_minus1,
+        row_height_minus1,
+        diff_cu_qp_delta_depth,
+        pps_beta_offset_div2,
+        pps_tc_offset_div2,
+        log2_parallel_merge_level_minus2,
         RefPicList: [DxvaPicEntryHevc::INVALID; 15],
         ..Default::default()
     }
+}
+
+/// Back-compat wrapper that calls [`from_sps_pps`] with `pps = None`.
+#[deprecated(note = "use from_sps_pps; this returns a SPS-only buffer the driver will reject")]
+#[must_use]
+pub fn from_sps(sps: &ParsedSps) -> DxvaPicParamsHevc {
+    from_sps_pps(sps, None)
 }
 
 #[cfg(test)]
@@ -334,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn from_sps_packs_format_flags_example_heic() {
+    fn from_sps_pps_packs_format_flags_example_heic() {
         // example.heic SPS: 4:2:0, 8-bit, log2_max_poc_lsb=4 (so minus4 = 0).
         let mut sps = ParsedSps::default();
         sps.chroma_format_idc = 1;
@@ -345,7 +554,7 @@ mod tests {
         sps.pic_height_in_luma_samples = 858;
         sps.log2_min_luma_coding_block_size_minus3 = 0;
 
-        let dxva = from_sps(&sps);
+        let dxva = from_sps_pps(&sps, None);
         assert_eq!(dxva.PicWidthInMinCbsY, 160); // 1280 >> 3
         assert_eq!(dxva.PicHeightInMinCbsY, 107); // 858 >> 3 = 107.25 -> 107
         // Chroma 4:2:0 = 1 in bits 0-1, no other flags set.
@@ -353,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn from_sps_pcm_block_packed_correctly() {
+    fn from_sps_pps_pcm_block_packed_correctly() {
         let mut sps = ParsedSps::default();
         sps.pcm_enabled_flag = true;
         sps.pcm_sample_bit_depth_luma_minus1 = 7; // 8-bit PCM
@@ -362,7 +571,7 @@ mod tests {
         sps.log2_diff_max_min_pcm_luma_coding_block_size = 2;
         sps.pcm_loop_filter_disabled_flag = true;
 
-        let dxva = from_sps(&sps);
+        let dxva = from_sps_pps(&sps, None);
         use coding_param_tool::*;
         assert_ne!(dxva.dwCodingParamToolFlags & PCM_ENABLED_FLAG, 0);
         assert_eq!(
@@ -372,6 +581,75 @@ mod tests {
         );
         assert_ne!(
             dxva.dwCodingParamToolFlags & PCM_LOOP_FILTER_DISABLED_FLAG,
+            0
+        );
+    }
+
+    #[test]
+    fn from_sps_pps_packs_setting_flags() {
+        let sps = ParsedSps::default();
+        let mut pps = ParsedPps::default();
+        pps.init_qp_minus26 = 6; // QP=32
+        pps.pps_cb_qp_offset = -2;
+        pps.pps_cr_qp_offset = 2;
+        pps.transform_skip_enabled_flag = true;
+        pps.cu_qp_delta_enabled_flag = true;
+        pps.weighted_pred_flag = false; // explicit false
+        pps.uniform_spacing_flag = true;
+        pps.pps_loop_filter_across_slices_enabled_flag = true;
+        pps.lists_modification_present_flag = true;
+
+        let dxva = from_sps_pps(&sps, Some(&pps));
+        assert_eq!(dxva.init_qp_minus26, 6);
+        assert_eq!(dxva.pps_cb_qp_offset, -2);
+        assert_eq!(dxva.pps_cr_qp_offset, 2);
+        use coding_setting_picture_property::*;
+        assert_ne!(
+            dxva.dwCodingSettingPicturePropertyFlags & TRANSFORM_SKIP_ENABLED_FLAG,
+            0
+        );
+        assert_ne!(
+            dxva.dwCodingSettingPicturePropertyFlags & CU_QP_DELTA_ENABLED_FLAG,
+            0
+        );
+        assert_ne!(
+            dxva.dwCodingSettingPicturePropertyFlags & UNIFORM_SPACING_FLAG,
+            0
+        );
+        assert_ne!(
+            dxva.dwCodingSettingPicturePropertyFlags & LISTS_MODIFICATION_PRESENT_FLAG,
+            0
+        );
+        assert_eq!(
+            dxva.dwCodingSettingPicturePropertyFlags & WEIGHTED_PRED_FLAG,
+            0
+        );
+    }
+
+    #[test]
+    fn from_sps_pps_copies_explicit_tile_layout() {
+        let sps = ParsedSps::default();
+        let mut pps = ParsedPps::default();
+        pps.tiles_enabled_flag = true;
+        pps.uniform_spacing_flag = false;
+        pps.num_tile_columns_minus1 = 2;
+        pps.num_tile_rows_minus1 = 1;
+        pps.column_widths = vec![10, 20, 30];
+        pps.row_heights = vec![15, 25];
+
+        let dxva = from_sps_pps(&sps, Some(&pps));
+        assert_eq!(dxva.num_tile_columns_minus1, 2);
+        assert_eq!(dxva.num_tile_rows_minus1, 1);
+        assert_eq!(dxva.column_width_minus1[0], 10);
+        assert_eq!(dxva.column_width_minus1[1], 20);
+        assert_eq!(dxva.column_width_minus1[2], 30);
+        assert_eq!(dxva.column_width_minus1[3], 0); // beyond the populated set
+        assert_eq!(dxva.row_height_minus1[0], 15);
+        assert_eq!(dxva.row_height_minus1[1], 25);
+        // uniform_spacing_flag = false, so the setting bit should be unset.
+        use coding_setting_picture_property::*;
+        assert_eq!(
+            dxva.dwCodingSettingPicturePropertyFlags & UNIFORM_SPACING_FLAG,
             0
         );
     }
