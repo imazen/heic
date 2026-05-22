@@ -24,12 +24,12 @@ use windows::core::{GUID, Interface};
 
 /// HEVC Main (8-bit) decoder profile GUID — `D3D11_DECODER_PROFILE_HEVC_VLD_MAIN`
 /// from `dxva.h`. Equal to `{5b11d51b-2f4c-4452-bcc3-09f2a1160cc0}`.
-const HEVC_VLD_MAIN: GUID = GUID::from_u128(0x5b11d51b_2f4c_4452_bcc3_09f2a1160cc0);
+pub(crate) const HEVC_VLD_MAIN: GUID = GUID::from_u128(0x5b11d51b_2f4c_4452_bcc3_09f2a1160cc0);
 
 /// HEVC Main10 (10-bit) decoder profile GUID —
 /// `D3D11_DECODER_PROFILE_HEVC_VLD_MAIN10` from `dxva.h`.
 /// `{107af0e0-ef1a-4d19-aba8-67a163073d13}`.
-const HEVC_VLD_MAIN10: GUID = GUID::from_u128(0x107af0e0_ef1a_4d19_aba8_67a163073d13);
+pub(crate) const HEVC_VLD_MAIN10: GUID = GUID::from_u128(0x107af0e0_ef1a_4d19_aba8_67a163073d13);
 
 /// Drive the probe. Returns `true` only when every step succeeds.
 pub(super) fn probe() -> bool {

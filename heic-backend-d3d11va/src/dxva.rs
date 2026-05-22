@@ -320,35 +320,8 @@ pub fn from_sps_pps(sps: &ParsedSps, pps: Option<&ParsedPps>) -> DxvaPicParamsHe
     // handful of u8 / i8 fields.
     use coding_setting_picture_property::*;
     let mut setting_flags: u32 = 0;
-    let (
-        init_qp_minus26,
-        num_ref_idx_l0_default_active_minus1,
-        num_ref_idx_l1_default_active_minus1,
-        pps_cb_qp_offset,
-        pps_cr_qp_offset,
-        diff_cu_qp_delta_depth,
-        pps_beta_offset_div2,
-        pps_tc_offset_div2,
-        log2_parallel_merge_level_minus2,
-        num_tile_columns_minus1,
-        num_tile_rows_minus1,
-        mut column_width_minus1,
-        mut row_height_minus1,
-    ): (
-        i8,
-        u8,
-        u8,
-        i8,
-        i8,
-        u8,
-        i8,
-        i8,
-        u8,
-        u8,
-        u8,
-        [u16; 19],
-        [u16; 21],
-    ) = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, [0u16; 19], [0u16; 21]);
+    let mut column_width_minus1 = [0u16; 19];
+    let mut row_height_minus1 = [0u16; 21];
     let (
         init_qp_minus26,
         num_ref_idx_l0_default_active_minus1,
@@ -443,19 +416,8 @@ pub fn from_sps_pps(sps: &ParsedSps, pps: Option<&ParsedPps>) -> DxvaPicParamsHe
             p.num_tile_rows_minus1,
         )
     } else {
-        (
-            init_qp_minus26,
-            num_ref_idx_l0_default_active_minus1,
-            num_ref_idx_l1_default_active_minus1,
-            pps_cb_qp_offset,
-            pps_cr_qp_offset,
-            diff_cu_qp_delta_depth,
-            pps_beta_offset_div2,
-            pps_tc_offset_div2,
-            log2_parallel_merge_level_minus2,
-            num_tile_columns_minus1,
-            num_tile_rows_minus1,
-        )
+        // Defaults when no PPS available — DXVA spec lists these as 0 / 0 / 0 etc.
+        (0i8, 0u8, 0u8, 0i8, 0i8, 0u8, 0i8, 0i8, 0u8, 0u8, 0u8)
     };
 
     // PPS-derived bits in dwCodingParamToolFlags (the union we
