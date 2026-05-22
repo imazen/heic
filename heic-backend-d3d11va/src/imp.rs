@@ -113,6 +113,20 @@ impl Inner {
         //
         // The parameter sets (VPS/SPS/PPS) are NOT included in the
         // bitstream — they're already in the picture-parameter buffer.
+        // VCL slice NAL types per HEVC spec Table 7-1: 0..=9 (trailing,
+        // temporal sub-layer, RADL, RASL) and 16..=21 (BLA/IDR/CRA).
+        // Everything else (VPS=32 / SPS=33 / PPS=34 / AUD=35 /
+        // SEI prefix=39 / SEI suffix=40 / etc.) is non-VCL and must NOT
+        // appear in the BITSTREAM buffer per the DXVA spec — submitting
+        // them would put the driver's slice parser at the wrong offset
+        // (the SEI NAL's payload, not the slice header), producing
+        // midgray output. example.heic's full-image bitstream has a
+        // SEI prefix in front of the IDR slice; filtering at this layer
+        // is what makes that case work.
+        fn is_vcl_nal_type(t: u8) -> bool {
+            matches!(t, 0..=9 | 16..=21)
+        }
+
         let mut bitstream: Vec<u8> = Vec::with_capacity(image_data.len() + 64);
         let ls = config.length_size as usize;
         let mut i = 0;
@@ -129,13 +143,25 @@ impl Inner {
                     "malformed hvcC length-prefixed slice data".into(),
                 ));
             }
-            if nal_count == 0 && nal_len > 0 {
-                nal_type_first = (image_data[i] >> 1) & 0x3F;
+            let nal_type = if nal_len > 0 {
+                (image_data[i] >> 1) & 0x3F
+            } else {
+                0
+            };
+            if nal_count == 0 {
+                nal_type_first = nal_type;
             }
-            bitstream.extend_from_slice(&[0, 0, 1]); // 3-byte start code per chromium
-            bitstream.extend_from_slice(&image_data[i..i + nal_len]);
+            if is_vcl_nal_type(nal_type) {
+                bitstream.extend_from_slice(&[0, 0, 1]); // 3-byte start code per chromium
+                bitstream.extend_from_slice(&image_data[i..i + nal_len]);
+            }
             i += nal_len;
             nal_count += 1;
+        }
+        if bitstream.is_empty() {
+            return Err(BackendError::Decode(
+                "hvcC slice data contained no VCL NAL units".into(),
+            ));
         }
 
         // When the SPS enables custom scaling lists, the DXVA spec

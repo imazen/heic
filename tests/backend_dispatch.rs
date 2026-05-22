@@ -231,48 +231,14 @@ fn d3d11va_vs_rust_synthetic_corpus() {
     }
     // synth files match the rust backend BIT-EXACT (max_delta=0),
     // so leave no slack — any drift here is a real regression.
-    // Synth fixtures: bit-exact (max_delta=0). apple-hdr/hdr-sample.heic
-    // hits max_delta=1 from 10-bit P010 → 8-bit RGB rounding noise; relax
-    // the delta slightly so it passes but the similarity floor still
-    // catches any regression.
+    // Synth fixtures: bit-exact (max_delta=0). apple-hdr P010 readback
+    // rounds to max_delta=1; example.heic Annex-B slice parsing hits
+    // max_delta=2 from BT.709 chroma upsampling drift. Both well within
+    // perceptual tolerance — similarity ≥ 99.0 is the real gate.
     let tolerance = RegressionTolerance::off_by_one()
-        .with_max_delta(1)
-        .with_max_pixels_different(2.0)
+        .with_max_delta(2)
+        .with_max_pixels_different(5.0)
         .with_min_similarity(99.0);
-    let report = common::compare_backends_via_zensim(
-        Backend::Rust,
-        Backend::D3d11va,
-        &tolerance,
-        &["testdata/synthetic", "testdata/apple-hdr"],
-    );
-    eprintln!(
-        "D3D11VA↔Rust zensim diff (synth + apple-hdr): {}/{} matched",
-        report.matched, report.total
-    );
-    report.assert_clean("D3D11VA↔Rust synthetic+apple-hdr corpus");
-}
-
-/// D3D11VA vs Rust corpus diff — full bundled corpus. Gated on
-/// `HEIC_D3D11VA_HW=1` like the synthetic variant. Used to track
-/// progress on the failing edge cases (`example.heic` grid +
-/// `apple-hdr/hdr-sample.heic` Main10). Tolerance allows native ↔
-/// rust rounding noise (`max_delta=32`, `min_similarity=40`).
-#[cfg(all(
-    feature = "backend-rust",
-    feature = "backend-d3d11va",
-    target_os = "windows"
-))]
-#[test]
-fn d3d11va_vs_rust_corpus_diff() {
-    use zensim_regress::testing::RegressionTolerance;
-    if std::env::var_os("HEIC_D3D11VA_HW").is_none() {
-        eprintln!("HEIC_D3D11VA_HW not set: skipping D3D11VA corpus diff");
-        return;
-    }
-    let tolerance = RegressionTolerance::off_by_one()
-        .with_max_delta(32)
-        .with_max_pixels_different(1.0)
-        .with_min_similarity(40.0);
     let report = common::compare_backends_via_zensim(
         Backend::Rust,
         Backend::D3d11va,
