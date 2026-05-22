@@ -331,13 +331,24 @@ fn decode_one_frame(
     height: u32,
     bit_depth: u8,
 ) -> Result<DecodedFrame, BackendError> {
-    // hvcC length-prefixed → Annex B for the MFT.
-    let annexb = nal::hvcc_to_annexb(image_data, config.length_size).ok_or_else(|| {
+    // Build the access-unit Annex-B blob: parameter sets (VPS+SPS+PPS)
+    // followed by the slice NALs. Some HEVC MFTs decode reliably only
+    // when parameter sets are prepended inline at each AU even though
+    // we also set MF_MT_MPEG_SEQUENCE_HEADER on the input media type.
+    let mut annexb = nal::annexb_parameter_sets(config.nal_units);
+    let slice_annexb = nal::hvcc_to_annexb(image_data, config.length_size).ok_or_else(|| {
         BackendError::Decode("malformed hvcC length-prefixed slice data".to_string())
     })?;
+    annexb.extend_from_slice(&slice_annexb);
 
     // Wrap Annex B bytes in an IMFSample.
     let sample = build_input_sample(&annexb)?;
+    // Some MFTs reject samples without timestamps; pin a zero PTS + 1/60s
+    // duration since for a still image the values are irrelevant but the
+    // transform may require them to be set at all. SAFETY: API contract.
+    unsafe { sample.SetSampleTime(0) }.map_err(decode_err("IMFSample::SetSampleTime"))?;
+    unsafe { sample.SetSampleDuration(166_667) }
+        .map_err(decode_err("IMFSample::SetSampleDuration"))?;
 
     // ProcessInput consumes the sample; the MFT internally queues it.
     // SAFETY: ProcessInput is the documented input-side entry; we own the
@@ -356,7 +367,7 @@ fn decode_one_frame(
 
     // Loop ProcessOutput, handling stream-change renegotiation, until we
     // get a sample.
-    let output_sample = poll_output(transform, bit_depth)?;
+    let output_sample = poll_output(transform, width, height, bit_depth)?;
 
     // Unpack the output sample's NV12 / P010 buffer to planar u16.
     let planes = read_output_planes(&output_sample, width, height, bit_depth)?;
@@ -417,7 +428,12 @@ fn build_input_sample(annexb: &[u8]) -> Result<IMFSample, BackendError> {
     Ok(sample)
 }
 
-fn poll_output(transform: &IMFTransform, _bit_depth: u8) -> Result<IMFSample, BackendError> {
+fn poll_output(
+    transform: &IMFTransform,
+    width: u32,
+    height: u32,
+    _bit_depth: u8,
+) -> Result<IMFSample, BackendError> {
     // We need to allocate the output sample ourselves if the MFT doesn't
     // provide one. Query the stream info.
     // SAFETY: GetOutputStreamInfo is a documented MFT inspection call.
@@ -429,6 +445,15 @@ fn poll_output(transform: &IMFTransform, _bit_depth: u8) -> Result<IMFSample, Ba
     const PROVIDES_SAMPLES: u32 = 0x100;
     let provides_samples = (info.dwFlags & PROVIDES_SAMPLES) != 0;
 
+    // info.cbSize is sometimes 0 or undersized before the first
+    // STREAM_CHANGE; over-allocate to width*height*4 which covers NV12
+    // (1.5 bpp) + P010 (3 bpp) + 16-row-alignment slack on any HEVC
+    // resolution we'd see in HEIF. The MFT writes the actual length
+    // back via SetCurrentLength.
+    let buf_size = info
+        .cbSize
+        .max(width.saturating_mul(height).saturating_mul(4));
+
     let mut attempts = 0;
     loop {
         attempts += 1;
@@ -438,33 +463,38 @@ fn poll_output(transform: &IMFTransform, _bit_depth: u8) -> Result<IMFSample, Ba
             ));
         }
 
-        let pre_alloc_sample = if provides_samples {
-            None
+        // Build the output buffer array in place so the MFT's writes to
+        // `pSample` / `dwStatus` come back to us. Cloning the buffer before
+        // passing it to ProcessOutput would discard those writes (the
+        // earlier bug). The array lives in `bufs` until we read bufs[0]
+        // back after the call.
+        let pre_alloc = if provides_samples {
+            core::mem::ManuallyDrop::new(None)
         } else {
-            Some(alloc_output_sample(info.cbSize)?)
+            core::mem::ManuallyDrop::new(Some(alloc_output_sample(buf_size)?))
         };
-
-        let output_buf = MFT_OUTPUT_DATA_BUFFER {
+        let mut bufs = [MFT_OUTPUT_DATA_BUFFER {
             dwStreamID: 0,
-            pSample: pre_alloc_sample
-                .as_ref()
-                .map_or(core::mem::ManuallyDrop::new(None), |s| {
-                    core::mem::ManuallyDrop::new(Some(s.clone()))
-                }),
+            pSample: pre_alloc,
             dwStatus: 0,
             pEvents: core::mem::ManuallyDrop::new(None),
-        };
+        }];
         let mut status: u32 = 0;
 
-        // SAFETY: ProcessOutput with a single output stream buffer.
+        // SAFETY: ProcessOutput with a single output stream buffer slice we
+        // hold ownership of for the duration of the call.
         let hr: Result<(), windows::core::Error> =
-            unsafe { transform.ProcessOutput(0, &mut [output_buf.clone()], &mut status) };
+            unsafe { transform.ProcessOutput(0, &mut bufs, &mut status) };
 
         match hr {
             Ok(()) => {
-                // The MFT wrote into output_buf.pSample (or replaced it if
-                // PROVIDES_SAMPLES).
-                if let Some(sample) = core::mem::ManuallyDrop::into_inner(output_buf.pSample) {
+                // Take ownership of whatever the MFT wrote into pSample.
+                // SAFETY: ManuallyDrop::take is safe because we don't
+                // touch bufs[0].pSample after this point (the array is
+                // dropped at scope exit; the pEvents ManuallyDrop is None
+                // so its Drop is a no-op).
+                let taken = unsafe { core::mem::ManuallyDrop::take(&mut bufs[0].pSample) };
+                if let Some(sample) = taken {
                     return Ok(sample);
                 }
                 return Err(BackendError::Decode(
@@ -473,14 +503,14 @@ fn poll_output(transform: &IMFTransform, _bit_depth: u8) -> Result<IMFSample, Ba
             }
             Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
                 // Renegotiate output type. Walk available types again.
-                // For NV12 / P010 path the renegotiation is usually idempotent
-                // because the bitstream dimensions match what we set.
+                // For NV12 / P010 path the renegotiation is usually
+                // idempotent because the bitstream dimensions match what
+                // we set.
                 configure_output_type(transform, _bit_depth)?;
                 continue;
             }
             Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => {
-                // Drain in progress; loop once more after a no-op sleep.
-                // For a single frame this should resolve on the next iteration.
+                // Drain in progress; loop once more.
                 continue;
             }
             Err(e) => {
