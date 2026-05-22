@@ -106,4 +106,40 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn hvcc_two_byte_length_prefix() {
+        // 2-byte length is rare in HEIC but supported by the spec.
+        let data = [0, 3, 0xAA, 0xBB, 0xCC, 0, 2, 1, 2];
+        let ab = hvcc_to_annexb(&data, 2).unwrap();
+        assert_eq!(ab, vec![0, 0, 0, 1, 0xAA, 0xBB, 0xCC, 0, 0, 0, 1, 1, 2]);
+    }
+
+    #[test]
+    fn hvcc_one_byte_length_prefix() {
+        // 1-byte length per the smaller-NAL ISO 14496-15 variant.
+        let data = [3, 0xAA, 0xBB, 0xCC, 2, 1, 2];
+        let ab = hvcc_to_annexb(&data, 1).unwrap();
+        assert_eq!(ab, vec![0, 0, 0, 1, 0xAA, 0xBB, 0xCC, 0, 0, 0, 1, 1, 2]);
+    }
+
+    #[test]
+    fn hvcc_empty_input() {
+        let ab = hvcc_to_annexb(&[], 4).unwrap();
+        assert!(ab.is_empty());
+    }
+
+    #[test]
+    fn hvcc_zero_length_nal() {
+        // A zero-length NAL is still valid framing — emit just the start code.
+        let data = [0, 0, 0, 0, 0, 0, 0, 2, 0xAA, 0xBB];
+        let ab = hvcc_to_annexb(&data, 4).unwrap();
+        assert_eq!(ab, vec![0, 0, 0, 1, 0, 0, 0, 1, 0xAA, 0xBB]);
+    }
+
+    #[test]
+    fn parameter_sets_empty_input() {
+        let out = annexb_parameter_sets(&[]);
+        assert!(out.is_empty());
+    }
 }
