@@ -22,23 +22,33 @@ enough = { workspace = true }
 [target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "visionos"))'.dependencies]
 objc2 = "0.6"
 objc2-foundation = "0.3"
+objc2-core-foundation = { version = "0.3", features = [
+    "CFBase",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+] }
 objc2-core-media = { version = "0.3", features = [
+    "CMBase",
+    "CMBlockBuffer",
     "CMFormatDescription",
     "CMSampleBuffer",
-    "CMBlockBuffer",
     "CMTime",
 ] }
 objc2-core-video = { version = "0.3", features = [
-    "CVPixelBuffer",
+    "CVBase",
+    "CVBuffer",
     "CVImageBuffer",
+    "CVPixelBuffer",
+    "CVPixelFormatDescription",
 ] }
 objc2-video-toolbox = { version = "0.3", features = [
-    "VTDecompressionSession",
+    "VTBase",
     "VTDecompressionProperties",
-    "VTSession",
+    "VTDecompressionSession",
     "VTErrors",
+    "VTSession",
 ] }
-block2 = "0.6"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
