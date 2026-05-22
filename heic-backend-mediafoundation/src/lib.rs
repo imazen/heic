@@ -69,6 +69,46 @@ pub struct MediaFoundationBackend {
 #[cfg(target_os = "windows")]
 unsafe impl Send for MediaFoundationBackend {}
 
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::*;
+
+    /// Smoke test: `MediaFoundationBackend::is_available()` should return
+    /// `true` on a Windows host where the HEVC Video Extensions package is
+    /// installed (true on every dev box for this crate; CI runners need
+    /// `winget install --id 9N4WGH0Z6VHQ` first per spec.md).
+    ///
+    /// Skipped via env var on CI runners that don't have the extension
+    /// installed — exits early with a printed message rather than failing,
+    /// matching the existing "set the gate at the workflow YAML, not in
+    /// the test body" pattern.
+    #[test]
+    fn mft_enumeration_finds_hevc_decoder_when_extension_installed() {
+        if std::env::var_os("HEIC_SKIP_MF_HEVC").is_some() {
+            eprintln!(
+                "HEIC_SKIP_MF_HEVC set: skipping MF HEVC enumeration test \
+                 (CI runner without the HEVC Video Extensions package)"
+            );
+            return;
+        }
+        let backend = MediaFoundationBackend::new();
+        assert!(
+            backend.is_available(),
+            "MediaFoundationBackend::is_available() returned false — \
+             the HEVC Video Extensions package is not installed (run \
+             `winget install --id 9N4WGH0Z6VHQ`) or `MFTEnumEx` is \
+             rejecting the synchronous-decoder filter for some other \
+             reason. Set HEIC_SKIP_MF_HEVC=1 to bypass."
+        );
+    }
+
+    #[test]
+    fn name_is_mediafoundation() {
+        let backend = MediaFoundationBackend::new();
+        assert_eq!(backend.name(), "mediafoundation");
+    }
+}
+
 impl MediaFoundationBackend {
     /// Create a new backend instance. Cheap on non-Windows targets (stub);
     /// on Windows, the actual COM/MFT setup is deferred to the first
