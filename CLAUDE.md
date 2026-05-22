@@ -442,37 +442,36 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 
 ## Known Bugs
 
-### D3D11VA real-decode: midgray output on 2 of 6 corpus files (2026-05-22)
+### D3D11VA real-decode: example.heic midgray (custom scaling lists; 2026-05-22)
 
-Status: ⚠ Partial. 4 of 6 `tests/testdata/*` files decode bit-exact
-on the RTX 5070 via the D3D11VA backend. Two fail:
+Status: ⚠ Partial — 5 of 6 bundled corpus files + 9/9 iPhone HDR
+fixtures decode on the RTX 5070 via D3D11VA. One known failure:
 
 - `tests/testdata/libheif-examples/example.heic` (1280×854, grid of
   6× 512×512 tiles, BT.709 limited): all 6 tiles return Y=128 /
-  Cb=128 / Cr=128 (midgray). PPS sdh=false.
-- `tests/testdata/apple-hdr/hdr-sample.heic` (1512×850, Main10,
-  BT.2020): also midgray on every tile. PPS sdh=false.
+  Cb=128 / Cr=128 midgray.
 
-Synthetic corpus all 4 files pass:
-- synth_8bit_q10/q50/lossless: amp=true, sao=true, scaling=false
-- synth_8bit_q95: amp=false, sao=true, scaling=true (closest SPS
-  match to the example tiles — only sdh=true differs)
+Root cause: example.heic's SPS encodes custom (non-default) scaling
+lists, but our `from_sps_pps` only ever submits HEVC default lists
+via `default_qmatrix_hevc()`. The driver decodes the bitstream with
+defaults, mismatched against the actual encoded scaling lists →
+silent midgray output. The `INVERSE_QUANTIZATION_MATRIX` buffer
+submission added in `bd46f8b` already fixed apple-hdr (defaults
+match Apple's encoder) and all 9 iPhone HDR fixtures — only the
+libheif/x265 encoder used for example.heic appears to override
+defaults.
 
-Triage attempted: SPS+PPS dump via `HEIC_D3D11VA_DEBUG=1` shows the
-two failing files differ from synth_q95 ONLY in `sdh=false`. Bit
-position 25 of `dwCodingParamToolFlags` confirmed correct by
-synth_q95 success. Likely remaining causes:
-
-1. `scaling_list_data_present_flag` not propagated; driver expects
-   INVERSE_QUANTIZATION_MATRIX buffer we don't send.
-2. `pps_scaling_list_data_present_flag` similar.
-3. Conformance-window math (854 visible vs 858 coded).
-4. Main10 / P010 path needs distinct pic-param handling.
+Fix path: extend the parent crate's HEVC bitstream parser to read
+`scaling_list_data` from the SPS/PPS, propagate the 4×4/8×8/16×16/32×32
+matrices through `ParsedSps`/`ParsedPps`, and copy them into the
+`DxvaQmatrixHevc` buffer in `Inner::decode` instead of synthesizing
+defaults. Chromium does this at
+`media/gpu/windows/d3d11_h265_accelerator.cc:557-650`. Bitstream
+parse is ~200 LOC + ~30 LOC of struct plumbing.
 
 Reproduce: `HEIC_D3D11VA_HW=1 HEIC_D3D11VA_DEBUG=1 cargo test ...
-d3d11va_vs_rust_synthetic_corpus` and uncomment the corpus_diff
-test to see the failures. Diagnostics print first-pixel samples +
-every relevant SPS/PPS flag.
+d3d11va_vs_rust_corpus_diff` to see the full corpus output;
+`d3d11va_vs_rust_synthetic_corpus` is the bit-exact subset gate.
 
 ## Investigation Notes
 
