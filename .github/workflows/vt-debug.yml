@@ -1,0 +1,240 @@
+name: VideoToolbox runtime debug
+
+# Manual-trigger workflow for chasing the VT SIGABRT inside
+# `videotoolbox_decodes_example`. Wires up four diagnostic
+# techniques the local WSL dev box can't reproduce:
+#
+#  1. Run the test under lldb so the crash dumps a full backtrace
+#     of every thread (not just the offending one) to stderr.
+#  2. Pull every macOS crash report from
+#     `~/Library/Logs/DiagnosticReports/` and upload as an artifact
+#     so we get the actual ips / crash log + register state.
+#  3. Re-run with the malloc-stack hardeners (`MallocStackLogging`,
+#     `MallocScribble`, `NSZombieEnabled`) to catch use-after-free
+#     and over-release patterns the SIGABRT may be hiding.
+#  4. Optionally open a `mxschmitt/action-tmate` session AFTER the
+#     test crashes so a maintainer can SSH into the runner, attach
+#     lldb manually, run dtrace, dump process memory, etc.
+#
+# Trigger from the GitHub UI ("Run workflow" button on this
+# workflow) or via `gh workflow run vt-debug.yml -f ...`. None of
+# the diagnostic paths run during regular CI — they cost real
+# minute-billing on the macOS runners.
+
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: 'Runner OS (re-run the workflow to cover multiple)'
+        required: true
+        default: 'macos-latest'
+        type: choice
+        options:
+          - 'macos-latest'
+          - 'macos-15-intel'
+          - 'macos-13'
+      test_filter:
+        description: 'Test-name filter (passed to `cargo test ... <filter>`)'
+        required: false
+        default: 'videotoolbox_decodes_example'
+        type: string
+      interactive:
+        description: 'Open a tmate SSH session after the crash for live debugging'
+        required: false
+        default: false
+        type: boolean
+      malloc_harden:
+        description: 'Enable MallocStackLogging + NSZombieEnabled + MallocScribble (catches UAF / over-release)'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  vt-debug:
+    name: vt-debug (${{ inputs.os }})
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 30
+    env:
+      # Force unwrapping tests to surface every panic backtrace + the
+      # SIGABRT chain. `panic = "abort"` would lose the unwind path
+      # so we explicitly stick with the default unwind behavior.
+      RUST_BACKTRACE: full
+      RUST_LIB_BACKTRACE: full
+      # Gate the VT runtime test on the parent's existing env switch.
+      HEIC_RUN_VT_RUNTIME: '1'
+      # Keep debug info on so lldb / Apple's crash reporter give us
+      # symbol names, not just opaque addresses. Profile-stripping
+      # in release builds would erase the very stack frames we want
+      # — use the `dev` profile for runtime diagnostics.
+      CARGO_PROFILE_DEV_DEBUG: '2'
+      CARGO_TERM_COLOR: 'never'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: vt-debug-${{ inputs.os }}
+
+      # Build the test binary FIRST so the binary path is known and
+      # we can drive it through `lldb` in a second step.
+      - name: Build test binary
+        run: |
+          cargo test --no-run \
+            --test backend_dispatch \
+            --features 'backend-rust,backend-videotoolbox,std' \
+            --message-format=json 2>&1 \
+            | tee /tmp/cargo-build.json
+          # Extract the freshly-built binary path so subsequent steps
+          # don't have to scrape `cargo test --no-run`'s output.
+          BIN=$(jq -r 'select(.profile.test == true and .target.name == "backend_dispatch") | .executable' /tmp/cargo-build.json | tail -n1)
+          if [[ -z "$BIN" || "$BIN" == "null" ]]; then
+            echo "FATAL: could not locate the backend_dispatch test binary" >&2
+            exit 1
+          fi
+          echo "TEST_BIN=$BIN" >> "$GITHUB_ENV"
+          echo "Located test binary: $BIN"
+
+      # Baseline: run the test plain so the failure mode is captured
+      # without lldb interference. This is the "what does the runner
+      # actually see" snapshot; lldb's backtrace comes in the next step.
+      - name: Plain test run (capture native crash)
+        id: plain
+        continue-on-error: true
+        env:
+          HEIC_RUN_VT_RUNTIME: '1'
+        run: |
+          set -o pipefail
+          "$TEST_BIN" \
+            --test-threads=1 \
+            --nocapture \
+            ${{ inputs.test_filter }} 2>&1 | tee /tmp/plain.log
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      # Drive the test under lldb so we get a backtrace of EVERY
+      # thread (not just the crashing one) plus register state at
+      # the moment of SIGABRT. lldb's `process handle SIGABRT --stop
+      # true --notify true --pass false` ensures the abort lands in
+      # the debugger instead of terminating the process. The `-o`
+      # flags batch lldb commands so we don't need an interactive
+      # session.
+      - name: Run under lldb (capture full crash trace)
+        id: lldb
+        continue-on-error: true
+        env:
+          HEIC_RUN_VT_RUNTIME: '1'
+        run: |
+          set -o pipefail
+          lldb \
+            --batch \
+            -o 'settings set target.disable-aslr false' \
+            -o 'settings set target.process.stop-on-sharedlibrary-events false' \
+            -o 'process handle SIGABRT --stop true --notify true --pass false' \
+            -o 'process handle SIGSEGV --stop true --notify true --pass false' \
+            -o 'process handle SIGBUS  --stop true --notify true --pass false' \
+            -o "run --test-threads=1 --nocapture ${{ inputs.test_filter }}" \
+            -o 'thread backtrace all' \
+            -o 'register read -a' \
+            -o 'image list' \
+            -o 'frame variable' \
+            -o 'quit' \
+            -- "$TEST_BIN" 2>&1 | tee /tmp/lldb.log
+
+      # Re-run with libc / Cocoa malloc hardeners. These catch the
+      # most common Apple-framework FFI crashes:
+      #   * MallocStackLogging — records every alloc/free; crash
+      #     reports show the allocation stack of corrupted blocks.
+      #   * MallocScribble — fills freed memory with 0x55, so a
+      #     UAF reads garbage instead of stale-but-usable data.
+      #   * MallocGuardEdges — pads allocations with guard pages so
+      #     off-end / off-start writes trip immediately.
+      #   * NSZombieEnabled — over-released Objective-C objects
+      #     become zombies that log instead of crashing silently.
+      - name: Run with malloc hardeners
+        if: ${{ inputs.malloc_harden }}
+        continue-on-error: true
+        env:
+          HEIC_RUN_VT_RUNTIME: '1'
+          MallocStackLogging: '1'
+          MallocStackLoggingNoCompact: '1'
+          MallocScribble: '1'
+          MallocGuardEdges: '1'
+          MallocCheckHeapEach: '100'
+          NSZombieEnabled: 'YES'
+        run: |
+          set -o pipefail
+          "$TEST_BIN" \
+            --test-threads=1 \
+            --nocapture \
+            ${{ inputs.test_filter }} 2>&1 | tee /tmp/malloc-hardened.log
+
+      # Pull Apple's crash reports. These contain the actual
+      # signal, fault address, thread state, plus the binary image
+      # list — useful for figuring out exactly which framework
+      # symbol triggered the SIGABRT.
+      - name: Collect macOS crash reports
+        if: always()
+        run: |
+          mkdir -p /tmp/crashreports
+          # Both user-scoped and system-scoped directories.
+          for dir in \
+            "$HOME/Library/Logs/DiagnosticReports" \
+            "/Library/Logs/DiagnosticReports"
+          do
+            if [[ -d "$dir" ]]; then
+              cp -v "$dir"/*.{ips,crash,diag} /tmp/crashreports/ 2>/dev/null || true
+            fi
+          done
+          ls -la /tmp/crashreports/ || true
+
+      # Snapshot anything in /tmp we want to inspect: build output,
+      # plain-run log, lldb backtrace, hardened-run log, crash reports.
+      - name: Upload diagnostics artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vt-debug-${{ inputs.os }}
+          path: |
+            /tmp/cargo-build.json
+            /tmp/plain.log
+            /tmp/lldb.log
+            /tmp/malloc-hardened.log
+            /tmp/crashreports/
+
+      # Optional interactive session. Gated on the `interactive`
+      # input so regular runs don't burn macOS minutes waiting for
+      # nobody to SSH in. When enabled, this pauses up to 30 min
+      # (job timeout - prior steps) so you can `ssh` in, attach
+      # lldb to a fresh `cargo test` process, run dtrace, etc.
+      #
+      # The action prints the SSH endpoint to the workflow log;
+      # accepts both registered SSH keys (faster) and web-shell.
+      - name: Pause for interactive tmate
+        if: ${{ inputs.interactive && always() }}
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
+          detached: false
+
+      # Surface the exit codes at the bottom of the run summary so
+      # we can tell at a glance which phase crashed and which
+      # phase succeeded.
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## VT debug summary (${{ inputs.os }})"
+            echo
+            echo "* test_filter: \`${{ inputs.test_filter }}\`"
+            echo "* malloc_harden: \`${{ inputs.malloc_harden }}\`"
+            echo "* interactive: \`${{ inputs.interactive }}\`"
+            echo
+            echo "### Logs"
+            for f in /tmp/plain.log /tmp/lldb.log /tmp/malloc-hardened.log; do
+              if [[ -s "$f" ]]; then
+                echo "* \`$(basename $f)\`: $(wc -l < "$f") lines"
+              fi
+            done
+            echo
+            crash_count=$(ls /tmp/crashreports 2>/dev/null | wc -l | tr -d ' ')
+            echo "* macOS crash reports captured: $crash_count"
+          } >> "$GITHUB_STEP_SUMMARY"
