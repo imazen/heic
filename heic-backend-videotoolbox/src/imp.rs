@@ -222,12 +222,20 @@ fn build_session(
     // constructor; format_desc is a live CFRetained; dest_attrs is a
     // CFDictionary we hold; callback_record points to a valid struct
     // for the lifetime of this call (VT copies it).
+    // Up-cast from CFRetained<CFDictionary<CFString, CFType>> to &CFDictionary
+    // (the generic-erased form VT expects). CFDictionary<K, V> impls
+    // AsRef<CFDictionary> via the cf_type! macro.
+    let dest_attrs_base: &objc2_core_foundation::CFDictionary =
+        <objc2_core_foundation::CFDictionary<
+            objc2_core_foundation::CFString,
+            objc2_core_foundation::CFType,
+        > as AsRef<objc2_core_foundation::CFDictionary>>::as_ref(&dest_attrs);
     let status = unsafe {
         VTDecompressionSession::create(
             None,
             format_desc,
             None,
-            Some(&dest_attrs),
+            Some(dest_attrs_base),
             &callback_record,
             NonNull::new_unchecked(&raw mut session),
         )
@@ -269,10 +277,14 @@ fn build_destination_attrs(
     .ok_or_else(|| BackendError::Decode("CFNumber::new(SInt32) returned null".into()))?;
     let empty_iosurface = empty_dict();
 
-    let keys: [&objc2_core_foundation::CFString; 2] = [
-        kCVPixelBufferPixelFormatTypeKey,
-        kCVPixelBufferIOSurfacePropertiesKey,
-    ];
+    // SAFETY: extern statics are unsafe by default; both are read-only
+    // CFStringRef constants exported by CoreVideo.
+    let keys: [&objc2_core_foundation::CFString; 2] = unsafe {
+        [
+            kCVPixelBufferPixelFormatTypeKey,
+            kCVPixelBufferIOSurfacePropertiesKey,
+        ]
+    };
     // Each CF concrete type impls AsRef<CFType>; deref the CFRetained
     // wrapper down to the concrete type and call `.as_ref()` to upcast.
     let pixel_fmt_ref: &objc2_core_foundation::CFType =
@@ -574,7 +586,8 @@ fn read_pixel_buffer(
         }
     }
 
-    CVPixelBufferUnlockBaseAddress(pixel_buf, CVPixelBufferLockFlags::ReadOnly);
+    // SAFETY: pairs the Lock above.
+    unsafe { CVPixelBufferUnlockBaseAddress(pixel_buf, CVPixelBufferLockFlags::ReadOnly) };
 
     Ok(DecodedFrame {
         width: config.width,
