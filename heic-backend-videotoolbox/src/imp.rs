@@ -368,7 +368,7 @@ fn decode_one_frame(
             &sample_buffer,
             VTDecodeFrameFlags::empty(),
             ptr::null_mut(),
-            Some(NonNull::new_unchecked(&raw mut info_flags)),
+            &raw mut info_flags,
         )
     };
     if status != 0 {
@@ -509,11 +509,10 @@ fn read_pixel_buffer(
         )));
     }
 
-    // Use the pixel buffer's actual dimensions; should match `config.width/height`
-    // but VT may have aligned up internally.
-    // SAFETY: pixel_buf is locked and live.
-    let pb_w = unsafe { CVPixelBufferGetWidth(pixel_buf) };
-    let pb_h = unsafe { CVPixelBufferGetHeight(pixel_buf) };
+    // objc2-core-video marks these getters as safe; only the pointer
+    // arithmetic reads inside the unpack loops below need `unsafe`.
+    let pb_w = CVPixelBufferGetWidth(pixel_buf);
+    let pb_h = CVPixelBufferGetHeight(pixel_buf);
     let w = config.width as usize;
     let h = config.height as usize;
     if pb_w < w || pb_h < h {
@@ -529,12 +528,10 @@ fn read_pixel_buffer(
     let mut cb_plane = vec![0u16; half_w * half_h];
     let mut cr_plane = vec![0u16; half_w * half_h];
 
-    // SAFETY: plane 0 = Y, plane 1 = UV (biplanar NV12 / P010). Stride
-    // queries return the buffer's actual row stride which may exceed `w`.
-    let y_base = unsafe { CVPixelBufferGetBaseAddressOfPlane(pixel_buf, 0) };
-    let y_stride = unsafe { CVPixelBufferGetBytesPerRowOfPlane(pixel_buf, 0) };
-    let uv_base = unsafe { CVPixelBufferGetBaseAddressOfPlane(pixel_buf, 1) };
-    let uv_stride = unsafe { CVPixelBufferGetBytesPerRowOfPlane(pixel_buf, 1) };
+    let y_base = CVPixelBufferGetBaseAddressOfPlane(pixel_buf, 0);
+    let y_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buf, 0);
+    let uv_base = CVPixelBufferGetBaseAddressOfPlane(pixel_buf, 1);
+    let uv_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buf, 1);
 
     if config.bit_depth_luma >= 10 {
         // P010: u16 LE with value in the LOW 10 bits (unlike Windows MF's
