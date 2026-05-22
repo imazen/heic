@@ -35,7 +35,6 @@
     target_os = "visionos"
 ))]
 
-use std::cell::Cell;
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 use std::vec;
@@ -58,16 +57,21 @@ use objc2_video_toolbox::{
     VTDecompressionSession,
 };
 
-// Output state captured by the VT decode callback. Filled in
-// `decode_callback`, drained by `Inner::decode` after the
-// `wait_for_asynchronous_frames` fence.
-//
-// Thread-local because the callback runs on whatever thread VT schedules
-// it on; we don't need cross-thread visibility — the synchronous decode
-// path keeps everything single-threaded per call.
-thread_local! {
-    static CALLBACK_SLOT: Cell<Option<CFRetained<CVPixelBuffer>>> = const { Cell::new(None) };
-    static CALLBACK_STATUS: Cell<i32> = const { Cell::new(0) };
+/// Output state captured by the VT decode callback.
+///
+/// Lives on the calling thread's stack across one `decode_one_frame`
+/// invocation; the callback receives a `*mut FrameOutput` via VT's
+/// per-frame `source_frame_refcon`, writes to it, and the caller
+/// reads the populated state once `decode_frame` returns and the
+/// `wait_for_asynchronous_frames` fence drains any queued work.
+///
+/// Routing through `source_frame_refcon` rather than a `thread_local!`
+/// avoids the case where VT schedules the callback on a different
+/// thread than the one calling `decode_frame` — the earlier
+/// thread-local approach lost the captured pixel buffer in that case.
+struct FrameOutput {
+    status: i32,
+    pixel_buf: Option<CFRetained<CVPixelBuffer>>,
 }
 
 #[derive(Default)]
@@ -310,36 +314,47 @@ fn empty_dict()
     CFDictionary::<objc2_core_foundation::CFType, objc2_core_foundation::CFType>::empty()
 }
 
-/// VT output callback. Stores the produced `CVPixelBuffer` (or the
-/// `status` if decode failed) in thread-local slots so the caller can
-/// drain them after `DecodeFrame` returns.
+/// VT output callback. VT hands us:
+///   * `source_frame_ref_con` — the per-frame refcon we passed to
+///     `decode_frame`; we point this at a stack-allocated
+///     [`FrameOutput`] in `decode_one_frame`. Writing to it directly
+///     (rather than a `thread_local!`) avoids data loss when VT
+///     schedules the callback on a worker thread.
+///   * `status` — `OSStatus` 0 on success, error code otherwise.
+///   * `image_buffer` — the decoded `CVPixelBuffer` (typedef'd as
+///     `CVImageBuffer` in CM headers). May be null on failure.
 ///
-/// SAFETY contract: VT calls us with valid pointers per the
-/// `VTDecompressionOutputCallback` typedef. We don't dereference
-/// `source_frame_refcon` (we pass null at decode time), and the
-/// `image_buffer` is borrowed by the callback's caller — we
-/// CFRetain it via Cell<Option<CFRetained>> by wrapping in
-/// CFRetained::retain.
+/// SAFETY: the caller (`decode_one_frame`) keeps `*source_frame_ref_con`
+/// live across the entire `decode_frame` + `wait_for_asynchronous_frames`
+/// sequence; image_buffer is borrowed from VT so we CFRetain it.
 unsafe extern "C-unwind" fn decode_callback(
     _decompression_output_ref_con: *mut c_void,
-    _source_frame_ref_con: *mut c_void,
+    source_frame_ref_con: *mut c_void,
     status: i32,
     _info_flags: VTDecodeInfoFlags,
     image_buffer: *mut CVImageBuffer,
     _presentation_time_stamp: CMTime,
     _presentation_duration: CMTime,
 ) {
-    CALLBACK_STATUS.with(|s| s.set(status));
+    if source_frame_ref_con.is_null() {
+        return;
+    }
+    // SAFETY: the caller passes a `&mut FrameOutput` cast to `*mut c_void`
+    // via `source_frame_refcon` in `decode_frame`; this is the same
+    // pointer coming back to us, valid for the duration of the call.
+    let out = unsafe { &mut *source_frame_ref_con.cast::<FrameOutput>() };
+    out.status = status;
     if status != 0 || image_buffer.is_null() {
         return;
     }
-    // SAFETY: image_buffer is a CVImageBufferRef borrowed by VT; we cast
-    // it to a CVPixelBuffer (CVImageBuffer is a typedef alias for
-    // CVPixelBuffer in the HEVC decode path) and CFRetain it so it
-    // outlives the callback.
+    // SAFETY: image_buffer is a CVImageBufferRef borrowed by VT.
+    // CVImageBuffer / CVPixelBuffer are documented aliases in
+    // CVImageBuffer.h; the cast is the standard VT pattern.
+    // CFRetained::retain bumps the refcount so it outlives the
+    // callback.
     let pixel_buf =
         unsafe { CFRetained::retain(NonNull::new_unchecked(image_buffer.cast::<CVPixelBuffer>())) };
-    CALLBACK_SLOT.with(|slot| slot.set(Some(pixel_buf)));
+    out.pixel_buf = Some(pixel_buf);
 }
 
 fn decode_one_frame(
@@ -354,9 +369,14 @@ fn decode_one_frame(
     let block_buffer = build_block_buffer(image_data)?;
     let sample_buffer = build_sample_buffer(&block_buffer, &cached.format_desc, image_data.len())?;
 
-    // Clear thread-local slots before invoking decode.
-    CALLBACK_SLOT.with(|s| s.set(None));
-    CALLBACK_STATUS.with(|s| s.set(0));
+    // Per-call output state; the callback writes into it via the
+    // source_frame_refcon we pass to decode_frame. Pinned across the
+    // decode + wait fence so the callback (which may fire on a VT
+    // worker thread) can safely write through the pointer.
+    let mut frame_output = FrameOutput {
+        status: 0,
+        pixel_buf: None,
+    };
 
     // Decode synchronously. Passing 0 for flags (no
     // EnableAsynchronousDecompression) makes VT call the callback before
@@ -365,14 +385,14 @@ fn decode_one_frame(
     // session that queues anyway.
     let mut info_flags = VTDecodeInfoFlags::empty();
     // SAFETY: session and sample_buffer are valid CFRetained handles;
-    // source_frame_refcon is null because we don't track frame identity
-    // here (single-shot decode).
+    // source_frame_refcon points at `frame_output` which lives through
+    // the wait fence below.
     let status = unsafe {
         VTDecompressionSession::decode_frame(
             &cached.session,
             &sample_buffer,
             VTDecodeFrameFlags::empty(),
-            ptr::null_mut(),
+            (&raw mut frame_output).cast::<c_void>(),
             &raw mut info_flags,
         )
     };
@@ -392,14 +412,15 @@ fn decode_one_frame(
         )));
     }
 
-    let cb_status = CALLBACK_STATUS.with(|s| s.get());
-    if cb_status != 0 {
+    if frame_output.status != 0 {
         return Err(BackendError::Decode(format!(
-            "VT decode callback reported OSStatus {cb_status}"
+            "VT decode callback reported OSStatus {}",
+            frame_output.status
         )));
     }
-    let pixel_buf = CALLBACK_SLOT
-        .with(|s| s.take())
+    let pixel_buf = frame_output
+        .pixel_buf
+        .take()
         .ok_or_else(|| BackendError::Decode("VT decode produced no pixel buffer".into()))?;
 
     read_pixel_buffer(&pixel_buf, config)

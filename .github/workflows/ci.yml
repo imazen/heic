@@ -249,20 +249,14 @@ jobs:
         run: cargo build -p heic-backend-videotoolbox
       - name: Clippy heic-backend-videotoolbox
         run: cargo clippy -p heic-backend-videotoolbox -- -D warnings
-      # Runtime decode test is currently gated by HEIC_RUN_VT_RUNTIME=1
-      # because the FFI tripped SIGABRT on its first CI exercise (likely
-      # a CVImageBuffer→CVPixelBuffer cast in the decode callback or
-      # an `unsafe impl Send` collision when tests run in parallel).
-      # Setting the gate lets the build + clippy + test-compile stay
-      # green while we iterate on the FFI; flip it on once a `heic`
-      # contributor with Apple hardware verifies the runtime path.
+      # Runtime decode + corpus diff. First exercise triggered a SIGABRT,
+      # root-caused to the decode callback writing to a thread_local that
+      # VT scheduled on a different thread than the caller; the FFI now
+      # routes per-call output via source_frame_refcon → FrameOutput,
+      # which is safe under any VT thread schedule. Single test thread to
+      # rule out residual concurrency surprises while we re-validate.
       - name: Test backend_dispatch (runtime VT)
-        if: env.HEIC_RUN_VT_RUNTIME == '1'
-        env:
-          HEIC_RUN_VT_RUNTIME: ${{ vars.HEIC_RUN_VT_RUNTIME }}
-        run: cargo test --test backend_dispatch --features "backend-rust,backend-videotoolbox,std" -- --nocapture
-      - name: Test backend_dispatch (build only)
-        run: cargo test --test backend_dispatch --features "backend-rust,backend-videotoolbox,std" --no-run
+        run: cargo test --test backend_dispatch --features "backend-rust,backend-videotoolbox,std" -- --nocapture --test-threads=1
 
   backend-mediacodec:
     name: backend-mediacodec (android compile-only)
