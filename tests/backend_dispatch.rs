@@ -142,14 +142,6 @@ fn mediafoundation_vs_rust_corpus_diff() {
             if path.extension().is_none_or(|e| e != "heic") {
                 continue;
             }
-            // example.heic still fails after VUI plumbing + h_aligned fix
-            // (max delta 255, similarity 9.4). Skipped with a loud marker
-            // — root cause is not chroma offset and not matrix mismatch;
-            // likely an MFT-specific bitstream handling issue.
-            if path.ends_with("example.heic") {
-                eprintln!("SKIP {} — known MF decode regression", path.display());
-                continue;
-            }
             total += 1;
             let data = match std::fs::read(&path) {
                 Ok(d) => d,

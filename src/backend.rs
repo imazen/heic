@@ -294,28 +294,37 @@ pub(crate) fn decode_one_tile(
     }
 
     // Slow path: build the HvccParams view once and walk the allowlist.
-    // Parse the first SPS NAL we find to extract VUI color metadata —
-    // without it, native backends would have to guess (BT.709 vs BT.601
-    // vs BT.2020), producing color-shifted output for HDR / non-default
-    // streams. The rust backend's SPS parser is reused via the in-crate
-    // `crate::hevc::params::parse_sps`; if no SPS or VUI is present we
-    // fall back to the "unspecified" CICP value 2 which downstream maps
-    // to BT.601 per the existing color-conversion table.
+    // Parse the first SPS NAL we find to extract VUI color metadata +
+    // bitstream-coded dimensions + conformance-window crop offsets.
+    // Without coded dims / crop, native backends produce visibly
+    // wrong output for files whose SPS encodes a larger frame than the
+    // HEIF `ispe` visible region (the `example.heic` case: ispe
+    // 1280×854, SPS pic_height 858 with crop_top=4).
     let nal_refs: Vec<&[u8]> = config.nal_units.iter().map(|n| n.as_slice()).collect();
-    let (full_range, matrix_coeffs, color_primaries, transfer_characteristics) =
-        extract_vui_color(config);
+    let sps_meta = extract_sps_metadata(config);
+    // Default `coded_*` to the visible size when there's no SPS info —
+    // backends that don't know any better will produce output at the
+    // visible size (which is correct for already-cropped bitstreams).
+    let coded_width = sps_meta.coded_width.max(width);
+    let coded_height = sps_meta.coded_height.max(height);
     let params = HvccParams {
         width,
         height,
+        coded_width,
+        coded_height,
+        crop_left: sps_meta.crop_left,
+        crop_right: sps_meta.crop_right,
+        crop_top: sps_meta.crop_top,
+        crop_bottom: sps_meta.crop_bottom,
         nal_units: &nal_refs,
         length_size: config.length_size_minus_one + 1,
         bit_depth_luma: config.bit_depth_luma_minus8 + 8,
         bit_depth_chroma: config.bit_depth_chroma_minus8 + 8,
         chroma_format_idc: config.chroma_format,
-        full_range,
-        matrix_coeffs,
-        color_primaries,
-        transfer_characteristics,
+        full_range: sps_meta.full_range,
+        matrix_coeffs: sps_meta.matrix_coeffs,
+        color_primaries: sps_meta.color_primaries,
+        transfer_characteristics: sps_meta.transfer_characteristics,
     };
 
     let mut last_err: Option<String> = None;
@@ -357,35 +366,81 @@ pub(crate) fn decode_one_tile(
     )))
 }
 
-/// Parse the first SPS NAL we find in `config.nal_units` and return its
-/// VUI color metadata as `(full_range, matrix, primaries, transfer)`.
+/// SPS metadata extracted by [`extract_sps_metadata`].
 ///
-/// Falls back to `(false, 2, 2, 2)` ("unspecified") when no SPS is present
-/// or the SPS parser rejects the payload — that's the same default the
-/// rust decoder uses when VUI is absent, so output stays consistent.
-fn extract_vui_color(config: &HevcDecoderConfig) -> (bool, u8, u8, u8) {
+/// All fields default to "unspecified / no crop" when no SPS is found
+/// or it fails to parse; callers replace `coded_*` with the visible
+/// dimensions when zero.
+#[derive(Default)]
+struct SpsMetadata {
+    coded_width: u32,
+    coded_height: u32,
+    crop_left: u32,
+    crop_right: u32,
+    crop_top: u32,
+    crop_bottom: u32,
+    full_range: bool,
+    matrix_coeffs: u8,
+    color_primaries: u8,
+    transfer_characteristics: u8,
+}
+
+/// Parse the first SPS NAL we find in `config.nal_units` and return its
+/// coded dimensions, conformance-window crop offsets, and VUI color
+/// metadata.
+///
+/// Falls back to `Default::default()` ("unspecified, no crop") when no
+/// SPS is present or the SPS parser rejects the payload.
+fn extract_sps_metadata(config: &HevcDecoderConfig) -> SpsMetadata {
+    let mut out = SpsMetadata {
+        matrix_coeffs: 2,
+        color_primaries: 2,
+        transfer_characteristics: 2,
+        ..Default::default()
+    };
     for nal_blob in &config.nal_units {
-        // Bytes 0..2 are the NAL header; NalType is in the high 6 bits of
-        // byte 0. SPS_NUT = 33.
         if nal_blob.len() < 3 {
             continue;
         }
         let nal_type = (nal_blob[0] >> 1) & 0x3F;
         if nal_type != 33 {
+            // not SPS_NUT
             continue;
         }
-        // SPS payload starts after the 2-byte NAL header.
-        let payload = &nal_blob[2..];
-        if let Ok(sps) = crate::hevc::params::parse_sps(payload) {
-            return (
-                sps.video_full_range_flag,
-                sps.matrix_coeffs,
-                sps.color_primaries,
-                sps.transfer_characteristics,
-            );
+        // Parse through the NAL helper so emulation prevention bytes
+        // (`00 00 03` → `00 00`) are stripped before the bitstream
+        // reader runs. Calling parse_sps directly on `&nal[2..]` works
+        // for some files but breaks on any payload that hits a
+        // 0x000003 sequence — the example.heic SPS does.
+        let Ok(nal) = crate::hevc::bitstream::parse_single_nal(nal_blob) else {
+            continue;
+        };
+        if let Ok(sps) = crate::hevc::params::parse_sps(&nal.payload) {
+            out.coded_width = sps.pic_width_in_luma_samples;
+            out.coded_height = sps.pic_height_in_luma_samples;
+            if sps.conformance_window_flag {
+                // SPS conf_win_offset is in chroma-subsampling units
+                // (SubWidthC / SubHeightC). Convert to luma samples
+                // matching the rust decoder's set_crop semantics.
+                let (sub_w, sub_h) = match sps.chroma_format_idc {
+                    1 => (2u32, 2u32), // 4:2:0
+                    2 => (2, 1),       // 4:2:2
+                    3 => (1, 1),       // 4:4:4
+                    _ => (2, 2),
+                };
+                out.crop_left = sps.conf_win_offset.0.saturating_mul(sub_w);
+                out.crop_right = sps.conf_win_offset.1.saturating_mul(sub_w);
+                out.crop_top = sps.conf_win_offset.2.saturating_mul(sub_h);
+                out.crop_bottom = sps.conf_win_offset.3.saturating_mul(sub_h);
+            }
+            out.full_range = sps.video_full_range_flag;
+            out.matrix_coeffs = sps.matrix_coeffs;
+            out.color_primaries = sps.color_primaries;
+            out.transfer_characteristics = sps.transfer_characteristics;
+            return out;
         }
     }
-    (false, 2, 2, 2)
+    out
 }
 
 #[cfg(test)]

@@ -99,15 +99,19 @@ impl Inner {
     ) -> Result<DecodedFrame, BackendError> {
         init_mf()?;
 
-        let width = config.width;
-        let height = config.height;
+        // Configure the MFT for the bitstream-coded dimensions so its
+        // output matches what we'll read back. The visible region is
+        // (width, height) cropped from (coded_width, coded_height) via
+        // crop_* offsets — we copy out only the visible pixels in the
+        // unpack stage below.
+        let coded_w = config.coded_width.max(config.width);
+        let coded_h = config.coded_height.max(config.height);
         let bit_depth = config.bit_depth_luma;
 
-        // Ensure transform is created and configured for this stream.
         let needs_reconfig = self
             .configured
             .as_ref()
-            .is_none_or(|c| c.width != width || c.height != height || c.bit_depth != bit_depth);
+            .is_none_or(|c| c.width != coded_w || c.height != coded_h || c.bit_depth != bit_depth);
 
         if self.transform.is_none() {
             self.transform = Some(activate_hevc_decoder()?);
@@ -118,20 +122,20 @@ impl Inner {
             .expect("transform initialized above");
 
         if needs_reconfig {
-            configure_input_type(transform, config, width, height)?;
+            configure_input_type(transform, config, coded_w, coded_h)?;
             configure_output_type(transform, bit_depth)?;
             // SAFETY: ProcessMessage with NOTIFY_BEGIN_STREAMING is the
             // documented MFT lifecycle call; arguments are constants.
             unsafe { transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0) }
                 .map_err(decode_err("ProcessMessage(BEGIN_STREAMING)"))?;
             self.configured = Some(ConfiguredFor {
-                width,
-                height,
+                width: coded_w,
+                height: coded_h,
                 bit_depth,
             });
         }
 
-        decode_one_frame(transform, config, image_data, width, height, bit_depth)
+        decode_one_frame(transform, config, image_data, coded_w, coded_h, bit_depth)
     }
 }
 
@@ -375,12 +379,23 @@ fn decode_one_frame(
     // get a sample.
     let output_sample = poll_output(transform, width, height, bit_depth)?;
 
-    // Unpack the output sample's NV12 / P010 buffer to planar u16.
-    let planes = read_output_planes(&output_sample, width, height, bit_depth)?;
-
-    Ok(DecodedFrame {
+    // Unpack the output sample, copying only the visible region per the
+    // SPS conformance window. width/height here are the coded
+    // dimensions; the visible region is offset by crop_left / crop_top.
+    let planes = read_output_planes(
+        &output_sample,
         width,
         height,
+        config.width,
+        config.height,
+        config.crop_left,
+        config.crop_top,
+        bit_depth,
+    )?;
+
+    Ok(DecodedFrame {
+        width: config.width,
+        height: config.height,
         y_plane: planes.y,
         cb_plane: planes.cb,
         cr_plane: planes.cr,
@@ -553,46 +568,56 @@ struct OutputPlanes {
     cr: Vec<u16>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn read_output_planes(
     sample: &IMFSample,
-    width: u32,
-    height: u32,
+    coded_w: u32,
+    coded_h: u32,
+    visible_w: u32,
+    visible_h: u32,
+    crop_x: u32,
+    crop_y: u32,
     bit_depth: u8,
 ) -> Result<OutputPlanes, BackendError> {
-    // Convert the sample to a single contiguous buffer.
     // SAFETY: ConvertToContiguousBuffer returns one IMFMediaBuffer covering
     // all the sample's buffers, allocating if needed.
     let buffer: IMFMediaBuffer = unsafe { sample.ConvertToContiguousBuffer() }
         .map_err(decode_err("IMFSample::ConvertToContiguousBuffer"))?;
 
-    // Prefer IMF2DBuffer for stride access; fall back to Lock when 2D isn't
-    // implemented (some software MFTs).
     if let Ok(buf2d) = buffer.cast::<IMF2DBuffer>() {
-        return read_planes_2d(&buf2d, width, height, bit_depth);
+        return read_planes_2d(
+            &buf2d, coded_w, coded_h, visible_w, visible_h, crop_x, crop_y, bit_depth,
+        );
     }
 
-    // Fallback: locked linear access; assume stride == width.
+    // Fallback: locked linear access; assume stride == coded_w.
     let mut ptr: *mut u8 = core::ptr::null_mut();
     let mut max_len: u32 = 0;
     let mut cur_len: u32 = 0;
     // SAFETY: Lock returns a readable pointer to up to max_len bytes.
     unsafe { buffer.Lock(&mut ptr, Some(&mut max_len), Some(&mut cur_len)) }
         .map_err(decode_err("IMFMediaBuffer::Lock(out)"))?;
-    let stride = width as usize;
+    let stride = coded_w as usize;
     // SAFETY: the lock guarantees the pointer is valid for `cur_len` bytes.
-    // Fallback path assumes no row-alignment padding (stride == width); the
-    // 2D path below handles the typical MFT case with aligned_height > height.
-    let planes =
-        unsafe { unpack_nv12_or_p010(ptr, stride, width, height, height, bit_depth, cur_len) };
+    let planes = unsafe {
+        unpack_nv12_or_p010(
+            ptr, stride, coded_h, visible_w, visible_h, crop_x, crop_y, bit_depth, cur_len,
+        )
+    };
     // SAFETY: pairs with the Lock above.
     unsafe { buffer.Unlock() }.map_err(decode_err("IMFMediaBuffer::Unlock(out)"))?;
     Ok(planes)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn read_planes_2d(
     buf2d: &IMF2DBuffer,
-    width: u32,
-    height: u32,
+    coded_w: u32,
+    coded_h: u32,
+    visible_w: u32,
+    visible_h: u32,
+    crop_x: u32,
+    crop_y: u32,
     bit_depth: u8,
 ) -> Result<OutputPlanes, BackendError> {
     let mut ptr: *mut u8 = core::ptr::null_mut();
@@ -610,18 +635,9 @@ fn read_planes_2d(
     let aligned_height = (total_bytes * 2 / 3)
         .checked_div(stride_abs)
         .unwrap_or(0)
-        .max(height as usize);
+        .max(coded_h as usize);
 
-    // Handle negative-stride (bottom-up) buffers: Lock2D's pointer
-    // points at the visual top-left of the image even when the
-    // underlying memory grows downward. To present a contiguous
-    // positive-stride view to `unpack_nv12_or_p010`, rebase the
-    // pointer at the physical first byte (top of memory) and rewrite
-    // stride to its absolute value.
     let positive_base = if stride < 0 {
-        // The Y plane physically occupies `aligned_height` rows ending
-        // at the row `ptr` points to. The first byte in memory is
-        // `aligned_height - 1` rows back from `ptr`.
         // SAFETY: ptr is the Lock2D pointer; we walk back within the
         // buffer the lock owns.
         unsafe { ptr.offset(-(stride_abs as isize * (aligned_height as isize - 1))) }
@@ -629,100 +645,121 @@ fn read_planes_2d(
         ptr
     };
 
-    // SAFETY: Lock2D + GetContiguousLength guarantee the pointer (after
-    // negative-stride rebase) is valid for total_bytes bytes;
-    // unpack_nv12_or_p010 reads strictly within
+    // SAFETY: Lock2D + GetContiguousLength guarantee the pointer is valid
+    // for total_bytes bytes; unpack reads strictly within
     // [positive_base, positive_base + total_bytes).
     let planes = unsafe {
         unpack_nv12_or_p010(
             positive_base,
             stride_abs,
-            width,
-            height,
             aligned_height as u32,
+            visible_w,
+            visible_h,
+            crop_x,
+            crop_y,
             bit_depth,
             total_bytes as u32,
         )
     };
     // SAFETY: pairs with Lock2D.
     unsafe { buf2d.Unlock2D() }.map_err(decode_err("IMF2DBuffer::Unlock2D"))?;
+    let _ = coded_w; // stride from Lock2D supersedes the coded_w hint
     Ok(planes)
 }
 
 /// SAFETY: caller guarantees `base` points at the start of an NV12 (8-bit) or
 /// P010 (16-bit) frame whose Y plane is `aligned_height` rows tall at
-/// `row_stride` bytes per row (only the first `height` rows are visible),
-/// followed immediately by the interleaved UV plane at `aligned_height/2`
-/// rows at `row_stride` bytes per row. NV12: top byte = Cb, next = Cr.
-/// P010: 16-bit little-endian samples, value in low 10 bits after `>> 6`.
+/// `row_stride` bytes per row, followed immediately by the interleaved UV
+/// plane at `aligned_height/2` rows at `row_stride` bytes per row. The
+/// output buffers are sized for the VISIBLE region (`visible_w` ×
+/// `visible_h`), copied starting at coded coordinates (`crop_x`,
+/// `crop_y`) — this is the SPS conformance window crop applied at copy
+/// time so callers see exactly the ispe-visible region.
+#[allow(clippy::too_many_arguments)]
 unsafe fn unpack_nv12_or_p010(
     base: *const u8,
     row_stride: usize,
-    width: u32,
-    height: u32,
     aligned_height: u32,
+    visible_w: u32,
+    visible_h: u32,
+    crop_x: u32,
+    crop_y: u32,
     bit_depth: u8,
     _total_len: u32,
 ) -> OutputPlanes {
-    let w = width as usize;
-    let h = height as usize;
+    let w = visible_w as usize;
+    let h = visible_h as usize;
     let h_aligned = aligned_height as usize;
+    let cx = crop_x as usize;
+    let cy = crop_y as usize;
     let half_h = h / 2;
     let half_w = w / 2;
+    // Chroma crop in 4:2:0: every-other luma sample → halve the offsets.
+    let chroma_cx = cx / 2;
+    let chroma_cy = cy / 2;
 
     let mut y_plane = vec![0u16; w * h];
     let mut cb_plane = vec![0u16; half_w * half_h];
     let mut cr_plane = vec![0u16; half_w * half_h];
 
     if bit_depth <= 8 {
-        // 8-bit NV12: store samples as zero-extended u16 (0..=255). The
-        // parent's DecodedFrame consumers (color_convert::convert_420_to_rgb,
-        // to_rgb*) read u16 planes but expect them in the source's
-        // `bit_depth` range — shifting up to 0..=65535 here would make the
-        // matrix coefficients overflow and produce a near-saturated frame.
+        // 8-bit NV12: visible Y rows are at (crop_y + y) in the coded
+        // buffer; each row's visible content starts at byte offset
+        // (crop_x) within the row. Store samples as zero-extended u16
+        // (0..=255) since the parent's color_convert::convert_420_to_rgb
+        // expects samples in source bit-depth range.
         for y in 0..h {
-            // SAFETY: row y of the Y plane occupies [base + y*stride,
-            // base + y*stride + stride) per the caller's guarantee.
-            let row = unsafe { core::slice::from_raw_parts(base.add(y * row_stride), row_stride) };
+            // SAFETY: row (cy + y) is within the aligned_height-row Y
+            // plane per the caller's guarantee.
+            let row =
+                unsafe { core::slice::from_raw_parts(base.add((cy + y) * row_stride), row_stride) };
             for x in 0..w {
-                y_plane[y * w + x] = u16::from(row[x]);
+                y_plane[y * w + x] = u16::from(row[cx + x]);
             }
         }
-        // UV plane starts at base + h * row_stride.
+        // UV plane starts at aligned_height * row_stride; visible UV row
+        // is at chroma_cy + uv_y within the UV plane.
         for y in 0..half_h {
-            // SAFETY: UV row y occupies [base + (h+y)*stride,
-            // base + (h+y)*stride + stride).
+            // SAFETY: UV row (h_aligned + chroma_cy + y) is within
+            // [base, base + total_bytes).
             let row = unsafe {
-                core::slice::from_raw_parts(base.add((h_aligned + y) * row_stride), row_stride)
+                core::slice::from_raw_parts(
+                    base.add((h_aligned + chroma_cy + y) * row_stride),
+                    row_stride,
+                )
             };
             for x in 0..half_w {
-                cb_plane[y * half_w + x] = u16::from(row[2 * x]);
-                cr_plane[y * half_w + x] = u16::from(row[2 * x + 1]);
+                let off = (chroma_cx + x) * 2;
+                cb_plane[y * half_w + x] = u16::from(row[off]);
+                cr_plane[y * half_w + x] = u16::from(row[off + 1]);
             }
         }
     } else {
         // 10-bit P010: u16 LE, MSB-aligned, low 6 bits zero. Shift right by 6.
         for y in 0..h {
-            // SAFETY: row y of the Y plane occupies [base + y*stride,
-            // base + y*stride + stride). P010 has 2 bytes per pixel; row
-            // stride is already the byte stride from Lock2D.
-            let row = unsafe { core::slice::from_raw_parts(base.add(y * row_stride), row_stride) };
+            // SAFETY: row (cy + y) inside coded Y plane.
+            let row =
+                unsafe { core::slice::from_raw_parts(base.add((cy + y) * row_stride), row_stride) };
             for x in 0..w {
-                let lo = row[2 * x];
-                let hi = row[2 * x + 1];
+                let off = (cx + x) * 2;
+                let lo = row[off];
+                let hi = row[off + 1];
                 let v = (u16::from(hi) << 8) | u16::from(lo);
                 y_plane[y * w + x] = v >> 6;
             }
         }
         for y in 0..half_h {
-            // SAFETY: UV row y occupies [base + (h+y)*stride,
-            // base + (h+y)*stride + stride). 4 bytes per chroma pair.
+            // SAFETY: UV row at (h_aligned + chroma_cy + y).
             let row = unsafe {
-                core::slice::from_raw_parts(base.add((h_aligned + y) * row_stride), row_stride)
+                core::slice::from_raw_parts(
+                    base.add((h_aligned + chroma_cy + y) * row_stride),
+                    row_stride,
+                )
             };
             for x in 0..half_w {
-                let cb = (u16::from(row[4 * x + 1]) << 8) | u16::from(row[4 * x]);
-                let cr = (u16::from(row[4 * x + 3]) << 8) | u16::from(row[4 * x + 2]);
+                let off = (chroma_cx + x) * 4;
+                let cb = (u16::from(row[off + 1]) << 8) | u16::from(row[off]);
+                let cr = (u16::from(row[off + 3]) << 8) | u16::from(row[off + 2]);
                 cb_plane[y * half_w + x] = cb >> 6;
                 cr_plane[y * half_w + x] = cr >> 6;
             }

@@ -160,6 +160,9 @@ name = "extract_hevc"
 name = "test_all"
 [[example]]
 name = "bench_parse_annexb"
+[[example]]
+name = "mf_diff"
+required-features = ["backend-rust", "backend-mediafoundation", "std"]
 # compare_support requires heic-wasm-rs (uncomment dep + add [[example]] to use)
 
 [[bench]]

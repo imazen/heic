@@ -149,11 +149,37 @@ impl std::error::Error for BackendError {}
 /// `MF_MT_FRAME_SIZE` or VideoToolbox's destination pixel buffer attributes)
 /// without parsing the SPS themselves.
 pub struct HvccParams<'a> {
-    /// Frame width in pixels (from HEIF `ispe`).
+    /// Visible width in pixels (from HEIF `ispe` — already cropped per
+    /// the SPS conformance window).
     pub width: u32,
 
-    /// Frame height in pixels (from HEIF `ispe`).
+    /// Visible height in pixels (from HEIF `ispe`).
     pub height: u32,
+
+    /// Bitstream-coded width before SPS conformance cropping
+    /// (`pic_width_in_luma_samples`). Equal to `width` when the SPS
+    /// doesn't specify a conformance window or the bitstream was coded
+    /// at the visible size. Backends that decode at the coded size and
+    /// then have to copy out the visible region use this together with
+    /// the `crop_*` offsets.
+    pub coded_width: u32,
+
+    /// Bitstream-coded height before SPS conformance cropping
+    /// (`pic_height_in_luma_samples`).
+    pub coded_height: u32,
+
+    /// SPS conformance window crop offsets (luma samples). Visible
+    /// region is `[crop_left, coded_width - crop_right)` × `[crop_top,
+    /// coded_height - crop_bottom)`. Backends that get raw decoder
+    /// output at `coded_width × coded_height` should skip these rows /
+    /// columns when populating the planes.
+    pub crop_left: u32,
+    /// See [`Self::crop_left`].
+    pub crop_right: u32,
+    /// See [`Self::crop_left`].
+    pub crop_top: u32,
+    /// See [`Self::crop_left`].
+    pub crop_bottom: u32,
 
     /// VPS, SPS, PPS, and any prefix-SEI NAL payloads (RBSP, no start codes,
     /// no length prefix).
