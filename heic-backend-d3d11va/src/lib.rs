@@ -103,4 +103,6 @@ impl HevcBackend for D3d11VaBackend {
 }
 
 #[cfg(target_os = "windows")]
+pub mod dxva;
+#[cfg(target_os = "windows")]
 mod probe;
