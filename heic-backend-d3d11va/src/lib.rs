@@ -34,16 +34,18 @@
 //!   directly, so callers can pin decode to a specific GPU on a
 //!   multi-GPU laptop via DXGI adapter enumeration.
 //!
-//! # Decode status
+//! # Decode pipeline
 //!
-//! [`Self::decode_hevc`] is a stub. The full HEVC decode pipeline
-//! (`CreateVideoDecoder` → bitstream/picture-parameters/slice-control
-//! buffers per `DXVA_PicParams_HEVC` / `DXVA_Slice_HEVC_Short` →
-//! `SubmitDecoderBuffers` → staging texture readback) follows
-//! Chromium's `media/gpu/windows/d3d11_h265_accelerator.cc` reference
-//! but is heavy enough (~1.7k LOC of field mapping) that it ships in
-//! a follow-up PR. The probe lands first so `recommended_backends()`
-//! reports D3D11VA accurately to callers.
+//! [`Self::decode_hevc`] runs the full DXVA HEVC decode path:
+//! `CreateVideoDecoder` → `DecoderBeginFrame` →
+//! `GetDecoderBuffer` / `ReleaseDecoderBuffer` /
+//! `SubmitDecoderBuffers` for the picture-parameter / bitstream /
+//! slice-control buffers → `DecoderEndFrame` → staging texture
+//! `CopyResource` + `Map` for readback. The `DxvaPicParamsHevc`
+//! populator follows Chromium's `PicParamsFromSPS` and
+//! `PicParamsFromPPS` in
+//! `media/gpu/windows/d3d11_h265_accelerator.cc`. See the `imp`
+//! module for the per-frame flow.
 
 #![cfg_attr(not(target_os = "windows"), allow(dead_code, unused_imports))]
 

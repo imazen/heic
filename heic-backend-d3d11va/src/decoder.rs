@@ -134,11 +134,12 @@ impl DecoderSession {
             OutputFormat: output_format,
         };
 
-        // 4. Walk configurations + pick one with ConfigBitstreamRaw=1
-        // (short-format slice control) — matches what DxvaPicParamsHevc
-        // expects. Most modern drivers expose both formats; we prefer
-        // long-format when both are available because libheif's
-        // bitstream uses Annex-B style.
+        // 4. Walk configurations and pick one with `ConfigBitstreamRaw
+        // == 1`. Per Microsoft's DXVA HEVC spec ("shall be 1") and
+        // chromium media/gpu/windows/d3d11_video_decoder_wrapper.cc:358,
+        // HEVC, VP9, and AV1 all require raw-Annex-B bitstream input.
+        // Picking index 0 blind sometimes gave us a different config
+        // and the driver silently produced zero pixels.
         // SAFETY: video_device is alive, desc valid for the call.
         let cfg_count = unsafe { video_device.GetVideoDecoderConfigCount(&decoder_desc) }
             .map_err(|e| BackendError::Decode(format!("GetVideoDecoderConfigCount: {e}")))?;
@@ -147,11 +148,30 @@ impl DecoderSession {
                 "No D3D11 video decoder config exposed for HEVC profile",
             ));
         }
-        // SAFETY: zero-initialized struct, will be filled by the API.
-        let mut config: D3D11_VIDEO_DECODER_CONFIG = unsafe { core::mem::zeroed() };
-        // SAFETY: 0 < cfg_count per the check above.
-        unsafe { video_device.GetVideoDecoderConfig(&decoder_desc, 0, &mut config) }
-            .map_err(|e| BackendError::Decode(format!("GetVideoDecoderConfig: {e}")))?;
+        let mut config: D3D11_VIDEO_DECODER_CONFIG =
+            // SAFETY: zero-initialized POD; filled by the API in the
+            // loop below.
+            unsafe { core::mem::zeroed() };
+        let mut picked = false;
+        for i in 0..cfg_count {
+            let mut candidate: D3D11_VIDEO_DECODER_CONFIG =
+                // SAFETY: zero-init POD; filled by GetVideoDecoderConfig.
+                unsafe { core::mem::zeroed() };
+            // SAFETY: i < cfg_count per the loop bound; out pointer is valid.
+            unsafe { video_device.GetVideoDecoderConfig(&decoder_desc, i, &mut candidate) }
+                .map_err(|e| BackendError::Decode(format!("GetVideoDecoderConfig[{i}]: {e}")))?;
+            if candidate.ConfigBitstreamRaw == 1 {
+                config = candidate;
+                picked = true;
+                break;
+            }
+        }
+        if !picked {
+            return Err(BackendError::Unavailable(
+                "No D3D11 HEVC decoder config with ConfigBitstreamRaw=1 \
+                 (driver doesn't expose the spec-required short-format)",
+            ));
+        }
 
         // 5. Create the decoder itself.
         // SAFETY: desc + config are valid; both pointers live through the call.
@@ -324,9 +344,20 @@ impl DecoderSession {
         )?;
 
         // 4. SLICE_CONTROL buffer — one DXVA_Slice_HEVC_Short
-        // pointing at the whole bitstream. struct layout:
-        // BSNALunitDataLocation (UINT), SliceBytesInBuffer (UINT),
-        // wBadSliceChopping (USHORT).
+        // pointing at the slice NAL inside the bitstream buffer.
+        // struct layout from dxva.h:
+        //   BSNALunitDataLocation (UINT)  — byte offset of the first
+        //                                   NAL data byte AFTER the
+        //                                   start code in the
+        //                                   BITSTREAM buffer.
+        //   SliceBytesInBuffer    (UINT)  — total slice bytes from
+        //                                   the location above.
+        //   wBadSliceChopping     (USHORT) — 0 = full slice, no chopping.
+        //
+        // For HEIC single-slice IDR tiles the slice_annexb buffer is
+        // [0x00 0x00 0x00 0x01][NAL header + RBSP]. Point at offset 0
+        // because the driver expects to see the start code itself
+        // (NB: chromium uses 0 for the full Annex-B blob).
         #[repr(C)]
         struct DxvaSliceHevcShort {
             bs_nalu_data_location: u32,

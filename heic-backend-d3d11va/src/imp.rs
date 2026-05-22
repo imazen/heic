@@ -27,7 +27,7 @@
 
 use std::vec::Vec;
 
-use heic_core::{BackendError, DecodedFrame, HvccParams, nal};
+use heic_core::{BackendError, DecodedFrame, HvccParams};
 
 use crate::decoder::DecoderSession;
 
@@ -70,20 +70,67 @@ impl Inner {
                     .to_string(),
             )
         })?;
-        let pic_params = crate::dxva::from_sps_pps(sps, config.pps);
+        let mut pic_params = crate::dxva::from_sps_pps(sps, config.pps);
+        // Per-picture fields the SPS/PPS populator can't fill in:
+        //
+        // * `CurrPic` references our single output texture slice 0;
+        //   leaving it INVALID confuses the driver about where to
+        //   write decoded samples.
+        // * For HEIC tiles every access unit is an IDR, so the
+        //   IDR/IRAP/INTRA flags in
+        //   `dwCodingSettingPicturePropertyFlags` are all true.
+        //   Without them the driver thinks it needs reference frames
+        //   we never provide and the output stays zero.
+        // * `CurrPicOrderCntVal` is 0 for the first (only) tile in a
+        //   single-IDR HEIC bitstream — no inter-frame POC scaling.
+        pic_params.CurrPic = crate::dxva::DxvaPicEntryHevc::new(0, false);
+        pic_params.CurrPicOrderCntVal = 0;
+        // StatusReportFeedbackNumber must be non-zero per the DXVA
+        // spec — drivers that don't use it tolerate 0, but Intel iHD
+        // and recent NVIDIA drivers reject zero with a silent
+        // no-op decode. Use a per-instance counter (just hash the
+        // input length for now — each tile gets a different number).
+        pic_params.StatusReportFeedbackNumber = (image_data.len() as u32).max(1);
+        {
+            use crate::dxva::coding_setting_picture_property::{
+                IDR_PIC_FLAG, INTRA_PIC_FLAG, IRAP_PIC_FLAG,
+            };
+            pic_params.dwCodingSettingPicturePropertyFlags |=
+                IDR_PIC_FLAG | IRAP_PIC_FLAG | INTRA_PIC_FLAG;
+        }
 
-        // Annex-B: VPS+SPS+PPS prefix followed by the slice payload
-        // converted from hvcC length-prefixed.
-        let mut annexb = nal::annexb_parameter_sets(config.nal_units);
-        let slice_annexb = nal::hvcc_to_annexb(image_data, config.length_size).ok_or(
-            BackendError::Decode("malformed hvcC length-prefixed slice data".into()),
-        )?;
-        annexb.extend_from_slice(&slice_annexb);
+        // Bitstream buffer for DXVA short-format slice control:
+        // chromium uses a **3-byte** start code `{0, 0, 1}` before the
+        // raw slice NAL bytes (not the 4-byte `{0, 0, 0, 1}` of standard
+        // Annex-B). DXVA_Slice_HEVC_Short.BSNALunitDataLocation points
+        // at offset 0 (the start code itself); the driver locates the
+        // NAL header by scanning past the start code internally.
+        //
+        // The parameter sets (VPS/SPS/PPS) are NOT included in the
+        // bitstream — they're already in the picture-parameter buffer.
+        let mut bitstream: Vec<u8> = Vec::with_capacity(image_data.len() + 64);
+        let ls = config.length_size as usize;
+        let mut i = 0;
+        while i + ls <= image_data.len() {
+            let mut nal_len: usize = 0;
+            for &b in &image_data[i..i + ls] {
+                nal_len = (nal_len << 8) | (b as usize);
+            }
+            i += ls;
+            if i + nal_len > image_data.len() {
+                return Err(BackendError::Decode(
+                    "malformed hvcC length-prefixed slice data".into(),
+                ));
+            }
+            bitstream.extend_from_slice(&[0, 0, 1]); // 3-byte start code per chromium
+            bitstream.extend_from_slice(&image_data[i..i + nal_len]);
+            i += nal_len;
+        }
 
         // Submit + read back. The DecoderSession's per-frame flow
         // documented in `decoder::DecoderSession::submit_one_frame`
         // handles BeginFrame → buffer Get/Release/Submit → EndFrame.
-        session.submit_one_frame(&pic_params, &annexb)?;
+        session.submit_one_frame(&pic_params, &bitstream)?;
 
         let planes = session.read_decoded_planes(
             config.width,

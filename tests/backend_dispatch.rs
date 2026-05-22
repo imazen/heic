@@ -180,6 +180,67 @@ fn videotoolbox_vs_rust_corpus_diff() {
     report.assert_clean("VT↔Rust corpus");
 }
 
+/// D3D11VA on Windows + real GPU: decode example.heic via the GPU
+/// backend only, verify dimensions match. Gated on `HEIC_D3D11VA_HW=1`
+/// because the test requires an HEVC-decode-capable GPU (RTX 30+,
+/// Intel iGPU from Skylake+, AMD VCN). Local dev box (RTX 5070) and
+/// future CI runners with `windows-2025-gpu` runner type can set it.
+#[cfg(all(
+    feature = "backend-rust",
+    feature = "backend-d3d11va",
+    target_os = "windows"
+))]
+#[test]
+fn d3d11va_decodes_example_on_hardware() {
+    if std::env::var_os("HEIC_D3D11VA_HW").is_none() {
+        eprintln!(
+            "HEIC_D3D11VA_HW not set: skipping D3D11VA hardware test. \
+             Set it on hosts with an HEVC-decode-capable GPU."
+        );
+        return;
+    }
+    let data = read_example();
+    let output = DecoderConfig::new()
+        .with_backend(Backend::D3d11va)
+        .decode(&data, PixelLayout::Rgba8)
+        .expect("D3D11VA should decode example.heic when HEIC_D3D11VA_HW is set");
+    assert_eq!(output.width, 1280);
+    assert_eq!(output.height, 854);
+    assert_eq!(output.data.len(), 1280 * 854 * 4);
+}
+
+/// D3D11VA vs Rust corpus diff via zensim-regress. Same tolerance as
+/// the MF↔Rust comparison since both native decoders apply similar
+/// chroma upsampling + matrix-coefficient rounding.
+#[cfg(all(
+    feature = "backend-rust",
+    feature = "backend-d3d11va",
+    target_os = "windows"
+))]
+#[test]
+fn d3d11va_vs_rust_corpus_diff() {
+    use zensim_regress::testing::RegressionTolerance;
+    if std::env::var_os("HEIC_D3D11VA_HW").is_none() {
+        eprintln!("HEIC_D3D11VA_HW not set: skipping D3D11VA corpus diff");
+        return;
+    }
+    let tolerance = RegressionTolerance::off_by_one()
+        .with_max_delta(32)
+        .with_max_pixels_different(1.0)
+        .with_min_similarity(40.0);
+    let report = common::compare_backends_via_zensim(
+        Backend::Rust,
+        Backend::D3d11va,
+        &tolerance,
+        common::CORPUS_DIRS,
+    );
+    eprintln!(
+        "D3D11VA↔Rust zensim diff: {}/{} matched",
+        report.matched, report.total
+    );
+    report.assert_clean("D3D11VA↔Rust corpus");
+}
+
 /// Empty allowlist must produce `HeicError::NoBackendSelected`.
 #[cfg(feature = "backend-rust")]
 #[test]
