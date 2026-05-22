@@ -158,6 +158,10 @@ impl HevcBackend for MediaFoundationBackend {
 // ────────────────────────────────────────────────────────────────────────
 // Real implementation lives in `imp` so the non-Windows build is a clean
 // no-op without `#[cfg(target_os = "windows")]` cluttering every function.
+// `pixels` is the NV12 / P010 → planar u16 buffer-unpack code, split out
+// so the buffer-handling reads stay close to the per-format byte loops.
 
 #[cfg(target_os = "windows")]
 mod imp;
+#[cfg(target_os = "windows")]
+mod pixels;
