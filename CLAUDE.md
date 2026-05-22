@@ -442,7 +442,37 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 
 ## Known Bugs
 
-(none)
+### D3D11VA real-decode: midgray output on 2 of 6 corpus files (2026-05-22)
+
+Status: ⚠ Partial. 4 of 6 `tests/testdata/*` files decode bit-exact
+on the RTX 5070 via the D3D11VA backend. Two fail:
+
+- `tests/testdata/libheif-examples/example.heic` (1280×854, grid of
+  6× 512×512 tiles, BT.709 limited): all 6 tiles return Y=128 /
+  Cb=128 / Cr=128 (midgray). PPS sdh=false.
+- `tests/testdata/apple-hdr/hdr-sample.heic` (1512×850, Main10,
+  BT.2020): also midgray on every tile. PPS sdh=false.
+
+Synthetic corpus all 4 files pass:
+- synth_8bit_q10/q50/lossless: amp=true, sao=true, scaling=false
+- synth_8bit_q95: amp=false, sao=true, scaling=true (closest SPS
+  match to the example tiles — only sdh=true differs)
+
+Triage attempted: SPS+PPS dump via `HEIC_D3D11VA_DEBUG=1` shows the
+two failing files differ from synth_q95 ONLY in `sdh=false`. Bit
+position 25 of `dwCodingParamToolFlags` confirmed correct by
+synth_q95 success. Likely remaining causes:
+
+1. `scaling_list_data_present_flag` not propagated; driver expects
+   INVERSE_QUANTIZATION_MATRIX buffer we don't send.
+2. `pps_scaling_list_data_present_flag` similar.
+3. Conformance-window math (854 visible vs 858 coded).
+4. Main10 / P010 path needs distinct pic-param handling.
+
+Reproduce: `HEIC_D3D11VA_HW=1 HEIC_D3D11VA_DEBUG=1 cargo test ...
+d3d11va_vs_rust_synthetic_corpus` and uncomment the corpus_diff
+test to see the failures. Diagnostics print first-pixel samples +
+every relevant SPS/PPS flag.
 
 ## Investigation Notes
 
