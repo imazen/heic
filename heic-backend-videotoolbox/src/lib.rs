@@ -59,16 +59,16 @@ pub struct VideoToolboxBackend {
     inner: imp::Inner,
 }
 
-// SAFETY: VTDecompressionSession is documented thread-safe in Apple's docs.
-// Our wrapper holds CFRetained CoreMedia/VideoToolbox handles which are
-// reference-counted and safe to send across threads. Concurrent calls from
-// multiple threads are explicitly supported by the underlying API.
 #[cfg(any(
     target_os = "macos",
     target_os = "ios",
     target_os = "tvos",
     target_os = "visionos"
 ))]
+// SAFETY: VTDecompressionSession is documented thread-safe in Apple's docs.
+// Our wrapper holds CFRetained CoreMedia/VideoToolbox handles which are
+// reference-counted and safe to send across threads. Concurrent calls from
+// multiple threads are explicitly supported by the underlying API.
 unsafe impl Send for VideoToolboxBackend {}
 
 impl VideoToolboxBackend {

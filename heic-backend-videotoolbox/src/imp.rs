@@ -89,6 +89,7 @@ struct Cached {
 // SAFETY: see VideoToolboxBackend's unsafe impl Send — CF types here are
 // reference-counted and the underlying VT session is thread-safe.
 unsafe impl Send for Cached {}
+// SAFETY: same as Cached above — Inner holds only Send-safe components.
 unsafe impl Send for Inner {}
 
 impl Inner {
@@ -230,6 +231,10 @@ fn build_session(
             objc2_core_foundation::CFString,
             objc2_core_foundation::CFType,
         > as AsRef<objc2_core_foundation::CFDictionary>>::as_ref(&dest_attrs);
+    // SAFETY: VTDecompressionSession::create is the documented session
+    // constructor; format_desc + dest_attrs_base are live CF handles;
+    // callback_record points to a valid struct that VT copies; the out
+    // pointer is non-null per `NonNull::new_unchecked` of a `&raw mut`.
     let status = unsafe {
         VTDecompressionSession::create(
             None,
