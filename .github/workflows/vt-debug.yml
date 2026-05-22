@@ -117,18 +117,25 @@ jobs:
             ${{ inputs.test_filter }} 2>&1 | tee /tmp/plain.log
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
 
-      # Drive the test under lldb so we get a backtrace of EVERY
-      # thread (not just the crashing one) plus register state at
-      # the moment of SIGABRT. lldb's `process handle SIGABRT --stop
-      # true --notify true --pass false` ensures the abort lands in
-      # the debugger instead of terminating the process. The `-o`
-      # flags batch lldb commands so we don't need an interactive
-      # session.
+      # Drive the test under lldb. The trick to getting a backtrace
+      # in --batch mode is the `-k` flag: lldb runs `-k` commands
+      # AFTER the process stops on a signal / crash, instead of
+      # `-o` which runs them upfront and then exits when the run
+      # hits a stop event. Capture every thread's backtrace,
+      # register state, and the framework version of every loaded
+      # image — that's what tells us which Apple framework symbol
+      # the abort came from. Also set MallocStackLogging beforehand
+      # so the OS records the alloc/free stacks for the offending
+      # pointer (printed by `malloc_history` after the crash if we
+      # had an interactive session; here we get them indirectly
+      # through the crash report).
       - name: Run under lldb (capture full crash trace)
         id: lldb
         continue-on-error: true
         env:
           HEIC_RUN_VT_RUNTIME: '1'
+          MallocStackLogging: '1'
+          MallocStackLoggingNoCompact: '1'
         run: |
           set -o pipefail
           lldb \
@@ -139,11 +146,17 @@ jobs:
             -o 'process handle SIGSEGV --stop true --notify true --pass false' \
             -o 'process handle SIGBUS  --stop true --notify true --pass false' \
             -o "run --test-threads=1 --nocapture ${{ inputs.test_filter }}" \
-            -o 'thread backtrace all' \
-            -o 'register read -a' \
-            -o 'image list' \
-            -o 'frame variable' \
-            -o 'quit' \
+            -k 'echo ====== thread backtrace all ======' \
+            -k 'thread backtrace all' \
+            -k 'echo ====== register read (current thread) ======' \
+            -k 'register read' \
+            -k 'echo ====== image list ======' \
+            -k 'image list' \
+            -k 'echo ====== frame variable ======' \
+            -k 'frame variable' \
+            -k 'echo ====== source list -c 8 ======' \
+            -k 'source list -c 8' \
+            -k 'quit' \
             -- "$TEST_BIN" 2>&1 | tee /tmp/lldb.log
 
       # Re-run with libc / Cocoa malloc hardeners. These catch the
