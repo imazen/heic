@@ -32,7 +32,12 @@
 
 #![cfg(target_os = "windows")]
 #![allow(non_snake_case)] // matches the Win32 SDK field names exactly
-#![allow(missing_docs)] // documented inline via comments + the module headers
+#![allow(missing_docs)]
+// documented inline via comments + the module headers
+// Tests use `let mut sps = ParsedSps::default(); sps.field = ...;` to set
+// up small fixtures field-by-field — that's clearer in unit tests than
+// constructing a 35-field struct literal with `..Default::default()`.
+#![cfg_attr(test, allow(clippy::field_reassign_with_default))]
 
 use heic_core::sps::{ParsedPps, ParsedSps};
 

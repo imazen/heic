@@ -479,4 +479,25 @@ mod tests {
         assert!(session.matches(1280, 854, 8));
         assert!(!session.matches(1280, 854, 10));
     }
+
+    /// Smoke test the readback path against an uninitialized output
+    /// texture — proves `CreateTexture2D(STAGING)` + `CopyResource` +
+    ///   `Map` + `Unmap` all succeed on real hardware. The unpacked
+    ///   values are undefined (garbage from the uninitialized GPU
+    ///   texture) but the plane lengths must match the visible region.
+    #[test]
+    fn read_decoded_planes_smoke_test_on_hardware() {
+        if std::env::var_os("HEIC_D3D11VA_HW").is_none() {
+            eprintln!("HEIC_D3D11VA_HW not set; skipping (requires GPU)");
+            return;
+        }
+        let session = DecoderSession::new(1280, 858, 8).expect("Main session");
+        // Visible 1280x854 = ispe; coded 1280x858 = sps height; crop top 4.
+        let planes = session
+            .read_decoded_planes(1280, 854, 0, 4)
+            .expect("staging texture readback should succeed even for an uninit texture");
+        assert_eq!(planes.y.len(), 1280 * 854);
+        assert_eq!(planes.cb.len(), 640 * 427);
+        assert_eq!(planes.cr.len(), 640 * 427);
+    }
 }

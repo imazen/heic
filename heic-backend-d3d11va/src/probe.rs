@@ -61,8 +61,12 @@ pub(super) fn probe() -> bool {
     };
 
     // SAFETY: ID3D11Device::cast queries the COM aggregate for the
-    // requested interface and returns Err if not supported.
-    let Ok(video_device): Result<ID3D11VideoDevice, _> = device.cast() else {
+    // requested interface and returns Err if not supported. The
+    // turbofish is required because msvc-toolchain rustc can't infer
+    // the target type from the `let Ok(_): Result<T, _>` annotation
+    // alone (works on gnu-toolchain — they disagree on closure-style
+    // type-flow analysis).
+    let Ok(video_device) = device.cast::<ID3D11VideoDevice>() else {
         return false;
     };
 
