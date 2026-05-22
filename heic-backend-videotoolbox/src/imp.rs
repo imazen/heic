@@ -42,7 +42,7 @@ use std::vec::Vec;
 
 use heic_core::{BackendError, DecodedFrame, HvccParams};
 
-use objc2_core_foundation::{CFDictionary, CFNumber, CFNumberType, CFRetained};
+use objc2_core_foundation::{CFDictionary, CFNumber, CFNumberType, CFRetained, kCFAllocatorNull};
 use objc2_core_media::{
     CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMSampleTimingInfo, CMTime, CMTimeFlags,
     CMVideoFormatDescriptionCreateFromHEVCParameterSets,
@@ -428,16 +428,25 @@ fn decode_one_frame(
 
 fn build_block_buffer(data: &[u8]) -> Result<CFRetained<CMBlockBuffer>, BackendError> {
     let mut bb: *mut CMBlockBuffer = ptr::null_mut();
-    // SAFETY: block_allocator = None + custom_block_source = null +
-    // flags = 0 tells CM to wrap the memory without copying or
-    // freeing it. The caller (decode_one_frame) holds the &[u8]
-    // borrow until the sample buffer is dropped.
+    // SAFETY: `block_allocator = kCFAllocatorNull` is the documented
+    // "borrowed memory" allocator — CMBlockBuffer wraps the pointer
+    // and calls the null allocator's `deallocate` (a no-op) on
+    // release. With `None` (which Rust maps to nullptr →
+    // kCFAllocatorDefault), the system tries to `free()` our `&[u8]`
+    // backing memory on drop → SIGABRT "Non-aligned pointer being
+    // freed" because the slice data was never malloc'd.
+    //
+    // The CM docs explicitly call this out under
+    // `CMBlockBufferCreateWithMemoryBlock`:
+    //   > "If blockAllocator is kCFAllocatorNull, the memory block
+    //   >  will not be deallocated when the buffer is released."
+    let null_allocator = unsafe { kCFAllocatorNull }.expect("kCFAllocatorNull is statically present");
     let status = unsafe {
         CMBlockBuffer::create_with_memory_block(
             None,
             data.as_ptr() as *mut c_void,
             data.len(),
-            None,
+            Some(null_allocator),
             ptr::null(),
             0,
             data.len(),
