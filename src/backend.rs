@@ -461,4 +461,60 @@ mod tests {
         #[cfg(not(feature = "backend-rust"))]
         assert!(order.is_empty());
     }
+
+    /// `extract_sps_metadata` falls through to defaults when given a config
+    /// with no SPS NALs at all (e.g. a corrupt hvcC).
+    #[cfg(feature = "backend-rust")]
+    #[test]
+    fn extract_sps_metadata_no_nals_returns_default() {
+        let config = HevcDecoderConfig {
+            config_version: 1,
+            general_profile_space: 0,
+            general_tier_flag: false,
+            general_profile_idc: 1,
+            general_profile_compatibility_flags: 0,
+            general_constraint_indicator_flags: 0,
+            general_level_idc: 0,
+            chroma_format: 1,
+            bit_depth_luma_minus8: 0,
+            bit_depth_chroma_minus8: 0,
+            length_size_minus_one: 3,
+            nal_units: alloc::vec::Vec::new(),
+        };
+        let meta = extract_sps_metadata(&config);
+        assert_eq!(meta.coded_width, 0);
+        assert_eq!(meta.coded_height, 0);
+        assert_eq!(meta.matrix_coeffs, 2);
+        assert_eq!(meta.color_primaries, 2);
+        assert_eq!(meta.transfer_characteristics, 2);
+        assert!(!meta.full_range);
+        assert_eq!(meta.crop_left, 0);
+    }
+
+    /// `extract_sps_metadata` ignores non-SPS NAL types (VPS/PPS) and
+    /// returns defaults when only those are present.
+    #[cfg(feature = "backend-rust")]
+    #[test]
+    fn extract_sps_metadata_ignores_non_sps() {
+        // VPS NAL type = 32 → header byte (32 << 1) = 64; PPS = 34 → header = 68.
+        let vps = vec![64, 1, 0]; // type 32, dummy payload
+        let pps = vec![68, 1, 0]; // type 34, dummy payload
+        let config = HevcDecoderConfig {
+            config_version: 1,
+            general_profile_space: 0,
+            general_tier_flag: false,
+            general_profile_idc: 1,
+            general_profile_compatibility_flags: 0,
+            general_constraint_indicator_flags: 0,
+            general_level_idc: 0,
+            chroma_format: 1,
+            bit_depth_luma_minus8: 0,
+            bit_depth_chroma_minus8: 0,
+            length_size_minus_one: 3,
+            nal_units: alloc::vec![vps, pps],
+        };
+        let meta = extract_sps_metadata(&config);
+        assert_eq!(meta.coded_width, 0); // no SPS found
+        assert_eq!(meta.matrix_coeffs, 2); // unspecified default
+    }
 }
