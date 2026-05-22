@@ -1,6 +1,6 @@
 # heic [![CI](https://img.shields.io/github/actions/workflow/status/imazen/heic/ci.yml?style=flat-square&label=CI)](https://github.com/imazen/heic/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/heic?style=flat-square)](https://crates.io/crates/heic) [![lib.rs](https://img.shields.io/crates/v/heic?style=flat-square&label=lib.rs&color=blue)](https://lib.rs/crates/heic) [![docs.rs](https://img.shields.io/docsrs/heic?style=flat-square)](https://docs.rs/heic) [![codecov](https://img.shields.io/codecov/c/github/imazen/heic?style=flat-square)](https://codecov.io/gh/imazen/heic) [![license](https://img.shields.io/crates/l/heic?style=flat-square)](https://github.com/imazen/heic#license)
 
-Pure Rust HEIC/HEIF image decoder. No C/C++ dependencies, no unsafe code.
+HEIC/HEIF image decoder for Rust. Ships with a pure-Rust HEVC backend AND optional native backends for Windows (Media Foundation), Apple (VideoToolbox), Android (MediaCodec), and Linux (VA-API) — pick the patent-licensed path that ships with the platform, or fall back to the pure-Rust decoder. The parent crate is `#![forbid(unsafe_code)]`; FFI lives in isolated subcrates.
 
 > ⚠️ **Patent notice:** HEVC/HEIF may be covered by third-party patents
 > (Access Advance and others). Imazen grants copyright permissions
@@ -45,10 +45,50 @@ Decodes most HEIC files from iPhones and cameras. 118/162 HEIF test files decode
 - Brotli-compressed uncompressed HEIF: not yet supported (deflate/zlib only)
 - PQ/HLG transfer functions: parsed and exposed via `ImageInfo`, but no EOTF applied — callers handle tone-mapping
 
+## Backends
+
+`heic` defers HEVC bitstream decoding to a pluggable backend. The parent crate parses the HEIF container, manages grid / alpha / gain-map orchestration, and walks a runtime allowlist of backends — falling through when a backend reports unavailable. Default `cargo build` fails with a `compile_error!` directing you to pick at least one.
+
+| Backend | Cargo feature | Targets | Status |
+|---|---|---|---|
+| Pure-Rust HEVC | `backend-rust` | all | Production. 118/162 HEIF corpus, 49/49 ITU-T conformance vectors. |
+| Media Foundation | `backend-mediafoundation` | Windows | Production. Runtime-CI verified on `windows-11-arm` with HEVC Video Extensions side-loaded. |
+| VideoToolbox | `backend-videotoolbox` | macOS, iOS, tvOS, visionOS | FFI complete; CI on `macos-latest` + `macos-15-intel`. |
+| MediaCodec | `backend-mediacodec` | Android | FFI complete; CI compile-only via Android NDK. |
+| VA-API | `backend-vaapi` | Linux | Skeleton (returns `Unavailable`); CI compile-only. |
+| D3D11VA | `backend-d3d11va` | Windows | Skeleton (returns `Unavailable`); CI compile-only. |
+
+```rust
+use heic::{Backend, DecoderConfig, PixelLayout};
+
+// Single backend.
+let output = DecoderConfig::new()
+    .with_backend(Backend::MediaFoundation)
+    .decode(&data, PixelLayout::Rgba8)?;
+
+// Ordered allowlist with fallthrough.
+let output = DecoderConfig::new()
+    .with_backends(&[Backend::VideoToolbox, Backend::Rust])
+    .decode(&data, PixelLayout::Rgba8)?;
+
+// Auto-pick a sensible order from the compiled-in backends.
+let output = DecoderConfig::new()
+    .recommended_backends()
+    .decode(&data, PixelLayout::Rgba8)?;
+```
+
+`BackendError::Unavailable` (driver / DLL / OS support missing) and `BackendError::Decode` (bitstream rejected) both fall through to the next backend; `LimitsExceeded` and `Cancelled` short-circuit.
+
 ## Features
 
 | Feature | Default | Description |
 |---------|---------|-------------|
+| `backend-rust` | no | Pure-Rust HEVC decoder. Always available; runs on every target. |
+| `backend-mediafoundation` | no | Windows Media Foundation HEVC MFT (requires HEVC Video Extensions). |
+| `backend-videotoolbox` | no | Apple VideoToolbox HEVC decoder (macOS / iOS / tvOS / visionOS). |
+| `backend-mediacodec` | no | Android NDK `AMediaCodec` HEVC decoder (API 21+). |
+| `backend-vaapi` | no | Linux libva HEVC decoder. Skeleton — runtime FFI pending. |
+| `backend-d3d11va` | no | Windows D3D11 DXVA HEVC decoder. Skeleton — runtime FFI pending. |
 | `std` | yes | Standard library support. Disable for `no_std + alloc`. |
 | `parallel` | no | Parallel tile decoding via rayon. Implies `std`. |
 | `av1` | no | AV1 codec support via rav1d-safe. Implies `std`. |

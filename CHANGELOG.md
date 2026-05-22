@@ -8,6 +8,35 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 <!-- Breaking changes that will ship together in the next major (or minor for 0.x) release.
      Add items here as you discover them. Do NOT ship these piecemeal — batch them. -->
 
+- **Default `cargo build` now fails with a `compile_error!` directing the user to enable a backend feature.** Previously the pure-Rust decoder shipped automatically as `default = ["std"]`; now the user MUST opt into at least one of `backend-rust`, `backend-mediafoundation`, `backend-videotoolbox`, `backend-mediacodec`, `backend-vaapi`, or `backend-d3d11va`. This is the 0.2.0 breaking change. The existing `default` build pulled in `heic`'s entire HEVC implementation unconditionally; the new layout makes the backend explicit so users on Apple / Android / Windows can pick the patent-licensed native decoder instead.
+- **`DecoderConfig` gains an allowlist API** (`with_backend`, `with_backends`, `recommended_backends`). Decoding without any backend in the allowlist returns `HeicError::NoBackendSelected`. `DecoderConfig::recommended_backends()` constructs a platform-aware default order from the compiled-in backends.
+
+### Added — native HEVC backends + workspace
+- **`heic-core` workspace member**: shared types (`HevcBackend` trait, `BackendError`, `HvccParams`, `DecodedFrame`) and platform-neutral helpers (NAL conversion, YCbCr→RGB SIMD) used by every backend. `no_std + alloc`, `#![forbid(unsafe_code)]`, minimal dep surface. Lets backend crates depend on the shared contract without pulling in the parent crate. Commits c6ee4ab, edf1c0c.
+- **`Backend` enum + allowlist API**: `Backend::{Rust, MediaFoundation, VideoToolbox, MediaCodec, Vaapi, D3d11va}`. `DecoderConfig::with_backend(Backend::MediaFoundation)` or `with_backends(&[Backend::VideoToolbox, Backend::Rust])` configures the ordered allowlist; the dispatcher walks it on every decode and falls through on `BackendError::Unavailable` / `BackendError::Decode`. Commits 7d559a6, c0ac39c.
+- **SPS metadata extraction**: `HvccParams` now carries the bitstream-coded dimensions (`coded_width`, `coded_height`), the conformance-window crop offsets (`crop_left/right/top/bottom`), and the SPS VUI color metadata (`full_range`, `matrix_coeffs`, `color_primaries`, `transfer_characteristics`). The parent crate parses these once from the first SPS NAL — emulation-prevention bytes stripped via `parse_single_nal` — and threads them through every backend. This fixes the example.heic chroma offset (max delta 255 → 0) and corrects every CICP-aware color decision on HDR / BT.2020 streams. Commits 7872ab4, 9d74221.
+
+### Added — `heic-backend-mediafoundation` (Windows)
+- Full Media Foundation Transform driver: `MFTEnumEx` → HEVC decoder MFT → `MF_MT_MPEG_SEQUENCE_HEADER` + AU-inline VPS/SPS/PPS for legacy AppX MFTs → `ProcessInput`/`END_OF_STREAM`/`DRAIN`/`ProcessOutput` dance with stream-change renegotiation → `IMF2DBuffer::Lock2D` with `GetContiguousLength`-aware aligned-height + negative-stride rebase → NV12/P010 unpack honoring SPS conformance window. Commits 208598f, f623336, 58f1ded, 9d74221.
+- Runtime CI on `windows-11-arm` with HEVC Video Extensions side-loaded; 5/5 dispatch tests pass + a zensim-regress corpus diff vs the Rust backend (every fixture, including example.heic, hits 0 bad pixels). Commits f72a32e, 4cb9c8e.
+
+### Added — `heic-backend-videotoolbox` (Apple)
+- Full VideoToolbox FFI: `CMVideoFormatDescriptionCreateFromHEVCParameterSets` → `VTDecompressionSessionCreate` (cached per-dimensions across decodes) → `CMSampleBuffer`-wrapped hvcC slice → `VTDecompressionSession::decode_frame` with synchronous output callback → `CVPixelBufferLockBaseAddress` + per-plane unpack of NV12 (8-bit) or P010 (10-bit, LSB-aligned, low-10-bit masked — opposite of Windows MF's MSB alignment). Targets macOS, iOS device + simulator, tvOS, visionOS. Commit 9758e51, 8764ea7, 626adf6, 04690a8.
+
+### Added — `heic-backend-mediacodec` (Android)
+- Full NDK `AMediaCodec` FFI: `createDecoderByType("video/hevc")` → `AMediaFormat` with KEY_WIDTH/HEIGHT + KEY_CSD_0 (Annex-B VPS+SPS+PPS) → `configure` with null surface (ByteBuffer mode) → input queue + EOS → output dequeue loop handling `INFO_OUTPUT_FORMAT_CHANGED` / `INFO_TRY_AGAIN_LATER` → per-color-format unpack for `COLOR_FormatYUV420Planar` (I420), `COLOR_FormatYUV420SemiPlanar` + `Flexible` (NV12), and `COLOR_FormatYUVP010` (10-bit). RAII teardown via `Cached`'s Drop. Commit 3352aa1.
+
+### Added — skeleton backends
+- `heic-backend-vaapi` (Linux libva). Compile-only CI on `ubuntu-latest`; runtime FFI lands when a Linux+GPU runner is configured. Commits 0545266, 970e656.
+- `heic-backend-d3d11va` (Windows DXVA, replaces the AMF skeleton). Compile-only on both Windows architectures. Commits 0545266, 970e656.
+
+### Added — test infrastructure
+- `tests/common/compare_backends_via_zensim`: shared corpus-sweep harness that drives any pair of `Backend` variants through the testdata corpus and gates inter-decoder drift via `zensim_regress::testing::check_regression`. Replaces the hand-rolled diff loop in `mediafoundation_vs_rust_corpus_diff`; new backend test files reuse it. Commit 9b04d6b.
+- `examples/mf_diff`: per-row max-channel-delta + bad-pixel-count diagnostic for the MF backend. Locally verified that the VUI + crop fix takes example.heic from 4.48 % bad pixels to 0. Commit 9d74221.
+
+### CI
+- Per-backend matrix jobs in `.github/workflows/ci.yml`: compile-only on the cross targets (aarch64-pc-windows-msvc, x86_64-pc-windows-msvc, macos-latest, macos-15-intel, ubuntu-latest, aarch64-linux-android) + runtime on `windows-11-arm` for MF. Existing fmt / clippy / msrv / coverage jobs updated for the workspace + backend-rust feature.
+
 ## [0.1.6] - 2026-05-19
 
 ### Packaging
