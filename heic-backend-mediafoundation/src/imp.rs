@@ -570,7 +570,10 @@ fn read_output_planes(
         .map_err(decode_err("IMFMediaBuffer::Lock(out)"))?;
     let stride = width as usize;
     // SAFETY: the lock guarantees the pointer is valid for `cur_len` bytes.
-    let planes = unsafe { unpack_nv12_or_p010(ptr, stride, width, height, bit_depth, cur_len) };
+    // Fallback path assumes no row-alignment padding (stride == width); the
+    // 2D path below handles the typical MFT case with aligned_height > height.
+    let planes =
+        unsafe { unpack_nv12_or_p010(ptr, stride, width, height, height, bit_depth, cur_len) };
     // SAFETY: pairs with the Lock above.
     unsafe { buffer.Unlock() }.map_err(decode_err("IMFMediaBuffer::Unlock(out)"))?;
     Ok(planes)
@@ -588,48 +591,59 @@ fn read_planes_2d(
     // pixel of the buffer per the MF docs.
     unsafe { buf2d.Lock2D(&mut ptr, &mut stride) }.map_err(decode_err("IMF2DBuffer::Lock2D"))?;
 
-    // Stride can be negative (bottom-up), but for NV12/P010 from the HEVC
-    // MFT it's typically positive. Handle negative for completeness.
     let stride_abs = stride.unsigned_abs() as usize;
-    let mut data_ptr = ptr;
-    if stride < 0 {
-        // ptr already points at row 0 (top-down logically), per docs; we
-        // walk rows by adding the negative stride. To keep the unpacker
-        // simple, copy rows out individually here. For now treat as positive.
-        // (Bottom-up output from HEVC MFT is rare.)
-    }
-    // SAFETY: Lock2D guarantees the pointer is valid for height rows of
-    // stride_abs bytes (per buffer's GetContiguousLength contract).
+
+    // Determine the actual Y-plane row count from the contiguous buffer
+    // length: NV12 / P010 occupy stride * aligned_height * 3/2 bytes,
+    // where `aligned_height` rounds the visible height up to whatever
+    // boundary the MFT chose (typically 16 for HEVC's CTB alignment).
+    // SAFETY: GetContiguousLength on the locked IMF2DBuffer is a
+    // documented inspection call.
+    let total_bytes = unsafe { buf2d.GetContiguousLength() }
+        .map_err(decode_err("IMF2DBuffer::GetContiguousLength"))? as usize;
+    let aligned_height = if stride_abs > 0 {
+        ((total_bytes * 2 / 3) / stride_abs).max(height as usize)
+    } else {
+        height as usize
+    };
+
+    // SAFETY: Lock2D + GetContiguousLength guarantee the pointer is valid
+    // for total_bytes bytes; unpack_nv12_or_p010 reads strictly within
+    // [base, base + total_bytes).
     let planes = unsafe {
         unpack_nv12_or_p010(
-            data_ptr,
+            ptr,
             stride_abs,
             width,
             height,
+            aligned_height as u32,
             bit_depth,
-            (stride_abs * height as usize * 3 / 2) as u32,
+            total_bytes as u32,
         )
     };
-    let _ = &mut data_ptr; // suppress unused-mut when negative-stride branch is a no-op
     // SAFETY: pairs with Lock2D.
     unsafe { buf2d.Unlock2D() }.map_err(decode_err("IMF2DBuffer::Unlock2D"))?;
     Ok(planes)
 }
 
 /// SAFETY: caller guarantees `base` points at the start of an NV12 (8-bit) or
-/// P010 (16-bit, MSB-aligned 10-bit + 6 zero LSBs) frame of `height` rows at
-/// `row_stride` bytes per row, followed immediately by the interleaved UV
-/// plane at `height/2` rows at `row_stride` bytes per row.
+/// P010 (16-bit) frame whose Y plane is `aligned_height` rows tall at
+/// `row_stride` bytes per row (only the first `height` rows are visible),
+/// followed immediately by the interleaved UV plane at `aligned_height/2`
+/// rows at `row_stride` bytes per row. NV12: top byte = Cb, next = Cr.
+/// P010: 16-bit little-endian samples, value in low 10 bits after `>> 6`.
 unsafe fn unpack_nv12_or_p010(
     base: *const u8,
     row_stride: usize,
     width: u32,
     height: u32,
+    aligned_height: u32,
     bit_depth: u8,
     _total_len: u32,
 ) -> OutputPlanes {
     let w = width as usize;
     let h = height as usize;
+    let h_aligned = aligned_height as usize;
     let half_h = h / 2;
     let half_w = w / 2;
 
@@ -638,16 +652,17 @@ unsafe fn unpack_nv12_or_p010(
     let mut cr_plane = vec![0u16; half_w * half_h];
 
     if bit_depth <= 8 {
-        // 8-bit NV12: Y row by row, UV interleaved. Materialize each row as
-        // a safe `&[u8]` slice with one `unsafe` at the top, then index
-        // through it with normal bounds-checked accesses.
+        // 8-bit NV12: store samples as zero-extended u16 (0..=255). The
+        // parent's DecodedFrame consumers (color_convert::convert_420_to_rgb,
+        // to_rgb*) read u16 planes but expect them in the source's
+        // `bit_depth` range — shifting up to 0..=65535 here would make the
+        // matrix coefficients overflow and produce a near-saturated frame.
         for y in 0..h {
             // SAFETY: row y of the Y plane occupies [base + y*stride,
             // base + y*stride + stride) per the caller's guarantee.
             let row = unsafe { core::slice::from_raw_parts(base.add(y * row_stride), row_stride) };
             for x in 0..w {
-                let v = row[x];
-                y_plane[y * w + x] = u16::from(v) << 8 | u16::from(v);
+                y_plane[y * w + x] = u16::from(row[x]);
             }
         }
         // UV plane starts at base + h * row_stride.
@@ -657,10 +672,8 @@ unsafe fn unpack_nv12_or_p010(
             let row =
                 unsafe { core::slice::from_raw_parts(base.add((h + y) * row_stride), row_stride) };
             for x in 0..half_w {
-                let cb = row[2 * x];
-                let cr = row[2 * x + 1];
-                cb_plane[y * half_w + x] = u16::from(cb) << 8 | u16::from(cb);
-                cr_plane[y * half_w + x] = u16::from(cr) << 8 | u16::from(cr);
+                cb_plane[y * half_w + x] = u16::from(row[2 * x]);
+                cr_plane[y * half_w + x] = u16::from(row[2 * x + 1]);
             }
         }
     } else {
