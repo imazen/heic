@@ -219,6 +219,17 @@ pub struct HvccParams<'a> {
     pub color_primaries: u8,
     /// Transfer characteristics (CICP).
     pub transfer_characteristics: u8,
+
+    /// Fully-parsed SPS field set required by VA-API and D3D11VA to
+    /// populate their picture-parameter buffers. `None` when the parent
+    /// crate couldn't parse the first SPS NAL (corrupt hvcC, no SPS
+    /// present); native backends should report
+    /// [`BackendError::Decode`] in that case rather than guess.
+    ///
+    /// The fields here duplicate the VUI / bit-depth / coded-dimensions
+    /// data on `HvccParams` for convenience — backends that only need
+    /// the small set already on `HvccParams` can ignore this field.
+    pub sps: Option<&'a sps::ParsedSps>,
 }
 
 /// HEVC backend implementation.

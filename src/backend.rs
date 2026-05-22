@@ -325,6 +325,7 @@ pub(crate) fn decode_one_tile(
         matrix_coeffs: sps_meta.matrix_coeffs,
         color_primaries: sps_meta.color_primaries,
         transfer_characteristics: sps_meta.transfer_characteristics,
+        sps: sps_meta.parsed.as_ref(),
     };
 
     let mut last_err: Option<String> = None;
@@ -383,6 +384,10 @@ struct SpsMetadata {
     matrix_coeffs: u8,
     color_primaries: u8,
     transfer_characteristics: u8,
+    /// Fully-parsed SPS field set for native backends to populate
+    /// VAPictureParameterBufferHEVC / DXVA_PicParams_HEVC. `None` when
+    /// the SPS NAL couldn't be parsed (corrupt hvcC, no SPS).
+    parsed: Option<heic_core::sps::ParsedSps>,
 }
 
 /// Parse the first SPS NAL we find in `config.nal_units` and return its
@@ -437,10 +442,81 @@ fn extract_sps_metadata(config: &HevcDecoderConfig) -> SpsMetadata {
             out.matrix_coeffs = sps.matrix_coeffs;
             out.color_primaries = sps.color_primaries;
             out.transfer_characteristics = sps.transfer_characteristics;
+            out.parsed = Some(populate_parsed_sps(&sps));
             return out;
         }
     }
     out
+}
+
+/// Build a [`heic_core::sps::ParsedSps`] from the parent crate's fully
+/// parsed `Sps` so native backends (D3D11VA / VA-API) don't have to
+/// re-parse the bitstream to populate their picture parameter buffers.
+fn populate_parsed_sps(sps: &crate::hevc::params::Sps) -> heic_core::sps::ParsedSps {
+    use heic_core::sps::{ParsedSps, SpsRangeExtension};
+
+    // PcmParams is an Option<PcmParams> on the parser side — defaults to
+    // 0 when pcm_enabled_flag is false (or the SPS didn't carry the
+    // optional block).
+    let (
+        pcm_sample_bit_depth_luma_minus1,
+        pcm_sample_bit_depth_chroma_minus1,
+        log2_min_pcm_luma_coding_block_size_minus3,
+        log2_diff_max_min_pcm_luma_coding_block_size,
+        pcm_loop_filter_disabled_flag,
+    ) = if let Some(pcm) = &sps.pcm_params {
+        (
+            pcm.pcm_sample_bit_depth_luma_minus1,
+            pcm.pcm_sample_bit_depth_chroma_minus1,
+            pcm.log2_min_pcm_luma_coding_block_size_minus3,
+            pcm.log2_diff_max_min_pcm_luma_coding_block_size,
+            pcm.pcm_loop_filter_disabled_flag,
+        )
+    } else {
+        (0, 0, 0, 0, false)
+    };
+    // The parent crate's parser models LongTermRefPicSps as the
+    // populated list of POC LSBs; HEVC's `num_long_term_ref_pics_sps`
+    // is the length of that list.
+    let num_long_term_ref_pics_sps = sps.long_term_ref_pics_sps.lt_ref_pic_poc_lsb.len();
+    let num_long_term_ref_pics_sps = u8::try_from(num_long_term_ref_pics_sps).unwrap_or(u8::MAX);
+
+    ParsedSps {
+        chroma_format_idc: sps.chroma_format_idc,
+        separate_colour_plane_flag: sps.separate_colour_plane_flag,
+        pic_width_in_luma_samples: sps.pic_width_in_luma_samples,
+        pic_height_in_luma_samples: sps.pic_height_in_luma_samples,
+        bit_depth_luma_minus8: sps.bit_depth_luma_minus8,
+        bit_depth_chroma_minus8: sps.bit_depth_chroma_minus8,
+        log2_max_pic_order_cnt_lsb_minus4: sps.log2_max_pic_order_cnt_lsb_minus4,
+        sps_max_sub_layers_minus1: sps.max_sub_layers_minus1,
+        sps_max_dec_pic_buffering_minus1: alloc::vec::Vec::new(),
+        log2_min_luma_coding_block_size_minus3: sps.log2_min_luma_coding_block_size_minus3,
+        log2_diff_max_min_luma_coding_block_size: sps.log2_diff_max_min_luma_coding_block_size,
+        log2_min_luma_transform_block_size_minus2: sps.log2_min_luma_transform_block_size_minus2,
+        log2_diff_max_min_luma_transform_block_size: sps
+            .log2_diff_max_min_luma_transform_block_size,
+        max_transform_hierarchy_depth_inter: sps.max_transform_hierarchy_depth_inter,
+        max_transform_hierarchy_depth_intra: sps.max_transform_hierarchy_depth_intra,
+        scaling_list_enabled_flag: sps.scaling_list_enabled_flag,
+        amp_enabled_flag: sps.amp_enabled_flag,
+        sample_adaptive_offset_enabled_flag: sps.sample_adaptive_offset_enabled_flag,
+        pcm_enabled_flag: sps.pcm_enabled_flag,
+        pcm_sample_bit_depth_luma_minus1,
+        pcm_sample_bit_depth_chroma_minus1,
+        log2_min_pcm_luma_coding_block_size_minus3,
+        log2_diff_max_min_pcm_luma_coding_block_size,
+        pcm_loop_filter_disabled_flag,
+        num_short_term_ref_pic_sets: sps.num_short_term_ref_pic_sets,
+        num_long_term_ref_pics_sps,
+        long_term_ref_pics_present_flag: sps.long_term_ref_pics_present_flag,
+        sps_temporal_mvp_enabled_flag: sps.sps_temporal_mvp_enabled_flag,
+        strong_intra_smoothing_enabled_flag: sps.strong_intra_smoothing_enabled_flag,
+        conformance_window_flag: sps.conformance_window_flag,
+        conf_win_offset: sps.conf_win_offset,
+        sps_range_extension_flag: false,
+        range_extension: SpsRangeExtension::default(),
+    }
 }
 
 #[cfg(test)]

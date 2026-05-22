@@ -35,7 +35,9 @@ use alloc::vec::Vec;
 /// struct after stripping emulation-prevention bytes; native backends
 /// consume it through [`crate::HvccParams::sps`] without re-parsing.
 #[derive(Debug, Clone, Default)]
-#[non_exhaustive]
+// NOT `#[non_exhaustive]` because the parent crate populates this
+// struct via field-list literal; adding new fields is a heic-core
+// 0.x semver-breaking change (acceptable; we bump heic with it).
 pub struct ParsedSps {
     /// `chroma_format_idc` — 0 (monochrome), 1 (4:2:0), 2 (4:2:2), 3 (4:4:4).
     pub chroma_format_idc: u8,
@@ -121,7 +123,9 @@ pub struct ParsedSps {
 /// bitstreams set the flag to false, in which case every field here is
 /// at its default (0 / false).
 #[derive(Debug, Clone, Default)]
-#[non_exhaustive]
+// NOT `#[non_exhaustive]` because the parent crate populates this
+// struct via field-list literal; adding new fields is a heic-core
+// 0.x semver-breaking change (acceptable; we bump heic with it).
 pub struct SpsRangeExtension {
     /// `transform_skip_rotation_enabled_flag`.
     pub transform_skip_rotation_enabled_flag: bool,
