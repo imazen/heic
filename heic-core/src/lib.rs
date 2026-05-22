@@ -40,6 +40,7 @@ pub mod color_convert;
 pub mod error;
 pub mod frame;
 pub mod nal;
+pub mod sps;
 
 #[cfg(target_arch = "aarch64")]
 mod color_convert_neon;
