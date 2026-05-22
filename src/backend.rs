@@ -275,50 +275,69 @@ pub(crate) fn decode_one_tile(
     backends: &[Backend],
     config: &HevcDecoderConfig,
     image_data: &[u8],
+    width: u32,
+    height: u32,
     stop: &dyn Stop,
 ) -> Result<DecodedFrame> {
     if backends.is_empty() {
         return Err(at!(HeicError::NoBackendSelected));
     }
 
-    // Fast path: single-Rust-backend selection skips the trait dispatch.
+    // Fast path: single-Rust-backend selection skips the trait dispatch +
+    // HvccParams construction entirely.
     #[cfg(feature = "backend-rust")]
     if backends.len() == 1 && backends[0] == Backend::Rust {
         // `?` triggers the existing From<HevcError> for At<HeicError> in
         // error.rs — no further conversion needed.
-        let _ = stop;
+        let _ = (stop, width, height);
         return Ok(crate::hevc::decode_with_config(config, image_data)?);
     }
 
-    // Slow path: any backend selection that includes a non-Rust variant.
-    // Currently every native backend's HevcBackend::is_available() returns
-    // false (skeletons) or only the MF backend's reports true on Windows;
-    // we don't yet have width/height plumbed into decode_one_tile's
-    // signature to build a complete HvccParams. Until that lands, the slow
-    // path falls through to the rust backend if it's in the allowlist, or
-    // returns AllBackendsFailed otherwise.
+    // Slow path: build the HvccParams view once and walk the allowlist.
+    let nal_refs: Vec<&[u8]> = config.nal_units.iter().map(|n| n.as_slice()).collect();
+    let params = HvccParams {
+        width,
+        height,
+        nal_units: &nal_refs,
+        length_size: config.length_size_minus_one + 1,
+        bit_depth_luma: config.bit_depth_luma_minus8 + 8,
+        bit_depth_chroma: config.bit_depth_chroma_minus8 + 8,
+        chroma_format_idc: config.chroma_format,
+    };
+
     let mut last_err: Option<String> = None;
     for &b in backends {
         #[cfg(feature = "backend-rust")]
         if b == Backend::Rust {
-            // Fast path even when Rust is mid-allowlist.
+            // Fast path even when Rust is mid-allowlist — bypass trait.
             let _ = stop;
             return Ok(crate::hevc::decode_with_config(config, image_data)?);
         }
-        let inst = b.instance();
+        let mut inst = b.instance();
         if !inst.is_available() {
             last_err = Some(format!("{}: backend reported unavailable", b.name()));
             continue;
         }
-        // TODO: native-backend dispatch — needs width/height threaded through
-        // decode_one_tile's signature to build a complete HvccParams. Today
-        // the only functional dispatch is the rust fast-path above.
-        last_err = Some(format!(
-            "{}: native-backend dispatch not yet plumbed (parent crate \
-             still routes through backend-rust; native backends ship as \
-             standalone subcrates pending the next PR)",
-            b.name()
-        ));
+        match inst.decode_hevc(&params, image_data, stop) {
+            Ok(frame) => return Ok(frame),
+            Err(BackendError::LimitsExceeded(m)) => {
+                return Err(at!(HeicError::LimitExceeded(m)));
+            }
+            Err(BackendError::Cancelled) => {
+                return Err(at!(HeicError::Cancelled(enough::StopReason::Cancelled)));
+            }
+            Err(BackendError::Unavailable(m)) => {
+                last_err = Some(format!("{}: {m}", b.name()));
+            }
+            Err(BackendError::Decode(m)) => {
+                last_err = Some(format!("{}: {m}", b.name()));
+            }
+            // BackendError is #[non_exhaustive]; new variants without a
+            // specific mapping fall through to the "try next backend" path.
+            Err(other) => {
+                last_err = Some(format!("{}: {other}", b.name()));
+            }
+        }
     }
     Err(at!(HeicError::AllBackendsFailed(
         last_err.unwrap_or_else(|| "no backends were available".into())

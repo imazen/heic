@@ -247,7 +247,8 @@ fn decode_item(
             }
             let image_data = container.get_item_data(item.id)?;
             if let Some(ref config) = item.hevc_config {
-                crate::backend::decode_one_tile(budget.backends, config, &image_data, stop)?
+                let (w, h) = item.dimensions.unwrap_or((0, 0));
+                crate::backend::decode_one_tile(budget.backends, config, &image_data, w, h, stop)?
             } else if item.item_type == ItemType::Hvc1 {
                 // Annex-B raw path: no hvcC config separately, so the
                 // dispatcher trait can't be used (every native backend
@@ -1213,7 +1214,14 @@ fn decode_grid(
         for (tile_idx, tile_data) in tile_data_list.iter().enumerate() {
             check_stop(stop)?;
             let tile_frame = if let Some(tile_config) = hevc_tile_config {
-                crate::backend::decode_one_tile(budget.backends, tile_config, tile_data, stop)?
+                crate::backend::decode_one_tile(
+                    budget.backends,
+                    tile_config,
+                    tile_data,
+                    tile_width,
+                    tile_height,
+                    stop,
+                )?
             } else {
                 // Non-HEVC tiles: look up the tile item and dispatch
                 let tile_id = tile_ids[tile_idx];
@@ -1502,8 +1510,14 @@ pub(crate) fn try_decode_grid_streaming(
         let _ = max_threads; // unused without parallel feature
         for (tile_idx, tile_data) in tile_data_list.iter().enumerate() {
             check_stop(stop)?;
-            let mut tile_frame =
-                crate::backend::decode_one_tile(backends, tile_config, tile_data, stop)?;
+            let mut tile_frame = crate::backend::decode_one_tile(
+                backends,
+                tile_config,
+                tile_data,
+                tile_width,
+                tile_height,
+                stop,
+            )?;
             if let Some((fr, mc)) = color_override {
                 tile_frame.full_range = fr;
                 tile_frame.matrix_coeffs = mc;
@@ -1882,7 +1896,8 @@ fn decode_alpha_plane(
 
     // Multi-codec dispatch: try HEVC first, then AV1
     let alpha_frame = if let Some(ref config) = alpha_item.hevc_config {
-        crate::backend::decode_one_tile(backends, config, &alpha_data, stop).ok()?
+        let (w, h) = alpha_item.dimensions.unwrap_or((0, 0));
+        crate::backend::decode_one_tile(backends, config, &alpha_data, w, h, stop).ok()?
     } else {
         #[cfg(feature = "av1")]
         {
