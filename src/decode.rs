@@ -755,7 +755,8 @@ fn decode_av1_item(
     };
 
     let mut output =
-        crate::hevc::DecodedFrame::with_params(width, height, bit_depth, chroma_format)?;
+        crate::hevc::DecodedFrame::with_params(width, height, bit_depth, chroma_format)
+            .map_err(crate::error::at_core)?;
 
     // Copy planes from rav1d frame to our DecodedFrame
     match frame.planes() {
@@ -949,7 +950,8 @@ fn decode_unci_item(
     }
 
     // Create output frame — use RGB (chroma_format=3 = 4:4:4) for unci
-    let mut output = crate::hevc::DecodedFrame::with_params(width, height, 8, 3)?;
+    let mut output = crate::hevc::DecodedFrame::with_params(width, height, 8, 3)
+        .map_err(crate::error::at_core)?;
 
     // Set full-range since unci pixels are typically full-range
     output.full_range = true;
