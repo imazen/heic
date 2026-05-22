@@ -88,3 +88,5 @@ impl HevcBackend for VaApiBackend {
 
 #[cfg(target_os = "linux")]
 mod probe;
+
+pub mod va_hevc;
