@@ -23,7 +23,7 @@
 #![allow(non_snake_case)] // matches the libva C field names exactly
 #![allow(missing_docs)] // documented inline via module headers
 
-use heic_core::sps::ParsedSps;
+use heic_core::sps::{ParsedPps, ParsedSps};
 
 /// libva `VAPictureHEVC` — one entry in the reference-frame array or
 /// the current picture identifier.
@@ -196,24 +196,19 @@ pub mod slice_parsing_fields {
     pub const INTRA_PIC_FLAG: u32 = 1 << 13;
 }
 
-/// Build a partially-populated [`VaPictureParameterBufferHevc`] from
-/// the SPS fields.
+/// Build a [`VaPictureParameterBufferHevc`] from SPS + PPS fields.
 ///
-/// Only the ~22 SPS-derived fields are populated; PPS-derived fields
-/// (tile layout, deblocking offsets, weighted prediction, init_qp) and
-/// per-slice / per-picture fields (`CurrPic`, `ReferenceFrames`,
-/// `st_rps_bits`, `IDR_PIC_FLAG` etc.) stay at `Default::default()`
-/// and must be filled in by the caller before submitting the buffer.
+/// Per-slice / per-picture fields (`CurrPic`, `st_rps_bits`,
+/// `RAP_PIC_FLAG` / `IDR_PIC_FLAG` / `INTRA_PIC_FLAG` etc.) stay at
+/// `Default::default()` and must be filled in by the caller before
+/// submitting the buffer. HEIC tiles are IDR-only so
+/// `ReferenceFrames` starts as `[VaPictureHevc::INVALID; 15]`.
 ///
-/// HEIC-specific simplifications baked in:
-///
-/// * `ReferenceFrames` is initialized to `[VaPictureHevc::INVALID; 15]`
-///   — HEIC tiles are IDR-only, no inter-frame references.
-/// * The slice-parsing-fields `RAP_PIC_FLAG`, `IDR_PIC_FLAG`,
-///   `INTRA_PIC_FLAG` should be set by the caller to 1 for HEIC tiles
-///   (they're set per-picture, not from the SPS).
+/// Pass `pps = None` to populate only the SPS-derived half (useful
+/// for unit tests against a synthetic SPS). The driver will reject
+/// SPS-only buffers; production callers should pass `Some(pps)`.
 #[must_use]
-pub fn from_sps(sps: &ParsedSps) -> VaPictureParameterBufferHevc {
+pub fn from_sps_pps(sps: &ParsedSps, pps: Option<&ParsedPps>) -> VaPictureParameterBufferHevc {
     let mut pic_flags: u32 = 0;
     use pic_fields::*;
     pic_flags |=
@@ -252,6 +247,116 @@ pub fn from_sps(sps: &ParsedSps) -> VaPictureParameterBufferHevc {
         // RAP/IDR/INTRA_PIC_FLAG set by caller per-picture.
     }
 
+    // PPS-derived bits in pic_fields + slice_parsing_fields (mirrors
+    // chromium's FillPicParams h265_vaapi_video_decoder_delegate.cc:119).
+    let mut column_widths_arr = [0u16; 19];
+    let mut row_heights_arr = [0u16; 21];
+    let (
+        init_qp_minus26,
+        num_ref_idx_l0_default_active_minus1,
+        num_ref_idx_l1_default_active_minus1,
+        pps_cb_qp_offset,
+        pps_cr_qp_offset,
+        diff_cu_qp_delta_depth,
+        pps_beta_offset_div2,
+        pps_tc_offset_div2,
+        log2_parallel_merge_level_minus2,
+        num_tile_columns_minus1,
+        num_tile_rows_minus1,
+        num_extra_slice_header_bits,
+    ) = if let Some(p) = pps {
+        use pic_fields::*;
+        if p.transform_skip_enabled_flag {
+            pic_flags |= TRANSFORM_SKIP_ENABLED_FLAG;
+        }
+        if p.sign_data_hiding_enabled_flag {
+            pic_flags |= SIGN_DATA_HIDING_ENABLED_FLAG;
+        }
+        if p.constrained_intra_pred_flag {
+            pic_flags |= CONSTRAINED_INTRA_PRED_FLAG;
+        }
+        if p.cu_qp_delta_enabled_flag {
+            pic_flags |= CU_QP_DELTA_ENABLED_FLAG;
+        }
+        if p.weighted_pred_flag {
+            pic_flags |= WEIGHTED_PRED_FLAG;
+        }
+        if p.weighted_bipred_flag {
+            pic_flags |= WEIGHTED_BIPRED_FLAG;
+        }
+        if p.transquant_bypass_enabled_flag {
+            pic_flags |= TRANSQUANT_BYPASS_ENABLED_FLAG;
+        }
+        if p.tiles_enabled_flag {
+            pic_flags |= TILES_ENABLED_FLAG;
+        }
+        if p.entropy_coding_sync_enabled_flag {
+            pic_flags |= ENTROPY_CODING_SYNC_ENABLED_FLAG;
+        }
+        if p.pps_loop_filter_across_slices_enabled_flag {
+            pic_flags |= PPS_LOOP_FILTER_ACROSS_SLICES_ENABLED_FLAG;
+        }
+        if p.loop_filter_across_tiles_enabled_flag {
+            pic_flags |= LOOP_FILTER_ACROSS_TILES_ENABLED_FLAG;
+        }
+
+        use slice_parsing_fields::*;
+        if p.lists_modification_present_flag {
+            slice_flags |= LISTS_MODIFICATION_PRESENT_FLAG;
+        }
+        if p.cabac_init_present_flag {
+            slice_flags |= CABAC_INIT_PRESENT_FLAG;
+        }
+        if p.output_flag_present_flag {
+            slice_flags |= OUTPUT_FLAG_PRESENT_FLAG;
+        }
+        if p.dependent_slice_segments_enabled_flag {
+            slice_flags |= DEPENDENT_SLICE_SEGMENTS_ENABLED_FLAG;
+        }
+        if p.pps_slice_chroma_qp_offsets_present_flag {
+            slice_flags |= PPS_SLICE_CHROMA_QP_OFFSETS_PRESENT_FLAG;
+        }
+        if p.deblocking_filter_override_enabled_flag {
+            slice_flags |= DEBLOCKING_FILTER_OVERRIDE_ENABLED_FLAG;
+        }
+        if p.pps_deblocking_filter_disabled_flag {
+            slice_flags |= PPS_DISABLE_DEBLOCKING_FILTER_FLAG;
+        }
+        if p.slice_segment_header_extension_present_flag {
+            slice_flags |= SLICE_SEGMENT_HEADER_EXTENSION_PRESENT_FLAG;
+        }
+
+        if p.tiles_enabled_flag && !p.uniform_spacing_flag {
+            for (i, w) in p
+                .column_widths
+                .iter()
+                .take(column_widths_arr.len())
+                .enumerate()
+            {
+                column_widths_arr[i] = *w;
+            }
+            for (i, h) in p.row_heights.iter().take(row_heights_arr.len()).enumerate() {
+                row_heights_arr[i] = *h;
+            }
+        }
+        (
+            p.init_qp_minus26,
+            p.num_ref_idx_l0_default_active_minus1,
+            p.num_ref_idx_l1_default_active_minus1,
+            p.pps_cb_qp_offset,
+            p.pps_cr_qp_offset,
+            p.diff_cu_qp_delta_depth,
+            p.pps_beta_offset_div2,
+            p.pps_tc_offset_div2,
+            p.log2_parallel_merge_level_minus2,
+            p.num_tile_columns_minus1,
+            p.num_tile_rows_minus1,
+            p.num_extra_slice_header_bits,
+        )
+    } else {
+        (0i8, 0u8, 0u8, 0i8, 0i8, 0u8, 0i8, 0i8, 0u8, 0u8, 0u8, 0u8)
+    };
+
     VaPictureParameterBufferHevc {
         ReferenceFrames: [VaPictureHevc::INVALID; 15],
         pic_width_in_luma_samples: sps.pic_width_in_luma_samples as u16,
@@ -276,9 +381,23 @@ pub fn from_sps(sps: &ParsedSps) -> VaPictureParameterBufferHevc {
             .log2_diff_max_min_pcm_luma_coding_block_size,
         max_transform_hierarchy_depth_intra: sps.max_transform_hierarchy_depth_intra,
         max_transform_hierarchy_depth_inter: sps.max_transform_hierarchy_depth_inter,
+        init_qp_minus26,
+        diff_cu_qp_delta_depth,
+        pps_cb_qp_offset,
+        pps_cr_qp_offset,
+        log2_parallel_merge_level_minus2,
+        num_tile_columns_minus1,
+        num_tile_rows_minus1,
+        column_width_minus1: column_widths_arr,
+        row_height_minus1: row_heights_arr,
         log2_max_pic_order_cnt_lsb_minus4: sps.log2_max_pic_order_cnt_lsb_minus4,
         num_short_term_ref_pic_sets: sps.num_short_term_ref_pic_sets,
         num_long_term_ref_pic_sps: sps.num_long_term_ref_pics_sps,
+        num_ref_idx_l0_default_active_minus1,
+        num_ref_idx_l1_default_active_minus1,
+        pps_beta_offset_div2,
+        pps_tc_offset_div2,
+        num_extra_slice_header_bits,
         ..Default::default()
     }
 }
@@ -305,7 +424,7 @@ mod tests {
         sps.pic_width_in_luma_samples = 1280;
         sps.pic_height_in_luma_samples = 858;
 
-        let va = from_sps(&sps);
+        let va = from_sps_pps(&sps, None);
         assert_eq!(va.pic_width_in_luma_samples, 1280);
         assert_eq!(va.pic_height_in_luma_samples, 858);
         // chroma_format_idc=1 in bits 0-1, AMP at bit 6, scaling_list at bit 4.
@@ -316,7 +435,7 @@ mod tests {
     #[test]
     fn from_sps_initializes_reference_frames_to_invalid() {
         let sps = ParsedSps::default();
-        let va = from_sps(&sps);
+        let va = from_sps_pps(&sps, None);
         // Every reference slot must be the libva-INVALID sentinel.
         for r in &va.ReferenceFrames {
             assert_eq!(r.flags & 0x01, 0x01);
@@ -327,7 +446,7 @@ mod tests {
     fn from_sps_packs_slice_parsing_sao_flag() {
         let mut sps = ParsedSps::default();
         sps.sample_adaptive_offset_enabled_flag = true;
-        let va = from_sps(&sps);
+        let va = from_sps_pps(&sps, None);
         assert_ne!(
             va.slice_parsing_fields & slice_parsing_fields::SAMPLE_ADAPTIVE_OFFSET_ENABLED_FLAG,
             0
