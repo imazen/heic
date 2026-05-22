@@ -1,5 +1,215 @@
 # HEIC Decoder Project Instructions
 
+## ABSOLUTE MANDATE: NEVER STOP PUSHING FORWARD
+
+**While working on a multi-step task in this repo, you do not stop, pause, lazily
+ask "shall I continue?", or wrap up the session early — unless one of the
+genuine stop conditions in `~/.claude/CLAUDE.md` ("NEVER PAUSE LAZILY") fires.**
+The default is: ship the next chunk. Then the next. Then the next.
+
+**Stopping criteria — these are the ONLY legitimate reasons to pause:**
+
+1. The next step is **destructive or externally visible** (force-push, publish,
+   posting outside this org, deleting shared state) — confirm per the global
+   "Executing actions with care" rules.
+2. The next step **branches in a way that's not derivable from prior
+   instructions** — two equally-valid paths with no expressed preference.
+3. You hit a **measured-and-verified** blocker (no GPU, no Apple HW, missing
+   library version not on crates.io) and there is no chunk you can ship
+   that doesn't depend on that block.
+4. Native-API runtime tests across all six backend targets pass, AND every
+   item on the user's last list is shipped or has a documented chunk that
+   cannot be shipped today.
+
+**Forbidden — these are NOT stop conditions:**
+
+* "I've done a lot already, let me summarize."
+* "Want me to keep going?"
+* "Should I continue with X, or hold?"
+* "The next step is heavy."
+* "Compile takes a while."
+* "CI is yellow on one job."
+* "I'm not sure if you want me to..."
+* End-of-session-feeling because the conversation is long.
+
+If a chunk is genuinely too large to ship in one pass, decompose into the
+smallest demoable chunk (per the global "NEVER GIVE UP ON A USER-DIRECTED
+LIST" rule), land that chunk with a passing test, document the next chunk
+with file paths + signatures, and **keep going on the next chunk** in the
+same turn. Do not stop to ask.
+
+## Writing Good Code — patterns imported from jxl-encoder
+
+These patterns are mandatory reading and apply to every commit. Adapted from
+`~/work/zen/jxl-encoder/CLAUDE.md` "Patterns of Mistakes to Avoid" + "Proof-
+by-Tests Investigation Methodology" + "Invariant Preservation Across Sessions".
+
+### 1. False positives are the highest-severity bug
+
+Tests that pass without exercising the thing they claim to test are worse
+than no tests — they manufacture false confidence and waste future
+investigation time. For a decoder, "the parser accepted the bytes" is
+**not** evidence "the image decoded correctly" — you must call all the
+way through `decode_to_frame` / `to_rgba` / the backend's `decode_hevc`
+and inspect actual pixels. The `mf_diff` example + zensim-regress corpus
+diff are the canonical templates for this codebase.
+
+Rules:
+- **Never** declare a backend "works" based on `is_available()` alone.
+  Decode example.heic via the backend and verify dimensions + pixel
+  equivalence (zensim ≥ 95) against the rust backend.
+- **Never** trust a test-count delta. Verify what the tests actually do.
+- When fixing a "tests pass but it's wrong" bug, audit every other test
+  that uses the same pattern.
+
+### 2. Read existing docs before investigating
+
+Before "investigating" any bug, read:
+
+1. This file's "Known Bugs" and "Investigation Notes" sections.
+2. `CHANGELOG.md` `[Unreleased]` and the most recent shipped version.
+3. `git log --since="3 days ago" --oneline -30`.
+4. `git log --grep="<error fragment>" --all`.
+5. The relevant backend's `PORTING.md` if applicable.
+
+If the bug is already documented, continue the existing investigation —
+do not start a new note. Update in place.
+
+### 3. Test the test infrastructure
+
+When you add a test helper (corpus harness, fake fixtures, diff utility),
+exercise it against known-good and known-bad inputs before relying on it.
+A test helper bug is worse than the bug it's trying to catch — it
+poisons every test built on top.
+
+### 4. Documentation reflects what's verified, not what's intended
+
+Before claiming a feature "works" in CLAUDE.md, README, CHANGELOG, or a
+commit message:
+
+- Decode a real HEIC end-to-end via the path being claimed.
+- Compare against libheif / the rust backend / dec265 — at least two
+  external sources of truth.
+- For native backends, the bar is `compare_backends_via_zensim` reporting
+  zero failed files in the bundled corpus.
+
+Status markers (used in CLAUDE.md + CHANGELOG):
+
+| Marker | Meaning |
+|---|---|
+| ✓ Complete | Works end-to-end, ≥ 2 cross-checks, runtime CI green. |
+| ⚠ Partial | Some inputs work, others fail; failure mode documented. |
+| ⚙ In Progress | Implementation exists, not yet exercised against real input. |
+| ✗ Broken | Implementation exists, known-failing test pinned. |
+| ❌ Not Started | No implementation. |
+
+### 5. One commit, one complete fix
+
+Multiple `fix: correct X` commits for the same `X` within a day means the
+first fix was shipped without understanding. Before fixing a bug:
+
+- Trace every consumer of the wrong data.
+- Write a failing test that reproduces it.
+- Understand **why** the bug exists, not just where.
+
+After: verify with a different code path (e.g. the MF backend fix
+verified via both `mediafoundation_alone_decodes_when_required` and the
+corpus zensim diff).
+
+### 6. Investigation lives in ONE place
+
+CLAUDE.md "Investigation Notes" is the single source of truth. Do NOT
+create `STATUS.md`, `NOTES.md`, `INVESTIGATION-of-foo.md` files — use
+dated entries in CLAUDE.md instead. Multiple symptoms (UnexpectedEof,
+InvalidEnum, byte corruption) may share a root cause; link related
+findings instead of duplicating them.
+
+### 7. Read code before claiming you understand it
+
+Before committing an implementation:
+
+- Read it line by line. Verify variable names match semantics
+  (`crop_y` vs `coded_y`, `width` vs `coded_width`).
+- Check that doc comments match what the code does.
+- Verify every computed value is actually used (don't compute a value
+  and then not consume it).
+
+For ports (chromium → Rust):
+
+- Read the reference implementation completely before writing the port.
+- Don't assume "similar" Rust code does the same thing as the C++.
+- Verify matching inputs produce matching outputs (parity tests).
+
+### 8. Add tracing FIRST when writing bitstream / FFI code
+
+For new bitstream paths or native FFI: add diagnostic logging *before*
+shipping the first `unsafe` block. The `mf_diff` example was added
+*after* example.heic was discovered to be broken — should have been
+written the moment we started writing the MF unpacker. Future native
+backends (D3D11VA, VA-API real decode): write the equivalent of
+`mf_diff` for that backend before declaring decode "complete".
+
+### 9. Proof-by-Tests investigation (layered invariants)
+
+When debugging, build a stack of invariant tests from coarsest to finest
+and commit each one as it passes:
+
+- **Layer 0**: Does it compile? Do existing tests pass?
+- **Layer 1**: Does the new component roundtrip in isolation?
+- **Layer 2**: Does the byte-level serialization match the reference?
+- **Layer 3**: Does the full pipeline produce output a reference decoder
+  accepts? (libheif, dec265, the rust backend)
+- **Layer 4**: Is the output perceptually correct on real photos?
+  (zensim, SSIM2)
+
+When a layer passes, record it in this file with the test name and the
+commit hash. Don't re-investigate passed layers. Focus on the first
+failing layer — that's where the bug lives.
+
+### 10. Pre-commit checklist
+
+Run before every commit:
+
+```bash
+cargo fmt --all
+cargo clippy --workspace --features backend-rust -- -D warnings
+cargo test --features backend-rust,std --lib
+```
+
+For changes to MF / VT / MediaCodec / VA-API / D3D11VA backends, also
+verify the per-backend cross-compile path that matches CI:
+
+```bash
+cargo clippy -p heic-backend-mediafoundation --target x86_64-pc-windows-gnu -- -D warnings
+cargo clippy -p heic-backend-mediacodec --target aarch64-linux-android -- -D warnings
+```
+
+For MF-specific changes, run the Windows host tests via
+`pwsh.exe -File V:\heic-win-test.ps1` and confirm 5/5 dispatch tests pass.
+
+### 11. Bitstream / FFI tracing is permanent
+
+`examples/mf_diff.rs`, `examples/probe_backends.rs`, the zensim corpus
+diff harness — these stay in tree forever. They're the regression gate
+that catches the next "chroma offset of 4 pixels" bug. Do not remove
+them once they catch their first bug; they catch the next one too.
+
+## Reference: chromium HEVC source
+
+The chromium tree is sparse-checked-out at `~/work/chromium` with only
+the HEVC-relevant files materialized:
+
+* `media/gpu/h265_decoder.{cc,h}` — generic Accelerator-delegated
+  decoder loop.
+* `media/gpu/windows/d3d11_h265_accelerator.{cc,h}` — DXVA decode FFI.
+* `media/gpu/vaapi/h265_vaapi_video_decoder_delegate.{cc,h}` — libva
+  decode FFI.
+* `media/parsers/h265_parser.{cc,h}` — SPS/PPS/slice header parsing.
+
+Use these as reference when porting decoder paths. The
+`heic-backend-d3d11va/PORTING.md` and `heic-backend-vaapi/PORTING.md`
+guides cross-reference these files with line numbers.
+
 ## Project Overview
 
 Pure Rust HEIC/HEIF image decoder. No C/C++ dependencies.
