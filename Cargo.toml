@@ -163,6 +163,9 @@ name = "bench_parse_annexb"
 [[example]]
 name = "mf_diff"
 required-features = ["backend-rust", "backend-mediafoundation", "std"]
+[[example]]
+name = "probe_backends"
+required-features = ["backend-rust", "std"]
 # compare_support requires heic-wasm-rs (uncomment dep + add [[example]] to use)
 
 [[bench]]
