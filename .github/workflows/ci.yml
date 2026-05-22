@@ -142,9 +142,10 @@ jobs:
 
   backend-mediafoundation:
     # Cross-compile-check the heic-backend-mediafoundation crate for Windows
-    # targets. Runtime / decode tests await the parent-crate wiring + a
-    # Windows runner with HEVC Video Extensions installed (see spec.md).
-    name: backend-mediafoundation (${{ matrix.target }})
+    # targets. Server 2025 (windows-latest) is structurally unsupported by
+    # Microsoft's HEVC MFT — see spec.md. windows-11-arm (Win 11 Enterprise
+    # client) gets a full runtime test below.
+    name: backend-mediafoundation (compile, ${{ matrix.target }})
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -164,6 +165,48 @@ jobs:
         run: cargo build -p heic-backend-mediafoundation --target ${{ matrix.target }}
       - name: Clippy heic-backend-mediafoundation
         run: cargo clippy -p heic-backend-mediafoundation --target ${{ matrix.target }} -- -D warnings
+
+  backend-mediafoundation-runtime:
+    # Runtime end-to-end test on Windows 11 ARM client (the only
+    # GitHub-hosted Win11 client image) with HEVC Video Extensions
+    # side-loaded. Decodes example.heic via the MF MFT through the
+    # parent crate's allowlist dispatcher.
+    name: backend-mediafoundation (runtime, windows-11-arm)
+    runs-on: windows-11-arm
+    env:
+      HEIC_REQUIRE_MF_HEVC: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          lfs: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: backend-mediafoundation-runtime
+      - name: Install HEVC Video Extensions (free Device Manufacturer variant)
+        shell: pwsh
+        run: |
+          # The free 9N4WGH0Z6VHQ package is signed by Microsoft and freely
+          # redistributable per the EULA, so we can mirror it. The URL is
+          # injected via the HEVC_APPX_URL_ARM64 secret/var; the CI step
+          # is best-effort — if install fails we still build, and the
+          # runtime test skips itself (HEIC_REQUIRE_MF_HEVC governs).
+          $url = $env:HEVC_APPX_URL_ARM64
+          if (-not $url) {
+            Write-Host "::warning::HEVC_APPX_URL_ARM64 not set; skipping HEVC AppX install"
+            "HEIC_REQUIRE_MF_HEVC=0" | Out-File -FilePath $env:GITHUB_ENV -Append
+            exit 0
+          }
+          Invoke-WebRequest -Uri $url -OutFile hevc.appx
+          Add-AppxPackage -Path hevc.appx
+          Get-AppxPackage Microsoft.HEVCVideoExtension*
+        continue-on-error: true
+      - name: Test backend_dispatch
+        run: cargo test --test backend_dispatch --features "backend-rust,backend-mediafoundation,std" --target aarch64-pc-windows-msvc
+      - name: Test backend-mediafoundation smoke
+        run: cargo test -p heic-backend-mediafoundation --target aarch64-pc-windows-msvc
 
   backend-d3d11va:
     name: backend-d3d11va (${{ matrix.target }})
