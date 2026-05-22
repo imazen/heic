@@ -250,7 +250,12 @@ fn build_session(
 /// on most paths but some hardware variants require it to share buffers
 /// across processes. Including an empty dict is the documented "use
 /// defaults" form.
-fn build_destination_attrs(pixel_fmt: u32) -> Result<CFRetained<CFDictionary>, BackendError> {
+fn build_destination_attrs(
+    pixel_fmt: u32,
+) -> Result<
+    CFRetained<CFDictionary<objc2_core_foundation::CFString, objc2_core_foundation::CFType>>,
+    BackendError,
+> {
     let pixel_fmt_i32: i32 = pixel_fmt as i32;
     // SAFETY: CFNumber::new is the documented constructor; value_ptr
     // points to a live local of the matching CFNumberType.
@@ -264,22 +269,28 @@ fn build_destination_attrs(pixel_fmt: u32) -> Result<CFRetained<CFDictionary>, B
     .ok_or_else(|| BackendError::Decode("CFNumber::new(SInt32) returned null".into()))?;
     let empty_iosurface = empty_dict();
 
-    // CFDictionary::from_slices wraps the underlying CFDictionaryCreate.
     let keys: [&objc2_core_foundation::CFString; 2] = [
         kCVPixelBufferPixelFormatTypeKey,
         kCVPixelBufferIOSurfacePropertiesKey,
     ];
-    let values: [&objc2_core_foundation::CFType; 2] = [
-        pixel_fmt_num.as_ref().as_super(),
-        empty_iosurface.as_ref().as_super(),
-    ];
-    Ok(CFDictionary::from_slices(&keys[..], &values[..]))
+    // Each CF concrete type impls AsRef<CFType>; deref the CFRetained
+    // wrapper down to the concrete type and call `.as_ref()` to upcast.
+    let pixel_fmt_ref: &objc2_core_foundation::CFType =
+        <CFNumber as AsRef<objc2_core_foundation::CFType>>::as_ref(&pixel_fmt_num);
+    let empty_ref: &objc2_core_foundation::CFType =
+        <CFDictionary<objc2_core_foundation::CFType, objc2_core_foundation::CFType> as AsRef<
+            objc2_core_foundation::CFType,
+        >>::as_ref(&empty_iosurface);
+    let values: [&objc2_core_foundation::CFType; 2] = [pixel_fmt_ref, empty_ref];
+    Ok(CFDictionary::<
+        objc2_core_foundation::CFString,
+        objc2_core_foundation::CFType,
+    >::from_slices(&keys[..], &values[..]))
 }
 
-fn empty_dict() -> CFRetained<CFDictionary> {
-    let keys: [&objc2_core_foundation::CFType; 0] = [];
-    let values: [&objc2_core_foundation::CFType; 0] = [];
-    CFDictionary::from_slices(&keys[..], &values[..])
+fn empty_dict()
+-> CFRetained<CFDictionary<objc2_core_foundation::CFType, objc2_core_foundation::CFType>> {
+    CFDictionary::<objc2_core_foundation::CFType, objc2_core_foundation::CFType>::empty()
 }
 
 /// VT output callback. Stores the produced `CVPixelBuffer` (or the
@@ -563,8 +574,7 @@ fn read_pixel_buffer(
         }
     }
 
-    // SAFETY: must pair the Lock above.
-    unsafe { CVPixelBufferUnlockBaseAddress(pixel_buf, CVPixelBufferLockFlags::ReadOnly) };
+    CVPixelBufferUnlockBaseAddress(pixel_buf, CVPixelBufferLockFlags::ReadOnly);
 
     Ok(DecodedFrame {
         width: config.width,
