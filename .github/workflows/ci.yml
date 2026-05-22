@@ -68,6 +68,22 @@ jobs:
       - name: Check (backend-rust, no_std)
         run: cargo check --no-default-features --features backend-rust
 
+      # Default `cargo build` must fail with the compile_error gate
+      # directing users to pick a backend feature. Catches the case
+      # where someone accidentally puts `default = ["backend-rust"]`
+      # back in heic/Cargo.toml.
+      - name: Default build must error
+        run: |
+          if cargo build --no-default-features 2>&1 | tee /tmp/build-no-features.log; then
+            echo "::error::Default build succeeded; the compile_error gate is broken."
+            exit 1
+          fi
+          if ! grep -q "no HEVC backend is active" /tmp/build-no-features.log; then
+            echo "::error::compile_error message missing the user-facing helper string."
+            cat /tmp/build-no-features.log
+            exit 1
+          fi
+
       - name: Test (backend-rust + parallel)
         run: cargo test --lib --features "backend-rust,parallel"
 
