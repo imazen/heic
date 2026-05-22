@@ -442,32 +442,38 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 
 ## Known Bugs
 
-### D3D11VA real-decode: example.heic midgray (custom scaling lists; 2026-05-22)
+### D3D11VA real-decode: example.heic midgray (not scaling lists; 2026-05-22)
 
-Status: ⚠ Partial — 5 of 6 bundled corpus files + 9/9 iPhone HDR
-fixtures decode on the RTX 5070 via D3D11VA. One known failure:
+Status: ⚠ Partial — 5 of 6 bundled corpus files (now including apple-hdr
+near-bit-exact at max_delta=1) + 9/9 iPhone HDR fixtures decode on the
+RTX 5070 via D3D11VA. One known failure:
 
 - `tests/testdata/libheif-examples/example.heic` (1280×854, grid of
   6× 512×512 tiles, BT.709 limited): all 6 tiles return Y=128 /
   Cb=128 / Cr=128 midgray.
 
-Root cause: example.heic's SPS encodes custom (non-default) scaling
-lists, but our `from_sps_pps` only ever submits HEVC default lists
-via `default_qmatrix_hevc()`. The driver decodes the bitstream with
-defaults, mismatched against the actual encoded scaling lists →
-silent midgray output. The `INVERSE_QUANTIZATION_MATRIX` buffer
-submission added in `bd46f8b` already fixed apple-hdr (defaults
-match Apple's encoder) and all 9 iPhone HDR fixtures — only the
-libheif/x265 encoder used for example.heic appears to override
-defaults.
+Root cause: NOT scaling lists. After adding scaling-list propagation
+through `ParsedSps`/`ParsedPps` + `qmatrix_from_parsed()`,
+apple-hdr/hdr-sample.heic dropped from max_delta=49 to max_delta=1
+(near bit-exact). example.heic remains stuck at max_delta=255
+midgray — i.e. the GPU isn't writing decoded pixels at all,
+unrelated to scaling-list math.
 
-Fix path: extend the parent crate's HEVC bitstream parser to read
-`scaling_list_data` from the SPS/PPS, propagate the 4×4/8×8/16×16/32×32
-matrices through `ParsedSps`/`ParsedPps`, and copy them into the
-`DxvaQmatrixHevc` buffer in `Inner::decode` instead of synthesizing
-defaults. Chromium does this at
-`media/gpu/windows/d3d11_h265_accelerator.cc:557-650`. Bitstream
-parse is ~200 LOC + ~30 LOC of struct plumbing.
+Suspect: example.heic's SPS likely has features the picture-parameter
+populator misses entirely (not in `dwCodingParamToolFlags` /
+`dwCodingSettingPicturePropertyFlags`). Candidates:
+1. `pps_scaling_list_data_present_flag` bit position in
+   `dwCodingSettingPicturePropertyFlags` — chromium sets it; my
+   `from_sps_pps` doesn't.
+2. `sps_scaling_list_data_present_flag` bit position similar.
+3. `ucNumDeltaPocsOfRefRpsIdx` / `wNumBitsForShortTermRPSInSlice`
+   computed from slice header — currently 0; might mis-set for the
+   specific RPS structure example.heic encodes.
+
+Next session: add `HEIC_D3D11VA_DEBUG=1` `Inner::decode` dump of
+the picture-parameter buffer bytes for synth_q95 vs example.heic
+to diff at the byte level. The struct is 192 bytes — a side-by-side
+hex compare will reveal the specific field that differs.
 
 Reproduce: `HEIC_D3D11VA_HW=1 HEIC_D3D11VA_DEBUG=1 cargo test ...
 d3d11va_vs_rust_corpus_diff` to see the full corpus output;

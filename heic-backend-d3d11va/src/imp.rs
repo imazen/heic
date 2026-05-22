@@ -142,15 +142,24 @@ impl Inner {
         // requires the host to submit an INVERSE_QUANTIZATION_MATRIX
         // buffer — without it, drivers vary between "use defaults
         // internally" (NVIDIA on simple synth streams) and "produce
-        // mid-gray garbage" (NVIDIA on the example.heic tile shape).
-        // We currently submit HEVC default scaling lists when the
-        // bit is set; this matches the encoder behavior for the
-        // overwhelming majority of HEIC fixtures (libheif / x265
-        // rarely override defaults for stills). Custom-list
-        // propagation through the parser is a follow-up.
-        let iq_matrix = sps
-            .scaling_list_enabled_flag
-            .then(crate::dxva::default_qmatrix_hevc);
+        // mid-gray garbage" (NVIDIA on encoders that override defaults).
+        //
+        // Preference order per HEVC spec 7.4.3.3.1:
+        //   1. PPS scaling lists when pps_scaling_list_data_present_flag = 1
+        //   2. SPS scaling lists when sps_scaling_list_data_present_flag = 1
+        //   3. HEVC default scaling lists otherwise
+        let iq_matrix = if sps.scaling_list_enabled_flag {
+            let custom = config
+                .pps
+                .and_then(|p| p.pps_scaling_list.as_ref())
+                .or(sps.scaling_list.as_ref());
+            Some(custom.map_or_else(
+                crate::dxva::default_qmatrix_hevc,
+                crate::dxva::qmatrix_from_parsed,
+            ))
+        } else {
+            None
+        };
 
         // Submit + read back. The DecoderSession's per-frame flow
         // documented in `decoder::DecoderSession::submit_one_frame`

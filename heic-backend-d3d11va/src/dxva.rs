@@ -39,7 +39,7 @@
 // constructing a 35-field struct literal with `..Default::default()`.
 #![cfg_attr(test, allow(clippy::field_reassign_with_default))]
 
-use heic_core::sps::{ParsedPps, ParsedSps};
+use heic_core::sps::{HevcScalingListData, ParsedPps, ParsedSps};
 
 /// `DXVA_PicEntry_HEVC` — single entry in the reference picture list
 /// or the current-picture identifier.
@@ -246,16 +246,10 @@ pub const HEVC_DEFAULT_SCALING_LIST_INTER_8X8: [u8; 64] = [
 ];
 
 /// Build a [`DxvaQmatrixHevc`] populated with HEVC default scaling
-/// lists (spec tables 7-3 / 7-4). The caller passes this to the
-/// driver whenever `sps.scaling_list_enabled_flag` is true.
-///
-/// Implementation note: chromium's path also propagates custom
-/// scaling lists from `sps.scaling_list_data` / `pps.scaling_list_data`
-/// when `scaling_list_data_present_flag` is set — that requires the
-/// bitstream parser to read the actual table values. For the HEIC
-/// fixtures we ship, defaults match the encoders (libheif / x265
-/// rarely override scaling lists for stills); the custom-list path
-/// is a follow-up if any failing file uses non-default lists.
+/// lists (spec tables 7-3 / 7-4). Used as the fallback when the SPS /
+/// PPS doesn't override defaults (i.e. `scaling_list_data_present_flag
+/// = false` everywhere); see [`qmatrix_from_parsed`] for the
+/// custom-list path.
 #[must_use]
 pub fn default_qmatrix_hevc() -> DxvaQmatrixHevc {
     let mut q = DxvaQmatrixHevc::default();
@@ -278,6 +272,50 @@ pub fn default_qmatrix_hevc() -> DxvaQmatrixHevc {
     // DC coefficients default to 16.
     q.ucScalingListDCCoefSizeID2 = [16; 6];
     q.ucScalingListDCCoefSizeID3 = [16; 2];
+    q
+}
+
+/// Build a [`DxvaQmatrixHevc`] from a parsed [`HevcScalingListData`]
+/// (the encoder's actual scaling lists, parsed from
+/// `scaling_list_data()` in the SPS or PPS).
+///
+/// The shared [`HevcScalingListData`] stores lists by
+/// `[sizeId][matrixId][coef_index]`:
+///
+/// * sizeId 0 → 4×4 (16 valid coefs, the remaining 48 are zero)
+/// * sizeId 1 → 8×8 (64 coefs)
+/// * sizeId 2 → 16×16 (64 base coefs + DC)
+/// * sizeId 3 → 32×32 (64 base coefs + DC, only intra/inter Y)
+///
+/// DXVA stores 4×4 as exactly 16 bytes (truncates the 48-byte tail)
+/// and 32×32 with only matrixIds 0 (intra Y) and 1 (inter Y) — the
+/// shared layout follows the HEVC spec's `matrixId += 3` step, so
+/// matrixId 0 in DXVA's `ucScalingLists3[0]` corresponds to
+/// `lists[3][0]` and `ucScalingLists3[1]` to `lists[3][3]`.
+#[must_use]
+pub fn qmatrix_from_parsed(s: &HevcScalingListData) -> DxvaQmatrixHevc {
+    let mut q = DxvaQmatrixHevc::default();
+
+    // 4×4: copy the first 16 of the 64-entry slot per matrixId.
+    for m in 0..6 {
+        q.ucScalingLists0[m].copy_from_slice(&s.lists[0][m][..16]);
+    }
+    // 8×8: full 64 entries per matrixId.
+    for m in 0..6 {
+        q.ucScalingLists1[m] = s.lists[1][m];
+        q.ucScalingLists2[m] = s.lists[2][m];
+    }
+    // 32×32: DXVA only carries 2 matrices (intra Y, inter Y) — the
+    // HEVC spec stores them at matrixIds 0 and 3 of sizeId=3.
+    q.ucScalingLists3[0] = s.lists[3][0];
+    q.ucScalingLists3[1] = s.lists[3][3];
+    // DC coefficients for 16×16 / 32×32. The shared format stores
+    // them as `dc_coef[sizeId-2][matrixId]`. DXVA expects:
+    //   * `ucScalingListDCCoefSizeID2[matrixId]` for 16×16 (6 values)
+    //   * `ucScalingListDCCoefSizeID3[matrixId for matrixId=0,3]` for 32×32
+    q.ucScalingListDCCoefSizeID2 = s.dc_coef[0];
+    q.ucScalingListDCCoefSizeID3[0] = s.dc_coef[1][0];
+    q.ucScalingListDCCoefSizeID3[1] = s.dc_coef[1][3];
     q
 }
 

@@ -1,3 +1,7 @@
+// Tests use `let mut sps = ParsedSps::default(); sps.field = ...;` to set
+// up small fixtures field-by-field — that's clearer than struct literals.
+#![cfg_attr(test, allow(clippy::field_reassign_with_default))]
+
 //! Rust mirror of libva's `VAPictureParameterBufferHEVC` (from
 //! `va/va_dec_hevc.h`) plus an SPS-fields populator that builds it
 //! from a [`heic_core::sps::ParsedSps`].

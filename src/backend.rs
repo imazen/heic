@@ -549,6 +549,20 @@ fn populate_parsed_pps(pps: &crate::hevc::params::Pps) -> heic_core::sps::Parsed
         slice_segment_header_extension_present_flag: pps
             .slice_segment_header_extension_present_flag,
         loop_filter_across_tiles_enabled_flag,
+        pps_scaling_list: pps.pps_scaling_list.as_ref().map(convert_scaling_list),
+    }
+}
+
+/// Convert the rust-backend's internal `ScalingListData` to the
+/// shared `heic_core::sps::HevcScalingListData`. Layout is identical
+/// (same `[[[u8; 64]; 6]; 4]` + `[[u8; 6]; 2]` shape), so this is a
+/// per-field copy.
+fn convert_scaling_list(
+    s: &crate::hevc::params::ScalingListData,
+) -> heic_core::sps::HevcScalingListData {
+    heic_core::sps::HevcScalingListData {
+        lists: s.lists,
+        dc_coef: s.dc_coef,
     }
 }
 
@@ -616,6 +630,7 @@ fn populate_parsed_sps(sps: &crate::hevc::params::Sps) -> heic_core::sps::Parsed
         conf_win_offset: sps.conf_win_offset,
         sps_range_extension_flag: false,
         range_extension: SpsRangeExtension::default(),
+        scaling_list: sps.scaling_list.as_ref().map(convert_scaling_list),
     }
 }
 

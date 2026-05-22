@@ -1,3 +1,8 @@
+// Tests use `let mut sps = ParsedSps::default(); sps.field = ...;` to set
+// up small fixtures field-by-field — that's clearer in unit tests than
+// constructing a 35-field struct literal with `..Default::default()`.
+#![cfg_attr(test, allow(clippy::field_reassign_with_default))]
+
 //! Parsed-SPS field set that native backends need to populate their
 //! picture-parameter buffers (DXVA_PicParams_HEVC for D3D11VA,
 //! VAPictureParameterBufferHEVC for VA-API).
@@ -116,6 +121,11 @@ pub struct ParsedPps {
     /// `loop_filter_across_tiles_enabled_flag` (HEVC default = 1 per spec;
     /// only relevant when tiles enabled).
     pub loop_filter_across_tiles_enabled_flag: bool,
+    /// Custom scaling-list data when the PPS overrides the SPS's lists
+    /// (i.e. `pps_scaling_list_data_present_flag = true`). Native
+    /// backends prefer this over the SPS scaling lists when present
+    /// per HEVC spec 7.4.3.3.1.
+    pub pps_scaling_list: Option<HevcScalingListData>,
 }
 
 /// Parsed HEVC SPS fields required by native backends to populate
@@ -126,6 +136,54 @@ pub struct ParsedPps {
 /// The parent crate's `crate::hevc::params::parse_sps` populates this
 /// struct after stripping emulation-prevention bytes; native backends
 /// consume it through [`crate::HvccParams::sps`] without re-parsing.
+/// `ParsedSps` is defined below; `HevcScalingListData` comes between
+/// because [`ParsedSps::scaling_list`] holds an
+/// `Option<HevcScalingListData>` and we want the type in scope
+/// before the field.
+///
+/// HEVC scaling-list matrices parsed from an SPS / PPS
+/// `scaling_list_data()` block (spec 7.3.4).
+///
+/// Mirrors the layout of the rust backend's internal
+/// `crate::hevc::params::ScalingListData` so the parent crate can
+/// convert from one to the other without round-tripping through
+/// per-field copies. Native backends (DXVA, libva) need these
+/// matrices to populate their per-frame quantization buffers when
+/// the SPS overrides HEVC default scaling lists.
+///
+/// Storage layout matches HEVC spec table 7-3 / 7-4:
+/// * `lists[sizeId][matrixId][coef_index]`
+///   * sizeId: 0=4×4 (16 coefs valid), 1=8×8, 2=16×16, 3=32×32 (64 each)
+///   * matrixId: 0..=2 = intra Y/Cb/Cr, 3..=5 = inter Y/Cb/Cr
+/// * `dc_coef[sizeId-2][matrixId]` — DC coefficient for 16×16 / 32×32.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HevcScalingListData {
+    /// Scaling-list coefficients in raster scan, `[sizeId][matrixId][i]`.
+    /// sizeId 0 uses only the first 16 entries (4×4 matrices); 1/2/3
+    /// use all 64.
+    pub lists: [[[u8; 64]; 6]; 4],
+    /// DC coefficients for 16×16 (`dc_coef[0][matrixId]`) and 32×32
+    /// (`dc_coef[1][matrixId]`). Default value is 16 per HEVC spec.
+    pub dc_coef: [[u8; 6]; 2],
+}
+
+impl HevcScalingListData {
+    /// HEVC default scaling lists (flat 16s everywhere). Useful as a
+    /// constant fallback when callers can't compute defaults
+    /// themselves.
+    #[must_use]
+    pub const fn flat() -> Self {
+        Self {
+            lists: [[[16; 64]; 6]; 4],
+            dc_coef: [[16; 6]; 2],
+        }
+    }
+}
+
+/// Parsed HEVC SPS fields required by native backends. See the
+/// module-level docs above; the type doc comment moved up so it
+/// can refer to [`HevcScalingListData`] which is defined ahead of
+/// this struct.
 #[derive(Debug, Clone, Default)]
 // NOT `#[non_exhaustive]` because the parent crate populates this
 // struct via field-list literal; adding new fields is a heic-core
@@ -208,6 +266,11 @@ pub struct ParsedSps {
     /// `sps_range_extension_flag = true`). HEIC main-profile streams
     /// leave this `Default::default()`.
     pub range_extension: SpsRangeExtension,
+    /// Custom scaling-list data when the SPS overrides HEVC defaults
+    /// (i.e. `sps_scaling_list_data_present_flag = true`). `None`
+    /// means the encoder is using HEVC default scaling lists, in
+    /// which case backends can use the spec defaults directly.
+    pub scaling_list: Option<HevcScalingListData>,
 }
 
 /// SPS Range Extension fields — populated only when
