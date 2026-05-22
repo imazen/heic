@@ -294,7 +294,16 @@ pub(crate) fn decode_one_tile(
     }
 
     // Slow path: build the HvccParams view once and walk the allowlist.
+    // Parse the first SPS NAL we find to extract VUI color metadata —
+    // without it, native backends would have to guess (BT.709 vs BT.601
+    // vs BT.2020), producing color-shifted output for HDR / non-default
+    // streams. The rust backend's SPS parser is reused via the in-crate
+    // `crate::hevc::params::parse_sps`; if no SPS or VUI is present we
+    // fall back to the "unspecified" CICP value 2 which downstream maps
+    // to BT.601 per the existing color-conversion table.
     let nal_refs: Vec<&[u8]> = config.nal_units.iter().map(|n| n.as_slice()).collect();
+    let (full_range, matrix_coeffs, color_primaries, transfer_characteristics) =
+        extract_vui_color(config);
     let params = HvccParams {
         width,
         height,
@@ -303,6 +312,10 @@ pub(crate) fn decode_one_tile(
         bit_depth_luma: config.bit_depth_luma_minus8 + 8,
         bit_depth_chroma: config.bit_depth_chroma_minus8 + 8,
         chroma_format_idc: config.chroma_format,
+        full_range,
+        matrix_coeffs,
+        color_primaries,
+        transfer_characteristics,
     };
 
     let mut last_err: Option<String> = None;
@@ -342,6 +355,37 @@ pub(crate) fn decode_one_tile(
     Err(at!(HeicError::AllBackendsFailed(
         last_err.unwrap_or_else(|| "no backends were available".into())
     )))
+}
+
+/// Parse the first SPS NAL we find in `config.nal_units` and return its
+/// VUI color metadata as `(full_range, matrix, primaries, transfer)`.
+///
+/// Falls back to `(false, 2, 2, 2)` ("unspecified") when no SPS is present
+/// or the SPS parser rejects the payload — that's the same default the
+/// rust decoder uses when VUI is absent, so output stays consistent.
+fn extract_vui_color(config: &HevcDecoderConfig) -> (bool, u8, u8, u8) {
+    for nal_blob in &config.nal_units {
+        // Bytes 0..2 are the NAL header; NalType is in the high 6 bits of
+        // byte 0. SPS_NUT = 33.
+        if nal_blob.len() < 3 {
+            continue;
+        }
+        let nal_type = (nal_blob[0] >> 1) & 0x3F;
+        if nal_type != 33 {
+            continue;
+        }
+        // SPS payload starts after the 2-byte NAL header.
+        let payload = &nal_blob[2..];
+        if let Ok(sps) = crate::hevc::params::parse_sps(payload) {
+            return (
+                sps.video_full_range_flag,
+                sps.matrix_coeffs,
+                sps.color_primaries,
+                sps.transfer_characteristics,
+            );
+        }
+    }
+    (false, 2, 2, 2)
 }
 
 #[cfg(test)]

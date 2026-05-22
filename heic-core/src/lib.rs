@@ -171,6 +171,27 @@ pub struct HvccParams<'a> {
 
     /// Chroma format idc: 0=monochrome, 1=4:2:0, 2=4:2:2, 3=4:4:4.
     pub chroma_format_idc: u8,
+
+    /// Color metadata sourced from the SPS VUI (or sensible defaults when
+    /// `vui_parameters_present_flag` is 0). Backends populate the
+    /// returned [`DecodedFrame`]'s color fields from this so the parent
+    /// crate's YCbCr→RGB conversion applies the correct matrix /
+    /// primaries / transfer / range without re-parsing the bitstream.
+    ///
+    /// Values follow ITU-T H.273 / CICP:
+    /// - `full_range`: VUI `video_full_range_flag` (false = limited
+    ///   [16,235], true = full [0,255]).
+    /// - `matrix_coeffs`: 1=BT.709, 5/6=BT.601, 9=BT.2020, 2=unspecified.
+    /// - `color_primaries`: 1=BT.709, 9=BT.2020, 12=Display P3, 2=unspecified.
+    /// - `transfer_characteristics`: 1=BT.709, 13=sRGB, 16=PQ, 18=HLG.
+    pub full_range: bool,
+    /// Matrix coefficients (CICP). See [`HvccParams::full_range`] for
+    /// the meaning of the field.
+    pub matrix_coeffs: u8,
+    /// Color primaries (CICP).
+    pub color_primaries: u8,
+    /// Transfer characteristics (CICP).
+    pub transfer_characteristics: u8,
 }
 
 /// HEVC backend implementation.

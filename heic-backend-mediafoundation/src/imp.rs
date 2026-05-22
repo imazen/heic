@@ -385,10 +385,14 @@ fn decode_one_frame(
         crop_top: 0,
         crop_bottom: 0,
         alpha_plane: None,
-        full_range: false,
-        matrix_coeffs: 2,
-        color_primaries: 2,
-        transfer_characteristics: 2,
+        // VUI color metadata is parsed once by the parent crate from the
+        // SPS and threaded in via HvccParams — using the wrong values here
+        // produces color-shifted output that's perceptually obvious
+        // (BT.601 vs BT.709 vs BT.2020 swap, limited vs full range).
+        full_range: config.full_range,
+        matrix_coeffs: config.matrix_coeffs,
+        color_primaries: config.color_primaries,
+        transfer_characteristics: config.transfer_characteristics,
         deblock_flags: Vec::new(),
         deblock_stride: 0,
         qp_map: Vec::new(),
