@@ -122,6 +122,64 @@ fn mediafoundation_vs_rust_corpus_diff() {
     report.assert_clean("MF↔Rust corpus");
 }
 
+/// VideoToolbox on Apple: decode example.heic via the VT backend only
+/// and assert dimensions match. VT is documented available on every
+/// macOS 10.13+ / iOS 11+ release, so this is a no-skip test on Apple
+/// targets — if it fails on CI, the VT FFI has regressed.
+#[cfg(all(
+    feature = "backend-videotoolbox",
+    any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "visionos"
+    )
+))]
+#[test]
+fn videotoolbox_decodes_example() {
+    let data = read_example();
+    let output = DecoderConfig::new()
+        .with_backend(Backend::VideoToolbox)
+        .decode(&data, PixelLayout::Rgba8)
+        .expect("VideoToolbox should decode example.heic on Apple targets");
+    assert_eq!(output.width, 1280);
+    assert_eq!(output.height, 854);
+    assert_eq!(output.data.len(), 1280 * 854 * 4);
+}
+
+/// VideoToolbox vs Rust corpus diff via zensim-regress. Same tolerance
+/// as the MF↔Rust comparison since both native decoders apply similar
+/// chroma upsampling + matrix-coefficient rounding.
+#[cfg(all(
+    feature = "backend-rust",
+    feature = "backend-videotoolbox",
+    any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "visionos"
+    )
+))]
+#[test]
+fn videotoolbox_vs_rust_corpus_diff() {
+    use zensim_regress::testing::RegressionTolerance;
+    let tolerance = RegressionTolerance::off_by_one()
+        .with_max_delta(32)
+        .with_max_pixels_different(1.0)
+        .with_min_similarity(40.0);
+    let report = common::compare_backends_via_zensim(
+        Backend::Rust,
+        Backend::VideoToolbox,
+        &tolerance,
+        common::CORPUS_DIRS,
+    );
+    eprintln!(
+        "VT↔Rust zensim diff: {}/{} matched",
+        report.matched, report.total
+    );
+    report.assert_clean("VT↔Rust corpus");
+}
+
 /// Empty allowlist must produce `HeicError::NoBackendSelected`.
 #[cfg(feature = "backend-rust")]
 #[test]
