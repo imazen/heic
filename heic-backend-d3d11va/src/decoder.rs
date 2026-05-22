@@ -234,6 +234,160 @@ impl DecoderSession {
     pub fn matches(&self, width: u32, height: u32, bit_depth: u8) -> bool {
         self.width == width && self.height == height && self.bit_depth == bit_depth
     }
+
+    /// Submit one HEVC access unit to the driver.
+    ///
+    /// `pic_params` is the SPS + PPS-populated picture-parameter
+    /// buffer. `slice_data_annexb` is the slice NAL bytes in Annex-B
+    /// form (start-code-prefixed; we use Annex-B because that matches
+    /// what `DxvaSliceHevcShort` references via `SliceBytesIndex = 0`).
+    ///
+    /// On success the decoded frame lands in [`Self::output_texture`];
+    /// callers can `CopySubresourceRegion` it into a CPU-readable
+    /// staging texture and `Map` to read NV12 / P010 bytes.
+    ///
+    /// This is the "first attempt" decode entry point — it submits one
+    /// slice in DXVA short format and calls `DecoderEndFrame` to flush.
+    /// Multi-slice / multi-tile pictures need richer slice control
+    /// buffer construction (one `DxvaSliceHevcShort` per slice + the
+    /// concatenated bitstream); that lands in a follow-up.
+    pub fn submit_one_frame(
+        &self,
+        pic_params: &crate::dxva::DxvaPicParamsHevc,
+        slice_data_annexb: &[u8],
+    ) -> Result<(), BackendError> {
+        // 1. DecoderBeginFrame — locks the output view for write.
+        // SAFETY: decoder + output_view are live for the session.
+        unsafe {
+            self.video_context
+                .DecoderBeginFrame(&self.decoder, &self.output_view, 0, None)
+        }
+        .map_err(|e| BackendError::Decode(format!("DecoderBeginFrame: {e}")))?;
+
+        // 2. PICTURE_PARAMETERS buffer.
+        copy_into_buffer(
+            &self.video_context,
+            &self.decoder,
+            D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS,
+            // SAFETY: DxvaPicParamsHevc is #[repr(C)] + Copy; safe to
+            // view its bytes for a memcpy into the GPU-side buffer.
+            unsafe {
+                core::slice::from_raw_parts(
+                    (pic_params as *const _) as *const u8,
+                    core::mem::size_of::<crate::dxva::DxvaPicParamsHevc>(),
+                )
+            },
+        )?;
+
+        // 3. BITSTREAM buffer — raw Annex-B bytes.
+        copy_into_buffer(
+            &self.video_context,
+            &self.decoder,
+            D3D11_VIDEO_DECODER_BUFFER_BITSTREAM,
+            slice_data_annexb,
+        )?;
+
+        // 4. SLICE_CONTROL buffer — one DXVA_Slice_HEVC_Short
+        // pointing at the whole bitstream. struct layout:
+        // BSNALunitDataLocation (UINT), SliceBytesInBuffer (UINT),
+        // wBadSliceChopping (USHORT).
+        #[repr(C)]
+        struct DxvaSliceHevcShort {
+            bs_nalu_data_location: u32,
+            slice_bytes_in_buffer: u32,
+            w_bad_slice_chopping: u16,
+        }
+        let slice = DxvaSliceHevcShort {
+            bs_nalu_data_location: 0,
+            slice_bytes_in_buffer: u32::try_from(slice_data_annexb.len()).unwrap_or(u32::MAX),
+            w_bad_slice_chopping: 0,
+        };
+        copy_into_buffer(
+            &self.video_context,
+            &self.decoder,
+            D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL,
+            // SAFETY: DxvaSliceHevcShort is #[repr(C)] + lives until
+            // ReleaseDecoderBuffer copies its bytes.
+            unsafe {
+                core::slice::from_raw_parts(
+                    (&slice as *const _) as *const u8,
+                    core::mem::size_of::<DxvaSliceHevcShort>(),
+                )
+            },
+        )?;
+
+        // 5. SubmitDecoderBuffers with the three buffer descriptors.
+        let buffer_descs = [
+            buffer_desc(
+                D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS,
+                core::mem::size_of::<crate::dxva::DxvaPicParamsHevc>() as u32,
+            ),
+            buffer_desc(
+                D3D11_VIDEO_DECODER_BUFFER_BITSTREAM,
+                u32::try_from(slice_data_annexb.len()).unwrap_or(u32::MAX),
+            ),
+            buffer_desc(
+                D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL,
+                core::mem::size_of::<DxvaSliceHevcShort>() as u32,
+            ),
+        ];
+        // SAFETY: buffer_descs is alive through the call.
+        unsafe {
+            self.video_context
+                .SubmitDecoderBuffers(&self.decoder, &buffer_descs)
+        }
+        .map_err(|e| BackendError::Decode(format!("SubmitDecoderBuffers: {e}")))?;
+
+        // 6. DecoderEndFrame flushes the decoder for this AU.
+        // SAFETY: decoder + context still alive.
+        unsafe { self.video_context.DecoderEndFrame(&self.decoder) }
+            .map_err(|e| BackendError::Decode(format!("DecoderEndFrame: {e}")))?;
+        Ok(())
+    }
+}
+
+/// Helper: GetDecoderBuffer → memcpy `data` → ReleaseDecoderBuffer.
+fn copy_into_buffer(
+    ctx: &ID3D11VideoContext,
+    decoder: &ID3D11VideoDecoder,
+    buffer_type: D3D11_VIDEO_DECODER_BUFFER_TYPE,
+    data: &[u8],
+) -> Result<(), BackendError> {
+    let mut buf_size: u32 = 0;
+    let mut buf_ptr: *mut core::ffi::c_void = core::ptr::null_mut();
+    // SAFETY: GetDecoderBuffer returns a writable pointer + size for
+    // the requested buffer slot.
+    unsafe { ctx.GetDecoderBuffer(decoder, buffer_type, &mut buf_size, &mut buf_ptr) }
+        .map_err(|e| BackendError::Decode(format!("GetDecoderBuffer({buffer_type:?}): {e}")))?;
+    if buf_ptr.is_null() || (data.len() as u32) > buf_size {
+        // SAFETY: pairs with GetDecoderBuffer; harmless on null.
+        unsafe { ctx.ReleaseDecoderBuffer(decoder, buffer_type) }
+            .map_err(|e| BackendError::Decode(format!("ReleaseDecoderBuffer: {e}")))?;
+        return Err(BackendError::Decode(format!(
+            "decoder buffer too small for {buffer_type:?}: have {buf_size}, need {}",
+            data.len()
+        )));
+    }
+    // SAFETY: buf_ptr valid for buf_size bytes; we write data.len() ≤ buf_size.
+    unsafe {
+        core::ptr::copy_nonoverlapping(data.as_ptr(), buf_ptr as *mut u8, data.len());
+    }
+    // SAFETY: pairs with the Get above.
+    unsafe { ctx.ReleaseDecoderBuffer(decoder, buffer_type) }
+        .map_err(|e| BackendError::Decode(format!("ReleaseDecoderBuffer: {e}")))
+}
+
+fn buffer_desc(
+    buffer_type: D3D11_VIDEO_DECODER_BUFFER_TYPE,
+    data_size: u32,
+) -> windows::Win32::Graphics::Direct3D11::D3D11_VIDEO_DECODER_BUFFER_DESC {
+    use windows::Win32::Graphics::Direct3D11::D3D11_VIDEO_DECODER_BUFFER_DESC;
+    // SAFETY: D3D11_VIDEO_DECODER_BUFFER_DESC is plain POD; zeroed is
+    // a valid initial state (all reserved fields must be 0).
+    let mut desc: D3D11_VIDEO_DECODER_BUFFER_DESC = unsafe { core::mem::zeroed() };
+    desc.BufferType = buffer_type;
+    desc.DataSize = data_size;
+    desc
 }
 
 /// Create a hardware D3D11 device (no software fallback — HEVC decode
