@@ -1,57 +1,50 @@
 //! Android MediaCodec HEVC decoder backend for `heic`.
 //!
-//! Wraps the NDK `AMediaCodec` C API (`createDecoderByType("video/hevc")`,
-//! `configure` with null surface, byte-buffer or `AImage` output) and
-//! exposes it through the [`heic_core::HevcBackend`] trait, so the parent
-//! `heic` crate can route HEIC tile decoding through Android's built-in
-//! HEVC decoder.
-//!
-//! # Availability
-//!
-//! Every Android device since API 21 (Lollipop, 2014) ships
-//! `c2.android.hevc.decoder` as a software HEVC fallback at minimum;
-//! modern devices have hardware decoders surfaced via the same API.
-//! 10-bit Main10 / `COLOR_FormatYUVP010` is reliable from API 33 onward.
+//! Wraps the NDK `AMediaCodec` C API and exposes it through the
+//! [`heic_core::HevcBackend`] trait, so the parent `heic` crate can route
+//! HEIC tile decoding through Android's built-in HEVC decoder. Every
+//! shipping Android (API 21+) carries `c2.android.hevc.decoder` as a
+//! software fallback at minimum; modern devices surface a hardware
+//! decoder via the same API.
 //!
 //! # NAL format
 //!
 //! MediaCodec expects **Annex B** start-code-prefixed NAL units, both for
 //! `csd-0` (VPS+SPS+PPS concatenated) and for each input access unit. The
-//! parent crate's hvcC length-prefixed slices are converted at the call
-//! site via [`heic_core::nal::hvcc_to_annexb`].
+//! parent crate's hvcC length-prefixed slices are converted on the fly
+//! via [`heic_core::nal::hvcc_to_annexb`].
 //!
-//! # Status — skeleton
+//! # Threading
 //!
-//! This commit lands the crate structure and the `HevcBackend` trait
-//! implementation as a stub that returns
-//! [`BackendError::Unavailable`](heic_core::BackendError::Unavailable).
-//! The real FFI (`AMediaCodec_createDecoderByType`, `AMediaFormat`
-//! configuration, the queue/dequeue loop, `AMediaCodec_getOutputImage` for
-//! API 33+ with byte-buffer fallback for older API levels, NV12/NV21/I420/
-//! YV12 / P010 → planar u16 unpack) lands in a follow-up PR with Android
-//! emulator CI verification (per the spec's `reactivecircus/android-emulator-runner@v2`
-//! setup).
+//! `AMediaCodec` is documented thread-safe across instances but not
+//! within one — single-threaded-per-instance, like the Windows MF
+//! transform. Callers that decode tile-grids in parallel construct one
+//! [`MediaCodecBackend`] per worker thread.
 
 #![cfg_attr(not(target_os = "android"), allow(dead_code, unused_imports))]
 
 use heic_core::{BackendError, DecodedFrame, HevcBackend, HvccParams};
 
 /// Android MediaCodec HEVC decoder backend.
+///
+/// Constructed via [`Self::new`]. Caches the `AMediaCodec` instance + the
+/// configured `AMediaFormat` across decode calls and reuses them when
+/// subsequent decodes have matching dimensions / bit-depth.
 #[derive(Default)]
 pub struct MediaCodecBackend {
     #[cfg(target_os = "android")]
-    _placeholder: (),
+    inner: imp::Inner,
 }
 
-// SAFETY: `AMediaCodec` instances are documented to be safe to use from any
-// thread as long as a single instance is not called concurrently from
-// multiple threads — same single-threaded-per-instance contract as the
-// Windows MF backend. For the skeleton, the wrapper is trivially Send.
+// SAFETY: `AMediaCodec` is single-instance-single-thread per the NDK docs.
+// The wrapper owns the codec exclusively, so it's safe to send the wrapper
+// across threads as long as each thread serializes its own calls.
+#[cfg(target_os = "android")]
 unsafe impl Send for MediaCodecBackend {}
 
 impl MediaCodecBackend {
-    /// Create a new MediaCodec backend instance. The underlying `AMediaCodec`
-    /// is created lazily on the first [`HevcBackend::decode_hevc`] call.
+    /// Create a new MediaCodec backend. The `AMediaCodec` is allocated
+    /// lazily on the first decode.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -64,10 +57,18 @@ impl HevcBackend for MediaCodecBackend {
     }
 
     fn is_available(&self) -> bool {
-        // Real implementation will use `AMediaCodecList` (API 28+) to look
-        // up `video/hevc` decoder capabilities; falling back to the
-        // "construct + start, then teardown" probe on older API levels.
-        false
+        #[cfg(target_os = "android")]
+        {
+            // Lazy probe: the actual `AMediaCodec_createDecoderByType` call
+            // happens on decode. Returning true here is fine — the
+            // dispatcher catches a real-world unavailable case via the
+            // fallthrough path.
+            true
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            false
+        }
     }
 
     fn decode_hevc(
@@ -76,9 +77,19 @@ impl HevcBackend for MediaCodecBackend {
         image_data: &[u8],
         stop: &dyn enough::Stop,
     ) -> Result<DecodedFrame, BackendError> {
-        let _ = (config, image_data, stop);
-        Err(BackendError::Unavailable(
-            "heic-backend-mediacodec: FFI implementation pending (skeleton crate)",
-        ))
+        #[cfg(target_os = "android")]
+        {
+            self.inner.decode(config, image_data, stop)
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = (config, image_data, stop);
+            Err(BackendError::Unavailable(
+                "heic-backend-mediacodec: not compiled for this target",
+            ))
+        }
     }
 }
+
+#[cfg(target_os = "android")]
+mod imp;
