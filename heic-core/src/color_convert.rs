@@ -405,3 +405,81 @@ pub(crate) fn scalar_pixel(
     rgb[*out_idx + 2] = b.clamp(0, 255) as u8;
     *out_idx += 3;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    /// Pure-black YCbCr (Y=16, Cb=Cr=128 for BT.709 limited range) should
+    /// convert to pure-black RGB (0,0,0). Regression gate for the
+    /// matrix-coefficient + y_bias math.
+    #[test]
+    fn convert_420_black_bt709_limited() {
+        let y = vec![16u16; 4]; // 2x2
+        let cb = vec![128u16; 1]; // 1x1 (4:2:0)
+        let cr = vec![128u16; 1];
+        let mut rgb = vec![0u8; 4 * 3];
+        convert_420_to_rgb(
+            &y, &cb, &cr, 2,     /*y_stride*/
+            1,     /*c_stride*/
+            0,     /*y_start*/
+            2,     /*y_end*/
+            0,     /*x_start*/
+            2,     /*x_end*/
+            0,     /*shift*/
+            false, /*limited range*/
+            1,     /*BT.709*/
+            &mut rgb,
+        );
+        // All four pixels = (0, 0, 0)
+        assert_eq!(rgb, vec![0u8; 12]);
+    }
+
+    /// Pure-white YCbCr (Y=235, Cb=Cr=128 for BT.709 limited range) →
+    /// pure-white RGB (255, 255, 255).
+    #[test]
+    fn convert_420_white_bt709_limited() {
+        let y = vec![235u16; 4];
+        let cb = vec![128u16; 1];
+        let cr = vec![128u16; 1];
+        let mut rgb = vec![0u8; 4 * 3];
+        convert_420_to_rgb(&y, &cb, &cr, 2, 1, 0, 2, 0, 2, 0, false, 1, &mut rgb);
+        for px in rgb.chunks_exact(3) {
+            assert_eq!(px, [255, 255, 255]);
+        }
+    }
+
+    /// Pure-red BT.709 limited range: Y=63, Cb=102, Cr=240 → RGB(255, 0, 0).
+    /// Values from the ITU-T H.273 Table 4 BT.709 inverse matrix.
+    #[test]
+    fn convert_420_red_bt709_limited() {
+        let y = vec![63u16; 4];
+        let cb = vec![102u16; 1];
+        let cr = vec![240u16; 1];
+        let mut rgb = vec![0u8; 4 * 3];
+        convert_420_to_rgb(&y, &cb, &cr, 2, 1, 0, 2, 0, 2, 0, false, 1, &mut rgb);
+        // Allow ±2 channel-steps for fixed-point rounding noise.
+        for px in rgb.chunks_exact(3) {
+            assert!(
+                px[0] >= 250 && px[1] <= 5 && px[2] <= 5,
+                "expected red ~(255,0,0), got {:?}",
+                px
+            );
+        }
+    }
+
+    /// Full-range BT.601 gray: Y=128, Cb=Cr=128 → RGB(128, 128, 128).
+    /// Exercises both the full_range path and the matrix_coeffs=5 fallback.
+    #[test]
+    fn convert_420_gray_bt601_full() {
+        let y = vec![128u16; 4];
+        let cb = vec![128u16; 1];
+        let cr = vec![128u16; 1];
+        let mut rgb = vec![0u8; 4 * 3];
+        convert_420_to_rgb(&y, &cb, &cr, 2, 1, 0, 2, 0, 2, 0, true, 5, &mut rgb);
+        for px in rgb.chunks_exact(3) {
+            assert_eq!(px, [128, 128, 128]);
+        }
+    }
+}
