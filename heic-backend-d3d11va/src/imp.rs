@@ -45,20 +45,6 @@ impl Inner {
         image_data: &[u8],
         _stop: &dyn enough::Stop,
     ) -> Result<DecodedFrame, BackendError> {
-        let coded_w = config.coded_width.max(config.width);
-        let coded_h = config.coded_height.max(config.height);
-        let bit_depth = config.bit_depth_luma;
-
-        // Rebuild on dimension / bit-depth mismatch (or first call).
-        if self
-            .cached
-            .as_ref()
-            .is_none_or(|s| !s.matches(coded_w, coded_h, bit_depth))
-        {
-            self.cached = Some(DecoderSession::new(coded_w, coded_h, bit_depth)?);
-        }
-        let session = self.cached.as_ref().expect("cached set above");
-
         // ParsedSps is mandatory — without it we can't fill the
         // picture-parameter buffer correctly. Fail loud rather than
         // submitting garbage.
@@ -70,6 +56,25 @@ impl Inner {
                     .to_string(),
             )
         })?;
+        // Use the SPS-declared coded dimensions directly. Picking
+        // anything else (e.g. the ispe-derived visible size) makes
+        // the texture and PicWidthInMinCbsY disagree, and the driver
+        // silently produces wrong content when the SPS coded size
+        // exceeds the texture (it crops to the texture instead of
+        // padding outward as the spec requires).
+        let coded_w = sps.pic_width_in_luma_samples;
+        let coded_h = sps.pic_height_in_luma_samples;
+        let bit_depth = config.bit_depth_luma;
+
+        // Rebuild on dimension / bit-depth mismatch (or first call).
+        if self
+            .cached
+            .as_ref()
+            .is_none_or(|s| !s.matches(coded_w, coded_h, bit_depth))
+        {
+            self.cached = Some(DecoderSession::new(coded_w, coded_h, bit_depth)?);
+        }
+        let session = self.cached.as_ref().expect("cached set above");
         let mut pic_params = crate::dxva::from_sps_pps(sps, config.pps);
         // Per-picture fields the SPS/PPS populator can't fill in:
         //
@@ -111,6 +116,8 @@ impl Inner {
         let mut bitstream: Vec<u8> = Vec::with_capacity(image_data.len() + 64);
         let ls = config.length_size as usize;
         let mut i = 0;
+        let mut nal_count = 0u32;
+        let mut nal_type_first = 0u8;
         while i + ls <= image_data.len() {
             let mut nal_len: usize = 0;
             for &b in &image_data[i..i + ls] {
@@ -122,9 +129,13 @@ impl Inner {
                     "malformed hvcC length-prefixed slice data".into(),
                 ));
             }
+            if nal_count == 0 && nal_len > 0 {
+                nal_type_first = (image_data[i] >> 1) & 0x3F;
+            }
             bitstream.extend_from_slice(&[0, 0, 1]); // 3-byte start code per chromium
             bitstream.extend_from_slice(&image_data[i..i + nal_len]);
             i += nal_len;
+            nal_count += 1;
         }
 
         // Submit + read back. The DecoderSession's per-frame flow
@@ -138,6 +149,62 @@ impl Inner {
             config.crop_left,
             config.crop_top,
         )?;
+
+        if std::env::var_os("HEIC_D3D11VA_DEBUG").is_some() {
+            let y0: Vec<_> = planes.y.iter().take(16).collect();
+            let cb0: Vec<_> = planes.cb.iter().take(8).collect();
+            let cr0: Vec<_> = planes.cr.iter().take(8).collect();
+            eprintln!(
+                "D3D11VA decode: {}x{} bd={} chroma_fmt={} \
+                 spsW={} spsH={} crop_lrtb=({},{},{},{}) \
+                 PicWHinMinCbs=({},{}) MinCbLog2={} \
+                 amp={} sao={} strong_smooth={} \
+                 pcm={} scaling={} \
+                 nals={} first_nal_type={} input_bytes={} \
+                 num_tile_cols={} num_tile_rows={} \
+                 y0={:?} cb0={:?} cr0={:?}",
+                config.width,
+                config.height,
+                bit_depth,
+                config.chroma_format_idc,
+                sps.pic_width_in_luma_samples,
+                sps.pic_height_in_luma_samples,
+                config.crop_left,
+                config.crop_right,
+                config.crop_top,
+                config.crop_bottom,
+                sps.pic_width_in_min_cbs_y(),
+                sps.pic_height_in_min_cbs_y(),
+                sps.min_cb_log2_size_y(),
+                sps.amp_enabled_flag,
+                sps.sample_adaptive_offset_enabled_flag,
+                sps.strong_intra_smoothing_enabled_flag,
+                sps.pcm_enabled_flag,
+                sps.scaling_list_enabled_flag,
+                nal_count,
+                nal_type_first,
+                image_data.len(),
+                config
+                    .pps
+                    .map_or(0, |p| u32::from(p.num_tile_columns_minus1) + 1),
+                config
+                    .pps
+                    .map_or(0, |p| u32::from(p.num_tile_rows_minus1) + 1),
+                y0,
+                cb0,
+                cr0,
+            );
+            eprintln!(
+                "  pps: wpp={} tiles_en={} tq_bypass={} sdh={} cabac_init={}",
+                config
+                    .pps
+                    .is_some_and(|p| p.entropy_coding_sync_enabled_flag),
+                config.pps.is_some_and(|p| p.tiles_enabled_flag),
+                config.pps.is_some_and(|p| p.transquant_bypass_enabled_flag),
+                config.pps.is_some_and(|p| p.sign_data_hiding_enabled_flag),
+                config.pps.is_some_and(|p| p.cabac_init_present_flag),
+            );
+        }
 
         Ok(DecodedFrame {
             width: config.width,
