@@ -43,14 +43,14 @@ use std::vec::Vec;
 
 use heic_core::{BackendError, DecodedFrame, HvccParams};
 
-use objc2_core_foundation::{CFRetained, CFString};
+use objc2_core_foundation::{CFDictionary, CFNumber, CFNumberType, CFRetained};
 use objc2_core_media::{
-    CMBlockBuffer, CMBlockBufferFlags, CMFormatDescription, CMSampleBuffer, CMSampleTimingInfo,
-    CMTime, CMVideoFormatDescriptionCreateFromHEVCParameterSets,
+    CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMSampleTimingInfo, CMTime, CMTimeFlags,
+    CMVideoFormatDescriptionCreateFromHEVCParameterSets,
 };
 use objc2_core_video::{
-    CVImageBuffer, CVPixelBuffer, CVPixelBufferLockFlags,
-    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+    CVImageBuffer, CVPixelBuffer, CVPixelBufferLockFlags, kCVPixelBufferIOSurfacePropertiesKey,
+    kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
     kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
 };
 use objc2_video_toolbox::{
@@ -250,95 +250,36 @@ fn build_session(
 /// on most paths but some hardware variants require it to share buffers
 /// across processes. Including an empty dict is the documented "use
 /// defaults" form.
-fn build_destination_attrs(
-    pixel_fmt: u32,
-) -> Result<CFRetained<objc2_core_foundation::CFDictionary>, BackendError> {
-    use objc2_core_foundation::{
-        CFDictionary, CFNumber, kCFAllocatorDefault, kCFTypeDictionaryKeyCallBacks,
-        kCFTypeDictionaryValueCallBacks,
-    };
-    use objc2_core_video::{
-        kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferPixelFormatTypeKey,
-    };
-
-    // Build the keys and values arrays.
-    let pixel_fmt_num: CFRetained<CFNumber> = CFNumber::new_i32(pixel_fmt as i32);
-    let empty_iosurface = empty_dict()?;
-
-    let keys: [*const c_void; 2] = [
-        // SAFETY: kCV* constants are CFStringRef statics from the framework.
-        unsafe { kCVPixelBufferPixelFormatTypeKey.cast() },
-        unsafe { kCVPixelBufferIOSurfacePropertiesKey.cast() },
-    ];
-    let values: [*const c_void; 2] = [
-        CFRetained::as_ptr(&pixel_fmt_num).cast(),
-        CFRetained::as_ptr(&empty_iosurface).cast(),
-    ];
-
-    let mut dict: *mut CFDictionary = ptr::null_mut();
-    // SAFETY: CFDictionaryCreate is the documented constructor; keys and
-    // values are non-null arrays of length 2; the callbacks are the
-    // standard "CF type" set.
-    unsafe {
-        extern "C-unwind" {
-            fn CFDictionaryCreate(
-                allocator: *const c_void,
-                keys: *const *const c_void,
-                values: *const *const c_void,
-                num_values: isize,
-                key_callbacks: *const c_void,
-                value_callbacks: *const c_void,
-            ) -> *mut CFDictionary;
-        }
-        dict = CFDictionaryCreate(
-            kCFAllocatorDefault.cast(),
-            keys.as_ptr(),
-            values.as_ptr(),
-            2,
-            (&raw const kCFTypeDictionaryKeyCallBacks).cast(),
-            (&raw const kCFTypeDictionaryValueCallBacks).cast(),
-        );
-    }
-    let dict = NonNull::new(dict).ok_or_else(|| {
-        BackendError::Decode(
-            "CFDictionaryCreate(destinationImageBufferAttributes) returned null".into(),
+fn build_destination_attrs(pixel_fmt: u32) -> Result<CFRetained<CFDictionary>, BackendError> {
+    let pixel_fmt_i32: i32 = pixel_fmt as i32;
+    // SAFETY: CFNumber::new is the documented constructor; value_ptr
+    // points to a live local of the matching CFNumberType.
+    let pixel_fmt_num: CFRetained<CFNumber> = unsafe {
+        CFNumber::new(
+            None,
+            CFNumberType::SInt32Type,
+            (&raw const pixel_fmt_i32).cast(),
         )
-    })?;
-    // SAFETY: Create Rule transfer.
-    Ok(unsafe { CFRetained::from_raw(dict) })
+    }
+    .ok_or_else(|| BackendError::Decode("CFNumber::new(SInt32) returned null".into()))?;
+    let empty_iosurface = empty_dict();
+
+    // CFDictionary::from_slices wraps the underlying CFDictionaryCreate.
+    let keys: [&objc2_core_foundation::CFString; 2] = [
+        kCVPixelBufferPixelFormatTypeKey,
+        kCVPixelBufferIOSurfacePropertiesKey,
+    ];
+    let values: [&objc2_core_foundation::CFType; 2] = [
+        pixel_fmt_num.as_ref().as_super(),
+        empty_iosurface.as_ref().as_super(),
+    ];
+    Ok(CFDictionary::from_slices(&keys[..], &values[..]))
 }
 
-fn empty_dict() -> Result<CFRetained<objc2_core_foundation::CFDictionary>, BackendError> {
-    use objc2_core_foundation::{
-        CFDictionary, kCFAllocatorDefault, kCFTypeDictionaryKeyCallBacks,
-        kCFTypeDictionaryValueCallBacks,
-    };
-    let mut dict: *mut CFDictionary = ptr::null_mut();
-    // SAFETY: Standard CFDictionaryCreate with zero keys / values.
-    unsafe {
-        extern "C-unwind" {
-            fn CFDictionaryCreate(
-                allocator: *const c_void,
-                keys: *const *const c_void,
-                values: *const *const c_void,
-                num_values: isize,
-                key_callbacks: *const c_void,
-                value_callbacks: *const c_void,
-            ) -> *mut CFDictionary;
-        }
-        dict = CFDictionaryCreate(
-            kCFAllocatorDefault.cast(),
-            ptr::null(),
-            ptr::null(),
-            0,
-            (&raw const kCFTypeDictionaryKeyCallBacks).cast(),
-            (&raw const kCFTypeDictionaryValueCallBacks).cast(),
-        );
-    }
-    let dict = NonNull::new(dict)
-        .ok_or_else(|| BackendError::Decode("CFDictionaryCreate(empty) returned null".into()))?;
-    // SAFETY: Create Rule transfer.
-    Ok(unsafe { CFRetained::from_raw(dict) })
+fn empty_dict() -> CFRetained<CFDictionary> {
+    let keys: [&objc2_core_foundation::CFType; 0] = [];
+    let values: [&objc2_core_foundation::CFType; 0] = [];
+    CFDictionary::from_slices(&keys[..], &values[..])
 }
 
 /// VT output callback. Stores the produced `CVPixelBuffer` (or the
@@ -453,7 +394,7 @@ fn build_block_buffer(data: &[u8]) -> Result<CFRetained<CMBlockBuffer>, BackendE
             ptr::null(),
             0,
             data.len(),
-            CMBlockBufferFlags::empty(),
+            0, /* CMBlockBufferFlags is a type alias for u32; no flags */
             NonNull::new_unchecked(&raw mut bb),
         )
     };
@@ -479,19 +420,19 @@ fn build_sample_buffer(
         duration: CMTime {
             value: 1,
             timescale: 60,
-            flags: objc2_core_media::CMTimeFlags::Valid,
+            flags: CMTimeFlags::Valid,
             epoch: 0,
         },
         presentationTimeStamp: CMTime {
             value: 0,
             timescale: 60,
-            flags: objc2_core_media::CMTimeFlags::Valid,
+            flags: CMTimeFlags::Valid,
             epoch: 0,
         },
         decodeTimeStamp: CMTime {
             value: 0,
             timescale: 60,
-            flags: objc2_core_media::CMTimeFlags::empty(),
+            flags: CMTimeFlags::empty(),
             epoch: 0,
         },
     }];
@@ -642,5 +583,8 @@ fn read_pixel_buffer(
         matrix_coeffs: config.matrix_coeffs,
         color_primaries: config.color_primaries,
         transfer_characteristics: config.transfer_characteristics,
+        deblock_flags: Vec::new(),
+        deblock_stride: 0,
+        qp_map: Vec::new(),
     })
 }
