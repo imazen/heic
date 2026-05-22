@@ -26,6 +26,98 @@
 
 use alloc::vec::Vec;
 
+/// Parsed HEVC PPS fields required by native backends. Sibling of
+/// [`ParsedSps`] — populated by the parent's PPS parser and threaded
+/// through [`crate::HvccParams::pps`].
+///
+/// Field selection matches what
+/// `media/gpu/windows/d3d11_h265_accelerator.cc::PicParamsFromPPS` and
+/// `media/gpu/vaapi/h265_vaapi_video_decoder_delegate.cc::FillPicParams`
+/// pull off the PPS. Tile layout is normalized to a single
+/// representation: `column_widths` / `row_heights` are explicit
+/// per-tile sizes (HEVC spec uniform-spacing reconstruction is the
+/// parent crate's responsibility, not the backend's).
+#[derive(Debug, Clone, Default)]
+pub struct ParsedPps {
+    /// `dependent_slice_segments_enabled_flag`.
+    pub dependent_slice_segments_enabled_flag: bool,
+    /// `output_flag_present_flag`.
+    pub output_flag_present_flag: bool,
+    /// `num_extra_slice_header_bits`.
+    pub num_extra_slice_header_bits: u8,
+    /// `sign_data_hiding_enabled_flag`.
+    pub sign_data_hiding_enabled_flag: bool,
+    /// `cabac_init_present_flag`.
+    pub cabac_init_present_flag: bool,
+    /// `num_ref_idx_l0_default_active_minus1`.
+    pub num_ref_idx_l0_default_active_minus1: u8,
+    /// `num_ref_idx_l1_default_active_minus1`.
+    pub num_ref_idx_l1_default_active_minus1: u8,
+    /// `init_qp_minus26`.
+    pub init_qp_minus26: i8,
+    /// `constrained_intra_pred_flag`.
+    pub constrained_intra_pred_flag: bool,
+    /// `transform_skip_enabled_flag`.
+    pub transform_skip_enabled_flag: bool,
+    /// `cu_qp_delta_enabled_flag`.
+    pub cu_qp_delta_enabled_flag: bool,
+    /// `diff_cu_qp_delta_depth` (only meaningful when
+    /// `cu_qp_delta_enabled_flag = 1`).
+    pub diff_cu_qp_delta_depth: u8,
+    /// `pps_cb_qp_offset` in range `[-12, 12]`.
+    pub pps_cb_qp_offset: i8,
+    /// `pps_cr_qp_offset` in range `[-12, 12]`.
+    pub pps_cr_qp_offset: i8,
+    /// `pps_slice_chroma_qp_offsets_present_flag`.
+    pub pps_slice_chroma_qp_offsets_present_flag: bool,
+    /// `weighted_pred_flag`.
+    pub weighted_pred_flag: bool,
+    /// `weighted_bipred_flag`.
+    pub weighted_bipred_flag: bool,
+    /// `transquant_bypass_enabled_flag`.
+    pub transquant_bypass_enabled_flag: bool,
+    /// `tiles_enabled_flag`.
+    pub tiles_enabled_flag: bool,
+    /// `entropy_coding_sync_enabled_flag` (WPP).
+    pub entropy_coding_sync_enabled_flag: bool,
+    /// `num_tile_columns_minus1` (only meaningful when tiles enabled).
+    pub num_tile_columns_minus1: u8,
+    /// `num_tile_rows_minus1` (only meaningful when tiles enabled).
+    pub num_tile_rows_minus1: u8,
+    /// `uniform_spacing_flag` (when set, backends compute tile sizes
+    /// from the SPS coded dimensions; otherwise read [`Self::column_widths`] /
+    /// [`Self::row_heights`]).
+    pub uniform_spacing_flag: bool,
+    /// Per-column tile widths in CTBs (only valid when tiles enabled
+    /// and `uniform_spacing_flag = false`). Length = `num_tile_columns_minus1 + 1`.
+    pub column_widths: Vec<u16>,
+    /// Per-row tile heights in CTBs. Length = `num_tile_rows_minus1 + 1`.
+    pub row_heights: Vec<u16>,
+    /// `pps_loop_filter_across_slices_enabled_flag`.
+    pub pps_loop_filter_across_slices_enabled_flag: bool,
+    /// `deblocking_filter_control_present_flag`.
+    pub deblocking_filter_control_present_flag: bool,
+    /// `deblocking_filter_override_enabled_flag`.
+    pub deblocking_filter_override_enabled_flag: bool,
+    /// `pps_deblocking_filter_disabled_flag`.
+    pub pps_deblocking_filter_disabled_flag: bool,
+    /// `pps_beta_offset_div2`.
+    pub pps_beta_offset_div2: i8,
+    /// `pps_tc_offset_div2`.
+    pub pps_tc_offset_div2: i8,
+    /// `pps_scaling_list_data_present_flag`.
+    pub pps_scaling_list_data_present_flag: bool,
+    /// `lists_modification_present_flag`.
+    pub lists_modification_present_flag: bool,
+    /// `log2_parallel_merge_level_minus2`.
+    pub log2_parallel_merge_level_minus2: u8,
+    /// `slice_segment_header_extension_present_flag`.
+    pub slice_segment_header_extension_present_flag: bool,
+    /// `loop_filter_across_tiles_enabled_flag` (HEVC default = 1 per spec;
+    /// only relevant when tiles enabled).
+    pub loop_filter_across_tiles_enabled_flag: bool,
+}
+
 /// Parsed HEVC SPS fields required by native backends to populate
 /// picture-parameter buffers (DXVA_PicParams_HEVC, VAPictureParameter
 /// BufferHEVC).

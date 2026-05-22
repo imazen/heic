@@ -326,6 +326,7 @@ pub(crate) fn decode_one_tile(
         color_primaries: sps_meta.color_primaries,
         transfer_characteristics: sps_meta.transfer_characteristics,
         sps: sps_meta.parsed.as_ref(),
+        pps: sps_meta.parsed_pps.as_ref(),
     };
 
     let mut last_err: Option<String> = None;
@@ -388,6 +389,9 @@ struct SpsMetadata {
     /// VAPictureParameterBufferHEVC / DXVA_PicParams_HEVC. `None` when
     /// the SPS NAL couldn't be parsed (corrupt hvcC, no SPS).
     parsed: Option<heic_core::sps::ParsedSps>,
+    /// Fully-parsed PPS field set. `None` when no PPS NAL was found or
+    /// parsing failed.
+    parsed_pps: Option<heic_core::sps::ParsedPps>,
 }
 
 /// Parse the first SPS NAL we find in `config.nal_units` and return its
@@ -403,6 +407,27 @@ fn extract_sps_metadata(config: &HevcDecoderConfig) -> SpsMetadata {
         transfer_characteristics: 2,
         ..Default::default()
     };
+    // First pass: look for the SPS. Then a second loop catches the PPS.
+    // Order in the hvcC NAL list isn't guaranteed, so we don't bail on
+    // the first SPS — but we do stop scanning once we have both.
+    for nal_blob in &config.nal_units {
+        if nal_blob.len() < 3 {
+            continue;
+        }
+        let nal_type = (nal_blob[0] >> 1) & 0x3F;
+        if nal_type != 34 {
+            // PPS_NUT (try this branch first because the SPS branch
+            // `return`s when it finds one).
+            continue;
+        }
+        let Ok(nal) = crate::hevc::bitstream::parse_single_nal(nal_blob) else {
+            continue;
+        };
+        if let Ok(pps) = crate::hevc::params::parse_pps(&nal.payload) {
+            out.parsed_pps = Some(populate_parsed_pps(&pps));
+            break;
+        }
+    }
     for nal_blob in &config.nal_units {
         if nal_blob.len() < 3 {
             continue;
@@ -452,6 +477,81 @@ fn extract_sps_metadata(config: &HevcDecoderConfig) -> SpsMetadata {
 /// Build a [`heic_core::sps::ParsedSps`] from the parent crate's fully
 /// parsed `Sps` so native backends (D3D11VA / VA-API) don't have to
 /// re-parse the bitstream to populate their picture parameter buffers.
+/// Build a [`heic_core::sps::ParsedPps`] from the parent crate's fully
+/// parsed `Pps` so native backends consume the PPS-derived fields
+/// (init_qp_minus26, tile layout, deblocking offsets, weighted
+/// prediction) without re-parsing the bitstream.
+fn populate_parsed_pps(pps: &crate::hevc::params::Pps) -> heic_core::sps::ParsedPps {
+    use heic_core::sps::ParsedPps;
+    let (
+        num_tile_columns_minus1,
+        num_tile_rows_minus1,
+        uniform_spacing_flag,
+        column_widths,
+        row_heights,
+        loop_filter_across_tiles_enabled_flag,
+    ) = if let Some(t) = &pps.tile_info {
+        (
+            // The parent's TileInfo holds these as u16; DXVA / libva
+            // both want u8 (range is [0, 18] / [0, 20] per spec).
+            u8::try_from(t.num_tile_columns_minus1).unwrap_or(u8::MAX),
+            u8::try_from(t.num_tile_rows_minus1).unwrap_or(u8::MAX),
+            t.uniform_spacing_flag,
+            t.column_widths.clone(),
+            t.row_heights.clone(),
+            t.loop_filter_across_tiles_enabled_flag,
+        )
+    } else {
+        (
+            0,
+            0,
+            true,
+            alloc::vec::Vec::new(),
+            alloc::vec::Vec::new(),
+            true,
+        )
+    };
+    ParsedPps {
+        dependent_slice_segments_enabled_flag: pps.dependent_slice_segments_enabled_flag,
+        output_flag_present_flag: pps.output_flag_present_flag,
+        num_extra_slice_header_bits: pps.num_extra_slice_header_bits,
+        sign_data_hiding_enabled_flag: pps.sign_data_hiding_enabled_flag,
+        cabac_init_present_flag: pps.cabac_init_present_flag,
+        num_ref_idx_l0_default_active_minus1: pps.num_ref_idx_l0_default_active_minus1,
+        num_ref_idx_l1_default_active_minus1: pps.num_ref_idx_l1_default_active_minus1,
+        init_qp_minus26: pps.init_qp_minus26,
+        constrained_intra_pred_flag: pps.constrained_intra_pred_flag,
+        transform_skip_enabled_flag: pps.transform_skip_enabled_flag,
+        cu_qp_delta_enabled_flag: pps.cu_qp_delta_enabled_flag,
+        diff_cu_qp_delta_depth: pps.diff_cu_qp_delta_depth,
+        pps_cb_qp_offset: pps.pps_cb_qp_offset,
+        pps_cr_qp_offset: pps.pps_cr_qp_offset,
+        pps_slice_chroma_qp_offsets_present_flag: pps.pps_slice_chroma_qp_offsets_present_flag,
+        weighted_pred_flag: pps.weighted_pred_flag,
+        weighted_bipred_flag: pps.weighted_bipred_flag,
+        transquant_bypass_enabled_flag: pps.transquant_bypass_enabled_flag,
+        tiles_enabled_flag: pps.tiles_enabled_flag,
+        entropy_coding_sync_enabled_flag: pps.entropy_coding_sync_enabled_flag,
+        num_tile_columns_minus1,
+        num_tile_rows_minus1,
+        uniform_spacing_flag,
+        column_widths,
+        row_heights,
+        pps_loop_filter_across_slices_enabled_flag: pps.pps_loop_filter_across_slices_enabled_flag,
+        deblocking_filter_control_present_flag: pps.deblocking_filter_control_present_flag,
+        deblocking_filter_override_enabled_flag: pps.deblocking_filter_override_enabled_flag,
+        pps_deblocking_filter_disabled_flag: pps.pps_deblocking_filter_disabled_flag,
+        pps_beta_offset_div2: pps.pps_beta_offset_div2,
+        pps_tc_offset_div2: pps.pps_tc_offset_div2,
+        pps_scaling_list_data_present_flag: pps.pps_scaling_list_data_present_flag,
+        lists_modification_present_flag: pps.lists_modification_present_flag,
+        log2_parallel_merge_level_minus2: pps.log2_parallel_merge_level_minus2,
+        slice_segment_header_extension_present_flag: pps
+            .slice_segment_header_extension_present_flag,
+        loop_filter_across_tiles_enabled_flag,
+    }
+}
+
 fn populate_parsed_sps(sps: &crate::hevc::params::Sps) -> heic_core::sps::ParsedSps {
     use heic_core::sps::{ParsedSps, SpsRangeExtension};
 

@@ -230,6 +230,12 @@ pub struct HvccParams<'a> {
     /// data on `HvccParams` for convenience — backends that only need
     /// the small set already on `HvccParams` can ignore this field.
     pub sps: Option<&'a sps::ParsedSps>,
+
+    /// Fully-parsed PPS field set required by VA-API and D3D11VA to
+    /// populate the rest of their picture-parameter buffers (tile
+    /// layout, init_qp, deblocking offsets, weighted pred). `None`
+    /// when no PPS NAL was found or parse failed.
+    pub pps: Option<&'a sps::ParsedPps>,
 }
 
 /// HEVC backend implementation.
