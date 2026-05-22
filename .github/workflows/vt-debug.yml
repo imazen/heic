@@ -77,18 +77,25 @@ jobs:
 
       # Build the test binary FIRST so the binary path is known and
       # we can drive it through `lldb` in a second step.
+      # Note: cargo emits JSON-formatted artifacts to stdout AND
+      # plain-text progress ("Compiling …", "Finished …") to stderr.
+      # Capture stdout-only for the jq scrape; let stderr go to the
+      # workflow log for human-readable progress.
       - name: Build test binary
         run: |
           cargo test --no-run \
             --test backend_dispatch \
             --features 'backend-rust,backend-videotoolbox,std' \
-            --message-format=json 2>&1 \
-            | tee /tmp/cargo-build.json
-          # Extract the freshly-built binary path so subsequent steps
-          # don't have to scrape `cargo test --no-run`'s output.
-          BIN=$(jq -r 'select(.profile.test == true and .target.name == "backend_dispatch") | .executable' /tmp/cargo-build.json | tail -n1)
+            --message-format=json > /tmp/cargo-build.ndjson
+          # Filter to only well-formed JSON lines (in case cargo prints
+          # a stray non-JSON line on stdout for any reason), then pick
+          # the test binary's executable path.
+          BIN=$(grep -E '^\{' /tmp/cargo-build.ndjson \
+            | jq -r 'select(.profile.test == true and .target.name == "backend_dispatch") | .executable // empty' \
+            | tail -n1)
           if [[ -z "$BIN" || "$BIN" == "null" ]]; then
             echo "FATAL: could not locate the backend_dispatch test binary" >&2
+            head -n5 /tmp/cargo-build.ndjson >&2
             exit 1
           fi
           echo "TEST_BIN=$BIN" >> "$GITHUB_ENV"
@@ -194,7 +201,7 @@ jobs:
         with:
           name: vt-debug-${{ inputs.os }}
           path: |
-            /tmp/cargo-build.json
+            /tmp/cargo-build.ndjson
             /tmp/plain.log
             /tmp/lldb.log
             /tmp/malloc-hardened.log
