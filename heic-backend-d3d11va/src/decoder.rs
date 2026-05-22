@@ -233,6 +233,44 @@ impl DecoderSession {
         self.width == width && self.height == height && self.bit_depth == bit_depth
     }
 
+    /// Read back the decoded NV12 / P010 frame as planar `u16` Y + Cb + Cr.
+    ///
+    /// Allocates a fresh staging texture, copies the GPU output into
+    /// it, maps it for CPU read, and unpacks NV12 / P010 → three
+    /// `Vec<u16>` planes with the crop offsets applied. This mirrors
+    /// the pattern in
+    /// `heic-backend-mediafoundation/src/pixels.rs::unpack_nv12_or_p010`
+    /// — both backends end up writing into the same DecodedFrame
+    /// layout the parent crate expects.
+    ///
+    /// `visible_w` × `visible_h` are the ispe-visible dimensions;
+    /// `crop_x` / `crop_y` are the SPS conformance-window offsets in
+    /// luma samples (chroma offsets are derived as crop / 2 for
+    /// 4:2:0). This matches `HvccParams.{width,height,crop_left,crop_top}`.
+    pub fn read_decoded_planes(
+        &self,
+        visible_w: u32,
+        visible_h: u32,
+        crop_x: u32,
+        crop_y: u32,
+    ) -> Result<crate::dxva_read::OutputPlanes, BackendError> {
+        crate::dxva_read::read_decoded_planes(
+            &self.device,
+            // Reuse the immediate context cast back to ID3D11DeviceContext —
+            // ID3D11VideoContext shares the same vtable upcast.
+            &self.video_context,
+            &self.output_texture,
+            self.output_format,
+            self.width,
+            self.height,
+            visible_w,
+            visible_h,
+            crop_x,
+            crop_y,
+            self.bit_depth,
+        )
+    }
+
     /// Submit one HEVC access unit to the driver.
     ///
     /// `pic_params` is the SPS + PPS-populated picture-parameter

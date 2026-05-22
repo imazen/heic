@@ -107,4 +107,6 @@ pub mod decoder;
 #[cfg(target_os = "windows")]
 pub mod dxva;
 #[cfg(target_os = "windows")]
+pub mod dxva_read;
+#[cfg(target_os = "windows")]
 mod probe;
