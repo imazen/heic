@@ -113,14 +113,45 @@ pub(crate) fn read_decoded_planes(
     unsafe { ctx.Map(&dst_resource, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }
         .map_err(|e| BackendError::Decode(format!("Map(staging): {e}")))?;
 
+    // Defensive bounds check before the raw-pointer unpack. The
+    // staging texture is sized for `coded_h × 3/2 × RowPitch`
+    // bytes (Y plane + UV plane); verify the visible region fits.
+    // Without this, a vendor driver returning an unexpected
+    // RowPitch or output_format combination would let the
+    // unpacker read past the mapped buffer. We can't query the
+    // actual mapped size directly from D3D11, so use the
+    // documented `coded_h * RowPitch * 3 / 2` upper bound that
+    // matches the texture creation parameters in
+    // [`DecoderSession::new`].
+    let row_pitch = mapped.RowPitch as usize;
+    let bytes_per_sample: usize = if bit_depth >= 10 { 2 } else { 1 };
+    let visible_y_end = (crop_y as usize)
+        .checked_add(visible_h as usize)
+        .ok_or_else(|| BackendError::Decode("crop_y + visible_h overflow".into()))?;
+    let visible_x_end = (crop_x as usize)
+        .checked_add(visible_w as usize)
+        .ok_or_else(|| BackendError::Decode("crop_x + visible_w overflow".into()))?;
+    if visible_y_end > coded_h as usize
+        || visible_x_end.saturating_mul(bytes_per_sample) > row_pitch
+    {
+        // SAFETY: pair Unmap before bailing.
+        unsafe { ctx.Unmap(&dst_resource, 0) };
+        return Err(BackendError::Decode(format!(
+            "visible region ({visible_w}×{visible_h} at +{crop_x},+{crop_y}) \
+             exceeds staging texture bounds ({coded_h} rows × {row_pitch} bytes/row)",
+        )));
+    }
+
     // 4. Unpack NV12 / P010 from the mapped bytes.
     // SAFETY: mapped.pData is valid for at least RowPitch * Height
-    // bytes per the D3D11 docs. Same per-row pattern as
+    // bytes per the D3D11 docs; the defensive checks above ensure
+    // the unpacker's reads stay within (RowPitch × coded_h × 3/2)
+    // bytes. Same per-row pattern as
     // heic-backend-mediafoundation/src/pixels.rs.
     let planes_result = unsafe {
         unpack_nv12_or_p010(
             mapped.pData as *const u8,
-            mapped.RowPitch as usize,
+            row_pitch,
             coded_h,
             visible_w,
             visible_h,

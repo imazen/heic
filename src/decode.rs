@@ -242,8 +242,18 @@ fn decode_item(
         ItemType::Hvc1 | ItemType::Unknown(_) => {
             // HEVC path — Unknown falls through to HEVC for backwards compat
             // Check limits before HEVC decode to avoid OOM from crafted SPS
+            // OR from extracting an oversized item out of the container.
+            // Both checks fire BEFORE `get_item_data` allocates, so a
+            // hostile grid with many large tiles can't exhaust memory by
+            // sneaking past the dimension gate while the byte budget is
+            // still untouched.
             if let Some((w, h)) = item.dimensions {
                 limits.check_dimensions(w, h)?;
+                // Conservative byte estimate: a 4K×4K Main10 frame is
+                // ~320 MB. The estimate uses saturating arithmetic so a
+                // hostile SPS (`pic_width = u32::MAX`) can't wrap.
+                let est = crate::DecoderConfig::estimate_memory(w, h, crate::PixelLayout::Rgba8);
+                limits.check_memory(est)?;
             }
             let image_data = container.get_item_data(item.id)?;
             if let Some(ref config) = item.hevc_config {

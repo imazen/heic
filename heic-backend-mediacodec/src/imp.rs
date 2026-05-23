@@ -242,6 +242,13 @@ fn decode_one_frame(
 ) -> Result<DecodedFrame, BackendError> {
     let codec = cached.codec;
 
+    // Honour cancellation BEFORE any FFI work — the input dequeue
+    // can block for 100ms on a busy decoder, and we don't want
+    // outer timeouts to be eaten by a hung first call.
+    if stop.should_stop() {
+        return Err(BackendError::Cancelled);
+    }
+
     // Convert hvcC length-prefixed slices to Annex B for the input buffer.
     let slice_annexb = heic_core::nal::hvcc_to_annexb(image_data, config.length_size).ok_or(
         BackendError::Decode("malformed hvcC length-prefixed slice data".into()),
@@ -344,8 +351,29 @@ fn decode_one_frame(
                 if out_ptr.is_null() {
                     return Err(BackendError::Decode("getOutputBuffer returned null".into()));
                 }
-                // SAFETY: out_ptr is valid for `size` bytes; the slice is
-                // immediately consumed by unpack before we release the buffer.
+                // Defensive: NDK promises the slice is `size` bytes
+                // valid, but a misbehaving vendor driver could
+                // return an undersized buffer that the unpack
+                // expects to be at least
+                // `slice_height * stride * (1.5)` bytes for 4:2:0
+                // (or `* 3` for P010). Check before constructing the
+                // slice so a bug surfaces as `BackendError::Decode`
+                // instead of an OOB read in unpack_planes.
+                let bytes_per_sample = if bit_depth >= 10 { 2usize } else { 1 };
+                let expected_min = (slice_height.max(coded_h as i32) as usize)
+                    .saturating_mul(stride.max(coded_w as i32) as usize)
+                    .saturating_mul(bytes_per_sample)
+                    .saturating_mul(3)
+                    / 2;
+                if size < expected_min {
+                    return Err(BackendError::Decode(format!(
+                        "MediaCodec output buffer undersized: size={size} expected≥{expected_min} \
+                         (stride={stride}, slice_height={slice_height}, bit_depth={bit_depth})"
+                    )));
+                }
+                // SAFETY: out_ptr is valid for `size` bytes per the NDK
+                // contract; we just verified `size` is at least the
+                // unpack code's minimum requirement.
                 let bytes = unsafe { core::slice::from_raw_parts(out_ptr, size) };
                 let planes = unpack_planes(
                     bytes,

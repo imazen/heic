@@ -300,6 +300,34 @@ pub struct Limits {
 }
 
 impl Limits {
+    /// Conservative defaults for **server-side** deployments where
+    /// the input is untrusted (a public image-upload endpoint, a
+    /// CDN transformation worker, etc.).
+    ///
+    /// * `max_width = max_height = 16_384` — covers 16K imagery; the
+    ///   single-frame HEVC level-6.2 ceiling is 32_768 but real-
+    ///   world HEIC photos top out at ~12K (full-frame DSLR
+    ///   panoramas).
+    /// * `max_pixels = 268_435_456` (256 megapixels) — high enough
+    ///   for high-end stills, low enough to block 65k×65k probe
+    ///   bombs.
+    /// * `max_memory_bytes = 1_073_741_824` (1 GiB) — matches the
+    ///   default upstream memory budget but documented explicitly.
+    ///
+    /// Tune per-deployment based on the hosting tier's actual
+    /// memory budget. The defaults are intentionally generous
+    /// enough to decode the median real photo without
+    /// intervention, while bounding hostile-input blast radius.
+    #[must_use]
+    pub fn server_defaults() -> Self {
+        Self {
+            max_width: Some(16_384),
+            max_height: Some(16_384),
+            max_pixels: Some(268_435_456),
+            max_memory_bytes: Some(1_073_741_824),
+        }
+    }
+
     /// Check that dimensions are within limits.
     pub(crate) fn check_dimensions(&self, width: u32, height: u32) -> Result<()> {
         if let Some(max_w) = self.max_width

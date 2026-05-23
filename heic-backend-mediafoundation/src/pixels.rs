@@ -104,20 +104,68 @@ fn read_planes_2d(
         .unwrap_or(0)
         .max(coded_h as usize);
 
+    // Defensive bounds check: verify the locked buffer is actually
+    // large enough to hold the unpacker's worst-case access
+    // pattern. Without this, a vendor MFT returning a stride or
+    // aligned_height inconsistent with GetContiguousLength would
+    // let unpack_nv12_or_p010 read past the buffer's end. The
+    // worst-case access is the last UV-plane byte at
+    // (aligned_height + chroma_height - 1) * stride + stride;
+    // for 4:2:0 chroma at half-height that's `aligned_height * 3
+    // / 2 * stride`. P010 doubles bytes per sample but
+    // GetContiguousLength reports byte size, so the same
+    // arithmetic applies.
+    let expected_min = aligned_height
+        .checked_mul(3)
+        .and_then(|v| v.checked_div(2))
+        .and_then(|v| v.checked_mul(stride_abs))
+        .unwrap_or(usize::MAX);
+    let bytes_per_sample = if bit_depth >= 10 { 2 } else { 1 };
+    let expected_min = expected_min.saturating_mul(bytes_per_sample);
+    if total_bytes < expected_min {
+        return Err(decode_err("IMF2DBuffer bounds check")(
+            windows::core::Error::from_hresult(windows::core::HRESULT(-1)),
+        ));
+    }
+    // Also verify the visible region fits within (crop + visible) × stride.
+    let visible_y_end = (crop_y as usize)
+        .checked_add(visible_h as usize)
+        .ok_or_else(|| {
+            decode_err("crop_y + visible_h overflow")(windows::core::Error::from_hresult(
+                windows::core::HRESULT(-1),
+            ))
+        })?;
+    let visible_x_end = (crop_x as usize)
+        .checked_add(visible_w as usize)
+        .ok_or_else(|| {
+            decode_err("crop_x + visible_w overflow")(windows::core::Error::from_hresult(
+                windows::core::HRESULT(-1),
+            ))
+        })?;
+    if visible_y_end > aligned_height || visible_x_end.saturating_mul(bytes_per_sample) > stride_abs
+    {
+        return Err(decode_err("visible region out of buffer bounds")(
+            windows::core::Error::from_hresult(windows::core::HRESULT(-1)),
+        ));
+    }
+
     // Negative-stride buffers (bottom-up): Lock2D's pointer points at the
     // visual top-left even when the underlying memory grows downward.
     // Rebase to the physical first byte and treat stride as positive so
     // unpack sees a normal layout.
     let positive_base = if stride < 0 {
         // SAFETY: ptr is the Lock2D pointer; we walk back within the
-        // buffer the lock owns.
+        // buffer the lock owns. The aligned_height bound is
+        // verified against GetContiguousLength above, so the
+        // rebase stays within the buffer.
         unsafe { ptr.offset(-(stride_abs as isize * (aligned_height as isize - 1))) }
     } else {
         ptr
     };
 
-    // SAFETY: Lock2D + GetContiguousLength guarantee the pointer is valid
-    // for total_bytes bytes; unpack reads strictly within
+    // SAFETY: Lock2D + GetContiguousLength guarantee the pointer is
+    // valid for total_bytes bytes; the defensive checks above ensure
+    // the unpacker's reads stay within
     // [positive_base, positive_base + total_bytes).
     let planes = unsafe {
         unpack_nv12_or_p010(

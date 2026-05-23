@@ -69,6 +69,29 @@ use objc2_video_toolbox::{
 /// avoids the case where VT schedules the callback on a different
 /// thread than the one calling `decode_frame` — the earlier
 /// thread-local approach lost the captured pixel buffer in that case.
+///
+/// # Memory ordering
+///
+/// The callback may fire on a VT worker thread, so the caller's
+/// read of `frame_output.pixel_buf` after `decode_frame` returns
+/// is — in theory — racing with the callback's write. Apple's VT
+/// documentation establishes the happens-before relationship for
+/// us:
+///
+/// 1. With `VTDecodeFrameFlags::empty()` (no
+///    `kVTDecodeFrame_EnableAsynchronousDecompression`),
+///    `VTDecompressionSessionDecodeFrame` *blocks the caller until
+///    the callback returns* per the docs — the function's return
+///    is the synchronization edge.
+/// 2. `VTDecompressionSessionWaitForAsynchronousFrames` is a hard
+///    fence even for sessions that schedule async work; it doesn't
+///    return until every queued callback has completed.
+///
+/// Together those two guarantees give us a sync edge ordering the
+/// callback's writes vs. the caller's reads — same semantics as
+/// `pthread_barrier_wait` for a 2-thread barrier. We therefore use
+/// plain (non-atomic) loads on the caller side; any acquire fence
+/// the platform requires is already issued by VT's blocking call.
 struct FrameOutput {
     status: i32,
     pixel_buf: Option<CFRetained<CVPixelBuffer>>,

@@ -58,9 +58,16 @@ pub struct D3d11VaBackend {
     inner: imp::Inner,
 }
 
-// SAFETY: D3D11 device and video decoder objects are documented thread-safe
-// when D3D11_CREATE_DEVICE_SINGLETHREADED is NOT set; call sites still need
-// to serialize submissions. The wrapper itself is trivially Send.
+// SAFETY: D3D11 device and video decoder objects are documented
+// thread-safe when `D3D11_CREATE_DEVICE_SINGLETHREADED` is NOT set
+// (the default — see Microsoft Learn /win32/direct3d11/overviews-
+// direct3d-11-render-multi-thread-intro). Per-call serialization is
+// enforced statically by the `HevcBackend::decode_hevc(&mut self)`
+// signature: two concurrent threads cannot hold `&mut` to the same
+// `D3d11VaBackend` simultaneously per Rust's aliasing rules, so the
+// `ID3D11VideoContext` access inside `Inner::decode` is implicitly
+// serialized. For sharing one instance across threads, callers
+// must wrap in `Mutex<D3d11VaBackend>` or build per-thread backends.
 #[cfg(target_os = "windows")]
 unsafe impl Send for D3d11VaBackend {}
 

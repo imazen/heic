@@ -93,8 +93,12 @@ impl Inner {
         &mut self,
         config: &HvccParams<'_>,
         image_data: &[u8],
-        _stop: &dyn enough::Stop,
+        stop: &dyn enough::Stop,
     ) -> Result<DecodedFrame, BackendError> {
+        // Early bail before we spend time + memory initializing MF.
+        if stop.should_stop() {
+            return Err(BackendError::Cancelled);
+        }
         init_mf()?;
 
         // Configure the MFT for the bitstream-coded dimensions so its
@@ -133,7 +137,9 @@ impl Inner {
             });
         }
 
-        decode_one_frame(transform, config, image_data, coded_w, coded_h, bit_depth)
+        decode_one_frame(
+            transform, config, image_data, coded_w, coded_h, bit_depth, stop,
+        )
     }
 }
 
@@ -332,6 +338,7 @@ fn decode_one_frame(
     width: u32,
     height: u32,
     bit_depth: u8,
+    stop: &dyn enough::Stop,
 ) -> Result<DecodedFrame, BackendError> {
     // Build the access-unit Annex-B blob: parameter sets (VPS+SPS+PPS)
     // followed by the slice NALs. Some HEVC MFTs decode reliably only
@@ -375,7 +382,7 @@ fn decode_one_frame(
 
     // Loop ProcessOutput, handling stream-change renegotiation, until we
     // get a sample.
-    let output_sample = poll_output(transform, width, height, bit_depth)?;
+    let output_sample = poll_output(transform, width, height, bit_depth, stop)?;
 
     // Unpack the output sample, copying only the visible region per the
     // SPS conformance window. width/height here are the coded
@@ -456,6 +463,7 @@ fn poll_output(
     width: u32,
     height: u32,
     _bit_depth: u8,
+    stop: &dyn enough::Stop,
 ) -> Result<IMFSample, BackendError> {
     // We need to allocate the output sample ourselves if the MFT doesn't
     // provide one. Query the stream info.
@@ -479,6 +487,13 @@ fn poll_output(
 
     let mut attempts = 0;
     loop {
+        // Poll cancellation BEFORE every iteration. The dequeue loop
+        // can spin up to 32 times in a worst-case stream-change
+        // negotiation; without this, a hung MFT would block any
+        // outer timeout for seconds.
+        if stop.should_stop() {
+            return Err(BackendError::Cancelled);
+        }
         attempts += 1;
         if attempts > 32 {
             return Err(BackendError::Decode(
