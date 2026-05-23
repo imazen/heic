@@ -1,0 +1,102 @@
+name: VA-API runtime decode
+
+# Manual-trigger workflow for runtime VA-API HEVC decode validation
+# against a real Linux + GPU host. The default `ubuntu-latest` runner
+# has no GPU, so this targets a `self-hosted` runner with the label
+# `linux-vaapi` — point it at any of the following to validate:
+#
+# * Bare-metal Linux + NVIDIA GPU + nvidia-vaapi-driver
+# * Bare-metal Linux + Intel iGPU + intel-media-va-driver (iHD)
+# * Bare-metal Linux + AMD GPU + mesa radeonsi_drv_video.so
+# * Cloud Linux VM with a GPU passthrough (Lambda, Vast.ai privileged,
+#   Hetzner GPU server, etc.)
+#
+# Runs the `vaapi_decode_test` example which decodes every file in
+# `tests/testdata/` via VA-API and reports per-file similarity vs the
+# rust backend baseline.
+#
+# Until a self-hosted runner is wired up, this workflow is the
+# canonical recipe a deploying team can follow to validate the VA-API
+# path on their target hardware — the same `cargo run --example
+# vaapi_decode_test` works inside a docker container, on bare-metal,
+# or under nsjail / firejail.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'Runner label (self-hosted Linux+GPU)'
+        required: true
+        default: 'ubuntu-latest'
+        type: choice
+        options:
+          - 'ubuntu-latest'    # compile + skip decode (no GPU)
+          - 'linux-vaapi'      # self-hosted NVIDIA/Intel/AMD VA-API runner
+      driver:
+        description: 'LIBVA_DRIVER_NAME override (nvidia / iHD / radeonsi / auto)'
+        required: false
+        default: 'auto'
+        type: string
+      verbose:
+        description: 'Print libva debug logs'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  runtime:
+    name: vaapi-runtime (${{ inputs.runner }})
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 25
+    env:
+      RUST_BACKTRACE: full
+      LIBVA_MESSAGING_LEVEL: ${{ inputs.verbose && '2' || '0' }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: vaapi-runtime-${{ inputs.runner }}
+
+      - name: Install runtime deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libva-dev libva2 libva-drm2 vainfo libegl1 \
+            mesa-va-drivers || true
+          # NVIDIA VA-API driver (optional — only present on NVIDIA hosts).
+          sudo apt-get install -y nvidia-vaapi-driver || true
+          # Intel iHD (optional — only present on Intel iGPU hosts).
+          sudo apt-get install -y intel-media-va-driver || true
+
+      - name: Probe libva
+        run: |
+          echo '--- DRM render nodes ---'
+          ls -la /dev/dri 2>/dev/null || echo 'no /dev/dri'
+          echo '--- vainfo (default driver) ---'
+          vainfo 2>&1 | head -30 || true
+          if [[ "${{ inputs.driver }}" != "auto" ]]; then
+            echo '--- vainfo (LIBVA_DRIVER_NAME=${{ inputs.driver }}) ---'
+            LIBVA_DRIVER_NAME='${{ inputs.driver }}' vainfo 2>&1 | head -30 || true
+          fi
+
+      - name: Build vaapi_decode_test
+        run: |
+          cargo build --release -p heic --example vaapi_decode_test \
+            --features 'backend-rust,backend-vaapi,std'
+
+      - name: Run vaapi_decode_test (corpus diff vs rust backend)
+        env:
+          LIBVA_DRIVER_NAME: ${{ inputs.driver == 'auto' && '' || inputs.driver }}
+        run: |
+          set -o pipefail
+          ./target/release/examples/vaapi_decode_test 2>&1 | tee /tmp/vaapi-runtime.log
+
+      - name: Upload run log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vaapi-runtime-${{ inputs.runner }}
+          path: /tmp/vaapi-runtime.log
+          if-no-files-found: ignore

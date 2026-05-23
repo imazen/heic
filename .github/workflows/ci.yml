@@ -321,7 +321,22 @@ jobs:
       - name: Build heic-backend-vaapi
         run: cargo build -p heic-backend-vaapi
       - name: Clippy heic-backend-vaapi
-        run: cargo clippy -p heic-backend-vaapi -- -D warnings
+        run: cargo clippy -p heic-backend-vaapi --tests -- -D warnings
+      - name: Unit tests heic-backend-vaapi
+        run: cargo test -p heic-backend-vaapi --lib
+      - name: Build runtime example (vaapi_decode_test)
+        run: |
+          cargo build --release -p heic --example vaapi_decode_test \
+            --features 'backend-rust,backend-vaapi,std'
+      - name: Probe-fall-through (no /dev/dri, no driver — should report unavailable)
+        # ubuntu-latest GH runner has no GPU, so the backend should
+        # honestly report unavailable. We assert that decoding still
+        # succeeds via the rust fallback when both backends are in
+        # the allowlist.
+        run: |
+          set -o pipefail
+          cargo test --release -p heic --features 'backend-rust,backend-vaapi,std' \
+            --test backend_dispatch rust_backend_decodes_example -- --nocapture
 
   coverage:
     name: Coverage
