@@ -440,6 +440,9 @@ fn build_block_buffer(data: &[u8]) -> Result<CFRetained<CMBlockBuffer>, BackendE
     // `CMBlockBufferCreateWithMemoryBlock`:
     //   > "If blockAllocator is kCFAllocatorNull, the memory block
     //   >  will not be deallocated when the buffer is released."
+    // SAFETY: kCFAllocatorNull is a statically-exported global Core
+    // Foundation symbol; reading it through the objc2 binding is the
+    // documented way to access the singleton.
     let null_allocator =
         unsafe { kCFAllocatorNull }.expect("kCFAllocatorNull is statically present");
     let status = unsafe {
