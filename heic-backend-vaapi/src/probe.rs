@@ -42,6 +42,19 @@ const VA_ENTRYPOINT_VLD: i32 = 1;
 /// Drive the probe. Returns `Ok(true)` if at least one HEVC profile is
 /// registered, `Ok(false)` if libva loaded but no profile matched,
 /// `Err(_)` if libva can't be loaded.
+///
+/// Two display backends are tried in order:
+///
+/// 1. **DRM render nodes** (`/dev/dri/renderD128..D135`). Works on
+///    physical Linux + most VMs with a real GPU passthrough. The
+///    primary path on bare-metal Linux.
+/// 2. **X11 display** (`vaGetDisplay` against an `XOpenDisplay(NULL)`
+///    handle). Works inside WSL2 where `/dev/dri` is absent but WSLg
+///    exposes an X server bridged to the host GPU. The libva driver
+///    that backs this (e.g. `nvidia_drv_video.so` via NVDEC, or the
+///    Mesa d3d12 driver) handles the actual decode through CUDA /
+///    D3D12 — libva itself doesn't care which display protocol
+///    fronts the driver.
 pub(super) fn probe() -> Result<bool, ProbeError> {
     let libva = open_lib("libva.so.2")?;
     let libva_drm = open_lib("libva-drm.so.2")?;
@@ -142,7 +155,122 @@ pub(super) fn probe() -> Result<bool, ProbeError> {
         // Otherwise keep walking render nodes — multi-GPU systems may
         // have one node without HEVC and another with.
     }
+
+    // WSL2 fallback: no /dev/dri but the host GPU is reachable via
+    // WSLg's X11 bridge. Open an X11 display through libX11, hand it
+    // to vaGetDisplay (libva-x11.so.2), and repeat the HEVC profile
+    // probe against that VADisplay.
+    if let Some(found) = probe_via_x11(
+        &libva,
+        &va_initialize,
+        &va_terminate,
+        &va_max_num_profiles,
+        &va_query_config_profiles,
+    )? {
+        return Ok(found);
+    }
+
+    let _ = libva_drm;
     Ok(false)
+}
+
+/// Try `vaGetDisplay(XOpenDisplay(NULL))` as a fallback when no DRM
+/// render nodes are available. Returns:
+/// * `Some(true)` — X11 display backend worked and HEVC profile found.
+/// * `Some(false)` — X11 + libva initialized but no HEVC profile.
+/// * `None` — X11 path not usable (no $DISPLAY, libX11 / libva-x11
+///   missing, XOpenDisplay returned NULL). Caller falls through.
+fn probe_via_x11(
+    _libva: &Library,
+    va_initialize: &libloading::Symbol<
+        unsafe extern "C" fn(*mut c_void, *mut c_int, *mut c_int) -> VaStatus,
+    >,
+    va_terminate: &libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> VaStatus>,
+    va_max_num_profiles: &libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> c_int>,
+    va_query_config_profiles: &libloading::Symbol<
+        unsafe extern "C" fn(*mut c_void, *mut i32, *mut c_int) -> VaStatus,
+    >,
+) -> Result<Option<bool>, ProbeError> {
+    if std::env::var_os("DISPLAY").is_none() {
+        return Ok(None);
+    }
+    // SAFETY: libloading::Library::new is the documented dlopen entry
+    // point; both SONAMES are stable.
+    let Ok(libx11) = (unsafe { Library::new("libX11.so.6") }) else {
+        return Ok(None);
+    };
+    // SAFETY: same as libx11 above.
+    let Ok(libva_x11) = (unsafe { Library::new("libva-x11.so.2") }) else {
+        return Ok(None);
+    };
+    // SAFETY: standard libX11 ABI; XOpenDisplay(NULL) reads $DISPLAY
+    // and returns a Display* (opaque pointer) or NULL.
+    let x_open_display: libloading::Symbol<
+        unsafe extern "C" fn(*const std::ffi::c_char) -> *mut c_void,
+    > = unsafe { libx11.get(b"XOpenDisplay\0") }.map_err(ProbeError::SymbolMissing)?;
+    // SAFETY: pairs with XOpenDisplay; closes the connection.
+    let x_close_display: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> c_int> =
+        unsafe { libx11.get(b"XCloseDisplay\0") }.map_err(ProbeError::SymbolMissing)?;
+    // SAFETY: vaGetDisplay takes a Display* and returns a VADisplay.
+    let va_get_display: libloading::Symbol<unsafe extern "C" fn(*mut c_void) -> *mut c_void> =
+        unsafe { libva_x11.get(b"vaGetDisplay\0") }.map_err(ProbeError::SymbolMissing)?;
+
+    // SAFETY: XOpenDisplay(NULL) reads $DISPLAY internally; returns
+    // a Display* or NULL on failure. We just verified $DISPLAY is set.
+    let x_display = unsafe { x_open_display(core::ptr::null()) };
+    if x_display.is_null() {
+        return Ok(None);
+    }
+    // SAFETY: x_display is non-null. vaGetDisplay returns a VADisplay
+    // backed by the X11 connection; libva tracks the connection
+    // internally for the lifetime of the returned display.
+    let va_display = unsafe { va_get_display(x_display) };
+    if va_display.is_null() {
+        // SAFETY: x_display was returned by XOpenDisplay; XCloseDisplay
+        // is its documented teardown.
+        unsafe { x_close_display(x_display) };
+        return Ok(None);
+    }
+
+    let mut major: c_int = 0;
+    let mut minor: c_int = 0;
+    // SAFETY: standard vaInitialize call against an X11-backed VADisplay.
+    let status = unsafe { va_initialize(va_display, &mut major, &mut minor) };
+    if status != VA_STATUS_SUCCESS {
+        // SAFETY: vaTerminate pairs with vaInitialize, even when init
+        // failed — libva documents it.
+        let _ = unsafe { va_terminate(va_display) };
+        // SAFETY: same x_display we opened above.
+        unsafe { x_close_display(x_display) };
+        return Ok(Some(false));
+    }
+
+    // SAFETY: display is initialized; bounded-size profile array.
+    let max = unsafe { va_max_num_profiles(va_display) };
+    let result = if max > 0 {
+        let mut profiles = vec![0i32; max as usize];
+        let mut count: c_int = 0;
+        // SAFETY: profiles buffer holds `max` slots.
+        let status =
+            unsafe { va_query_config_profiles(va_display, profiles.as_mut_ptr(), &mut count) };
+        if status == VA_STATUS_SUCCESS {
+            profiles[..count as usize]
+                .iter()
+                .any(|&p| p == VA_PROFILE_HEVC_MAIN || p == VA_PROFILE_HEVC_MAIN_10)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    // SAFETY: pairs with vaInitialize.
+    let _ = unsafe { va_terminate(va_display) };
+    // SAFETY: pairs with XOpenDisplay.
+    unsafe { x_close_display(x_display) };
+    // Keep libloading handles in scope so the symbols stay valid.
+    let _ = (libx11, libva_x11);
+    Ok(Some(result))
 }
 
 #[derive(Debug)]

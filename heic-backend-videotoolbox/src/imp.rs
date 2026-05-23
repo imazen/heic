@@ -440,7 +440,8 @@ fn build_block_buffer(data: &[u8]) -> Result<CFRetained<CMBlockBuffer>, BackendE
     // `CMBlockBufferCreateWithMemoryBlock`:
     //   > "If blockAllocator is kCFAllocatorNull, the memory block
     //   >  will not be deallocated when the buffer is released."
-    let null_allocator = unsafe { kCFAllocatorNull }.expect("kCFAllocatorNull is statically present");
+    let null_allocator =
+        unsafe { kCFAllocatorNull }.expect("kCFAllocatorNull is statically present");
     let status = unsafe {
         CMBlockBuffer::create_with_memory_block(
             None,
