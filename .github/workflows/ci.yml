@@ -74,6 +74,10 @@ jobs:
       # back in heic/Cargo.toml.
       - name: Default build must error
         run: |
+          # set -o pipefail required: otherwise `if cargo ... | tee` reads
+          # tee's (always-zero) exit code, not cargo's, and the gate
+          # silently passes when the compile_error fires correctly.
+          set -o pipefail
           if cargo build --no-default-features 2>&1 | tee /tmp/build-no-features.log; then
             echo "::error::Default build succeeded; the compile_error gate is broken."
             exit 1
