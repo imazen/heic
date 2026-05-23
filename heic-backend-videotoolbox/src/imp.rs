@@ -445,6 +445,13 @@ fn build_block_buffer(data: &[u8]) -> Result<CFRetained<CMBlockBuffer>, BackendE
     // documented way to access the singleton.
     let null_allocator =
         unsafe { kCFAllocatorNull }.expect("kCFAllocatorNull is statically present");
+    // SAFETY: data pointer + length describe a live borrow that
+    // outlives this function (see the lifetime argument in the doc
+    // comment); CMBlockBufferCreateWithMemoryBlock with a non-null
+    // blockAllocator + null_allocator gives the borrowed-memory
+    // contract — the buffer wraps but never frees the bytes. bb is
+    // a valid out-pointer; NonNull::new_unchecked is safe because
+    // `&raw mut bb` is never null.
     let status = unsafe {
         CMBlockBuffer::create_with_memory_block(
             None,
