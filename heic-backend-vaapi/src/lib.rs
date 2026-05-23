@@ -70,7 +70,7 @@ use heic_core::{BackendError, DecodedFrame, HevcBackend, HvccParams};
 #[derive(Default)]
 pub struct VaApiBackend {
     #[cfg(target_os = "linux")]
-    _placeholder: (),
+    cached: Option<decode::Session>,
 }
 
 // SAFETY: VADisplay handles are documented thread-safe under per-display
@@ -107,18 +107,49 @@ impl HevcBackend for VaApiBackend {
         &mut self,
         config: &HvccParams<'_>,
         image_data: &[u8],
-        stop: &dyn enough::Stop,
+        _stop: &dyn enough::Stop,
     ) -> Result<DecodedFrame, BackendError> {
-        let _ = (config, image_data, stop);
-        Err(BackendError::Unavailable(
-            "heic-backend-vaapi: HEVC decode FFI pending — probe succeeded \
-             but the full SPS/PPS → VAPictureParameterBufferHEVC mapping \
-             ships in a follow-up PR",
-        ))
+        #[cfg(target_os = "linux")]
+        {
+            let sps = config.sps.ok_or_else(|| {
+                BackendError::Decode(
+                    "HvccParams.sps missing — parent parser didn't populate".into(),
+                )
+            })?;
+            let coded_w = sps.pic_width_in_luma_samples;
+            let coded_h = sps.pic_height_in_luma_samples;
+            let bit_depth = config.bit_depth_luma;
+
+            if self
+                .cached
+                .as_ref()
+                .is_none_or(|s| !s.matches(coded_w, coded_h, bit_depth))
+            {
+                self.cached = Some(decode::Session::new(coded_w, coded_h, bit_depth)?);
+            }
+            let session = self.cached.as_ref().expect("cached set above");
+            decode::decode_one_frame(session, config, image_data)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (config, image_data);
+            Err(BackendError::Unavailable(
+                "heic-backend-vaapi: not compiled for this target",
+            ))
+        }
     }
 }
 
 #[cfg(target_os = "linux")]
 mod probe;
+
+#[cfg(target_os = "linux")]
+mod ffi;
+
+#[cfg(target_os = "linux")]
+mod decode;
+
+#[cfg(target_os = "linux")]
+mod slice;
 
 pub mod va_hevc;

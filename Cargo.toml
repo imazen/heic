@@ -166,6 +166,9 @@ required-features = ["backend-rust", "backend-mediafoundation", "std"]
 [[example]]
 name = "probe_backends"
 required-features = ["backend-rust", "std"]
+[[example]]
+name = "vaapi_decode_test"
+required-features = ["backend-rust", "backend-vaapi", "std"]
 # compare_support requires heic-wasm-rs (uncomment dep + add [[example]] to use)
 
 [[bench]]
