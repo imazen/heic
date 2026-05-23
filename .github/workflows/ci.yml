@@ -78,7 +78,7 @@ jobs:
             echo "::error::Default build succeeded; the compile_error gate is broken."
             exit 1
           fi
-          if ! grep -q "no HEVC backend is active" /tmp/build-no-features.log; then
+          if ! grep -q "no HEVC backend is enabled" /tmp/build-no-features.log; then
             echo "::error::compile_error message missing the user-facing helper string."
             cat /tmp/build-no-features.log
             exit 1
