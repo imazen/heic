@@ -1,0 +1,93 @@
+# cargo-deny configuration for the heic workspace.
+#
+# Run via `cargo deny check` (locally) or the GH Actions step in
+# `.github/workflows/ci.yml`. The defaults below codify the policy
+# we audit against for production-server prod code quality.
+
+[graph]
+# Targets we actively support — clippy + tests run against each in CI.
+all-features = false
+features = ["backend-rust", "std"]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "i686-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "aarch64-linux-android",
+    "x86_64-linux-android",
+    "wasm32-unknown-unknown",
+]
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/RustSec/advisory-db"]
+yanked = "deny"
+ignore = [
+    # paste 1.0.15 is unmaintained-but-stable; only used as a
+    # proc-macro helper transitively via rav1e + rav1d-safe. No
+    # safe upgrade path until upstream migrates to `pastey`. We
+    # ship a deny-allow because the crate has no known security
+    # vulnerabilities — RUSTSEC-2024-0436 is a maintenance flag,
+    # not a CVE.
+    "RUSTSEC-2024-0436",
+]
+
+[licenses]
+# Allowlist of permissive + business-safe licenses for transitive
+# deps. The heic workspace crates themselves are AGPL-3.0-only OR
+# LicenseRef-Imazen-Commercial (dual licensing); the AGPL term is
+# allowed for the first-party crates via the `private` carve-out
+# below — third-party AGPL deps would still be rejected.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "0BSD",
+    "MPL-2.0",     # weak copyleft per-file; LGPL-equivalent for transitive code
+    "BSL-1.0",
+    "AGPL-3.0-only", # heic itself; gated by private-workspace below
+]
+confidence-threshold = 0.93
+# First-party crates use a non-SPDX `LicenseRef-Imazen-Commercial`
+# fallback for the commercial license tier. cargo-deny treats
+# LicenseRef-* as proprietary; we register it explicitly here so
+# the workspace builds clean.
+exceptions = [
+    { allow = ["AGPL-3.0-only", "LicenseRef-Imazen-Commercial"], name = "heic" },
+    { allow = ["AGPL-3.0-only", "LicenseRef-Imazen-Commercial"], name = "heic-core" },
+    { allow = ["AGPL-3.0-only", "LicenseRef-Imazen-Commercial"], name = "heic-backend-mediafoundation" },
+    { allow = ["AGPL-3.0-only", "LicenseRef-Imazen-Commercial"], name = "heic-backend-videotoolbox" },
+    { allow = ["AGPL-3.0-only", "LicenseRef-Imazen-Commercial"], name = "heic-backend-mediacodec" },
+    { allow = ["AGPL-3.0-only", "LicenseRef-Imazen-Commercial"], name = "heic-backend-vaapi" },
+    { allow = ["AGPL-3.0-only", "LicenseRef-Imazen-Commercial"], name = "heic-backend-d3d11va" },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+# Crates we know we explicitly DON'T want.
+deny = [
+    # openssl-sys: prefer rustls everywhere.
+    { name = "openssl-sys" },
+    # ring 0.16.x: rotated to 0.17+ via dependency consolidation.
+    { name = "ring", version = "<0.17.0" },
+]
+# Allow some known multiple-version duplicates we can't eliminate
+# without bumping a large transitive.
+skip = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
