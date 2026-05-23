@@ -19,16 +19,48 @@
 //! If any step fails, the parent's allowlist dispatcher falls through
 //! to the next backend.
 //!
+//! # WSL2 setup (no `/dev/dri`)
+//!
+//! WSL2 doesn't expose `/dev/dri` because the host GPU is reached
+//! through Microsoft's `/dev/dxg` paravirtual device, not standard
+//! DRM. The probe transparently falls back to an X11-backed
+//! `VADisplay` via `XOpenDisplay($DISPLAY)` (works under WSLg).
+//!
+//! End-to-end setup on Ubuntu 22.04 + WSL2 with an NVIDIA host:
+//!
+//! ```bash
+//! sudo apt-get install -y libdrm-dev libegl1-mesa-dev \
+//!     libgstreamer-plugins-bad1.0-dev pkg-config vainfo
+//! git clone https://github.com/FFmpeg/nv-codec-headers.git
+//! sudo make -C nv-codec-headers install
+//! git clone https://github.com/elFarto/nvidia-vaapi-driver.git
+//! # apply the heic-crate ~30-LOC patch to src/export-buf.c so the
+//! # findGPUIndexFromFd fallback picks the first EGL device when
+//! # there's no DRM render-node file (WSL is the canonical case)
+//! cd nvidia-vaapi-driver && meson setup build && ninja -C build
+//! sudo cp build/nvidia_drv_video.so /usr/lib/x86_64-linux-gnu/dri/
+//! export LIBVA_DRIVER_NAME=nvidia NVD_BACKEND=egl
+//! ```
+//!
+//! After that, `cargo run -p heic-backend-vaapi --example
+//! vaapi_probe` should print `is_available() = true` and exit 0.
+//!
 //! # Decode status
 //!
-//! [`Self::decode_hevc`] is a stub. The full HEVC decode path (SPS/PPS
-//! → `VAPictureParameterBufferHEVC`, slice control buffer, IQ matrix,
-//! `vaBeginPicture`/`vaRenderPicture`/`vaEndPicture`/`vaSyncSurface`,
-//! `vaDeriveImage` → planar `u16`) follows the Chromium media/gpu
-//! reference but is heavy enough (~1.5k LOC of bit-by-bit field
-//! mapping) that it lives in a follow-up PR. The probe is the
-//! first chunk that ships now so `recommended_backends()` can report
-//! VA-API accurately to callers.
+//! [`Self::decode_hevc`] is a stub. The full HEVC decode path
+//! (SPS/PPS → `VAPictureParameterBufferHEVC` (already in tree as
+//! `va_hevc::from_sps_pps`), slice control buffer, IQ matrix,
+//! `vaBeginPicture` / `vaRenderPicture` / `vaEndPicture` /
+//! `vaSyncSurface`, `vaDeriveImage` → planar `u16`) follows the
+//! Chromium `media/gpu/vaapi` reference. It needs a
+//! `VASliceParameterBufferHEVC` populator (~30 fields beyond what
+//! `va_hevc.rs` already has — `slice_data_byte_offset`, RefPicList
+//! indices, num_ref_idx_l0_active, weighted-pred tables, etc.)
+//! plus ~600 LOC of libloading-wrapped FFI for the actual
+//! `vaCreateBuffer` / `vaRenderPicture` / `vaSyncSurface` chain.
+//! That lives in a follow-up PR; the probe ships now so
+//! `recommended_backends()` can route to VA-API on Linux without
+//! waiting for the runtime.
 
 #![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 
