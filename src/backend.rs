@@ -289,8 +289,10 @@ pub(crate) fn decode_one_tile(
     if backends.len() == 1 && backends[0] == Backend::Rust {
         // `?` triggers the existing From<HevcError> for At<HeicError> in
         // error.rs — no further conversion needed.
-        let _ = (stop, width, height);
-        return Ok(crate::hevc::decode_with_config(config, image_data)?);
+        let _ = (width, height);
+        return Ok(crate::hevc::decode_with_config_stop(
+            config, image_data, stop,
+        )?);
     }
 
     // Slow path: build the HvccParams view once and walk the allowlist.
@@ -334,12 +336,16 @@ pub(crate) fn decode_one_tile(
         #[cfg(feature = "backend-rust")]
         if b == Backend::Rust {
             // Fast path even when Rust is mid-allowlist — bypass trait.
-            let _ = stop;
-            return Ok(crate::hevc::decode_with_config(config, image_data)?);
+            return Ok(crate::hevc::decode_with_config_stop(
+                config, image_data, stop,
+            )?);
         }
         let mut inst = b.instance();
         if !inst.is_available() {
-            last_err = Some(format!("{}: backend reported unavailable", b.name()));
+            last_err = Some(truncate_backend_msg(&format!(
+                "{}: backend reported unavailable",
+                b.name()
+            )));
             continue;
         }
         match inst.decode_hevc(&params, image_data, stop) {
@@ -351,21 +357,46 @@ pub(crate) fn decode_one_tile(
                 return Err(at!(HeicError::Cancelled(enough::StopReason::Cancelled)));
             }
             Err(BackendError::Unavailable(m)) => {
-                last_err = Some(format!("{}: {m}", b.name()));
+                last_err = Some(truncate_backend_msg(&format!("{}: {m}", b.name())));
             }
             Err(BackendError::Decode(m)) => {
-                last_err = Some(format!("{}: {m}", b.name()));
+                last_err = Some(truncate_backend_msg(&format!("{}: {m}", b.name())));
             }
             // BackendError is #[non_exhaustive]; new variants without a
             // specific mapping fall through to the "try next backend" path.
             Err(other) => {
-                last_err = Some(format!("{}: {other}", b.name()));
+                last_err = Some(truncate_backend_msg(&format!("{}: {other}", b.name())));
             }
         }
     }
     Err(at!(HeicError::AllBackendsFailed(
         last_err.unwrap_or_else(|| "no backends were available".into())
     )))
+}
+
+/// Cap per-backend error message length so a misbehaving FFI string
+/// (or a hostile bitstream that drove a backend to dump file paths /
+/// credentials into the `Decode(String)` payload) can't bloat the
+/// final `AllBackendsFailed` allocation.
+///
+/// 256 bytes is enough room for `"backend-name: " + a few words`;
+/// truncation appends `…` so callers reading the log know there's
+/// more.
+fn truncate_backend_msg(s: &str) -> alloc::string::String {
+    const MAX: usize = 256;
+    if s.len() <= MAX {
+        return s.into();
+    }
+    // Find a UTF-8 codepoint boundary at or before MAX so the
+    // truncation never splits a multibyte char.
+    let mut cut = MAX;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut out = alloc::string::String::with_capacity(cut + 3);
+    out.push_str(&s[..cut]);
+    out.push('…');
+    out
 }
 
 /// SPS metadata extracted by [`extract_sps_metadata`].

@@ -102,10 +102,33 @@ impl Session {
         // Open a VADisplay. Try DRM render nodes first, then X11.
         let (display, x_display, x_close) = open_display(&sym)?;
 
-        // SAFETY: standard vaInitialize call.
+        // Construct the Session struct UP-FRONT with sentinel handles
+        // (`VA_INVALID_ID` / `VA_INVALID_SURFACE`). Each subsequent
+        // libva call writes its handle into the corresponding field.
+        // If any step fails, `?` returns and `session` goes out of
+        // scope → Drop runs → every successfully-created handle gets
+        // destroyed in the right order. Previously, half-built state
+        // (e.g., a successful `vaCreateConfig` followed by a failed
+        // `vaCreateSurfaces`) leaked because the local variables
+        // weren't yet captured in a struct with a Drop impl.
+        let mut session = Session {
+            sym,
+            display,
+            config: VA_INVALID_ID,
+            context: VA_INVALID_ID,
+            surface: VA_INVALID_SURFACE,
+            coded_width: coded_w,
+            coded_height: coded_h,
+            bit_depth,
+            x_display,
+            x_close_display: x_close,
+        };
+
+        // SAFETY: standard vaInitialize call against a freshly-opened display.
         let mut major: c_int = 0;
         let mut minor: c_int = 0;
-        let status = unsafe { (sym.va_initialize)(display, &mut major, &mut minor) };
+        let status =
+            unsafe { (session.sym.va_initialize)(session.display, &mut major, &mut minor) };
         let _ = (major, minor);
         if status != VA_STATUS_SUCCESS {
             return Err(BackendError::Decode(format!(
@@ -120,17 +143,15 @@ impl Session {
         };
 
         // vaCreateConfig — HEVC Main(/Main10), VLD entrypoint, no extra attribs.
-        let mut config: VaConfigId = VA_INVALID_ID;
-        // SAFETY: standard vaCreateConfig signature; null attrib_list +
-        // num_attribs=0 picks driver defaults.
+        // SAFETY: standard vaCreateConfig signature; null attrib_list.
         let status = unsafe {
-            (sym.va_create_config)(
-                display,
+            (session.sym.va_create_config)(
+                session.display,
                 profile,
                 VA_ENTRYPOINT_VLD,
                 core::ptr::null_mut(),
                 0,
-                &mut config,
+                &mut session.config,
             )
         };
         if status != VA_STATUS_SUCCESS {
@@ -140,15 +161,14 @@ impl Session {
         }
 
         // vaCreateSurfaces — single surface sized to the coded dims.
-        let mut surface: VaSurfaceId = VA_INVALID_SURFACE;
-        // SAFETY: standard vaCreateSurfaces signature; null attribs.
+        // SAFETY: standard vaCreateSurfaces signature.
         let status = unsafe {
-            (sym.va_create_surfaces)(
-                display,
+            (session.sym.va_create_surfaces)(
+                session.display,
                 rt_format,
                 coded_w,
                 coded_h,
-                &mut surface,
+                &mut session.surface,
                 1,
                 core::ptr::null_mut(),
                 0,
@@ -161,18 +181,17 @@ impl Session {
         }
 
         // vaCreateContext — bound to the surface as the render target.
-        let mut context: VaContextId = VA_INVALID_ID;
         // SAFETY: standard vaCreateContext signature.
         let status = unsafe {
-            (sym.va_create_context)(
-                display,
-                config,
+            (session.sym.va_create_context)(
+                session.display,
+                session.config,
                 coded_w as c_int,
                 coded_h as c_int,
                 VA_PROGRESSIVE,
-                &mut surface,
+                &mut session.surface,
                 1,
-                &mut context,
+                &mut session.context,
             )
         };
         if status != VA_STATUS_SUCCESS {
@@ -181,18 +200,7 @@ impl Session {
             )));
         }
 
-        Ok(Session {
-            sym,
-            display,
-            config,
-            context,
-            surface,
-            coded_width: coded_w,
-            coded_height: coded_h,
-            bit_depth,
-            x_display,
-            x_close_display: x_close,
-        })
+        Ok(session)
     }
 
     pub(crate) fn matches(&self, w: u32, h: u32, bd: u8) -> bool {

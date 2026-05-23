@@ -323,6 +323,23 @@ impl DecoderSession {
         }
         .map_err(|e| BackendError::Decode(format!("DecoderBeginFrame: {e}")))?;
 
+        // RAII guard: if any of the buffer-copy / SubmitDecoderBuffers
+        // calls below return early via `?`, the guard's Drop fires
+        // `DecoderEndFrame` to release the output view lock. Without
+        // this, a mid-pipeline error leaves the decoder in
+        // "BeginFrame'd but not Ended" state — the next call to
+        // `DecoderBeginFrame` would either fail outright (most
+        // drivers reject overlapping frames) or worse silently
+        // corrupt state. The guard is "armed" by default; the
+        // success path disarms it before its own explicit
+        // `DecoderEndFrame` call, so the End-Frame ioctl only ever
+        // fires once.
+        let mut frame_guard = FrameGuard {
+            ctx: &self.video_context,
+            decoder: &self.decoder,
+            armed: true,
+        };
+
         // 2. PICTURE_PARAMETERS buffer.
         copy_into_buffer(
             &self.video_context,
@@ -436,11 +453,42 @@ impl DecoderSession {
         }
         .map_err(|e| BackendError::Decode(format!("SubmitDecoderBuffers: {e}")))?;
 
-        // 6. DecoderEndFrame flushes the decoder for this AU.
+        // 6. DecoderEndFrame flushes the decoder for this AU. Disarm
+        // the guard FIRST so its Drop doesn't re-fire End-Frame on
+        // top of the explicit call below.
+        frame_guard.armed = false;
         // SAFETY: decoder + context still alive.
         unsafe { self.video_context.DecoderEndFrame(&self.decoder) }
             .map_err(|e| BackendError::Decode(format!("DecoderEndFrame: {e}")))?;
         Ok(())
+    }
+}
+
+/// RAII guard for `DecoderBeginFrame` → `DecoderEndFrame` pairing.
+///
+/// Drop runs `DecoderEndFrame` IFF `armed == true`. The success
+/// path disarms before its own explicit End-Frame call so we don't
+/// double-fire. Mid-pipeline failures (buffer copy fails,
+/// SubmitDecoderBuffers fails) skip the disarm step, so Drop closes
+/// the frame cleanly — the next decode call on the same session
+/// then starts from a known-good "no in-flight frame" state.
+struct FrameGuard<'a> {
+    ctx: &'a ID3D11VideoContext,
+    decoder: &'a ID3D11VideoDecoder,
+    armed: bool,
+}
+
+impl Drop for FrameGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            // SAFETY: ctx + decoder outlive the guard (it borrows
+            // them); DecoderEndFrame is the documented pair of
+            // DecoderBeginFrame regardless of submission status.
+            // The Result is ignored — Drop can't propagate errors
+            // and the alternative (logging) would require a
+            // dependency we don't have at this layer.
+            let _ = unsafe { self.ctx.DecoderEndFrame(self.decoder) };
+        }
     }
 }
 

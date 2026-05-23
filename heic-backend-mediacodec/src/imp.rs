@@ -475,14 +475,19 @@ fn unpack_planes(
             }
         }
         COLOR_FORMAT_YUV_P010 => {
-            // P010: u16 LE, value in low 10 bits (mask 0x3FF).
+            // P010: u16 LE, 10-bit value MSB-aligned within the u16
+            // (bits 15..6 carry the sample; bits 5..0 are zero).
+            // Earlier code masked with `& 0x3FF` which extracted the
+            // ZERO low bits — producing garbled output instead of the
+            // intended 10-bit sample. `>> 6` is the correct extraction,
+            // matching the Windows MF / D3D11VA / VT P010 paths.
             for row in 0..h {
                 let src = (cy + row) * s + cx * 2;
                 for col in 0..w {
                     let off = src + col * 2;
                     let lo = bytes[off];
                     let hi = bytes[off + 1];
-                    y_plane[row * w + col] = ((u16::from(hi) << 8) | u16::from(lo)) & 0x3FF;
+                    y_plane[row * w + col] = ((u16::from(hi) << 8) | u16::from(lo)) >> 6;
                 }
             }
             let uv_base = s * sh;
@@ -492,8 +497,8 @@ fn unpack_planes(
                     let off = src + col * 4;
                     let cb = (u16::from(bytes[off + 1]) << 8) | u16::from(bytes[off]);
                     let cr = (u16::from(bytes[off + 3]) << 8) | u16::from(bytes[off + 2]);
-                    cb_plane[row * half_w + col] = cb & 0x3FF;
-                    cr_plane[row * half_w + col] = cr & 0x3FF;
+                    cb_plane[row * half_w + col] = cb >> 6;
+                    cr_plane[row * half_w + col] = cr >> 6;
                 }
             }
         }

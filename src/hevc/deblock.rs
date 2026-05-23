@@ -63,9 +63,19 @@ fn trace_edge(
     use std::io::Write;
     use std::sync::LazyLock;
     use std::sync::Mutex;
-    static TRACE_FILE: LazyLock<Mutex<std::fs::File>> =
-        LazyLock::new(|| Mutex::new(std::fs::File::create("/tmp/our_deblock_trace.txt").unwrap()));
-    let mut f = TRACE_FILE.lock().unwrap();
+    // Trace file is best-effort: if /tmp/ is read-only or full, the
+    // LazyLock holds an `Option<File>` that's None — every write
+    // silently no-ops instead of panicking. This keeps the trace
+    // helper safe to call from production code with the trace
+    // toggle accidentally left on (server boxes with restricted
+    // tmpfs would otherwise crash on the first deblock edge).
+    static TRACE_FILE: LazyLock<Mutex<Option<std::fs::File>>> =
+        LazyLock::new(|| Mutex::new(std::fs::File::create("/tmp/our_deblock_trace.txt").ok()));
+    let mut guard = match TRACE_FILE.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let Some(f) = guard.as_mut() else { return };
     let _ = writeln!(
         f,
         "EDGE {} x={} y={} bS={} QP_P={} QP_Q={} qP_L={} beta={} tc={} dE={} dEp={} dEq={} d={} \

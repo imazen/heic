@@ -101,7 +101,13 @@ impl core::error::Error for HeicError {
 
 impl From<HevcError> for HeicError {
     fn from(e: HevcError) -> Self {
-        Self::HevcDecode(e)
+        match e {
+            // Cancellation propagates as a first-class HeicError so callers
+            // can distinguish it from a real decode failure without
+            // unwrapping the nested HevcError.
+            HevcError::Cancelled(reason) => Self::Cancelled(reason),
+            other => Self::HevcDecode(other),
+        }
     }
 }
 
@@ -206,6 +212,8 @@ pub enum HevcError {
     AllocationFailed,
     /// Dimension overflow (width * height exceeds limits)
     DimensionOverflow,
+    /// Decode was cancelled by an [`enough::Stop`] token.
+    Cancelled(enough::StopReason),
 }
 
 impl fmt::Display for HevcError {
@@ -225,6 +233,7 @@ impl fmt::Display for HevcError {
             Self::DecodingError(msg) => write!(f, "decoding error: {msg}"),
             Self::AllocationFailed => write!(f, "memory allocation failed"),
             Self::DimensionOverflow => write!(f, "frame dimensions overflow"),
+            Self::Cancelled(reason) => write!(f, "HEVC decode cancelled: {reason:?}"),
         }
     }
 }

@@ -984,25 +984,37 @@ impl DecoderConfig {
     /// image uses monochrome or if tiles are decoded sequentially.
     #[must_use]
     pub fn estimate_memory(width: u32, height: u32, layout: PixelLayout) -> u64 {
+        // Saturating arithmetic so a hostile SPS (`pic_width_in_luma_
+        // samples = u32::MAX`, etc.) can't wrap the byte estimate to a
+        // small value and slip past `Limits::check_memory`. The
+        // saturation point (u64::MAX bytes ≈ 16 exabytes) is far
+        // above any sensible `max_memory_bytes` cap, so a wrapped
+        // estimate would correctly fail the limit check.
         let w = u64::from(width);
         let h = u64::from(height);
-        let pixels = w * h;
+        let pixels = w.saturating_mul(h);
 
         // YCbCr planes (u16 per sample)
-        let luma_bytes = pixels * 2;
+        let luma_bytes = pixels.saturating_mul(2);
         let chroma_w = w.div_ceil(2);
         let chroma_h = h.div_ceil(2);
-        let chroma_bytes = chroma_w * chroma_h * 2 * 2; // Cb + Cr
+        let chroma_bytes = chroma_w
+            .saturating_mul(chroma_h)
+            .saturating_mul(2)
+            .saturating_mul(2); // Cb + Cr
 
         // Output pixel buffer
-        let output_bytes = pixels * layout.bytes_per_pixel() as u64;
+        let output_bytes = pixels.saturating_mul(layout.bytes_per_pixel() as u64);
 
         // Deblocking metadata (flags + QP map at 4x4 granularity)
         let blocks_w = w.div_ceil(4);
         let blocks_h = h.div_ceil(4);
-        let deblock_bytes = blocks_w * blocks_h * 2; // flags(u8) + qp(i8)
+        let deblock_bytes = blocks_w.saturating_mul(blocks_h).saturating_mul(2);
 
-        luma_bytes + chroma_bytes + output_bytes + deblock_bytes
+        luma_bytes
+            .saturating_add(chroma_bytes)
+            .saturating_add(output_bytes)
+            .saturating_add(deblock_bytes)
     }
 
     /// Check if the primary image has an HDR gain map auxiliary image.

@@ -51,6 +51,23 @@ pub fn decode(data: &[u8]) -> Result<DecodedFrame> {
 /// This is the preferred method for HEIC files where parameter sets
 /// are stored separately in the hvcC box.
 pub fn decode_with_config(config: &HevcDecoderConfig, image_data: &[u8]) -> Result<DecodedFrame> {
+    decode_with_config_stop(config, image_data, &enough::Unstoppable)
+}
+
+/// Same as [`decode_with_config`], but checks `stop` at tile entry
+/// so a multi-tile grid decode can cancel between tiles.
+///
+/// The check is at the START — full-tile granularity, not
+/// per-CTU. For HEIC grids that's the right cadence (tiles take
+/// ~10-50 ms each; finer granularity would cost more than it saves).
+pub fn decode_with_config_stop(
+    config: &HevcDecoderConfig,
+    image_data: &[u8],
+    stop: &dyn enough::Stop,
+) -> Result<DecodedFrame> {
+    if stop.should_stop() {
+        return Err(HevcError::Cancelled(enough::StopReason::Cancelled));
+    }
     let mut nal_units = Vec::new();
 
     // Parse parameter sets from hvcC
