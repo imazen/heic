@@ -182,14 +182,15 @@ done
 echo "    -- heic-core (cargo publish --dry-run)"
 cargo publish --dry-run -p heic-core --allow-dirty
 
-# Per-crate `cargo package` validates the file list + Cargo.toml
-# parse + workspace inheritance resolution without resolving
-# inter-crate deps against crates.io.
-for crate in "${CRATES[@]}"; do
-    if [ "$crate" = "heic-core" ]; then continue; fi
-    echo "    -- $crate (cargo package)"
-    cargo package -p "$crate" --allow-dirty --no-verify >/dev/null
-done
+# Non-leaf crates fail `cargo package` / `cargo publish --dry-run`
+# at the "prepare for upload" step because their workspace-version
+# deps aren't on crates.io yet — there's no flag to bypass that.
+# Accepted limitation: full multi-crate dry-run only works AFTER
+# the first leaf is published. The real publish step (which IS
+# sequenced + sleeps between uploads) is the ultimate validator.
+echo "    (skipping cargo package for non-leaf crates — their"
+echo "     deps aren't on crates.io until heic-core is published;"
+echo "     real-publish step validates them in topological order)"
 
 if [ "${PUBLISH_DRY:-false}" = "true" ]; then
     step "PUBLISH_DRY=true — stopping after dry-run. Set PUBLISH_DRY=false to publish for real."
