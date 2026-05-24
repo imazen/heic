@@ -134,9 +134,17 @@ fi
 # ── 6. Dry-run packaging ─────────────────────────────────────────────────
 
 step "Dry-run cargo publish for each crate"
+# --no-verify skips the post-package build step. Without it, the dry-
+# run for heic-backend-mediafoundation (which depends on heic-core
+# v$VERSION) fails because heic-core v$VERSION isn't on crates.io
+# yet — there's no way to verify a multi-crate workspace publish
+# end-to-end before the first crate goes up. CI separately verifies
+# every crate builds; the dry-run here only validates the
+# packaging step (file inclusion, README presence, Cargo.toml
+# parseability, license string, etc.).
 for crate in "${CRATES[@]}"; do
     echo "    -- $crate"
-    cargo publish --dry-run -p "$crate" --allow-dirty
+    cargo publish --dry-run --no-verify -p "$crate" --allow-dirty
 done
 
 if [ "${PUBLISH_DRY:-false}" = "true" ]; then
