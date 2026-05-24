@@ -30,6 +30,36 @@ fmt:
 # Local CI sanity check
 ci: fmt clippy feature-check test test-parallel
 
+# ── Release ──────────────────────────────────────────────────────────────
+#
+# Single-command publish for the entire workspace. Reads the version
+# from `[workspace.package].version` in Cargo.toml — the human bumps
+# that BEFORE running these (one edit + commit + push + wait-for-CI).
+#
+# `just publish-dry` runs everything through `cargo publish --dry-run`
+# without touching crates.io or pushing tags. Safe to run any time.
+#
+# `just publish` is the real ship: runs the full validation flow,
+# tags the commit, creates a GitHub release, and uploads every
+# crate to crates.io in topological order. Prompts for an explicit
+# "PUBLISH" confirmation before the irreversible step.
+#
+# Both delegate to `scripts/release.sh`. See its docstring for the
+# full sequence + env-var knobs (PUBLISH_DRY, PUBLISH_SKIP_CI,
+# PUBLISH_FORCE).
+
+# Validate the full publish flow without touching crates.io
+publish-dry:
+    PUBLISH_DRY=true ./scripts/release.sh
+
+# Publish every workspace crate to crates.io (REAL — irreversible)
+publish:
+    ./scripts/release.sh
+
+# Show the current workspace version (helps you remember what `just publish` will ship)
+version:
+    @awk '/^\[workspace\.package\]/{f=1; next} /^\[/{f=0} f && /^version = "/{print}' Cargo.toml
+
 # Run reference comparison tests (requires test files)
 compare:
     cargo test --test compare_reference -- --nocapture

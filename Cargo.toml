@@ -11,6 +11,10 @@ members = [
 resolver = "3"
 
 [workspace.package]
+# Bumped together for every workspace release — `scripts/release.sh`
+# expects a single source of truth here so a workspace publish only
+# needs ONE version bump. See RELEASING.md for the full flow.
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.89"
 license = "AGPL-3.0-only OR LicenseRef-Imazen-Commercial"
@@ -18,13 +22,13 @@ repository = "https://github.com/imazen/heic"
 authors = ["Imazen LLC"]
 
 [workspace.dependencies]
-heic-core = { version = "0.0.0", path = "heic-core" }
+heic-core = { version = "0.2.0", path = "heic-core" }
 enough = "0.4.3"
 whereat = "0.1.5"
 
 [package]
 name = "heic"
-version = "0.1.6"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -93,11 +97,11 @@ unci = ["dep:zenflate"]
 
 [dependencies]
 heic-core = { workspace = true }
-heic-backend-mediafoundation = { version = "0.0.0", path = "heic-backend-mediafoundation", optional = true }
-heic-backend-videotoolbox = { version = "0.0.0", path = "heic-backend-videotoolbox", optional = true }
-heic-backend-mediacodec = { version = "0.0.0", path = "heic-backend-mediacodec", optional = true }
-heic-backend-vaapi = { version = "0.0.0", path = "heic-backend-vaapi", optional = true }
-heic-backend-d3d11va = { version = "0.0.0", path = "heic-backend-d3d11va", optional = true }
+heic-backend-mediafoundation = { version = "0.2.0", path = "heic-backend-mediafoundation", optional = true }
+heic-backend-videotoolbox = { version = "0.2.0", path = "heic-backend-videotoolbox", optional = true }
+heic-backend-mediacodec = { version = "0.2.0", path = "heic-backend-mediacodec", optional = true }
+heic-backend-vaapi = { version = "0.2.0", path = "heic-backend-vaapi", optional = true }
+heic-backend-d3d11va = { version = "0.2.0", path = "heic-backend-d3d11va", optional = true }
 enough = "0.4.3"
 whereat = { version = "0.1.5"}
 archmage = { version = "0.9.16", default-features = false, features = ["macros"] }
