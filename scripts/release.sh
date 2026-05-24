@@ -133,18 +133,62 @@ fi
 
 # ── 6. Dry-run packaging ─────────────────────────────────────────────────
 
-step "Dry-run cargo publish for each crate"
-# --no-verify skips the post-package build step. Without it, the dry-
-# run for heic-backend-mediafoundation (which depends on heic-core
-# v$VERSION) fails because heic-core v$VERSION isn't on crates.io
-# yet — there's no way to verify a multi-crate workspace publish
-# end-to-end before the first crate goes up. CI separately verifies
-# every crate builds; the dry-run here only validates the
-# packaging step (file inclusion, README presence, Cargo.toml
-# parseability, license string, etc.).
+step "Validating publish metadata for each crate"
+# Full `cargo publish --dry-run` only works for heic-core (the
+# root of the dep tree) — the backend + parent crates depend on
+# heic-core $VERSION which isn't on crates.io until the real
+# publish step runs, so their dry-run fails with
+# "no matching package named heic-core". We do what we can offline:
+#   * heic-core: full `cargo publish --dry-run --no-verify`
+#     (validates Cargo.toml + README + license + included files).
+#   * Every other crate: parse Cargo.toml ourselves and assert
+#     description / license / repository / readme are set, then
+#     `cargo package` to make sure the file list builds. The full
+#     `cargo publish` for these runs at real-publish time after
+#     heic-core is up.
+require_metadata() {
+    local crate_dir="$1"
+    local manifest="$crate_dir/Cargo.toml"
+    for field in description repository keywords categories; do
+        if ! grep -qE "^${field}(\.workspace)?\s*=" "$manifest"; then
+            fail "$manifest missing [package].$field"
+        fi
+    done
+    # license OR license.workspace
+    if ! grep -qE '^license(\.workspace)?\s*=' "$manifest"; then
+        fail "$manifest missing [package].license"
+    fi
+    # README must exist if `readme = "..."` is set, OR if the crate
+    # has the default `README.md` at its root.
+    local readme_line readme_path
+    readme_line=$(grep -E '^readme\s*=' "$manifest" || true)
+    if [ -n "$readme_line" ]; then
+        readme_path=$(echo "$readme_line" | sed -E 's/^readme\s*=\s*"([^"]+)".*/\1/')
+        [ -f "$crate_dir/$readme_path" ] || fail "$manifest: readme = \"$readme_path\" but file missing"
+    fi
+}
+
 for crate in "${CRATES[@]}"; do
-    echo "    -- $crate"
-    cargo publish --dry-run --no-verify -p "$crate" --allow-dirty
+    if [ "$crate" = "heic" ]; then
+        crate_dir="."
+    else
+        crate_dir="$crate"
+    fi
+    echo "    -- $crate (metadata)"
+    require_metadata "$crate_dir"
+done
+
+# Full dry-run on the leaf crate.
+echo "    -- heic-core (cargo publish --dry-run)"
+cargo publish --dry-run -p heic-core --allow-dirty
+
+# Per-crate `cargo package` validates the file list + Cargo.toml
+# parse + workspace inheritance resolution without resolving
+# inter-crate deps against crates.io.
+for crate in "${CRATES[@]}"; do
+    if [ "$crate" = "heic-core" ]; then continue; fi
+    echo "    -- $crate (cargo package)"
+    cargo package -p "$crate" --allow-dirty --no-verify >/dev/null
 done
 
 if [ "${PUBLISH_DRY:-false}" = "true" ]; then
