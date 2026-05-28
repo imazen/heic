@@ -4,6 +4,16 @@ version = "0.0.0"
 publish = false
 edition = "2024"
 
+# Detach from the parent `heic` workspace. cargo-fuzz expects to
+# build fuzz/ as an independent crate (so it can swap sanitizer
+# RUSTFLAGS without contaminating the rest of the workspace's
+# build), but cargo errors out if a sub-Cargo.toml sits inside a
+# workspace it isn't a member of. Declaring an empty workspace
+# here decouples them — same pattern used by zenwebp/fuzz and
+# zenavif-parse/fuzz.
+[workspace]
+members = ["."]
+
 [package.metadata]
 cargo-fuzz = true
 
@@ -12,7 +22,10 @@ libfuzzer-sys = "0.4"
 
 [dependencies.heic]
 path = ".."
-features = ["av1", "unci"]
+# `backend-rust` satisfies the HEVC-backend `compile_error!` gate in
+# `heic::lib`. `av1` enables the AVIF/AV1 fuzz target; `unci` enables
+# the uncompressed-codec target.
+features = ["backend-rust", "av1", "unci"]
 
 [[bin]]
 name = "fuzz_decode"
