@@ -505,7 +505,11 @@ fn copy_into_buffer(
     // the requested buffer slot.
     unsafe { ctx.GetDecoderBuffer(decoder, buffer_type, &mut buf_size, &mut buf_ptr) }
         .map_err(|e| BackendError::Decode(format!("GetDecoderBuffer({buffer_type:?}): {e}")))?;
-    if buf_ptr.is_null() || (data.len() as u32) > buf_size {
+    // Compare in usize: `data.len() as u32` TRUNCATES on a 64-bit host, so a
+    // >4 GiB bitstream whose low 32 bits land below buf_size would pass this
+    // guard and the copy_nonoverlapping below would overflow the GPU buffer
+    // (OOB write / UB). `buf_size as usize` widens losslessly.
+    if buf_ptr.is_null() || data.len() > buf_size as usize {
         // SAFETY: pairs with GetDecoderBuffer; harmless on null.
         unsafe { ctx.ReleaseDecoderBuffer(decoder, buffer_type) }
             .map_err(|e| BackendError::Decode(format!("ReleaseDecoderBuffer: {e}")))?;
