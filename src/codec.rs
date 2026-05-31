@@ -112,7 +112,7 @@ static DECODE_DESCRIPTORS: &[PixelDescriptor] = &[
 /// Supplement extraction (gain map, depth map) is **opt-in**: both default
 /// to `false`. Enable via [`with_extract_gain_map`](Self::with_extract_gain_map)
 /// or [`with_extract_depth`](Self::with_extract_depth). The flags propagate
-/// to every [`HeicDecodeJob`] created by [`job()`](Self::job).
+/// to every [`HeicDecodeJob`] created by its `job()` factory.
 #[derive(Clone, Debug)]
 pub struct HeicDecoderConfig {
     inner: crate::DecoderConfig,

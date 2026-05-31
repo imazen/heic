@@ -428,7 +428,7 @@ pub struct ImageInfo {
     pub transfer_characteristics: u16,
     /// Matrix coefficients (CICP). 1=BT.709, 5/6=BT.601, 9=BT.2020, 2=unspecified
     pub matrix_coefficients: u16,
-    /// Full range flag (CICP). true = full [0,255], false = limited [16,235]
+    /// Full range flag (CICP). true = full `[0,255]`, false = limited `[16,235]`
     pub video_full_range: bool,
     /// Whether the file contains an ICC profile (in colr box)
     pub has_icc_profile: bool,
@@ -922,8 +922,8 @@ impl DecoderConfig {
     /// fall through to subsequent entries. An empty list causes decode to
     /// return [`HeicError::NoBackendSelected`].
     ///
-    /// See [`Backend`] for the available variants and the
-    /// [`backend`](crate::backend) module for fallthrough semantics.
+    /// See [`Backend`] for the available variants and the allowlist
+    /// fallthrough semantics.
     ///
     /// # Example
     ///
