@@ -75,21 +75,16 @@ jobs:
           target: google_apis
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
           disable-animations: true
+          # The action runs this in /bin/sh (dash); keep it flat — no multi-line
+          # if/case blocks (they were mangled into a syntax error). Require the
+          # MediaCodec backend to decode (no rust fallback) via a one-line grep.
           script: |
             set -e
             BIN=target/x86_64-linux-android/release/examples/backend_decode
-            if [ ! -f "$BIN" ]; then
-              echo "::error::missing $BIN"
-              ls -R target/x86_64-linux-android/release/examples || true
-              exit 1
-            fi
             adb push "$BIN" /data/local/tmp/backend_decode
             adb shell chmod 755 /data/local/tmp/backend_decode
             adb push testdata/libheif-examples/example.heic /data/local/tmp/example.heic
-            # Require the MediaCodec backend to decode it (no rust fallback).
             OUT=$(adb shell "/data/local/tmp/backend_decode /data/local/tmp/example.heic mediacodec" | tr -d '\r')
             echo "device output: $OUT"
-            case "$OUT" in
-              "OK mediacodec "*) echo "MediaCodec runtime decode OK" ;;
-              *) echo "::error::MediaCodec runtime decode failed: $OUT"; exit 1 ;;
-            esac
+            echo "$OUT" | grep -q "^OK mediacodec " || { echo "::error::MediaCodec runtime decode failed: $OUT"; exit 1; }
+            echo "MediaCodec runtime decode OK"
