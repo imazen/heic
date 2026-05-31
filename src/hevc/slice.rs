@@ -369,6 +369,25 @@ impl SliceHeader {
                 let num_long_term_sps = if num_lt_sps > 0 { reader.read_ue()? } else { 0 };
                 let num_long_term_pics = reader.read_ue()?;
 
+                // H.265 7.4.7.1: num_long_term_sps ≤ num_long_term_ref_pics_sps,
+                // and the total long-term reference count is bounded by the DPB
+                // (≤ 16). Reject out-of-range rather than computing
+                // `num_long_term_sps + num_long_term_pics` below — both are
+                // unbounded ue(v) (up to ~4.29e9) whose sum overflow-panics in
+                // debug/fuzz builds, wraps in release, and drives a huge loop.
+                // Bound each operand to 16 BEFORE summing so the addition in the
+                // loop bound below cannot itself overflow (num_lt_sps can be
+                // large if the SPS LT list was long).
+                if num_long_term_sps as usize > num_lt_sps
+                    || num_long_term_sps > 16
+                    || num_long_term_pics > 16
+                    || num_long_term_sps + num_long_term_pics > 16
+                {
+                    return Err(HevcError::InvalidBitstream(
+                        "long-term ref pic count exceeds DPB bound (16)",
+                    ));
+                }
+
                 let poc_bits = sps.log2_max_pic_order_cnt_lsb_minus4 + 4;
 
                 for i in 0..(num_long_term_sps + num_long_term_pics) {

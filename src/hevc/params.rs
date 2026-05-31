@@ -644,6 +644,25 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
             ),
         });
     }
+    // Validate the DERIVED transform-block sizes (H.265 7.4.3.2), not just the
+    // individual minus2/diff fields above. A crafted SPS with min_tb=5 (minus2=3)
+    // and diff=3 yields log2_max_tb=8 (256×256); an inter-CU transform leaf can
+    // then reach that size — bypassing intra's log2>5 guard — and slice the
+    // fixed `[i16; 1024]` CoeffBuffer out of bounds in residual dequant
+    // (ctu.rs). Spec requires MinTb ≤ MinCb and MinTb ≤ MaxTb ≤ min(CtbSize, 5).
+    let log2_min_cb = log2_min_luma_coding_block_size_minus3 + 3;
+    let log2_ctb = log2_min_cb + log2_diff_max_min_luma_coding_block_size;
+    let log2_min_tb = log2_min_luma_transform_block_size_minus2 + 2;
+    let log2_max_tb = log2_min_tb + log2_diff_max_min_luma_transform_block_size;
+    if log2_max_tb > 5 || log2_min_tb > log2_min_cb || log2_max_tb > log2_ctb {
+        return Err(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!(
+                "derived transform sizes invalid: log2_min_tb={log2_min_tb} \
+                 log2_max_tb={log2_max_tb} log2_min_cb={log2_min_cb} log2_ctb={log2_ctb}"
+            ),
+        });
+    }
     let max_transform_hierarchy_depth_inter = reader.read_ue()? as u8;
     if max_transform_hierarchy_depth_inter > 5 {
         return Err(HevcError::InvalidParameterSet {
@@ -880,8 +899,28 @@ pub fn parse_pps(data: &[u8]) -> Result<Pps> {
     let entropy_coding_sync_enabled_flag = reader.read_bit()? != 0;
 
     let tile_info = if tiles_enabled_flag {
-        let num_tile_columns_minus1 = reader.read_ue()? as u16;
-        let num_tile_rows_minus1 = reader.read_ue()? as u16;
+        let num_tile_columns_minus1 = reader.read_ue()?;
+        let num_tile_rows_minus1 = reader.read_ue()?;
+        // H.265 Table A.1 caps tile columns at 20 and rows at 22 across all
+        // levels; the DXVA/VA-API picture-parameter structs carry
+        // column_width_minus1[19] / row_height_minus1[21] arrays sized to
+        // exactly that. Reject anything larger so (a) the `as u16` (and the
+        // native-backend `as u8`) narrowing can never silently truncate a huge
+        // attacker count and (b) native backends never index past their fixed
+        // tile arrays. Without this, read_ue() up to ~4.29e9 truncated to u16
+        // produced a desynced tile grid and an out-of-array FFI tile count.
+        if num_tile_columns_minus1 > 19 || num_tile_rows_minus1 > 21 {
+            return Err(HevcError::InvalidParameterSet {
+                kind: "PPS",
+                msg: alloc::format!(
+                    "tile grid {}x{} exceeds HEVC max 20x22",
+                    num_tile_columns_minus1.saturating_add(1),
+                    num_tile_rows_minus1.saturating_add(1)
+                ),
+            });
+        }
+        let num_tile_columns_minus1 = num_tile_columns_minus1 as u16;
+        let num_tile_rows_minus1 = num_tile_rows_minus1 as u16;
         let uniform_spacing_flag = reader.read_bit()? != 0;
 
         let (column_widths, row_heights) = if !uniform_spacing_flag {
@@ -1068,6 +1107,20 @@ fn parse_scaling_list_data(reader: &mut BitstreamReader<'_>) -> Result<ScalingLi
                 let mut next_coef: i32 = 8;
                 if size_id > 1 {
                     let dc_coef_minus8 = reader.read_se()?;
+                    // H.265 7.4.5: scaling_list_dc_coef_minus8 ∈ [-7, 247].
+                    // Reject out-of-range rather than computing `+ 8` with plain
+                    // `+`: read_se() can return up to i32::MAX, so `i32::MAX + 8`
+                    // overflow-panics in overflow-checked builds (debug /
+                    // cargo-fuzz) or wraps to a garbage DC factor in release
+                    // (wrong dequant). Matches the delta path's hardening below.
+                    if !(-7..=247).contains(&dc_coef_minus8) {
+                        return Err(HevcError::InvalidParameterSet {
+                            kind: "scaling_list",
+                            msg: alloc::format!(
+                                "scaling_list_dc_coef_minus8={dc_coef_minus8} out of range [-7,247]"
+                            ),
+                        });
+                    }
                     next_coef = dc_coef_minus8 + 8;
                     data.dc_coef[size_id - 2][matrix_id] = ((next_coef + 256) % 256) as u8;
                 }
