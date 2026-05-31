@@ -19,7 +19,7 @@ FFI backend crates. So CI has two jobs:
 | Backend | Compile / clippy | Runtime decode in CI | Where |
 |---|---|---|---|
 | `backend-rust` | all 6 OSes + i686 + wasm32 | ✅ corpus gate on all 6 OSes + i686 (32-bit) | `ci.yml` |
-| MediaFoundation | windows-latest (x64+arm64) | ✅ `windows-11-arm` (HEVC AppX side-loaded) | `ci.yml` |
+| MediaFoundation | windows-latest (x64+arm64) | ⚠ `windows-11-arm` job runs, but the decode test **skips** unless the HEVC codec is installed (see note) | `ci.yml` |
 | VideoToolbox | macOS arm64 + Intel | ✅ `macos-latest` + `macos-15-intel` | `ci.yml` |
 | MediaCodec | aarch64-android (NDK) | ✅ **Android emulator** (x86_64, software HEVC) | `mediacodec-runtime.yml` |
 | VA-API | ubuntu (libva-dev) | ⏳ self-hosted Linux+GPU only | `vaapi-runtime.yml` |
@@ -44,9 +44,31 @@ CI.
 - **All 7 fuzz targets** run nightly (was 5).
 - **`cargo-semver-checks`** (informational on 0.x), **`cargo doc -D warnings`**,
   and **`av1` + `unci`** lint/unit gating — all were missing.
-- **MF runtime AppX step** now fails loud when the secret is set but install
-  fails (was `continue-on-error` → the only MF runtime gate could silently
-  no-op).
+- **MF runtime AppX step** now fails loud when `HEVC_APPX_URL_ARM64` is set but
+  install fails (was `continue-on-error` → the gate could silently no-op).
+
+### MediaFoundation runtime — codec licensing
+
+The MF HEVC decode test on `windows-11-arm` needs the "HEVC Video Extensions"
+codec, which the GitHub-hosted image doesn't reliably ship. **It cannot be
+side-loaded by mirroring the `.appx`:** that package (Store product
+`9N4WGH0Z6VHQ`, the free "from Device Manufacturer" variant) is a Microsoft
+Store "Digital Good", and the Microsoft Services Agreement §14.j prohibits
+redistributing/transferring copies — being free + Microsoft-signed does **not**
+grant redistribution (verified against the MSA + the standard software license
+terms). So the decode test **skips** by default (`HEIC_REQUIRE_MF_HEVC=0`). To
+run it for real, acquire the codec license-cleanly:
+
+- `winget install --id 9N4WGH0Z6VHQ --source msstore` on the runner (keeps
+  acquisition inside the Store license; may require Store auth — test it works
+  unattended on the hosted image), **or**
+- a Microsoft Store for Business / Intune **offline license** you own, hosted at
+  `HEVC_APPX_URL_ARM64`, **or**
+- run the MF dispatch test on a licensed Windows host (e.g. `V:\heic-win-test.ps1`).
+
+Do **not** point `HEVC_APPX_URL_ARM64` at a public mirror of the stock Store
+`.appx` — it's a licensing risk, and the Store CDN
+(`delivery.mp.microsoft.com`) URLs are short-lived and would rot anyway.
 
 ### Conformance suite — still a gap
 

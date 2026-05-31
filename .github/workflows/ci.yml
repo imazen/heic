@@ -308,15 +308,29 @@ jobs:
         env:
           HEVC_APPX_URL_ARM64: ${{ secrets.HEVC_APPX_URL_ARM64 }}
         run: |
-          # The free 9N4WGH0Z6VHQ package is signed by Microsoft and freely
-          # redistributable per the EULA, so we can mirror it.
+          # HEIC_REQUIRE_MF_HEVC / HEVC_APPX_URL_ARM64 — LICENSING NOTE.
+          # "HEVC Video Extensions" (Store product 9N4WGH0Z6VHQ, the free
+          # "from Device Manufacturer" variant) is a Microsoft Store "Digital
+          # Good". The Microsoft Services Agreement (§14.j) says you may "not
+          # redistribute ... or transfer any copies of the Digital Goods", so
+          # mirroring the .appx at a public URL is NOT licensed — being free +
+          # Microsoft-signed does NOT grant redistribution. (Store CDN
+          # delivery.mp.microsoft.com links are also short-lived/signed and
+          # would rot.) So HEVC_APPX_URL_ARM64 is intentionally LEFT UNSET on
+          # this repo and the MF runtime decode is skipped here; the licensed
+          # ways to acquire the codec for a real run are:
+          #   * `winget install --id 9N4WGH0Z6VHQ --source msstore` on the
+          #     runner (keeps acquisition inside the Store license; may need
+          #     Store auth, so test it works unattended), or
+          #   * a Microsoft Store for Business / Intune offline license you own,
+          #     pointed at by HEVC_APPX_URL_ARM64, or
+          #   * run the MF dispatch test on a licensed Windows host instead.
           #
-          # Fail-loud policy: if the secret is UNSET this is an unconfigured
-          # environment — skip the runtime decode (HEIC_REQUIRE_MF_HEVC=0) and
-          # exit clean. If the secret IS set but the download/install fails,
-          # that is a real breakage: let the error propagate and FAIL the job
-          # (no continue-on-error), so a broken mirror URL can't silently turn
-          # the only MF runtime gate into a no-op.
+          # Fail-loud policy: if HEVC_APPX_URL_ARM64 is UNSET, skip the runtime
+          # decode (HEIC_REQUIRE_MF_HEVC=0) and exit clean. If it IS set (you
+          # supplied a license-clean offline package), a download/install
+          # failure propagates and FAILs the job — no continue-on-error, so a
+          # broken URL can't silently turn the gate into a no-op.
           $url = $env:HEVC_APPX_URL_ARM64
           if (-not $url) {
             Write-Host "::warning::HEVC_APPX_URL_ARM64 not set; skipping MF HEVC runtime decode"
