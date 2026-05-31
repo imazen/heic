@@ -296,23 +296,22 @@ impl DecoderSession {
     /// Submit one HEVC access unit to the driver.
     ///
     /// `pic_params` is the SPS + PPS-populated picture-parameter
-    /// buffer. `slice_data_annexb` is the slice NAL bytes in Annex-B
-    /// form (start-code-prefixed; we use Annex-B because that matches
-    /// what `DxvaSliceHevcShort` references via `SliceBytesIndex = 0`).
+    /// buffer. `slice_data_annexb` is the concatenated slice NAL bytes
+    /// in Annex-B form (each slice 3-byte-start-code-prefixed). `slices`
+    /// lists one `(offset, length)` per slice in `slice_data_annexb`,
+    /// where `offset` is the byte position of that slice's `{0,0,1}`
+    /// start code and `length` is the start code plus NAL bytes — one
+    /// `DxvaSliceHevcShort` is emitted per entry, matching chromium's
+    /// per-slice `SubmitSlice` accumulation.
     ///
     /// On success the decoded frame lands in [`Self::output_texture`];
     /// callers can `CopySubresourceRegion` it into a CPU-readable
     /// staging texture and `Map` to read NV12 / P010 bytes.
-    ///
-    /// This is the "first attempt" decode entry point — it submits one
-    /// slice in DXVA short format and calls `DecoderEndFrame` to flush.
-    /// Multi-slice / multi-tile pictures need richer slice control
-    /// buffer construction (one `DxvaSliceHevcShort` per slice + the
-    /// concatenated bitstream); that lands in a follow-up.
     pub fn submit_one_frame(
         &self,
         pic_params: &crate::dxva::DxvaPicParamsHevc,
         slice_data_annexb: &[u8],
+        slices: &[(u32, u32)],
         iq_matrix: Option<&crate::dxva::DxvaQmatrixHevc>,
     ) -> Result<(), BackendError> {
         // 1. DecoderBeginFrame — locks the output view for write.
@@ -383,44 +382,53 @@ impl DecoderSession {
             slice_data_annexb,
         )?;
 
-        // 4. SLICE_CONTROL buffer — one DXVA_Slice_HEVC_Short
-        // pointing at the slice NAL inside the bitstream buffer.
-        // struct layout from dxva.h:
-        //   BSNALunitDataLocation (UINT)  — byte offset of the first
-        //                                   NAL data byte AFTER the
-        //                                   start code in the
-        //                                   BITSTREAM buffer.
-        //   SliceBytesInBuffer    (UINT)  — total slice bytes from
-        //                                   the location above.
+        // 4. SLICE_CONTROL buffer — one DXVA_Slice_HEVC_Short per slice
+        // NAL inside the bitstream buffer. struct layout from dxva.h:
+        //   BSNALunitDataLocation (UINT)  — byte offset of the slice's
+        //                                   {0,0,1} start code within
+        //                                   the BITSTREAM buffer.
+        //   SliceBytesInBuffer    (UINT)  — total slice bytes from that
+        //                                   location (start code + NAL).
         //   wBadSliceChopping     (USHORT) — 0 = full slice, no chopping.
         //
-        // For HEIC single-slice IDR tiles the slice_annexb buffer is
-        // [0x00 0x00 0x00 0x01][NAL header + RBSP]. Point at offset 0
-        // because the driver expects to see the start code itself
-        // (NB: chromium uses 0 for the full Annex-B blob).
+        // chromium accumulates one entry per slice and submits a single
+        // SLICE_CONTROL buffer of N * sizeof(DXVA_Slice_HEVC_Short)
+        // (media/gpu/windows/d3d_video_decoder_wrapper.cc
+        // AppendBitstreamAndSliceDataWithStartCode → slice_info_bytes_).
+        // BSNALunitDataLocation points at the start code itself; the
+        // driver scans past it internally. For a single-slice IDR tile
+        // this collapses to one entry at offset 0.
         #[repr(C)]
+        #[derive(Clone, Copy)]
         struct DxvaSliceHevcShort {
             bs_nalu_data_location: u32,
             slice_bytes_in_buffer: u32,
             w_bad_slice_chopping: u16,
         }
-        let slice = DxvaSliceHevcShort {
-            bs_nalu_data_location: 0,
-            slice_bytes_in_buffer: u32::try_from(slice_data_annexb.len()).unwrap_or(u32::MAX),
-            w_bad_slice_chopping: 0,
-        };
+        let mut slice_control: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(
+            slices.len() * core::mem::size_of::<DxvaSliceHevcShort>(),
+        );
+        for &(offset, length) in slices {
+            let slice = DxvaSliceHevcShort {
+                bs_nalu_data_location: offset,
+                slice_bytes_in_buffer: length,
+                w_bad_slice_chopping: 0,
+            };
+            // SAFETY: DxvaSliceHevcShort is #[repr(C)] + Copy; viewing
+            // its bytes for the memcpy into the accumulator is sound.
+            let bytes = unsafe {
+                core::slice::from_raw_parts(
+                    (&slice as *const DxvaSliceHevcShort) as *const u8,
+                    core::mem::size_of::<DxvaSliceHevcShort>(),
+                )
+            };
+            slice_control.extend_from_slice(bytes);
+        }
         copy_into_buffer(
             &self.video_context,
             &self.decoder,
             D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL,
-            // SAFETY: DxvaSliceHevcShort is #[repr(C)] + lives until
-            // ReleaseDecoderBuffer copies its bytes.
-            unsafe {
-                core::slice::from_raw_parts(
-                    (&slice as *const _) as *const u8,
-                    core::mem::size_of::<DxvaSliceHevcShort>(),
-                )
-            },
+            &slice_control,
         )?;
 
         // 5. SubmitDecoderBuffers — include the iq_matrix descriptor
@@ -444,7 +452,7 @@ impl DecoderSession {
         ));
         buffer_descs.push(buffer_desc(
             D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL,
-            core::mem::size_of::<DxvaSliceHevcShort>() as u32,
+            u32::try_from(slice_control.len()).unwrap_or(u32::MAX),
         ));
         // SAFETY: buffer_descs is alive through the call.
         unsafe {

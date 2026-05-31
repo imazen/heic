@@ -32,6 +32,24 @@ pub(super) struct OutputPlanes {
     pub cr: Vec<u16>,
 }
 
+/// Minimum locked-buffer byte length required for `unpack_nv12_or_p010` to
+/// stay in bounds: an NV12/P010 frame is `aligned_height` Y rows + half as
+/// many interleaved UV rows = `aligned_height * 3 / 2` rows of `stride_abs`
+/// bytes each, times the per-sample byte width (1 for NV12, 2 for P010).
+///
+/// Returns `usize::MAX` on overflow so the `total_bytes < min` comparison
+/// rejects the buffer rather than wrapping to a small value. Shared by the
+/// IMF2DBuffer and linear fallback paths so they can't diverge.
+fn nv12_min_bytes(aligned_height: usize, stride_abs: usize, bit_depth: u8) -> usize {
+    let bytes_per_sample = if bit_depth >= 10 { 2 } else { 1 };
+    aligned_height
+        .checked_mul(3)
+        .and_then(|v| v.checked_div(2))
+        .and_then(|v| v.checked_mul(stride_abs))
+        .and_then(|v| v.checked_mul(bytes_per_sample))
+        .unwrap_or(usize::MAX)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn read_output_planes(
     sample: &IMFSample,
@@ -63,7 +81,28 @@ pub(super) fn read_output_planes(
     unsafe { buffer.Lock(&mut ptr, Some(&mut max_len), Some(&mut cur_len)) }
         .map_err(decode_err("IMFMediaBuffer::Lock(out)"))?;
     let stride = coded_w as usize;
-    // SAFETY: the lock guarantees the pointer is valid for `cur_len` bytes.
+
+    // Defensive bounds check, mirroring the IMF2DBuffer path: verify the
+    // locked buffer actually holds the full NV12/P010 frame the unpacker
+    // walks (assuming stride == coded_w here). Without this a software MFT
+    // that returns a short/undersized buffer would let unpack_nv12_or_p010
+    // read past the lock's valid range — UB on untrusted .heic input.
+    // `cur_len` is the MFT-reported valid-data length (set via
+    // SetCurrentLength); `max_len` is the allocation. Require the worst-case
+    // read to fit within both before we construct any slice.
+    let aligned_height = coded_h as usize;
+    let expected_min = nv12_min_bytes(aligned_height, stride, bit_depth);
+    if (cur_len as usize) < expected_min || (max_len as usize) < expected_min {
+        // SAFETY: pairs with the Lock above; release before returning.
+        let _ = unsafe { buffer.Unlock() };
+        return Err(decode_err("IMFMediaBuffer linear bounds check")(
+            windows::core::Error::from_hresult(windows::core::HRESULT(-1)),
+        ));
+    }
+
+    // SAFETY: the lock guarantees the pointer is valid for `cur_len` bytes,
+    // and the bounds check above proved `cur_len >= expected_min`, so the
+    // unpacker's reads stay within [ptr, ptr + cur_len).
     let planes = unsafe {
         unpack_nv12_or_p010(
             ptr, stride, coded_h, visible_w, visible_h, crop_x, crop_y, bit_depth,
@@ -115,13 +154,8 @@ fn read_planes_2d(
     // / 2 * stride`. P010 doubles bytes per sample but
     // GetContiguousLength reports byte size, so the same
     // arithmetic applies.
-    let expected_min = aligned_height
-        .checked_mul(3)
-        .and_then(|v| v.checked_div(2))
-        .and_then(|v| v.checked_mul(stride_abs))
-        .unwrap_or(usize::MAX);
+    let expected_min = nv12_min_bytes(aligned_height, stride_abs, bit_depth);
     let bytes_per_sample = if bit_depth >= 10 { 2 } else { 1 };
-    let expected_min = expected_min.saturating_mul(bytes_per_sample);
     if total_bytes < expected_min {
         return Err(decode_err("IMF2DBuffer bounds check")(
             windows::core::Error::from_hresult(windows::core::HRESULT(-1)),

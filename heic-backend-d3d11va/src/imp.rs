@@ -127,7 +127,20 @@ impl Inner {
             matches!(t, 0..=9 | 16..=21)
         }
 
+        // Each VCL slice NAL becomes its own DXVA short-format slice
+        // control entry: chromium's H265Decoder loop calls SubmitSlice
+        // once per slice header, and each call appends one
+        // DXVA_Slice_HEVC_Short via AppendBitstreamAndSliceDataWithStartCode
+        // (media/gpu/windows/d3d_video_decoder_wrapper.cc). A tile with
+        // multiple slice NALs therefore needs N entries, each pointing at
+        // its own start-code-prefixed slice within the bitstream buffer.
+        // Emitting one entry for the whole buffer (the previous behaviour)
+        // made the driver decode only the first slice and ignore the
+        // rest, corrupting multi-slice tiles. `slices` collects
+        // (byte offset of the [0,0,1] start code, total bytes incl. start
+        // code) per slice, in bitstream order.
         let mut bitstream: Vec<u8> = Vec::with_capacity(image_data.len() + 64);
+        let mut slices: Vec<(u32, u32)> = Vec::new();
         let ls = config.length_size as usize;
         let mut i = 0;
         let mut nal_count = 0u32;
@@ -152,13 +165,20 @@ impl Inner {
                 nal_type_first = nal_type;
             }
             if is_vcl_nal_type(nal_type) {
+                let offset = u32::try_from(bitstream.len()).map_err(|_| {
+                    BackendError::Decode("d3d11va: bitstream buffer exceeds u32 offset".into())
+                })?;
                 bitstream.extend_from_slice(&[0, 0, 1]); // 3-byte start code per chromium
                 bitstream.extend_from_slice(&image_data[i..i + nal_len]);
+                let slice_len = u32::try_from(nal_len + 3).map_err(|_| {
+                    BackendError::Decode("d3d11va: slice NAL exceeds u32 length".into())
+                })?;
+                slices.push((offset, slice_len));
             }
             i += nal_len;
             nal_count += 1;
         }
-        if bitstream.is_empty() {
+        if slices.is_empty() {
             return Err(BackendError::Decode(
                 "hvcC slice data contained no VCL NAL units".into(),
             ));
@@ -190,7 +210,7 @@ impl Inner {
         // Submit + read back. The DecoderSession's per-frame flow
         // documented in `decoder::DecoderSession::submit_one_frame`
         // handles BeginFrame → buffer Get/Release/Submit → EndFrame.
-        session.submit_one_frame(&pic_params, &bitstream, iq_matrix.as_ref())?;
+        session.submit_one_frame(&pic_params, &bitstream, &slices, iq_matrix.as_ref())?;
 
         let planes = session.read_decoded_planes(
             config.width,

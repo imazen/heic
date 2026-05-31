@@ -340,6 +340,20 @@ fn decode_one_frame(
     bit_depth: u8,
     stop: &dyn enough::Stop,
 ) -> Result<DecodedFrame, BackendError> {
+    // The HEVC MFT always emits a 4:2:0 NV12/P010 surface regardless of the
+    // source chroma sampling. For 4:2:2 / 4:4:4 (chroma_format_idc 2/3) the
+    // hardware path would silently downsample chroma — wrong pixels — so we
+    // reject those here and let the parent's allowlist dispatcher fall
+    // through to the pure-Rust backend, which decodes them correctly. The
+    // returned frame below is therefore unconditionally tagged 4:2:0.
+    if config.chroma_format_idc != 1 {
+        return Err(BackendError::Decode(format!(
+            "MediaFoundation HEVC MFT only produces 4:2:0; source \
+             chroma_format_idc={} not supported (falling back)",
+            config.chroma_format_idc
+        )));
+    }
+
     // Build the access-unit Annex-B blob: parameter sets (VPS+SPS+PPS)
     // followed by the slice NALs. Some HEVC MFTs decode reliably only
     // when parameter sets are prepended inline at each AU even though
@@ -405,7 +419,11 @@ fn decode_one_frame(
         cb_plane: planes.cb,
         cr_plane: planes.cr,
         bit_depth,
-        chroma_format: config.chroma_format_idc,
+        // The MFT output is always 4:2:0 NV12/P010 (read_output_planes
+        // unpacks half-res chroma); non-4:2:0 sources were rejected above,
+        // so tagging the buffer with the source idc would mislabel it. The
+        // unpacked planes are 4:2:0 — tag them as such.
+        chroma_format: 1,
         crop_left: 0,
         crop_right: 0,
         crop_top: 0,
@@ -524,14 +542,21 @@ fn poll_output(
         let hr: Result<(), windows::core::Error> =
             unsafe { transform.ProcessOutput(0, &mut bufs, &mut status) };
 
+        // Take ownership of whatever sits in pSample on EVERY path, success
+        // or failure. On success this is the decoded sample the MFT wrote;
+        // on STREAM_CHANGE / NEED_MORE_INPUT / error the MFT leaves our
+        // pre-allocated sample in place. Either way the COM ref is ours, so
+        // we must `take` it out of the ManuallyDrop and either return it
+        // (success) or drop it here — leaving it in `bufs` would leak the
+        // IMFSample on each retry iteration (the ManuallyDrop suppresses the
+        // array's normal Release on scope exit).
+        // SAFETY: ManuallyDrop::take is safe because we don't touch
+        // bufs[0].pSample again after this; the array drops at scope exit
+        // with pSample already moved out and pEvents == None (no-op Drop).
+        let taken = unsafe { core::mem::ManuallyDrop::take(&mut bufs[0].pSample) };
+
         match hr {
             Ok(()) => {
-                // Take ownership of whatever the MFT wrote into pSample.
-                // SAFETY: ManuallyDrop::take is safe because we don't
-                // touch bufs[0].pSample after this point (the array is
-                // dropped at scope exit; the pEvents ManuallyDrop is None
-                // so its Drop is a no-op).
-                let taken = unsafe { core::mem::ManuallyDrop::take(&mut bufs[0].pSample) };
                 if let Some(sample) = taken {
                     return Ok(sample);
                 }
@@ -543,15 +568,22 @@ fn poll_output(
                 // Renegotiate output type. Walk available types again.
                 // For NV12 / P010 path the renegotiation is usually
                 // idempotent because the bitstream dimensions match what
-                // we set.
+                // we set. `taken` is dropped here, releasing the unused
+                // pre-allocated sample before we loop.
+                drop(taken);
                 configure_output_type(transform, _bit_depth)?;
                 continue;
             }
             Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => {
-                // Drain in progress; loop once more.
+                // Drain in progress; loop once more. Release the unused
+                // pre-allocated sample first.
+                drop(taken);
                 continue;
             }
             Err(e) => {
+                // `taken` is dropped at the end of this block, releasing the
+                // unused pre-allocated sample before we return the error.
+                drop(taken);
                 return Err(BackendError::Decode(format!(
                     "IMFTransform::ProcessOutput: {e}"
                 )));

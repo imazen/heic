@@ -624,6 +624,17 @@ pub fn from_sps_pps(sps: &ParsedSps, pps: Option<&ParsedPps>) -> DxvaPicParamsHe
         pps_tc_offset_div2,
         log2_parallel_merge_level_minus2,
         RefPicList: [DxvaPicEntryHevc::INVALID; 15],
+        // DXVA expects unused ref-list slots to carry the 0xFF
+        // "no reference" sentinel, not 0 (which is a valid RefPicList
+        // index). chromium's PicParamsFromRefLists fills these three
+        // arrays with kDxvaInvalidRefPicIndex (0xFF) before writing any
+        // real indices (media/gpu/windows/d3d11_h265_accelerator.cc).
+        // HEIC stills are I-frames with empty ref sets, so every entry
+        // stays 0xFF; leaving them 0 made some drivers treat surface
+        // index 0 as a reference and emit midgray.
+        RefPicSetStCurrBefore: [0xFF; 8],
+        RefPicSetStCurrAfter: [0xFF; 8],
+        RefPicSetLtCurr: [0xFF; 8],
         ..Default::default()
     }
 }

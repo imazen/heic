@@ -568,6 +568,20 @@ fn read_pixel_buffer(
         CVPixelBufferUnlockBaseAddress,
     };
 
+    // We always request a biplanar 4:2:0 destination (NV12 / P010) from VT in
+    // `build_session`, and the unpack loops below assume 4:2:0 chroma. If the
+    // source bitstream is 4:2:2 or 4:4:4 we'd be tagging a 4:2:0 buffer with
+    // the wrong chroma_format_idc, producing color-shifted / mis-subsampled
+    // pixels. Reject so the parent dispatcher falls through to the pure-Rust
+    // backend, which handles 4:2:2 / 4:4:4 correctly. (Done before locking so
+    // we don't touch buffer memory on the reject path.)
+    if config.chroma_format_idc != 1 {
+        return Err(BackendError::Decode(format!(
+            "VideoToolbox produces 4:2:0 output; source chroma_format_idc {} unsupported",
+            config.chroma_format_idc
+        )));
+    }
+
     // SAFETY: locking with read-only flag is the documented way to access
     // pixel data; the Unlock pairs at the end of this function.
     let lock_status =
@@ -582,17 +596,33 @@ fn read_pixel_buffer(
     // arithmetic reads inside the unpack loops below need `unsafe`.
     let pb_w = CVPixelBufferGetWidth(pixel_buf);
     let pb_h = CVPixelBufferGetHeight(pixel_buf);
+    // VT decodes at the bitstream-coded picture size; the visible region is
+    // the SPS conformance window `[crop_left, ..)` × `[crop_top, ..)`. The
+    // output planes are sized for the VISIBLE region (config.width/height)
+    // and copied starting at coded coordinate (crop_left, crop_top), mirroring
+    // the MediaFoundation backend's pixels.rs. Without applying the crop, a
+    // bitstream with a top/left conformance offset yields spatially shifted
+    // pixels.
     let w = config.width as usize;
     let h = config.height as usize;
-    if pb_w < w || pb_h < h {
+    let crop_x = config.crop_left as usize;
+    let crop_y = config.crop_top as usize;
+    // The visible window must fit inside the decoded buffer: the last visible
+    // luma sample is at coded (crop_x + w - 1, crop_y + h - 1).
+    let need_w = crop_x.saturating_add(w);
+    let need_h = crop_y.saturating_add(h);
+    if pb_w < need_w || pb_h < need_h {
         // SAFETY: must pair the Lock above.
         unsafe { CVPixelBufferUnlockBaseAddress(pixel_buf, CVPixelBufferLockFlags::ReadOnly) };
         return Err(BackendError::Decode(format!(
-            "CVPixelBuffer too small: {pb_w}x{pb_h} < {w}x{h}"
+            "CVPixelBuffer too small: {pb_w}x{pb_h} < visible {w}x{h} at crop ({crop_x},{crop_y})"
         )));
     }
     let half_w = w / 2;
     let half_h = h / 2;
+    // Chroma crop in 4:2:0: every-other luma sample → halve the offsets.
+    let chroma_cx = crop_x / 2;
+    let chroma_cy = crop_y / 2;
     let mut y_plane = vec![0u16; w * h];
     let mut cb_plane = vec![0u16; half_w * half_h];
     let mut cr_plane = vec![0u16; half_w * half_h];
@@ -602,27 +632,48 @@ fn read_pixel_buffer(
     let uv_base = CVPixelBufferGetBaseAddressOfPlane(pixel_buf, 1);
     let uv_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buf, 1);
 
+    // CVPixelBufferGetBaseAddressOfPlane can return NULL for a non-planar
+    // buffer (or if the plane index is out of range). Reading through a null
+    // base would be undefined behavior, so bail to BackendError::Decode and
+    // let the dispatcher fall through.
+    if y_base.is_null() || uv_base.is_null() {
+        // SAFETY: must pair the Lock above.
+        unsafe { CVPixelBufferUnlockBaseAddress(pixel_buf, CVPixelBufferLockFlags::ReadOnly) };
+        return Err(BackendError::Decode(
+            "CVPixelBufferGetBaseAddressOfPlane returned null (non-planar buffer?)".into(),
+        ));
+    }
+
     if config.bit_depth_luma >= 10 {
         // P010: u16 LE with value in the LOW 10 bits (unlike Windows MF's
         // P010 which is MSB-aligned). Mask to 10 bits.
         for row in 0..h {
-            // SAFETY: row inside bounds; y_stride is the per-row byte count.
-            let row_ptr = unsafe { (y_base as *const u8).add(row * y_stride) };
-            // SAFETY: row covers at least 2*w bytes (u16 per pixel).
-            let row_slice = unsafe { std::slice::from_raw_parts(row_ptr, 2 * w) };
+            // SAFETY: visible row (crop_y + row) is within the pb_h-row Y
+            // plane per the bounds check above; y_stride is the per-row byte
+            // count.
+            let row_ptr = unsafe { (y_base as *const u8).add((crop_y + row) * y_stride) };
+            // SAFETY: row covers at least 2*(crop_x + w) bytes (u16 per pixel),
+            // and the bounds check guarantees crop_x + w <= pb_w <=
+            // y_stride/2.
+            let row_slice = unsafe { std::slice::from_raw_parts(row_ptr, 2 * (crop_x + w)) };
             for x in 0..w {
-                let v = (u16::from(row_slice[2 * x + 1]) << 8) | u16::from(row_slice[2 * x]);
+                let off = 2 * (crop_x + x);
+                let v = (u16::from(row_slice[off + 1]) << 8) | u16::from(row_slice[off]);
                 y_plane[row * w + x] = v & 0x3FF;
             }
         }
         for row in 0..half_h {
-            // SAFETY: UV plane base + per-row stride.
-            let row_ptr = unsafe { (uv_base as *const u8).add(row * uv_stride) };
-            // SAFETY: 4 bytes per UV pair (u16 Cb + u16 Cr) × half_w.
-            let row_slice = unsafe { std::slice::from_raw_parts(row_ptr, 4 * half_w) };
+            // SAFETY: visible chroma row (chroma_cy + row) is within the UV
+            // plane; uv_stride is the per-row byte count.
+            let row_ptr = unsafe { (uv_base as *const u8).add((chroma_cy + row) * uv_stride) };
+            // SAFETY: 4 bytes per UV pair (u16 Cb + u16 Cr) covering up to
+            // (chroma_cx + half_w) pairs.
+            let row_slice =
+                unsafe { std::slice::from_raw_parts(row_ptr, 4 * (chroma_cx + half_w)) };
             for x in 0..half_w {
-                let cb = (u16::from(row_slice[4 * x + 1]) << 8) | u16::from(row_slice[4 * x]);
-                let cr = (u16::from(row_slice[4 * x + 3]) << 8) | u16::from(row_slice[4 * x + 2]);
+                let off = 4 * (chroma_cx + x);
+                let cb = (u16::from(row_slice[off + 1]) << 8) | u16::from(row_slice[off]);
+                let cr = (u16::from(row_slice[off + 3]) << 8) | u16::from(row_slice[off + 2]);
                 cb_plane[row * half_w + x] = cb & 0x3FF;
                 cr_plane[row * half_w + x] = cr & 0x3FF;
             }
@@ -630,22 +681,25 @@ fn read_pixel_buffer(
     } else {
         // NV12 8-bit: zero-extend u8 → u16 in [0, 255] range.
         for row in 0..h {
-            // SAFETY: row inside bounds.
-            let row_ptr = unsafe { (y_base as *const u8).add(row * y_stride) };
-            // SAFETY: row covers w bytes.
-            let row_slice = unsafe { std::slice::from_raw_parts(row_ptr, w) };
+            // SAFETY: visible row (crop_y + row) inside the Y plane.
+            let row_ptr = unsafe { (y_base as *const u8).add((crop_y + row) * y_stride) };
+            // SAFETY: row covers at least (crop_x + w) bytes.
+            let row_slice = unsafe { std::slice::from_raw_parts(row_ptr, crop_x + w) };
             for x in 0..w {
-                y_plane[row * w + x] = u16::from(row_slice[x]);
+                y_plane[row * w + x] = u16::from(row_slice[crop_x + x]);
             }
         }
         for row in 0..half_h {
-            // SAFETY: UV plane row.
-            let row_ptr = unsafe { (uv_base as *const u8).add(row * uv_stride) };
-            // SAFETY: 2 bytes per UV pair × half_w.
-            let row_slice = unsafe { std::slice::from_raw_parts(row_ptr, 2 * half_w) };
+            // SAFETY: visible chroma row (chroma_cy + row) inside the UV plane.
+            let row_ptr = unsafe { (uv_base as *const u8).add((chroma_cy + row) * uv_stride) };
+            // SAFETY: 2 bytes per UV pair covering up to (chroma_cx + half_w)
+            // pairs.
+            let row_slice =
+                unsafe { std::slice::from_raw_parts(row_ptr, 2 * (chroma_cx + half_w)) };
             for x in 0..half_w {
-                cb_plane[row * half_w + x] = u16::from(row_slice[2 * x]);
-                cr_plane[row * half_w + x] = u16::from(row_slice[2 * x + 1]);
+                let off = 2 * (chroma_cx + x);
+                cb_plane[row * half_w + x] = u16::from(row_slice[off]);
+                cr_plane[row * half_w + x] = u16::from(row_slice[off + 1]);
             }
         }
     }
@@ -660,7 +714,13 @@ fn read_pixel_buffer(
         cb_plane,
         cr_plane,
         bit_depth: config.bit_depth_luma,
-        chroma_format: config.chroma_format_idc,
+        // The buffer above was unpacked as 4:2:0 and we already rejected any
+        // other source format, so tag it 4:2:0 (1) rather than echoing back
+        // config.chroma_format_idc (which is guaranteed == 1 here, but being
+        // explicit prevents a future edit from re-introducing a mislabel).
+        chroma_format: 1,
+        // The crop was applied above (planes hold only the visible region), so
+        // the returned frame carries no further crop.
         crop_left: 0,
         crop_right: 0,
         crop_top: 0,

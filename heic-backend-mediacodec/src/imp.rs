@@ -19,19 +19,27 @@
 //!    buffer using the color-format key from `getOutputFormat`.
 //! 7. `AMediaCodec_releaseOutputBuffer(idx, false)` + `stop` + `delete`.
 //!
-//! Pixel formats handled:
+//! Pixel formats handled (chroma byte order resolved per color-format key):
 //!
-//! - `COLOR_FormatYUV420SemiPlanar` (NV12 / NV21): Y plane + interleaved
-//!   UV. Most common on hardware decoders. Cb/Cr ordering depends on
-//!   `KEY_STRIDE` / `KEY_SLICE_HEIGHT` and color-format-specific
-//!   conventions; we follow the NV12 (Cb before Cr) layout reported by
-//!   modern devices.
-//! - `COLOR_FormatYUV420Planar` (I420): Y plane + U plane + V plane.
-//!   Software decoder default.
+//! - `COLOR_FormatYUV420SemiPlanar` (NV12): Y plane + interleaved UV with
+//!   Cb before Cr — the OMX contract for this constant. Most common on
+//!   hardware decoders.
+//! - Vendor NV21 semi-planar (`OMX_QCOM_COLOR_FormatYVU420SemiPlanar`,
+//!   `OMX_SEC_COLOR_FormatNV21Linear`): interleaved UV with Cr before Cb;
+//!   unpacked with the chroma byte order swapped relative to NV12.
+//! - `COLOR_FormatYUV420Planar` / `…PackedPlanar` (I420): Y plane + U plane
+//!   + V plane. Software decoder default.
 //! - `COLOR_FormatYUVP010` (P010, 10-bit): u16 samples, MSB-aligned.
 //!
-//! For everything else we surface `BackendError::Decode("unsupported
-//! color format: ...")` so the dispatcher can fall through.
+//! `COLOR_FormatYUV420Flexible` is **rejected** in this ByteBuffer path:
+//! its concrete chroma byte order (NV12 vs NV21 vs planar) is unspecified
+//! without the AImage plane API (`AMediaCodec_getOutputImage`), which
+//! ndk-sys 0.6 does not expose. Guessing NV12 risks a red/blue swap on
+//! devices that back FLEXIBLE with NV21, so we fall through instead.
+//!
+//! For every other (unrecognized) color format we surface
+//! `BackendError::Decode(...)` so the dispatcher can fall through to the
+//! pure-Rust backend.
 
 #![cfg(target_os = "android")]
 
@@ -51,9 +59,23 @@ use ndk_sys as ndk;
 // — declare locally per the docs.
 
 const COLOR_FORMAT_YUV420_PLANAR: i32 = 19;
+const COLOR_FORMAT_YUV420_PACKED_PLANAR: i32 = 20;
 const COLOR_FORMAT_YUV420_SEMI_PLANAR: i32 = 21;
-const COLOR_FORMAT_YUV420_FLEXIBLE: i32 = 0x7F420888;
+const COLOR_FORMAT_YUV420_PACKED_SEMI_PLANAR: i32 = 39;
+const COLOR_FORMAT_YUV420_FLEXIBLE: i32 = 0x7F42_0888;
 const COLOR_FORMAT_YUV_P010: i32 = 54;
+
+// Vendor NV21 (Cr-before-Cb interleaved) semi-planar formats. Unlike the
+// generic OMX `SemiPlanar` constant (which is NV12 / Cb-before-Cr by the
+// OMX contract), these report a reversed chroma byte order. Treating them
+// as NV12 swaps Cb/Cr → red/blue swap. We map the well-known vendor values
+// to an explicit NV21 unpack; anything else semi-planar we cannot prove the
+// ordering of from a raw ByteBuffer is rejected below.
+//
+// `OMX_QCOM_COLOR_FormatYVU420SemiPlanar` (Qualcomm) and
+// `OMX_SEC_COLOR_FormatNV21Linear` (Samsung).
+const COLOR_FORMAT_QCOM_YVU420_SEMI_PLANAR: i32 = 0x7FA3_0C00u32 as i32;
+const COLOR_FORMAT_SEC_NV21_LINEAR: i32 = 0x7F00_0001;
 
 // Buffer flags
 const BUFFER_FLAG_END_OF_STREAM: u32 = 4;
@@ -242,6 +264,22 @@ fn decode_one_frame(
 ) -> Result<DecodedFrame, BackendError> {
     let codec = cached.codec;
 
+    // The MediaCodec ByteBuffer output is ALWAYS 4:2:0 (NV12 / I420 / P010)
+    // — there is no 4:2:2 / 4:4:4 ByteBuffer layout in this path, and the
+    // unpack code below produces a half-width/half-height chroma plane
+    // unconditionally. Tagging the returned frame with the source
+    // `chroma_format_idc` for a non-4:2:0 source would mislabel a 4:2:0
+    // buffer as 4:2:2/4:4:4 and corrupt the chroma upsampling. Reject
+    // non-4:2:0 sources here so the dispatcher falls through to the
+    // pure-Rust backend, which decodes 4:2:2/4:4:4 correctly.
+    if config.chroma_format_idc != 1 {
+        return Err(BackendError::Decode(format!(
+            "MediaCodec ByteBuffer output is 4:2:0 only; source chroma_format_idc={} \
+             needs the pure-Rust backend",
+            config.chroma_format_idc
+        )));
+    }
+
     // Honour cancellation BEFORE any FFI work — the input dequeue
     // can block for 100ms on a busy decoder, and we don't want
     // outer timeouts to be eaten by a hung first call.
@@ -398,7 +436,11 @@ fn decode_one_frame(
                     cb_plane: planes.cb,
                     cr_plane: planes.cr,
                     bit_depth,
-                    chroma_format: config.chroma_format_idc,
+                    // Always 4:2:0: the ByteBuffer unpack produces a
+                    // half-width/half-height chroma plane, and non-4:2:0
+                    // sources were rejected above. Tag literally as 1 so the
+                    // frame's chroma_format matches the actual plane layout.
+                    chroma_format: 1,
                     crop_left: 0,
                     crop_right: 0,
                     crop_top: 0,
@@ -448,33 +490,122 @@ fn unpack_planes(
 ) -> Result<OutputPlanes, BackendError> {
     let s = stride as usize;
     let sh = slice_height as usize;
-    let _ = coded_w;
-    let _ = coded_h;
     let w = visible_w as usize;
     let h = visible_h as usize;
     let cx = crop_x as usize;
     let cy = crop_y as usize;
+
+    // ── Geometry validation (untrusted SPS crop + HEIF `ispe`) ───────────
+    // The visible region (`width`/`height`), crop offsets (SPS conformance
+    // window), and the decoder's reported `stride`/`slice_height` come from
+    // three independent sources in a `.heic`. A crafted SPS crop combined
+    // with a mismatched `ispe` can produce a `crop + visible` region that
+    // overruns the coded plane the decoder actually wrote, which would drive
+    // the unpack indices past the validated buffer and panic (or, with the
+    // raw-pointer slice, read OOB). Reject any inconsistent geometry up front
+    // so the dispatcher falls through to the pure-Rust backend.
+    if w == 0 || h == 0 {
+        return Err(BackendError::Decode(
+            "MediaCodec: zero visible dimension".into(),
+        ));
+    }
+    // Coded region the decoder produced (use the larger of reported stride /
+    // slice-height vs the bitstream coded size — the caller already passes
+    // `stride.max(coded_w)` / `slice_height.max(coded_h)`).
+    let coded_cols = s.max(coded_w as usize);
+    let coded_rows = sh.max(coded_h as usize);
+    // crop + visible must fit inside the coded region.
+    if cx.checked_add(w).is_none_or(|r| r > coded_cols)
+        || cy.checked_add(h).is_none_or(|r| r > coded_rows)
+    {
+        return Err(BackendError::Decode(format!(
+            "MediaCodec: crop+visible exceeds coded region \
+             (crop=({cx},{cy}) visible=({w},{h}) coded=({coded_cols},{coded_rows}))"
+        )));
+    }
+
     let half_w = w / 2;
     let half_h = h / 2;
     let chroma_cx = cx / 2;
     let chroma_cy = cy / 2;
+
+    // Maximal byte index a plane read touches; checked so crafted strides /
+    // crops can't wrap. Each closure returns the *last* index (inclusive) for
+    // the given access pattern; we require it to be `< bytes.len()`.
+    let buf_len = bytes.len();
+    // Y plane (8-bit): bytes_per_px = 1; (10-bit P010): 2.
+    let y_last = |bpp: usize| -> Option<usize> {
+        // (cy + h - 1) * s + (cx + w - 1) * bpp + (bpp - 1)
+        (cy + h - 1)
+            .checked_mul(s)?
+            .checked_add((cx + w - 1).checked_mul(bpp)?)?
+            .checked_add(bpp - 1)
+    };
+    // Semi-planar chroma (NV12 / NV21 / P010 interleaved): base + last UV pair.
+    // `unit` = bytes per (Cb,Cr) sample-pair element (2 for 8-bit NV12/NV21,
+    // 4 for P010); `hi` = highest byte offset within the last unit touched.
+    // Returns `Some(0)` (a no-op index) when there is no chroma to read so the
+    // caller's `>= buf_len` check passes trivially for empty chroma planes.
+    let uv_semi_last = |unit: usize, hi: usize| -> Option<usize> {
+        if half_w == 0 || half_h == 0 {
+            return Some(0);
+        }
+        let uv_base = s.checked_mul(sh)?;
+        uv_base
+            .checked_add((chroma_cy + half_h - 1).checked_mul(s)?)?
+            .checked_add(chroma_cx.checked_mul(unit)?)?
+            .checked_add((half_w - 1).checked_mul(unit)?)?
+            .checked_add(hi)
+    };
+
     let mut y_plane = vec![0u16; w * h];
     let mut cb_plane = vec![0u16; half_w * half_h];
     let mut cr_plane = vec![0u16; half_w * half_h];
 
+    // Helper to surface a uniform OOB error.
+    let oob = |what: &str| {
+        BackendError::Decode(format!(
+            "MediaCodec: {what} read would exceed output buffer (len={buf_len})"
+        ))
+    };
+
     match color_format {
-        COLOR_FORMAT_YUV420_PLANAR => {
-            // I420 / YV12: Y plane, then U, then V (Cb, Cr separate).
+        COLOR_FORMAT_YUV420_PLANAR | COLOR_FORMAT_YUV420_PACKED_PLANAR => {
+            // I420: Y plane, then U, then V (Cb, Cr separate).
             // Stride applies to Y; chroma stride = stride / 2.
+            let chroma_stride = s / 2;
+            let u_base = s.checked_mul(sh).ok_or_else(|| oob("planar Y"))?;
+            let v_base = u_base
+                .checked_add(
+                    chroma_stride
+                        .checked_mul(sh / 2)
+                        .ok_or_else(|| oob("planar U"))?,
+                )
+                .ok_or_else(|| oob("planar U"))?;
+            // Bounds: Y last byte, and V plane last byte (>= U plane). When
+            // there is no chroma (half_w/half_h == 0) only the Y bound matters.
+            let y_max = y_last(1).ok_or_else(|| oob("planar Y"))?;
+            let v_max = if half_w == 0 || half_h == 0 {
+                0
+            } else {
+                v_base
+                    .checked_add(
+                        (chroma_cy + half_h - 1)
+                            .checked_mul(chroma_stride)
+                            .ok_or_else(|| oob("planar V"))?,
+                    )
+                    .and_then(|x| x.checked_add(chroma_cx + half_w - 1))
+                    .ok_or_else(|| oob("planar V"))?
+            };
+            if y_max >= buf_len || v_max >= buf_len {
+                return Err(oob("planar"));
+            }
             for row in 0..h {
                 let src = (cy + row) * s + cx;
                 for col in 0..w {
                     y_plane[row * w + col] = u16::from(bytes[src + col]);
                 }
             }
-            let chroma_stride = s / 2;
-            let u_base = s * sh;
-            let v_base = u_base + chroma_stride * (sh / 2);
             for row in 0..half_h {
                 let src_u = u_base + (chroma_cy + row) * chroma_stride + chroma_cx;
                 let src_v = v_base + (chroma_cy + row) * chroma_stride + chroma_cx;
@@ -484,9 +615,13 @@ fn unpack_planes(
                 }
             }
         }
-        COLOR_FORMAT_YUV420_SEMI_PLANAR | COLOR_FORMAT_YUV420_FLEXIBLE => {
-            // NV12: Y plane, then interleaved UV at same stride. Treat
-            // FLEXIBLE as NV12 since modern devices return NV12 for it.
+        COLOR_FORMAT_YUV420_SEMI_PLANAR | COLOR_FORMAT_YUV420_PACKED_SEMI_PLANAR => {
+            // NV12: Y plane, then interleaved UV at same stride, Cb before Cr.
+            let y_max = y_last(1).ok_or_else(|| oob("NV12 Y"))?;
+            let uv_max = uv_semi_last(2, 1).ok_or_else(|| oob("NV12 UV"))?;
+            if y_max >= buf_len || uv_max >= buf_len {
+                return Err(oob("NV12"));
+            }
             for row in 0..h {
                 let src = (cy + row) * s + cx;
                 for col in 0..w {
@@ -502,6 +637,31 @@ fn unpack_planes(
                 }
             }
         }
+        COLOR_FORMAT_QCOM_YVU420_SEMI_PLANAR | COLOR_FORMAT_SEC_NV21_LINEAR => {
+            // NV21: Y plane, then interleaved VU at same stride — Cr BEFORE
+            // Cb. Identical layout to NV12 except the two chroma bytes are
+            // swapped; reading it as NV12 would swap Cb/Cr → red/blue swap.
+            let y_max = y_last(1).ok_or_else(|| oob("NV21 Y"))?;
+            let uv_max = uv_semi_last(2, 1).ok_or_else(|| oob("NV21 UV"))?;
+            if y_max >= buf_len || uv_max >= buf_len {
+                return Err(oob("NV21"));
+            }
+            for row in 0..h {
+                let src = (cy + row) * s + cx;
+                for col in 0..w {
+                    y_plane[row * w + col] = u16::from(bytes[src + col]);
+                }
+            }
+            let uv_base = s * sh;
+            for row in 0..half_h {
+                let src = uv_base + (chroma_cy + row) * s + chroma_cx * 2;
+                for col in 0..half_w {
+                    // NV21: Cr byte first, then Cb.
+                    cr_plane[row * half_w + col] = u16::from(bytes[src + col * 2]);
+                    cb_plane[row * half_w + col] = u16::from(bytes[src + col * 2 + 1]);
+                }
+            }
+        }
         COLOR_FORMAT_YUV_P010 => {
             // P010: u16 LE, 10-bit value MSB-aligned within the u16
             // (bits 15..6 carry the sample; bits 5..0 are zero).
@@ -509,6 +669,11 @@ fn unpack_planes(
             // ZERO low bits — producing garbled output instead of the
             // intended 10-bit sample. `>> 6` is the correct extraction,
             // matching the Windows MF / D3D11VA / VT P010 paths.
+            let y_max = y_last(2).ok_or_else(|| oob("P010 Y"))?;
+            let uv_max = uv_semi_last(4, 3).ok_or_else(|| oob("P010 UV"))?;
+            if y_max >= buf_len || uv_max >= buf_len {
+                return Err(oob("P010"));
+            }
             for row in 0..h {
                 let src = (cy + row) * s + cx * 2;
                 for col in 0..w {
@@ -529,6 +694,19 @@ fn unpack_planes(
                     cr_plane[row * half_w + col] = cr >> 6;
                 }
             }
+        }
+        COLOR_FORMAT_YUV420_FLEXIBLE => {
+            // FLEXIBLE's concrete chroma byte order (NV12 / NV21 / planar) is
+            // unspecified in this ByteBuffer path and can only be resolved via
+            // the AImage plane API (`AMediaCodec_getOutputImage`), which
+            // ndk-sys 0.6 does not expose. Guessing NV12 risks a red/blue swap
+            // on devices that back FLEXIBLE with NV21, so fall through to the
+            // pure-Rust backend instead of producing wrong pixels.
+            return Err(BackendError::Decode(
+                "MediaCodec returned COLOR_FormatYUV420Flexible; chroma byte order \
+                 is undeterminable from a raw ByteBuffer"
+                    .into(),
+            ));
         }
         other => {
             return Err(BackendError::Decode(format!(
