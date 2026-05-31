@@ -1024,9 +1024,16 @@ impl HeicStreamDecoder {
             )
         };
 
-        if let Some(lim) = limits {
-            lim.check_dimensions(output_width, output_height)?;
-        }
+        // Always enforce the default resource ceiling when the caller passed no
+        // explicit Limits. The old `if let Some(lim)` skipped the check entirely
+        // in the common default-construction case, so a crafted grid with the
+        // 32-bit-dims flag and output_width/height up to 0xFFFFFFFF drove an
+        // uncapped allocation (OOM on 64-bit; usize-overflow undersized strip
+        // buffer + OOB index on 32-bit/wasm). Mirror the parent's
+        // try_decode_grid_streaming, which uses limits.unwrap_or(&NO_LIMITS).
+        limits
+            .unwrap_or(&crate::decode::NO_LIMITS)
+            .check_dimensions(output_width, output_height)?;
 
         // Get tile info
         let tile_ids = container.get_item_references(primary_item.id, FourCC::DIMG);
@@ -1109,7 +1116,13 @@ impl HeicStreamDecoder {
 
         let y_offset = row * grid.tile_height;
         let bpp = grid.layout.bytes_per_pixel();
-        let strip_bytes = grid.output_width as usize * strip_h as usize * bpp;
+        // checked_mul: even with the dimension cap applied in setup_grid this
+        // guards against usize overflow on 32-bit/wasm when a caller passes
+        // explicit large limits.
+        let strip_bytes = (grid.output_width as usize)
+            .checked_mul(strip_h as usize)
+            .and_then(|v| v.checked_mul(bpp))
+            .ok_or_else(|| at!(HeicError::InvalidData("grid strip size overflow")))?;
 
         self.strip_buffer.resize(strip_bytes, 0);
 

@@ -151,7 +151,7 @@ fn decode_tiles_parallel(
 /// some other zen codecs use; `max_memory_bytes` is 1 GiB, generous for
 /// 8K/16K stills but well below the multi-GiB OOM the previous
 /// `NO_LIMITS` (all-`None`) configuration permitted.
-static NO_LIMITS: Limits = Limits {
+pub(crate) static NO_LIMITS: Limits = Limits {
     max_width: Some(16_384),
     max_height: Some(16_384),
     max_pixels: Some(256 * 1024 * 1024),
