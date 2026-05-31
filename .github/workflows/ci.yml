@@ -402,14 +402,22 @@ jobs:
           key: backend-mediacodec-android
       - name: Build heic-backend-mediacodec (aarch64-linux-android)
         env:
-          # nttld/setup-ndk@v1 sets ANDROID_NDK_HOME; cargo-ndk wraps the
-          # toolchain. For the skeleton (no FFI yet) we can use the bare
-          # cargo target without cargo-ndk, since the stub doesn't actually
-          # link ndk-sys.
           CC_aarch64_linux_android: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang
           AR_aarch64_linux_android: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang
         run: cargo build -p heic-backend-mediacodec --target aarch64-linux-android
+
+      # Build the backend_decode EXAMPLE (an executable) so the link actually
+      # runs — `cargo build -p <lib>` above does not link, which is exactly why
+      # the AMEDIAFORMAT_KEY_CSD_0 undefined-symbol bug (libmediandk API 28+)
+      # went undetected. The API-33 clang linker resolves the symbol; a future
+      # symbol that needs a higher API would fail here, on every push, cheaply.
+      - name: Link-check backend_decode example (android)
+        env:
+          CC_aarch64_linux_android: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang
+          AR_aarch64_linux_android: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang
+        run: cargo build --example backend_decode --target aarch64-linux-android --features "backend-rust,backend-mediacodec,std"
 
   backend-vaapi:
     name: backend-vaapi (linux compile-only)
