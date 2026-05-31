@@ -389,37 +389,24 @@ fn decode_one_frame(
                 if out_ptr.is_null() {
                     return Err(BackendError::Decode("getOutputBuffer returned null".into()));
                 }
-                // Defensive: NDK promises the slice is `size` bytes
-                // valid, but a misbehaving vendor driver could
-                // return an undersized buffer that the unpack
-                // expects to be at least
-                // `slice_height * stride * (1.5)` bytes for 4:2:0
-                // (or `* 3` for P010). Check before constructing the
-                // slice so a bug surfaces as `BackendError::Decode`
-                // instead of an OOB read in unpack_planes.
-                let bytes_per_sample = if bit_depth >= 10 { 2usize } else { 1 };
-                let expected_min = (slice_height.max(coded_h as i32) as usize)
-                    .saturating_mul(stride.max(coded_w as i32) as usize)
-                    .saturating_mul(bytes_per_sample)
-                    .saturating_mul(3)
-                    / 2;
-                if size < expected_min {
-                    return Err(BackendError::Decode(format!(
-                        "MediaCodec output buffer undersized: size={size} expected≥{expected_min} \
-                         (stride={stride}, slice_height={slice_height}, bit_depth={bit_depth})"
-                    )));
-                }
                 // SAFETY: out_ptr is valid for `size` bytes per the NDK
-                // contract; we just verified `size` is at least the
-                // unpack code's minimum requirement.
+                // contract. unpack_planes validates every plane read against
+                // `bytes.len()` (== size), so a vendor driver that returns a
+                // short buffer surfaces as BackendError::Decode, not an OOB —
+                // no separate (and previously WRONG) size pre-check needed.
                 let bytes = unsafe { core::slice::from_raw_parts(out_ptr, size) };
+                // Pass the decoder's REPORTED buffer geometry (stride /
+                // slice_height) — NOT max()'d up to the SPS coded size. When the
+                // decoder crops to the visible region it reports
+                // slice_height < coded_h (example.heic: coded 856 -> emitted
+                // 854 rows); demanding coded_h wrongly rejected that legitimate
+                // buffer as "undersized". unpack_planes handles the
+                // already-cropped-vs-coded distinction.
                 let planes = unpack_planes(
                     bytes,
                     last_color_format,
-                    stride.max(coded_w as i32) as u32,
-                    slice_height.max(coded_h as i32) as u32,
-                    coded_w,
-                    coded_h,
+                    stride.max(1) as u32,
+                    slice_height.max(1) as u32,
                     config.width,
                     config.height,
                     config.crop_left,
@@ -480,8 +467,6 @@ fn unpack_planes(
     color_format: i32,
     stride: u32,
     slice_height: u32,
-    coded_w: u32,
-    coded_h: u32,
     visible_w: u32,
     visible_h: u32,
     crop_x: u32,
@@ -492,35 +477,40 @@ fn unpack_planes(
     let sh = slice_height as usize;
     let w = visible_w as usize;
     let h = visible_h as usize;
-    let cx = crop_x as usize;
-    let cy = crop_y as usize;
 
     // ── Geometry validation (untrusted SPS crop + HEIF `ispe`) ───────────
-    // The visible region (`width`/`height`), crop offsets (SPS conformance
+    // The visible region (`width`/`height`), the crop offsets (SPS conformance
     // window), and the decoder's reported `stride`/`slice_height` come from
-    // three independent sources in a `.heic`. A crafted SPS crop combined
-    // with a mismatched `ispe` can produce a `crop + visible` region that
-    // overruns the coded plane the decoder actually wrote, which would drive
-    // the unpack indices past the validated buffer and panic (or, with the
-    // raw-pointer slice, read OOB). Reject any inconsistent geometry up front
-    // so the dispatcher falls through to the pure-Rust backend.
+    // three independent sources in a `.heic`.
     if w == 0 || h == 0 {
         return Err(BackendError::Decode(
             "MediaCodec: zero visible dimension".into(),
         ));
     }
-    // Coded region the decoder produced (use the larger of reported stride /
-    // slice-height vs the bitstream coded size — the caller already passes
-    // `stride.max(coded_w)` / `slice_height.max(coded_h)`).
-    let coded_cols = s.max(coded_w as usize);
-    let coded_rows = sh.max(coded_h as usize);
-    // crop + visible must fit inside the coded region.
-    if cx.checked_add(w).is_none_or(|r| r > coded_cols)
-        || cy.checked_add(h).is_none_or(|r| r > coded_rows)
-    {
+
+    // MediaCodec may emit either the already-cropped (visible) buffer OR the
+    // full coded buffer. If applying the SPS crop offset would run past the
+    // buffer's own rows/cols, the decoder already cropped — so the visible
+    // image starts at the buffer origin and the offset is 0; otherwise the
+    // buffer holds the coded frame and we apply the crop. This makes
+    // example.heic (coded 856 -> decoder emits 854 visible rows, slice_height
+    // 854) read correctly instead of being rejected or reading shifted pixels.
+    // A crop that still doesn't fit after zeroing is genuinely inconsistent
+    // geometry (crafted SPS + mismatched ispe) -> reject, and the dispatcher
+    // falls through to the pure-Rust backend.
+    let cx = if (crop_x as usize).checked_add(w).is_some_and(|r| r <= s) {
+        crop_x as usize
+    } else {
+        0
+    };
+    let cy = if (crop_y as usize).checked_add(h).is_some_and(|r| r <= sh) {
+        crop_y as usize
+    } else {
+        0
+    };
+    if cx + w > s || cy + h > sh {
         return Err(BackendError::Decode(format!(
-            "MediaCodec: crop+visible exceeds coded region \
-             (crop=({cx},{cy}) visible=({w},{h}) coded=({coded_cols},{coded_rows}))"
+            "MediaCodec: visible region {w}x{h} at ({cx},{cy}) exceeds output buffer {s}x{sh}"
         )));
     }
 
