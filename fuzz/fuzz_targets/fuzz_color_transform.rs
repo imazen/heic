@@ -1,10 +1,15 @@
-//! Fuzz target for color conversion and spatial transforms.
+//! Fuzz target for YCbCr→RGB color conversion on attacker-shaped frames.
 //!
 //! Constructs a DecodedFrame from structured fuzz data and exercises:
 //! - YCbCr→RGB/RGBA/BGR/BGRA color conversion (scalar + SIMD paths)
-//! - Spatial transforms: rotate_90_cw, rotate_180, rotate_270_cw, mirror_horizontal, mirror_vertical
-//! - to_rgb16, to_rgba16
-//! - write_rgb_into, write_rgba_into, write_bgra_into, write_bgr_into
+//! - to_rgb16 / to_rgba16 (the 16-bit native path, incl. the limited-range
+//!   bit-depth scaling)
+//! - write_rgb_into
+//!
+//! Spatial transforms (rotate/mirror) are exercised through the public decode
+//! path (irot/imir metadata) by `fuzz_decode`, not here — their trait is
+//! internal to the crate, so driving them directly would require exposing a
+//! new public API.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -31,7 +36,6 @@ fuzz_target!(|data: &[u8]| {
         2 => 9u8,  // BT.2020
         _ => 2u8,  // unspecified
     };
-    let transform_op = data[6] % 6; // 0=none, 1=rot90, 2=rot180, 3=rot270, 4=mirrorH, 5=mirrorV
     let output_format = data[7] % 7; // select output format
 
     // Make dimensions even for 4:2:0
@@ -83,17 +87,18 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    let frame = DecodedFrame::from_planes(
-        width,
-        height,
-        bit_depth,
-        chroma_format,
-        y_plane,
-        cb_plane,
-        cr_plane,
-        full_range,
-        matrix_coeffs,
-    );
+    // with_params allocates correctly-sized planes; overwrite them (and the
+    // color signalling) with our fuzz-derived data. Returns Err on a degenerate
+    // size — just bail.
+    let mut frame = match DecodedFrame::with_params(width, height, bit_depth, chroma_format) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    frame.y_plane = y_plane;
+    frame.cb_plane = cb_plane;
+    frame.cr_plane = cr_plane;
+    frame.full_range = full_range;
+    frame.matrix_coeffs = matrix_coeffs;
 
     // Exercise color conversion paths
     match output_format {
@@ -108,16 +113,6 @@ fuzz_target!(|data: &[u8]| {
             let mut buf = vec![0u8; (width * height * 3) as usize];
             frame.write_rgb_into(&mut buf);
         }
-        _ => {}
-    }
-
-    // Exercise spatial transforms
-    match transform_op {
-        1 => { let _ = frame.rotate_90_cw(); }
-        2 => { let _ = frame.rotate_180(); }
-        3 => { let _ = frame.rotate_270_cw(); }
-        4 => { let _ = frame.mirror_horizontal(); }
-        5 => { let _ = frame.mirror_vertical(); }
         _ => {}
     }
 });
