@@ -120,7 +120,10 @@ pub(super) fn probe() -> Result<bool, ProbeError> {
         // SAFETY: display is initialized; vaMaxNumProfiles returns the
         // array length we need to allocate.
         let max = unsafe { va_max_num_profiles(display) };
-        if max <= 0 {
+        // Cap the driver-reported profile count: real drivers expose well
+        // under 100 profiles, so a huge value is a buggy/hostile driver and
+        // would drive a large `vec![0i32; max]` allocation.
+        if max <= 0 || max > 4096 {
             // SAFETY: same display we just initialized.
             let _ = unsafe { va_terminate(display) };
             continue;
@@ -138,8 +141,11 @@ pub(super) fn probe() -> Result<bool, ProbeError> {
             continue;
         }
 
+        // Clamp the driver-returned count to the buffer we allocated — a
+        // buggy/hostile driver could report count > max and panic the slice.
+        let count = (count.max(0) as usize).min(profiles.len());
         // Look for an HEVC profile in the returned list.
-        let found = profiles[..count as usize]
+        let found = profiles[..count]
             .iter()
             .any(|&p| p == VA_PROFILE_HEVC_MAIN || p == VA_PROFILE_HEVC_MAIN_10);
         if found {
@@ -247,14 +253,16 @@ fn probe_via_x11(
 
     // SAFETY: display is initialized; bounded-size profile array.
     let max = unsafe { va_max_num_profiles(va_display) };
-    let result = if max > 0 {
+    // Cap max (hostile/buggy driver guard) — see the other probe path.
+    let result = if max > 0 && max <= 4096 {
         let mut profiles = vec![0i32; max as usize];
         let mut count: c_int = 0;
         // SAFETY: profiles buffer holds `max` slots.
         let status =
             unsafe { va_query_config_profiles(va_display, profiles.as_mut_ptr(), &mut count) };
         if status == VA_STATUS_SUCCESS {
-            profiles[..count as usize]
+            let count = (count.max(0) as usize).min(profiles.len());
+            profiles[..count]
                 .iter()
                 .any(|&p| p == VA_PROFILE_HEVC_MAIN || p == VA_PROFILE_HEVC_MAIN_10)
         } else {

@@ -82,9 +82,13 @@ pub struct VaPictureParameterBufferHevc {
     pub pic_height_in_luma_samples: u16,
     /// Bitfield union — see [`pic_fields`] for layout.
     pub pic_fields: u32,
-    /// Bitfield union — see [`slice_parsing_fields`] for layout.
-    pub slice_parsing_fields: u32,
     /// `sps_max_dec_pic_buffering_minus1` at the SPS's highest TID.
+    ///
+    /// NOTE: in the libva C `VAPictureParameterBufferHEVC`, `pic_fields` is
+    /// followed DIRECTLY by this field — `slice_parsing_fields` lives much
+    /// later, after the tile arrays (see below). The struct is memcpy'd
+    /// verbatim into the driver buffer, so the field order here must match the
+    /// header exactly; the const offset asserts after the struct pin it.
     pub sps_max_dec_pic_buffering_minus1: u8,
     /// `bit_depth_luma_minus8`.
     pub bit_depth_luma_minus8: u8,
@@ -130,6 +134,10 @@ pub struct VaPictureParameterBufferHevc {
     pub column_width_minus1: [u16; 19],
     /// Per-row tile heights (only first `num_tile_rows_minus1 + 1` valid).
     pub row_height_minus1: [u16; 21],
+    /// Bitfield union — see [`slice_parsing_fields`] for layout. In the libva
+    /// C header this sits HERE, between `row_height_minus1` and
+    /// `log2_max_pic_order_cnt_lsb_minus4` — NOT next to `pic_fields`.
+    pub slice_parsing_fields: u32,
     /// `log2_max_pic_order_cnt_lsb_minus4`.
     pub log2_max_pic_order_cnt_lsb_minus4: u8,
     /// `num_short_term_ref_pic_sets`.
@@ -152,6 +160,35 @@ pub struct VaPictureParameterBufferHevc {
     /// Reserved — must be zero.
     pub va_reserved: [u32; 8],
 }
+
+// Pin the ABI layout of VaPictureParameterBufferHevc to the libva
+// `VAPictureParameterBufferHEVC` C declaration. The struct is memcpy'd
+// verbatim into the libva buffer (`bytes_of(&pic_param)`), so a field-order
+// or size drift silently corrupts the driver's read. These offsets were
+// derived from va/va_dec_hevc.h: pic_fields is directly followed by
+// sps_max_dec_pic_buffering_minus1 (offset 456); the tile arrays end before
+// slice_parsing_fields; total size is 604. A layout test (value checks alone)
+// cannot catch a reorder — only offset asserts can.
+const _: () = {
+    use core::mem::{offset_of, size_of};
+    assert!(offset_of!(VaPictureParameterBufferHevc, pic_fields) == 452);
+    assert!(
+        offset_of!(
+            VaPictureParameterBufferHevc,
+            sps_max_dec_pic_buffering_minus1
+        ) == 456
+    );
+    assert!(offset_of!(VaPictureParameterBufferHevc, column_width_minus1) == 476);
+    assert!(offset_of!(VaPictureParameterBufferHevc, slice_parsing_fields) == 556);
+    assert!(
+        offset_of!(
+            VaPictureParameterBufferHevc,
+            log2_max_pic_order_cnt_lsb_minus4
+        ) == 560
+    );
+    assert!(offset_of!(VaPictureParameterBufferHevc, st_rps_bits) == 568);
+    assert!(size_of::<VaPictureParameterBufferHevc>() == 604);
+};
 
 /// Bit layout of [`VaPictureParameterBufferHevc::pic_fields`].
 ///

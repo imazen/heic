@@ -616,14 +616,53 @@ fn unpack_planes(
     let uv_pitch = image.pitches[1] as usize;
     let uv_offset = image.offsets[1] as usize;
 
+    // Validate the read region against the ACTUAL mapped VAImage geometry
+    // before any raw-pointer reads. config.width/height/crop_* come from the
+    // HEIF ispe box + SPS conformance window (attacker-controlled, parsed from
+    // independent boxes), while the surface was allocated from the SPS coded
+    // dimensions. If the ispe region exceeds the coded surface, the unchecked
+    // `base.add(...)` reads below would run past the mapped buffer (OOB / UB).
+    // libva guarantees the VAImage covers ITS OWN width/height — not the
+    // larger attacker-set visible region — so we must check explicitly.
+    let bps = if bit_depth <= 8 { 1usize } else { 2 };
+    let data_size = image.data_size as usize;
+    // last byte read on a plane = off + (last_row)*pitch + last_col_bytes - 1;
+    // require off + last_row*pitch + last_col_bytes <= data_size (overflow-safe).
+    let plane_fits = |off: usize, last_row: usize, pitch: usize, last_col_bytes: usize| -> bool {
+        last_row
+            .checked_mul(pitch)
+            .and_then(|v| v.checked_add(off))
+            .and_then(|v| v.checked_add(last_col_bytes))
+            .is_some_and(|end| end <= data_size)
+    };
+    if w == 0
+        || h == 0
+        || cx + w > image.width as usize
+        || cy + h > image.height as usize
+        || !plane_fits(y_offset, (cy + h) - 1, y_pitch, (cx + w) * bps)
+        || !plane_fits(
+            uv_offset,
+            (chroma_cy + half_h).saturating_sub(1),
+            uv_pitch,
+            (chroma_cx + half_w) * 2 * bps,
+        )
+    {
+        return Err(BackendError::Decode(format!(
+            "VAImage geometry {}x{} (data_size {data_size}) too small for visible \
+             region {w}x{h} +crop({cx},{cy})",
+            image.width, image.height
+        )));
+    }
+
     let mut y = vec![0u16; w * h];
     let mut cb = vec![0u16; half_w * half_h];
     let mut cr = vec![0u16; half_w * half_h];
 
     if bit_depth <= 8 {
         for row in 0..h {
-            // SAFETY: y_offset + (cy+row)*y_pitch + (cx+w) ≤ image.data_size
-            // by libva's guarantee that the VAImage covers the full surface.
+            // SAFETY: y_offset + (cy+h-1)*y_pitch + (cx+w) ≤ image.data_size,
+            // validated by the plane_fits checks above (cx+w ≤ image.width,
+            // cy+h ≤ image.height, and the byte extent ≤ data_size).
             let src_row = unsafe { base.add(y_offset + (cy + row) * y_pitch) };
             for col in 0..w {
                 // SAFETY: per-row pointer stays within the row.
