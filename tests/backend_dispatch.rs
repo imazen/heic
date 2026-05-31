@@ -22,6 +22,21 @@ fn read_example() -> Vec<u8> {
     std::fs::read(EXAMPLE_HEIC).expect("example.heic should be in testdata/")
 }
 
+/// True only when the runner PROVES the HEVC Video Extensions are available,
+/// i.e. `HEIC_REQUIRE_MF_HEVC` is set to a truthy value. The CI workflow sets
+/// it to `1` after a successful AppX install and to `0` when the codec is not
+/// installed (no `HEVC_APPX_URL_ARM64` secret) — so `"0"`, empty, and unset all
+/// mean "skip" (MF cannot decode HEVC without the codec; `ActivateObject`
+/// returns `0xC00DB3B4`). The decision is caller-controlled via the workflow →
+/// AppX step → this env var, per the no-graceful-skip rule.
+#[cfg(all(feature = "backend-mediafoundation", target_os = "windows"))]
+fn mf_hevc_required() -> bool {
+    match std::env::var("HEIC_REQUIRE_MF_HEVC") {
+        Ok(v) => !v.is_empty() && v != "0",
+        Err(_) => false,
+    }
+}
+
 #[cfg(feature = "backend-rust")]
 #[test]
 fn rust_backend_decodes_example() {
@@ -61,10 +76,10 @@ fn mediafoundation_fallthrough_to_rust_succeeds() {
 #[cfg(all(feature = "backend-mediafoundation", target_os = "windows"))]
 #[test]
 fn mediafoundation_alone_decodes_when_required() {
-    if std::env::var_os("HEIC_REQUIRE_MF_HEVC").is_none() {
+    if !mf_hevc_required() {
         eprintln!(
-            "HEIC_REQUIRE_MF_HEVC not set: skipping MF-alone decode test. \
-             Set it on runners with the HEVC Video Extensions package \
+            "HEIC_REQUIRE_MF_HEVC not enabled: skipping MF-alone decode test. \
+             Set it to 1 on runners with the HEVC Video Extensions package \
              installed."
         );
         return;
@@ -101,8 +116,8 @@ fn mediafoundation_alone_decodes_when_required() {
 fn mediafoundation_vs_rust_corpus_diff() {
     use zensim_regress::testing::RegressionTolerance;
 
-    if std::env::var_os("HEIC_REQUIRE_MF_HEVC").is_none() {
-        eprintln!("HEIC_REQUIRE_MF_HEVC not set: skipping corpus diff");
+    if !mf_hevc_required() {
+        eprintln!("HEIC_REQUIRE_MF_HEVC not enabled: skipping corpus diff");
         return;
     }
     let tolerance = RegressionTolerance::off_by_one()
