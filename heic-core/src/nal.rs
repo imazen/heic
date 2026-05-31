@@ -37,12 +37,16 @@ pub fn hvcc_to_annexb(data: &[u8], length_size: u8) -> Option<Vec<u8>> {
             nal_len = (nal_len << 8) | (b as usize);
         }
         i += ls;
-        if i + nal_len > data.len() {
+        // `nal_len` is up to 0xFFFFFFFF; on a 32-bit target (wasm32, i686)
+        // `i + nal_len` would wrap, bypass this bound check, and then
+        // `data[i..i + nal_len]` would panic on the out-of-range slice.
+        // checked_add makes the overflow a clean rejection.
+        let Some(end) = i.checked_add(nal_len).filter(|&e| e <= data.len()) else {
             return None;
-        }
+        };
         out.extend_from_slice(&[0, 0, 0, 1]);
-        out.extend_from_slice(&data[i..i + nal_len]);
-        i += nal_len;
+        out.extend_from_slice(&data[i..end]);
+        i = end;
     }
     Some(out)
 }

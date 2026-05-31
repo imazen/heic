@@ -413,9 +413,9 @@ impl DecodedFrame {
         let shift = self.bit_depth - 8;
 
         let y_start = self.crop_top;
-        let y_end = self.height - self.crop_bottom;
+        let y_end = self.height.saturating_sub(self.crop_bottom);
         let x_start = self.crop_left;
-        let x_end = self.width - self.crop_right;
+        let x_end = self.width.saturating_sub(self.crop_right);
         let w = self.width as usize;
 
         let mut out_idx = 0;
@@ -465,9 +465,9 @@ impl DecodedFrame {
         let shift = self.bit_depth - 8;
 
         let y_start = self.crop_top;
-        let y_end = self.height - self.crop_bottom;
+        let y_end = self.height.saturating_sub(self.crop_bottom);
         let x_start = self.crop_left;
-        let x_end = self.width - self.crop_right;
+        let x_end = self.width.saturating_sub(self.crop_right);
 
         let mut pixel_idx = 0usize;
         let w = self.width as usize;
@@ -509,9 +509,9 @@ impl DecodedFrame {
         let shift = self.bit_depth - 8;
 
         let y_start = self.crop_top;
-        let y_end = self.height - self.crop_bottom;
+        let y_end = self.height.saturating_sub(self.crop_bottom);
         let x_start = self.crop_left;
-        let x_end = self.width - self.crop_right;
+        let x_end = self.width.saturating_sub(self.crop_right);
         let w = self.width as usize;
 
         for y in y_start..y_end {
@@ -538,9 +538,9 @@ impl DecodedFrame {
         let shift = self.bit_depth - 8;
 
         let y_start = self.crop_top;
-        let y_end = self.height - self.crop_bottom;
+        let y_end = self.height.saturating_sub(self.crop_bottom);
         let x_start = self.crop_left;
-        let x_end = self.width - self.crop_right;
+        let x_end = self.width.saturating_sub(self.crop_right);
         let w = self.width as usize;
 
         let mut offset = 0;
@@ -592,9 +592,9 @@ impl DecodedFrame {
         let shift = self.bit_depth - 8;
 
         let y_start = self.crop_top;
-        let y_end = self.height - self.crop_bottom;
+        let y_end = self.height.saturating_sub(self.crop_bottom);
         let x_start = self.crop_left;
-        let x_end = self.width - self.crop_right;
+        let x_end = self.width.saturating_sub(self.crop_right);
 
         let mut offset = 0;
         let mut pixel_idx = 0usize;
@@ -634,9 +634,9 @@ impl DecodedFrame {
         let shift = self.bit_depth - 8;
 
         let y_start = self.crop_top;
-        let y_end = self.height - self.crop_bottom;
+        let y_end = self.height.saturating_sub(self.crop_bottom);
         let x_start = self.crop_left;
-        let x_end = self.width - self.crop_right;
+        let x_end = self.width.saturating_sub(self.crop_right);
 
         let mut offset = 0;
         let mut pixel_idx = 0usize;
@@ -676,9 +676,9 @@ impl DecodedFrame {
         let shift = self.bit_depth - 8;
 
         let y_start = self.crop_top;
-        let y_end = self.height - self.crop_bottom;
+        let y_end = self.height.saturating_sub(self.crop_bottom);
         let x_start = self.crop_left;
-        let x_end = self.width - self.crop_right;
+        let x_end = self.width.saturating_sub(self.crop_right);
 
         let mut offset = 0;
         for y in y_start..y_end {
@@ -708,9 +708,9 @@ impl DecodedFrame {
 
         // Iterate over cropped region
         let y_start = self.crop_top;
-        let y_end = self.height - self.crop_bottom;
+        let y_end = self.height.saturating_sub(self.crop_bottom);
         let x_start = self.crop_left;
-        let x_end = self.width - self.crop_right;
+        let x_end = self.width.saturating_sub(self.crop_right);
 
         let mut pixel_idx = 0usize;
         for y in y_start..y_end {
@@ -924,9 +924,9 @@ impl DecodedFrame {
         let mut rgb = try_vec![0u16; total_elems]?;
 
         let y_start = self.crop_top;
-        let y_end = self.height - self.crop_bottom;
+        let y_end = self.height.saturating_sub(self.crop_bottom);
         let x_start = self.crop_left;
-        let x_end = self.width - self.crop_right;
+        let x_end = self.width.saturating_sub(self.crop_right);
         let w = self.width as usize;
 
         let max_val = ((1u32 << self.bit_depth) - 1) as i32;
@@ -959,9 +959,9 @@ impl DecodedFrame {
         let mut rgba = Vec::with_capacity(total_elems);
 
         let y_start = self.crop_top;
-        let y_end = self.height - self.crop_bottom;
+        let y_end = self.height.saturating_sub(self.crop_bottom);
         let x_start = self.crop_left;
-        let x_end = self.width - self.crop_right;
+        let x_end = self.width.saturating_sub(self.crop_right);
 
         let max_val = ((1u32 << self.bit_depth) - 1) as i32;
         let neutral = 1i32 << (self.bit_depth - 1);
@@ -1064,8 +1064,12 @@ impl DecodedFrame {
         max_val: i32,
         neutral: i32,
     ) -> (i32, i32, i32) {
-        let cb = cb_val - neutral;
-        let cr = cr_val - neutral;
+        // Clamp samples to the native range up front: out-of-range values can't
+        // be legitimate luma/chroma, and clamping keeps the fixed-point products
+        // below (notably the limited-range Y term scaled by `scale`) within i32.
+        let y_val = y_val.clamp(0, max_val);
+        let cb = cb_val.clamp(0, max_val) - neutral;
+        let cr = cr_val.clamp(0, max_val) - neutral;
 
         if self.full_range {
             // Full-range: same coefficients as 8-bit, but scaled for bit depth.
@@ -1110,7 +1114,15 @@ impl DecodedFrame {
                 9 => (13806, -1541, -5349, 17615), // BT.2020
                 _ => (13126, -3222, -6686, 16591), // BT.601 (default/unspecified)
             };
-            let yv = (y_val - y_offset) * 9576;
+            // The Y scale MUST grow with bit depth. 9576 = round((256/219)·2^13)
+            // is the *8-bit* fixed-point Y scale, valid only at shift==13. Here
+            // `shift = 13 + (bit_depth-8)` grows with depth but 9576 was NOT
+            // rescaled, so luma came out divided by an extra 2^(bit_depth-8):
+            // 10/12-bit limited-range white clipped at ~25% brightness. Multiply
+            // by `scale` (=2^(bit_depth-8)) so white (Y=235·scale) maps to
+            // max_val. The chroma coefficients need no change — native chroma is
+            // already `scale`× larger and the larger `shift` compensates it.
+            let yv = (y_val - y_offset) * 9576 * scale;
             let r = (yv + cr_r * cr + half) >> shift;
             let g = (yv + cb_g * cb + cr_g * cr + half) >> shift;
             let b = (yv + cb_b * cb + half) >> shift;
@@ -1220,6 +1232,48 @@ mod tests {
         assert_eq!(frame.total_cropped_pixels(), 20_000);
         assert_eq!(frame.total_cropped_bytes(3), 60_000);
         assert_eq!(frame.total_cropped_bytes(4), 80_000);
+    }
+
+    /// Build a 2×2 4:2:0 limited-range BT.709 frame at `bit_depth` with every
+    /// luma sample = `y` and the single chroma sample at the neutral point.
+    fn solid_frame(bit_depth: u8, y: u16) -> DecodedFrame {
+        let neutral = 1u16 << (bit_depth - 1);
+        DecodedFrame {
+            width: 2,
+            height: 2,
+            y_plane: vec![y; 4],
+            cb_plane: vec![neutral; 1],
+            cr_plane: vec![neutral; 1],
+            bit_depth,
+            ..frame_with_cropped_dims(2, 2)
+        }
+    }
+
+    /// Regression: limited-range YCbCr→RGB at native bit depth must map
+    /// full-scale white (Y=235·2^(bd-8)) to 0xFFFF and black (Y=16·2^(bd-8))
+    /// to 0 at every bit depth. Before the fix the Y-scale constant (9576, the
+    /// 8-bit fixed-point value) was not rescaled for bit_depth>8, so 10/12-bit
+    /// limited-range white clipped at ~25% (Y=940 → RGB 256 instead of 1023 →
+    /// ~16400/65535). The 8-bit path (shift==13) was unaffected, which is why
+    /// the 8-bit RGB comparison tests never caught it.
+    #[test]
+    fn limited_range_white_black_all_depths() {
+        for &(bd, white_y, black_y) in &[(8u8, 235u16, 16u16), (10, 940, 64), (12, 3760, 256)] {
+            let white = solid_frame(bd, white_y).to_rgb16().unwrap();
+            assert_eq!(
+                &white[0..3],
+                &[0xFFFF, 0xFFFF, 0xFFFF],
+                "bit_depth {bd}: limited-range white must be full 0xFFFF, got {:?}",
+                &white[0..3]
+            );
+            let black = solid_frame(bd, black_y).to_rgb16().unwrap();
+            assert_eq!(
+                &black[0..3],
+                &[0, 0, 0],
+                "bit_depth {bd}: limited-range black must be 0, got {:?}",
+                &black[0..3]
+            );
+        }
     }
 
     /// Regression for CR-1: a frame where the conformance crop offsets
