@@ -55,8 +55,8 @@ Decodes most HEIC files from iPhones and cameras. 118/162 HEIF test files decode
 | Media Foundation | `backend-mediafoundation` | Windows | Production. Runtime-CI verified on `windows-11-arm` with HEVC Video Extensions side-loaded. |
 | VideoToolbox | `backend-videotoolbox` | macOS, iOS, tvOS, visionOS | FFI complete; CI on `macos-latest` + `macos-15-intel`. |
 | MediaCodec | `backend-mediacodec` | Android | FFI complete; CI compile-only via Android NDK. |
-| VA-API | `backend-vaapi` | Linux | Skeleton (returns `Unavailable`); CI compile-only. |
-| D3D11VA | `backend-d3d11va` | Windows | Skeleton (returns `Unavailable`); CI compile-only. |
+| VA-API | `backend-vaapi` | Linux | Runtime FFI implemented (libva HEVC decode). No GPU on hosted CI — compile-only there; validate on a Linux+GPU host via `vaapi-runtime.yml`. |
+| D3D11VA | `backend-d3d11va` | Windows | Runtime FFI implemented (DXVA HEVC decode). No HEVC-capable GPU on hosted Windows CI — compile-only there; validate on a Windows+GPU host. |
 
 ```rust
 use heic::{Backend, DecoderConfig, PixelLayout};
@@ -87,8 +87,8 @@ let output = DecoderConfig::new()
 | `backend-mediafoundation` | no | Windows Media Foundation HEVC MFT (requires HEVC Video Extensions). |
 | `backend-videotoolbox` | no | Apple VideoToolbox HEVC decoder (macOS / iOS / tvOS / visionOS). |
 | `backend-mediacodec` | no | Android NDK `AMediaCodec` HEVC decoder (API 21+). |
-| `backend-vaapi` | no | Linux libva HEVC decoder. Skeleton — runtime FFI pending. |
-| `backend-d3d11va` | no | Windows D3D11 DXVA HEVC decoder. Skeleton — runtime FFI pending. |
+| `backend-vaapi` | no | Linux libva HEVC decoder (runtime FFI implemented; needs a GPU + VA-API driver at runtime). |
+| `backend-d3d11va` | no | Windows D3D11 DXVA HEVC decoder (runtime FFI implemented; needs an HEVC-capable GPU at runtime). |
 | `std` | yes | Standard library support. Disable for `no_std + alloc`. |
 | `parallel` | no | Parallel tile decoding via rayon. Implies `std`. |
 | `av1` | no | AV1 codec support via rav1d-safe. Implies `std`. |
