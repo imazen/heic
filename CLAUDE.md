@@ -451,6 +451,34 @@ untrusted-input safety bugs reachable from a crafted .heic; native-backend
 items are FFI/correctness bugs not runtime-verifiable on this Linux host.
 Findings also logged to `~/work/feedback/heic.md`.
 
+**FIX STATUS (2026-05-31) — all 29 confirmed findings addressed except 2 deferred:**
+- ✅ FIXED + pushed to main: HEVC param/slice overflows (95d6eab); 10-bit
+  limited-range color + NAL 32-bit wrap + crop saturating_sub (5be0203, 5f23346);
+  stsc DoS + clap crop + iovl offset (4bf4f5e); zencodec grid limits (be7533e);
+  VA-API ABI field order + offset asserts + unpack OOB + probe clamps (274db91);
+  D3D11VA u32-trunc OOB (c840a02); native-FFI batch — MF chroma/leak/linear-unpack,
+  VT chroma/crop/null, MediaCodec chroma/NV21/crop, D3D11VA multi-slice/0xFF-refpic
+  (19a998c). Verification: pure-Rust by tests (heic-core color regression, corpus
+  gate, overflow-checked corpus); native by cross-compile (windows-gnu / android /
+  apple) — NOT runtime-verified (no Win/Android/Apple/GPU HW here). Runtime
+  validation lands with the GPU/emulator CI (docs/CI.md).
+- ⏳ DEFERRED (measure-first, not skipped):
+  1. **UNINIT-sentinel leak** (cabac.rs:266 + frame.rs:444) — error-vs-clamp choice
+     needs corpus-regression measurement (erroring on truncated streams could
+     regress currently-passing corpus files). Sequence behind the conformance/corpus
+     CI gate. NOTE: the color fix's `y_val.clamp(0, max_val)` already stops the raw
+     0xFFFF leak in the 16-bit path.
+  2. **dequant i32 overflow** (transform.rs:689,704; transform_simd.rs:1435,1449)
+     for high-QP 10/12/16-bit — a correct fix widens the SIMD dequant kernel to i64;
+     needs zenbench to confirm no 8/10-bit hot-path regression before landing. 8-bit
+     (common case) does NOT overflow. Sequence behind a zenbench i64-vs-i32 dequant
+     measurement.
+
+**CI ADDED (2026-05-31):** corpus-decode gate over 95 bundled files (all 6 OSes +
+i686 32-bit); overflow-checks job; semver/doc/av1/unci gates; 7 fuzz targets; MF
+runtime fail-loud; MediaCodec emulator gate; VA-API/D3D11VA self-hosted GPU gates +
+`examples/backend_decode`. Strategy + bounded-cost GPU plan: `docs/CI.md`.
+
 **HIGH — pure-Rust untrusted-input (fixable + verifiable on Linux):**
 - `src/codec.rs:1027,1112` — zencodec streaming grid decoder skips dim/memory
   limits when `Limits` not provided (parent's `try_decode_grid_streaming`
