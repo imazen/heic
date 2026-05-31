@@ -442,6 +442,122 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 
 ## Known Bugs
 
+### Deep safety+code review — 2026-05-31 (43-agent workflow, adversarially verified)
+
+Full fan-out review of all crates + native backends + CI. 81 findings, 29
+verified-real, 2 refuted. Confirmed bugs below (file:line traced + an
+independent verifier re-derived each from source). Pure-Rust items are
+untrusted-input safety bugs reachable from a crafted .heic; native-backend
+items are FFI/correctness bugs not runtime-verifiable on this Linux host.
+Findings also logged to `~/work/feedback/heic.md`.
+
+**HIGH — pure-Rust untrusted-input (fixable + verifiable on Linux):**
+- `src/codec.rs:1027,1112` — zencodec streaming grid decoder skips dim/memory
+  limits when `Limits` not provided (parent's `try_decode_grid_streaming`
+  uses `unwrap_or(&NO_LIMITS)`; the adapter does not). Crafted 32-bit-dims
+  grid → uncapped alloc (64-bit OOM) / usize-overflow undersized buffer +
+  OOB-index panic (wasm32). `strip_bytes` mul is unchecked. Fix: mirror
+  `NO_LIMITS` default + `checked_mul`.
+- `heic-core/src/frame.rs:1098-1122` — 10/12-bit **limited-range** YCbCr→RGB is
+  ~4× too dark. Y-scale const `9576` is the 8-bit fixed-point scale but `shift`
+  grows with bit depth without rescaling the coefficient. 10-bit white
+  Y=940→RGB 256 not 1023. Corrupts every 10-bit limited-range image (iPhone
+  HDR/BT.2020) through the 16-bit path. 8-bit + full-range branches correct,
+  so 8-bit RGB tests never caught it. Fix: scale `9576` by `2^(bit_depth-8)`.
+- `src/hevc/params.rs:1070-1072` — scaling-list DC coef `dc_coef_minus8 + 8`
+  uses plain `+`; `read_se()` can return i32::MAX → overflow panic (debug /
+  cargo-fuzz) or wrapped garbage DC (release wrong-pixels). Adjacent delta
+  path already hardened with `wrapping_add`. Fix: reject per H.265 range
+  [-7,247] or `wrapping_add`+`rem_euclid`.
+- `src/hevc/params.rs:629-646` — SPS validates min/diff TB-size fields
+  individually but not derived `log2_max_tb_size`. Craft min_tb=5 + diff=3 →
+  log2_max_tb=8; an **inter** CU leaf at log2_size=6 bypasses intra's
+  log2>5 guard → `coeffs[..4096]` slices the fixed `[i16;1024]` CoeffBuffer
+  (`ctu.rs:2253/2258`) → OOB panic. Fix: reject `log2_max_tb_size > 5`.
+- `src/decode.rs:2149-2188` + `src/hevc/transforms.rs` + `heic-core/src/frame.rs:416-418`
+  — crafted `clap` clean-aperture inflates crop offsets unboundedly; a later
+  `irot` swaps a huge offset into crop_right/bottom; `width - crop_right`
+  u32 subtraction underflows → panic (debug) / OOB (release). Fix: clamp
+  crop ≤ dims after clap+each transform AND `saturating_sub` the ~10
+  `to_rgb*`/`to_bgr*` y_end/x_end sites. (verifier downgraded high→medium)
+- `src/heif/parser.rs:2484-2491` — `resolve_sample_offset` inner loop upper
+  bound `next_first_chunk` (attacker stsc field, up to u32::MAX) only
+  validated `>= first_chunk`, not `<= num_chunks`. With `samples_per_chunk==0`
+  the match never fires → up to ~4.3e9 useless iterations (measured 6.7s at
+  5e8). Probe paths (`ImageInfo::from_bytes`, `extract_exif/xmp/icc`) pass
+  `Unstoppable` so it's **uncancellable**. ~650-byte msf1 file. Fix: clamp
+  `next_first_chunk.min(num_chunks+1)` + reject `samples_per_chunk==0`.
+
+**HIGH — native FFI (fix by code-reading; runtime-verify needs the target OS):**
+- `heic-backend-d3d11va/src/decoder.rs:508-520` — `(data.len() as u32) > buf_size`
+  guard truncates on 64-bit; a >4 GiB bitstream whose low 32 bits < buf_size
+  passes, then `copy_nonoverlapping(..,data.len())` overflows the GPU buffer
+  (OOB write/UB). Same file uses safe `u32::try_from(..).unwrap_or(MAX)`
+  elsewhere (lines 409,443). Fix: compare in usize before the cast.
+- `heic-backend-vaapi/src/va_hevc.rs:84-134` — `VaPictureParameterBufferHevc`
+  field order diverges from libva ABI: `slice_parsing_fields` placed right
+  after `pic_fields` but libva puts it AFTER `row_height_minus1[21]`. Struct
+  is `bytes_of`-memcpy'd into the driver buffer → every field from
+  `sps_max_dec_pic_buffering_minus1` on is read 4 bytes off → garbage decode
+  + plausible driver-side tile OOB. Total size still 604 so no size error;
+  unit tests check field *values* not *offsets* (CLAUDE.md §1 anti-pattern).
+  Confirmed via offset_of harness. Fix: reorder to match va_dec_hevc.h +
+  add `const offset_of` layout asserts.
+- `heic-backend-vaapi/src/decode.rs:593-672` — `unpack_planes` walks the mapped
+  VAImage with loop bounds `config.width/height` + crop from `ispe`/SPS-conf
+  (attacker, independent boxes) but the surface is sized from SPS coded dims.
+  No check that `cy+h<=image.height` / offsets `<=data_size` → OOB read/UB
+  when ispe > coded. Fix: validate against VAImage geometry, clamp.
+- `heic-backend-mediafoundation/src/pixels.rs:57-74` — linear (non-IMF2DBuffer)
+  fallback unpack does ZERO buffer-length validation (cur_len/max_len read but
+  unused) before `from_raw_parts` over `coded_w*coded_h*3/2` → OOB if the MFT
+  buffer is shorter. The 2D path guards this (pixels.rs:118-129); linear
+  doesn't. (verifier: high→medium) Fix: share the 2D bounds check.
+
+**Systemic native-backend bug — chroma mislabel (3 backends, all confirmed):**
+- MF `imp.rs:408`, VT `imp.rs:594-663`, MediaCodec `imp.rs:457-463` — each
+  hardcodes a 4:2:0 output buffer but tags `DecodedFrame.chroma_format` with
+  the *source* `chroma_format_idc`. For 4:2:2/4:4:4 sources the parent
+  (`src/decode.rs:634-664`, `frame.c_stride()`) reads chroma with the wrong
+  stride/row-count → silent wrong pixels (guards turn would-be OOB into
+  partial garbage reads). Fix: set `chroma_format=1` after decode, or reject
+  non-4:2:0.
+- MediaCodec `imp.rs:487-503` also unconditionally unpacks
+  COLOR_FormatYUV420Flexible as NV12 → Cb/Cr swap (red/blue) on NV21/planar
+  devices.
+
+**MEDIUM (confirmed, abbreviated — see ~/work/feedback/heic.md for full):**
+- `src/hevc/slice.rs:369-374` — long-term RPS `num_long_term_sps +
+  num_long_term_pics` u32 sum overflow (two unbounded ue loops).
+- `heic-core/src/nal.rs:40-44` — `hvcc_to_annexb` length-prefix bound check
+  wraps on 32-bit → slice-index panic.
+- `src/hevc/params.rs:883-895` — PPS num_tile_columns/rows_minus1 `as u16`
+  truncation, no spec-bound validation; then `src/backend.rs:528-529` clamps
+  to 255 (`unwrap_or(u8::MAX)`) into FFI pic-params → tile desync / OOB tile
+  index in native backends.
+- `src/decode.rs:609-631` — iovl negative per-image offsets clamped to 0
+  instead of clipping off-canvas → wrong pixels (overlay_1000x680 13.1dB).
+- `src/hevc/transform.rs:704` / `transform_simd.rs:1449` — i32 overflow in flat
+  dequantize scalar path for 12/16-bit at high QP (partial).
+- `src/hevc/cabac.rs:266-273` + `heic-core/src/frame.rs:444-447,718-723` —
+  CABAC EOF tolerance lets a truncated bitstream "succeed" with
+  `UNINIT_SAMPLE`(u16::MAX) CTBs; the sentinel passes through to_rgb/to_rgba
+  (only final RGB clamp) → garbage pixels instead of a decode error.
+- VT `imp.rs:583-667` — conformance-window crop / coded size ignored →
+  spatially shifted pixels (top/left crop).
+- MF `imp.rs:509-560` — pre-allocated IMFSample never Released on
+  STREAM_CHANGE / NEED_MORE_INPUT / error retry → COM ref leak.
+- MediaCodec `imp.rs:362-503` — crafted SPS-conf crop + mismatched ispe drives
+  unpack index past the validated output-buffer size → panic.
+- D3D11VA `imp.rs:130-165`+`decoder.rs:386-424` — single slice-control entry
+  emitted for multi-slice/multi-NAL bitstream → wrong pixels.
+
+**Refuted (NOT bugs — recorded so they're not re-investigated):**
+- `heic-core/src/frame.rs:413` degenerate bit_depth<8 panic — native backends
+  never produce bit_depth<8; not reachable from untrusted input.
+- `src/decode.rs:1303,1948,2111,2404` unguarded luma/alpha/gainmap blits —
+  dimensions validated upstream; the native-backend plane-size invariant holds.
+
 ### D3D11VA real-decode: example.heic midgray (not scaling lists; 2026-05-22)
 
 Status: ⚠ Partial — 5 of 6 bundled corpus files (now including apple-hdr
