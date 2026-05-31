@@ -73,13 +73,17 @@ jobs:
           api-level: 34
           arch: x86_64
           target: google_apis
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          cores: 2
+          ram-size: 4096M
+          emulator-boot-timeout: 600
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -accel on
           disable-animations: true
           # The action runs this in /bin/sh (dash); keep it flat — no multi-line
           # if/case blocks (they were mangled into a syntax error). Require the
           # MediaCodec backend to decode (no rust fallback) via a one-line grep.
           script: |
             set -e
+            adb wait-for-device
             BIN=target/x86_64-linux-android/release/examples/backend_decode
             adb push "$BIN" /data/local/tmp/backend_decode
             adb shell chmod 755 /data/local/tmp/backend_decode
