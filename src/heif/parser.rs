@@ -2484,6 +2484,24 @@ fn resolve_sample_offset(
         if first_chunk > num_chunks || next_first_chunk < first_chunk {
             return Err(at!(HeicError::InvalidData("invalid stsc first_chunk")));
         }
+        // A chunk index beyond num_chunks can never resolve (the loop body
+        // rejects chunk_idx >= chunk_offsets.len()), so iterating past
+        // num_chunks+1 is pure wasted work. A crafted next_first_chunk up to
+        // u32::MAX would otherwise spin this inner loop billions of times —
+        // and it is uncancellable on the probe/metadata paths
+        // (ImageInfo::from_bytes / extract_exif|xmp|icc pass an Unstoppable).
+        // With first_chunk monotonic (entry i's next == entry i+1's first) and
+        // first_chunk <= num_chunks enforced above, clamping here bounds the
+        // total work across all entries to ~num_chunks.
+        let next_first_chunk = next_first_chunk.min(num_chunks + 1);
+        // A run contributing zero samples per chunk never advances
+        // current_sample, so the target-match below can never fire and the
+        // whole run is wasted iteration — reject as malformed.
+        if samples_per_chunk == 0 {
+            return Err(at!(HeicError::InvalidData(
+                "stsc samples_per_chunk is zero"
+            )));
+        }
 
         // Iterate through chunks in this stsc run. Poll the cancellation
         // token periodically so a 1M-chunk run does not block a stop

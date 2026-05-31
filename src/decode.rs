@@ -607,20 +607,28 @@ fn decode_iovl(
         };
 
         let (off_x, off_y) = offsets[idx];
+        // A negative offset places the tile partially off the top/left of the
+        // canvas: the on-canvas portion begins `-off_x`/`-off_y` pixels INTO the
+        // tile and is drawn at dst (0,0). Clamping dst to 0 WITHOUT advancing
+        // the source origin (the old behaviour) drew the tile's own left/top
+        // edge at the canvas origin, shifting the whole tile right/down by the
+        // offset magnitude — wrong pixels.
         let dst_x = off_x.max(0) as u32;
         let dst_y = off_y.max(0) as u32;
-        let tile_w = tile_frame.cropped_width();
-        let tile_h = tile_frame.cropped_height();
+        let src_skip_x = off_x.min(0).unsigned_abs(); // tile cols hidden off the left
+        let src_skip_y = off_y.min(0).unsigned_abs(); // tile rows hidden off the top
+        let tile_w = tile_frame.cropped_width().saturating_sub(src_skip_x);
+        let tile_h = tile_frame.cropped_height().saturating_sub(src_skip_y);
 
         // Copy luma
         let copy_w = tile_w.min(canvas_width.saturating_sub(dst_x));
         let copy_h = tile_h.min(canvas_height.saturating_sub(dst_y));
 
         for row in 0..copy_h {
-            let src_row = (tile_frame.crop_top + row) as usize;
+            let src_row = (tile_frame.crop_top + src_skip_y + row) as usize;
             let dst_row = (dst_y + row) as usize;
             for col in 0..copy_w {
-                let src_col = (tile_frame.crop_left + col) as usize;
+                let src_col = (tile_frame.crop_left + src_skip_x + col) as usize;
                 let dst_col = (dst_x + col) as usize;
                 let src_idx = src_row * tile_frame.y_stride() + src_col;
                 let dst_idx = dst_row * output.y_stride() + dst_col;
@@ -642,8 +650,8 @@ fn decode_iovl(
             let c_copy_h = copy_h.div_ceil(sub_y);
             let c_dst_x = dst_x / sub_x;
             let c_dst_y = dst_y / sub_y;
-            let c_src_x = tile_frame.crop_left / sub_x;
-            let c_src_y = tile_frame.crop_top / sub_y;
+            let c_src_x = (tile_frame.crop_left + src_skip_x) / sub_x;
+            let c_src_y = (tile_frame.crop_top + src_skip_y) / sub_y;
 
             let src_c_stride = tile_frame.c_stride();
             let dst_c_stride = output.c_stride();
@@ -2171,16 +2179,25 @@ fn apply_clean_aperture(frame: &mut crate::hevc::DecodedFrame, clap: &CleanApert
         0.0
     };
 
-    let extra_left =
-        round_f64((conf_width as f64 - clean_width as f64) / 2.0 + horiz_off_pixels) as u32;
-    let extra_top =
-        round_f64((conf_height as f64 - clean_height as f64) / 2.0 + vert_off_pixels) as u32;
-    let extra_right = conf_width
-        .saturating_sub(clean_width)
-        .saturating_sub(extra_left);
-    let extra_bottom = conf_height
-        .saturating_sub(clean_height)
-        .saturating_sub(extra_top);
+    // Clamp the offsets to the available crop budget. `horiz_off`/`vert_off`
+    // come straight from the clap box and are unbounded, so without the
+    // `.min()` a crafted clap inflated `extra_left`/`extra_top` past the frame
+    // dimensions; a later `irot` then swapped a huge offset into
+    // crop_right/crop_bottom and the YCbCr→RGB `width - crop_right` underflowed
+    // (panic/OOB). Clamping extra_left to [0, conf_width-clean_width] keeps
+    // extra_left+extra_right == conf_width-clean_width exactly, so the total
+    // crop can never exceed the frame size. (`as u32` already saturates a
+    // negative round to 0.)
+    let max_extra_horiz = conf_width.saturating_sub(clean_width);
+    let max_extra_vert = conf_height.saturating_sub(clean_height);
+    let extra_left = (round_f64((conf_width as f64 - clean_width as f64) / 2.0 + horiz_off_pixels)
+        as u32)
+        .min(max_extra_horiz);
+    let extra_top = (round_f64((conf_height as f64 - clean_height as f64) / 2.0 + vert_off_pixels)
+        as u32)
+        .min(max_extra_vert);
+    let extra_right = max_extra_horiz.saturating_sub(extra_left);
+    let extra_bottom = max_extra_vert.saturating_sub(extra_top);
 
     frame.crop_left += extra_left;
     frame.crop_right += extra_right;
