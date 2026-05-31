@@ -33,6 +33,8 @@ jobs:
           - fuzz_hevc_raw
           - fuzz_decode_av1
           - fuzz_decode_unci
+          - fuzz_decode_limits
+          - fuzz_color_transform
     steps:
       - uses: actions/checkout@v6
 

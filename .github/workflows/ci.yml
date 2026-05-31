@@ -39,6 +39,13 @@ jobs:
       - name: Test (backend-rust + parallel)
         run: cargo test --lib --features "backend-rust,parallel"
 
+      # Decode the bundled testdata corpus end-to-end (not just --lib) on every
+      # OS. The corpus (95 committed files incl. example.heic, 10-bit apple-hdr,
+      # grids, uncompressed HEIF) ships in the checkout, so no download. This is
+      # the regression gate for wrong-pixel / panic-on-corpus bugs.
+      - name: Corpus decode gate
+        run: cargo test --test corpus_decode --features "backend-rust,std,av1,unci"
+
       - name: Check (backend-rust, no_std)
         run: cargo check --no-default-features --features backend-rust
 
@@ -100,6 +107,60 @@ jobs:
       - name: Test (all publishable features)
         run: cargo test --lib --features "backend-rust,std,fallible-alloc,parallel,zencodec"
 
+      # av1 + unci are publishable features but were never lint-/unit-gated.
+      - name: Test (backend-rust + av1 + unci)
+        run: cargo test --lib --features "backend-rust,std,av1,unci"
+
+  # Decode the corpus + run every fuzz-regression seed with integer overflow
+  # checks forced ON in release. The HEVC parameter-set overflow bugs
+  # (scaling-list DC, long-term-RPS sum, derived transform size) only panic
+  # under overflow-checks; plain release would wrap them silently. This gate
+  # catches a regression that the normal corpus job (debug, checks already on)
+  # also catches but pins it for release-shaped builds too.
+  overflow-checks:
+    name: Overflow-checked corpus + fuzz seeds
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-C overflow-checks=on"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Corpus decode (overflow-checked, release)
+        run: cargo test --release --test corpus_decode --features "backend-rust,std,av1,unci"
+      - name: Fuzz regression seeds (overflow-checked)
+        run: cargo test --release --test fuzz_regression --features "backend-rust,std,av1,unci"
+
+  # cargo-semver-checks is mandated before every release (RELEASING.md /
+  # CLAUDE.md) but was not gated in CI. Run it on PRs so an accidental public
+  # API break surfaces in review, not at publish time. Informational on the
+  # 0.x line (a break is allowed with a minor bump) — does not fail the build,
+  # but the report is visible.
+  semver:
+    name: semver-checks (informational)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          feature-group: only-explicit-features
+          features: "backend-rust,std,zencodec"
+        continue-on-error: true
+
+  # Doc build must be warning-free (broken intra-doc links, etc.).
+  doc:
+    name: Doc build
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo doc
+        run: cargo doc --no-deps --features "backend-rust,std,av1,unci,zencodec"
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
@@ -118,6 +179,9 @@ jobs:
 
       - name: Clippy (all publishable features)
         run: cargo clippy --lib --features "backend-rust,std,fallible-alloc,parallel,zencodec" -- -D warnings
+
+      - name: Clippy (av1 + unci + tests)
+        run: cargo clippy --tests --features "backend-rust,std,av1,unci" -- -D warnings
 
   supply-chain:
     name: Supply chain (cargo audit + deny)
@@ -184,6 +248,14 @@ jobs:
       - name: Test (i686)
         run: cross test --lib --features "backend-rust,std" --target i686-unknown-linux-gnu
 
+      # 32-bit decode correctness, not just compile. Several review fixes are
+      # 32-bit overflow/wrap bugs (NAL length-prefix checked_add, stsc clamp,
+      # zencodec strip checked_mul) that only manifest where usize is 32-bit —
+      # i686 and wasm32. Running the corpus gate under `cross` (qemu) on i686
+      # exercises the whole decode pipeline on a 32-bit target.
+      - name: Corpus decode (i686, 32-bit)
+        run: cross test --test corpus_decode --features "backend-rust,std,av1,unci" --target i686-unknown-linux-gnu
+
   backend-mediafoundation:
     # Cross-compile-check the heic-backend-mediafoundation crate for Windows
     # targets. Server 2025 (windows-latest) is structurally unsupported by
@@ -231,22 +303,30 @@ jobs:
           key: backend-mediafoundation-runtime
       - name: Install HEVC Video Extensions (free Device Manufacturer variant)
         shell: pwsh
+        # Map the secret to an env var (never interpolate ${{ secrets.* }}
+        # directly into the script body).
+        env:
+          HEVC_APPX_URL_ARM64: ${{ secrets.HEVC_APPX_URL_ARM64 }}
         run: |
           # The free 9N4WGH0Z6VHQ package is signed by Microsoft and freely
-          # redistributable per the EULA, so we can mirror it. The URL is
-          # injected via the HEVC_APPX_URL_ARM64 secret/var; the CI step
-          # is best-effort — if install fails we still build, and the
-          # runtime test skips itself (HEIC_REQUIRE_MF_HEVC governs).
+          # redistributable per the EULA, so we can mirror it.
+          #
+          # Fail-loud policy: if the secret is UNSET this is an unconfigured
+          # environment — skip the runtime decode (HEIC_REQUIRE_MF_HEVC=0) and
+          # exit clean. If the secret IS set but the download/install fails,
+          # that is a real breakage: let the error propagate and FAIL the job
+          # (no continue-on-error), so a broken mirror URL can't silently turn
+          # the only MF runtime gate into a no-op.
           $url = $env:HEVC_APPX_URL_ARM64
           if (-not $url) {
-            Write-Host "::warning::HEVC_APPX_URL_ARM64 not set; skipping HEVC AppX install"
+            Write-Host "::warning::HEVC_APPX_URL_ARM64 not set; skipping MF HEVC runtime decode"
             "HEIC_REQUIRE_MF_HEVC=0" | Out-File -FilePath $env:GITHUB_ENV -Append
             exit 0
           }
+          $ErrorActionPreference = "Stop"
           Invoke-WebRequest -Uri $url -OutFile hevc.appx
           Add-AppxPackage -Path hevc.appx
           Get-AppxPackage Microsoft.HEVCVideoExtension*
-        continue-on-error: true
       - name: Test backend_dispatch
         run: cargo test --test backend_dispatch --features "backend-rust,backend-mediafoundation,std" --target aarch64-pc-windows-msvc
       - name: Test backend-mediafoundation smoke
