@@ -58,7 +58,12 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
         run: |
-          cargo ndk -t x86_64 build --release \
+          # Build for API 34 (matches the emulator). The backend references
+          # AMEDIAFORMAT_KEY_CSD_0, which libmediandk only exports from API 28+;
+          # cargo-ndk's lower default platform left it as an undefined symbol at
+          # link time. (Nothing else in CI *links* the mediacodec backend into a
+          # binary, so this only surfaces here — the backend requires API >= 28.)
+          cargo ndk -t x86_64 -p 34 build --release \
             --example backend_decode \
             --features "backend-rust,backend-mediacodec,std"
 
