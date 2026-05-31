@@ -13,16 +13,10 @@ name: MediaCodec runtime decode
 # boot behaviour differs.
 
 on:
-  # Dispatch-only for now. The build+link is verified on every push by the
-  # `Link-check backend_decode example (android)` step in ci.yml (that step
-  # caught the AMEDIAFORMAT_KEY_CSD_0 / API-28 link bug). The on-device decode
-  # below is blocked on emulator-runner adb instability on the GH runner
-  # ("Unable to connect to adb daemon on port: 5037" / "device offline"
-  # mid-run) — a CI-infra tuning issue independent of heic. Once the emulator
-  # boots reliably with adb online, flip this back to:
-  #   push: { branches: [main] }
-  #   pull_request: { branches: [main] }
-  # Run manually meanwhile: gh workflow run "MediaCodec runtime decode".
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -84,17 +78,18 @@ jobs:
           emulator-boot-timeout: 600
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -accel on
           disable-animations: true
-          # The action runs this in /bin/sh (dash); keep it flat — no multi-line
-          # if/case blocks (they were mangled into a syntax error). Require the
-          # MediaCodec backend to decode (no rust fallback) via a one-line grep.
-          script: |
-            set -e
-            adb wait-for-device
-            BIN=target/x86_64-linux-android/release/examples/backend_decode
-            adb push "$BIN" /data/local/tmp/backend_decode
-            adb shell chmod 755 /data/local/tmp/backend_decode
-            adb push testdata/libheif-examples/example.heic /data/local/tmp/example.heic
-            OUT=$(adb shell "/data/local/tmp/backend_decode /data/local/tmp/example.heic mediacodec" | tr -d '\r')
-            echo "device output: $OUT"
-            echo "$OUT" | grep -q "^OK mediacodec " || { echo "::error::MediaCodec runtime decode failed: $OUT"; exit 1; }
-            echo "MediaCodec runtime decode OK"
+          # IMPORTANT: this action runs the `script` LINE-BY-LINE, each as a
+          # separate `sh -c` — so shell variables do NOT persist across lines
+          # (a `BIN=...` line is lost, and the next line sees an empty `$BIN`),
+          # and multi-line `if`/`case` blocks break. So the whole thing must be
+          # ONE command: a `>-`-folded single line chained with `&&` (no shared
+          # variables, fail-fast). Requires the MediaCodec backend to decode
+          # (no rust fallback).
+          script: >-
+            adb wait-for-device &&
+            adb push target/x86_64-linux-android/release/examples/backend_decode /data/local/tmp/bd &&
+            adb shell chmod 755 /data/local/tmp/bd &&
+            adb push testdata/libheif-examples/example.heic /data/local/tmp/ex.heic &&
+            OUT="$(adb shell '/data/local/tmp/bd /data/local/tmp/ex.heic mediacodec' | tr -d '\r')" &&
+            echo "device output: $OUT" &&
+            { echo "$OUT" | grep -q '^OK mediacodec ' || { echo "::error::MediaCodec runtime decode failed: $OUT"; exit 1; }; }
