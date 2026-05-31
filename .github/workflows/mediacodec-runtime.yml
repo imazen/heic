@@ -1,0 +1,90 @@
+name: MediaCodec runtime decode
+
+# Runtime gate for heic-backend-mediacodec: EXECUTES the unsafe AMediaCodec FFI
+# on an Android emulator (the c2.android.hevc.decoder software codec ships in
+# every system image) — not just cross-compile. Hosted + KVM-accelerated, no
+# device farm, no extra cost. Uses examples/backend_decode (force-single
+# backend, no pure-Rust fallback) so a MediaCodec failure is a hard error.
+#
+# FIRST-RUN NOTE: the emulator + adb plumbing below is the standard
+# reactivecircus/android-emulator-runner pattern but cannot be validated
+# locally (the emulator only exists in CI). Treat the first CI run as the
+# validation and iterate the build / adb push / exec lines if the ABI path or
+# boot behaviour differs.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: mediacodec-runtime-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  emulator:
+    name: mediacodec runtime (android emulator)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mediacodec-runtime
+
+      # A fast x86_64 emulator needs nested KVM on the Linux runner.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+      - name: Install cargo-ndk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      - name: Build backend_decode for x86_64-linux-android
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          cargo ndk -t x86_64 build --release \
+            --example backend_decode \
+            --features "backend-rust,backend-mediacodec,std"
+
+      - name: Run on emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          disable-animations: true
+          script: |
+            set -e
+            BIN=target/x86_64-linux-android/release/examples/backend_decode
+            if [ ! -f "$BIN" ]; then
+              echo "::error::missing $BIN"
+              ls -R target/x86_64-linux-android/release/examples || true
+              exit 1
+            fi
+            adb push "$BIN" /data/local/tmp/backend_decode
+            adb shell chmod 755 /data/local/tmp/backend_decode
+            adb push testdata/libheif-examples/example.heic /data/local/tmp/example.heic
+            # Require the MediaCodec backend to decode it (no rust fallback).
+            OUT=$(adb shell "/data/local/tmp/backend_decode /data/local/tmp/example.heic mediacodec" | tr -d '\r')
+            echo "device output: $OUT"
+            case "$OUT" in
+              "OK mediacodec "*) echo "MediaCodec runtime decode OK" ;;
+              *) echo "::error::MediaCodec runtime decode failed: $OUT"; exit 1 ;;
+            esac

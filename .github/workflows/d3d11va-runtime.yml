@@ -1,0 +1,71 @@
+name: D3D11VA runtime decode
+
+# Runtime gate for heic-backend-d3d11va: runs the DXVA HEVC decode on a real
+# Windows + HEVC-capable GPU. GitHub-hosted Windows runners have NO
+# decode-capable GPU (the WARP software device cannot video-decode), so this
+# targets a SELF-HOSTED Windows+GPU runner labeled [self-hosted, windows,
+# d3d11va].
+#
+# COST IS BOUNDED BY CONSTRUCTION. A self-hosted runner on owned hardware (e.g.
+# a ~$200-300 Intel-iGPU mini-PC, which does DXVA HEVC decode) has $0 marginal
+# cost per job — there is no cloud account in scope, so no code bug, crash, or
+# leaked credential can produce a runaway bill. See docs/CI.md for the full
+# bounded-cost rationale and the org-level budget backstop.
+#
+# PUBLIC-REPO TRUST MODEL. This runs only on push to main / tags, manual
+# dispatch, or a pull request a maintainer has labeled `gpu-ci` (applying a
+# label requires write access). Fork-PR code never reaches the self-hosted box
+# unapproved. Keep the org's fork-PR setting at "Require approval for all
+# outside collaborators", and keep NO secrets / cloud creds / signing keys on
+# the runner. See docs/CI.md.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    types: [labeled, synchronize]
+  workflow_dispatch:
+
+concurrency:
+  group: d3d11va-runtime-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  runtime:
+    name: d3d11va runtime (self-hosted windows+gpu)
+    # Never run fork-PR code on the self-hosted box without a maintainer label.
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'gpu-ci')
+    runs-on: [self-hosted, windows, d3d11va]
+    timeout-minutes: 20
+    env:
+      HEIC_D3D11VA_HW: '1'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build backend_decode
+        run: cargo build --release --example backend_decode --features "backend-rust,backend-d3d11va,std"
+
+      - name: Decode corpus via D3D11VA (no rust fallback)
+        shell: bash
+        run: |
+          set -e
+          bin=target/release/examples/backend_decode.exe
+          fail=0
+          for f in testdata/synthetic/*.heic testdata/libheif-examples/example.heic testdata/apple-hdr/hdr-sample.heic; do
+            [ -f "$f" ] || continue
+            if out=$("$bin" "$f" d3d11va); then
+              echo "OK  $f -> $out"
+            else
+              echo "::error::d3d11va failed on $f"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      # The committed synthetic corpus is the bit-exact-vs-rust gate.
+      - name: Synthetic bit-exact gate
+        run: cargo test --release --test backend_dispatch d3d11va_vs_rust_synthetic_corpus --features "backend-rust,backend-d3d11va,std"
