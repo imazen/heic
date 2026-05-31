@@ -63,7 +63,7 @@ jobs:
           # cargo-ndk's lower default platform left it as an undefined symbol at
           # link time. (Nothing else in CI *links* the mediacodec backend into a
           # binary, so this only surfaces here — the backend requires API >= 28.)
-          cargo ndk -t x86_64 -p 34 build --release \
+          cargo ndk -t x86_64 --platform 34 build --release \
             --example backend_decode \
             --features "backend-rust,backend-mediacodec,std"
 
