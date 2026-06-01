@@ -443,16 +443,55 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 
 ## Known Bugs
 
-### Lossless HEVC (cu_transquant_bypass) not decoded — errors cleanly (2026-05-31)
+### Lossless HEVC not decoded — errors cleanly. Root-caused; blocked on RExt residual (2026-06-01)
 
-`testdata/features/lossless.heic` (heif-enc `-L`, RGB matrix=0, lossless via
-`cu_transquant_bypass_flag`) does **not** decode: it returns
-`InvalidBitstream("incomplete decode: undecoded luma samples remain")` from the
-UNINIT completeness guard. This is a missing codec feature, not corruption — the
-decoder errors cleanly (no panic, no wrong pixels). Pinned by
-`tests/cov_features.rs::lossless_errors_cleanly_until_supported`; when transquant
-bypass is implemented, flip that test to assert pixels. Status: ⚠ Partial
-(errors cleanly; feature unimplemented).
+`testdata/features/lossless.heic` (heif-enc `-L`) is a **10-bit 4:4:4
+`cu_transquant_bypass` intra-NxN, matrix_coefficients=0 (GBR)** image. It
+returns `InvalidBitstream("incomplete decode: undecoded luma samples remain")`
+from the UNINIT guard — clean error, no wrong pixels. Pinned by
+`tests/cov_features.rs::lossless_errors_cleanly_until_supported`.
+
+**SE-trace investigation (2026-06-01).** Set `SE_TRACE_LIMIT` (ctu.rs) > 0 and
+diff our SE# trace against dec265's (regular build, stderr, same `SE#n name
+val= range= byte=` format). For lossless.heic, dec265 emits 304 SEs; ours
+diverges in three layers, each a distinct 4:4:4 carve-out. **The first two are
+small, verified fixes** (apply them, re-diff, confirm the divergence point
+advances); the third is the real blocker.
+
+1. **SE#11 — 4:4:4 cbf carve-out (FIX KNOWN).** dec265 re-reads `cbf_cb`/`cbf_cr`
+   at the 4×4 child level; we skip to `cbf_luma`. H.265 7.3.8.8 reads them when
+   `log2TrafoSize > 2 || ChromaArrayType == 3`. ctu.rs `decode_transform_tree_inner`
+   ~line 1890: change `else if log2_size > 2` → `else if log2_size > 2 ||
+   chroma_array_type == 3`. (CLAUDE.md already flagged this as the 4:4:4
+   carve-out; it does NOT change `nokia_444` which is non-NxN, MAE stays 1.4.)
+2. **SE#45 — 4:4:4 NxN chroma modes (FIX KNOWN).** dec265 reads FOUR
+   `intra_chroma_mode` (one per luma PB); we read one. H.265 7.3.8.5: for
+   `ChromaArrayType == 3` loop `intra_chroma_pred_mode` per PB. ctu.rs PartNxN
+   branch ~line 1649: call `decode_intra_chroma_mode(luma_mode_i)` ×4 and
+   `store_intra_chroma_mode` each quadrant at `log2_pu_size`. Reconstruction must
+   then read the per-quadrant mode via `get_intra_chroma_mode_at(x,y)` (not the
+   single passed `intra_chroma_mode`).
+3. **SE#65 — RExt 4:4:4 residual coding (BLOCKER).** After 1+2, the Cb 4×4
+   residual at byte 219 consumes 9 bytes for us vs **22 for dec265** — we
+   under-read the large lossless levels. This is Range-Extensions residual
+   coding: `persistent_rice_adaptation_enabled_flag` (rice param carried across
+   sub-blocks, not reset), `cabac_bypass_alignment_enabled_flag`, and
+   `extended_precision_processing_flag` from the SPS/PPS `*_range_extension`.
+   These aren't parsed/applied. This is the multi-step remaining work.
+
+**Also needed for this file (orthogonal):** `matrix_coefficients == 0`
+(identity / GBR) color is unhandled — `heic-core/src/frame.rs::ycbcr_to_rgb`
+falls through to BT.601, mangling RGB planes to gray. For matrix=0, output
+R=Cr-plane, G=Y-plane, B=Cb-plane, full-range, no chroma offset. (Generate a
+*lossy* matrix=0 file with `heif-enc --matrix_coefficients 0 --colour_primaries
+1 --transfer_characteristic 13` to verify this independently of lossless.)
+
+**transquant_bypass reconstruction** (residual = coeff directly, no dequant/
+transform) **+ implicit RDPCM** (H.265 8.6.2: intra modes 10/26 accumulate the
+residual along the prediction direction) were prototyped and are spec-correct,
+but can't be verified until the RExt residual parse (layer 3) syncs. They were
+reverted to keep the clean-error state (pixels sacred). Status: ⚙ In Progress —
+layers 1+2 ready to re-apply, blocked on layer-3 RExt residual coding.
 
 ### Negative-offset overlay: we are MORE spec-compliant than libheif (not a bug)
 
