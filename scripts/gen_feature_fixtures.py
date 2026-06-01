@@ -222,6 +222,104 @@ def mux_derived(dst, base_w, base_h, kind, out_w, out_h, src,
     open(dst, "wb").write(ftyp + meta + box(b"mdat", mdat_payload))
 
 
+# ---- edge-case overlay / iden-chain (malformed + limit + 32-bit paths) -------
+def mux_overlay(dst, canvas_w, canvas_h, offset, version=0, large=False, src=None):
+    """Overlay with full control: version (reject path), flags&1 (32-bit), signed
+    offsets (negative-offset src_skip), oversized canvas (limit rejection)."""
+    hvcc, colr, coded = extract(src)
+    ew = canvas_w if canvas_w < 65536 else 65535
+    eh = canvas_h if canvas_h < 65536 else 65535
+    ipco = box(b"ipco", b"".join([hvcc, ispe(64, 64), colr, ispe(ew, eh)]))
+
+    def item_assoc(item, lst):
+        r = struct.pack(">H", item) + bytes([len(lst)])
+        for e, i in lst:
+            r += bytes([(e << 7) | i])
+        return r
+
+    ipma = fbox(b"ipma", 0, 0, struct.pack(">I", 2)
+                + item_assoc(1, [(1, 1), (0, 2), (0, 3)]) + item_assoc(2, [(0, 4)]))
+    iprp = box(b"iprp", ipco + ipma)
+
+    def infe(item, typ, hidden):
+        return fbox(b"infe", 2, 1 if hidden else 0,
+                    struct.pack(">HH", item, 0) + typ + b"drv\x00")
+
+    iinf = fbox(b"iinf", 0, 0, struct.pack(">H", 2)
+                + infe(1, b"hvc1", True) + infe(2, b"iovl", False))
+    iref = fbox(b"iref", 0, 0, box(b"dimg", struct.pack(">HHH", 2, 1, 1)))
+    pitm = fbox(b"pitm", 0, 0, struct.pack(">H", 2))
+    hdlr = fbox(b"hdlr", 0, 0, struct.pack(">I", 0) + b"pict" + b"\x00" * 12)
+    flags = 1 if large else 0
+    ho, vo = offset
+    fill = struct.pack(">HHHH", 0, 0, 0, 65535)
+    if large:
+        item2 = bytes([version, flags]) + fill \
+            + struct.pack(">II", canvas_w, canvas_h) + struct.pack(">ii", ho, vo)
+    else:
+        item2 = bytes([version, flags]) + fill \
+            + struct.pack(">HH", canvas_w, canvas_h) + struct.pack(">hh", ho, vo)
+    ftyp = box(b"ftyp", b"heic" + struct.pack(">I", 0) + b"mif1" + b"heic")
+
+    def iloc(o1, o2):
+        body = bytes([0x44, 0x00]) + struct.pack(">H", 2)
+        body += struct.pack(">HHH", 1, 0, 1) + struct.pack(">II", o1, len(coded))
+        body += struct.pack(">HHH", 2, 0, 1) + struct.pack(">II", o2, len(item2))
+        return fbox(b"iloc", 0, 0, body)
+
+    o1 = o2 = 0
+    for _ in range(4):
+        meta = fbox(b"meta", 0, 0, hdlr + pitm + iinf + iref + iprp + iloc(o1, o2))
+        st = len(ftyp) + len(meta) + 8
+        o1, o2 = st, st + len(coded)
+    open(dst, "wb").write(ftyp + meta + box(b"mdat", coded + item2))
+
+
+def mux_iden_chain(dst, n, src):
+    """n-deep iden->iden->...->coded chain. n>MAX_DERIVED_DEPTH(3) must reject."""
+    hvcc, colr, coded = extract(src)
+    ipco = box(b"ipco", b"".join([hvcc, ispe(64, 64), colr]))
+
+    def item_assoc(item, lst):
+        r = struct.pack(">H", item) + bytes([len(lst)])
+        for e, i in lst:
+            r += bytes([(e << 7) | i])
+        return r
+
+    entries = [item_assoc(1, [(1, 1), (0, 2), (0, 3)])]
+    entries += [item_assoc(it, [(0, 2)]) for it in range(2, 2 + n)]
+    ipma = fbox(b"ipma", 0, 0, struct.pack(">I", 1 + n) + b"".join(entries))
+    iprp = box(b"iprp", ipco + ipma)
+
+    def infe(item, typ, hidden):
+        return fbox(b"infe", 2, 1 if hidden else 0,
+                    struct.pack(">HH", item, 0) + typ + b"d\x00")
+
+    infes = [infe(1, b"hvc1", True)]
+    infes += [infe(it, b"iden", True) for it in range(2, 1 + n)]
+    infes += [infe(1 + n, b"iden", False)]
+    iinf = fbox(b"iinf", 0, 0, struct.pack(">H", 1 + n) + b"".join(infes))
+    drefs = b"".join(box(b"dimg", struct.pack(">HHH", it, 1, it - 1))
+                     for it in range(2, 2 + n))
+    iref = fbox(b"iref", 0, 0, drefs)
+    pitm = fbox(b"pitm", 0, 0, struct.pack(">H", 1 + n))
+    hdlr = fbox(b"hdlr", 0, 0, struct.pack(">I", 0) + b"pict" + b"\x00" * 12)
+    ftyp = box(b"ftyp", b"heic" + struct.pack(">I", 0) + b"mif1" + b"heic")
+
+    def iloc(o1):
+        body = bytes([0x44, 0x00]) + struct.pack(">H", 1 + n)
+        body += struct.pack(">HHH", 1, 0, 1) + struct.pack(">II", o1, len(coded))
+        for it in range(2, 2 + n):
+            body += struct.pack(">HHH", it, 0, 0)
+        return fbox(b"iloc", 0, 0, body)
+
+    o1 = 0
+    for _ in range(4):
+        meta = fbox(b"meta", 0, 0, hdlr + pitm + iinf + iref + iprp + iloc(o1))
+        o1 = len(ftyp) + len(meta) + 8
+    open(dst, "wb").write(ftyp + meta + box(b"mdat", coded))
+
+
 # ---- generate ---------------------------------------------------------------
 def main():
     if not os.path.exists(HEIFENC):
@@ -269,6 +367,21 @@ def main():
     # derived items
     mux_derived(f"{OUT}/iden_rot90.heic", 64, 64, b"iden", 64, 64, f"{tmp}/c64.heic", irot_angle=1)
     mux_derived(f"{OUT}/iovl.heic", 64, 64, b"iovl", 96, 96, f"{tmp}/c64.heic", overlay_offset=(16, 16))
+
+    # edge-case derived images: decode-path branches the happy fixtures miss.
+    c64 = f"{tmp}/c64.heic"
+    # negative offset -> src_skip clamping (spec-correct: shows tile's clipped
+    # bottom-right region; libheif skips this — we are more compliant here)
+    mux_overlay(f"{OUT}/iovl_negoff.heic", 96, 96, (-16, -16), src=c64)
+    # flags&1 large format -> 32-bit canvas/offset path (== iovl pixel-for-pixel)
+    mux_overlay(f"{OUT}/iovl_large.heic", 96, 96, (16, 16), large=True, src=c64)
+    # version != 0 -> HeicError::Unsupported
+    mux_overlay(f"{OUT}/iovl_badver.heic", 96, 96, (16, 16), version=1, src=c64)
+    # oversized canvas -> Limits::check_dimensions rejection
+    mux_overlay(f"{OUT}/iovl_huge_canvas.heic", 40000, 40000, (0, 0), large=True, src=c64)
+    # iden chain depth 2 (ok) vs depth 4 (> MAX_DERIVED_DEPTH=3 -> reject)
+    mux_iden_chain(f"{OUT}/iden_depth2.heic", 2, c64)
+    mux_iden_chain(f"{OUT}/iden_depth4.heic", 4, c64)
 
     # metadata items (EXIF / XMP)
     shutil.copy(f"{OUT}/single.heic", f"{OUT}/exif.heic")

@@ -15,7 +15,7 @@
 //! 4:4:4 fixture matched libheif at MAE 1.4/65535). The corner layout of the
 //! transform base image is TL=red TR=green BL=blue BR=yellow.
 
-use heic::{DecoderConfig, ImageInfo, PixelLayout};
+use heic::{DecoderConfig, HeicError, ImageInfo, PixelLayout};
 use std::path::{Path, PathBuf};
 
 fn features_dir() -> PathBuf {
@@ -377,5 +377,97 @@ fn lossless_errors_cleanly_until_supported() {
     assert!(
         res.is_err(),
         "lossless now decodes — implement support and update this test to assert pixels"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Overlay edge cases: 32-bit large format, negative offset, version reject,
+// canvas-size limit. (mux'd by scripts/gen_feature_fixtures.py)
+// ---------------------------------------------------------------------------
+#[test]
+fn iovl_large_format_32bit_matches_16bit() {
+    // flags&1 selects 32-bit canvas/offset fields. Same geometry as iovl.heic,
+    // so the output must be byte-identical to the 16-bit fixture.
+    let big = DecoderConfig::new()
+        .decode(&read("iovl_large.heic"), PixelLayout::Rgb8)
+        .unwrap();
+    let small = DecoderConfig::new()
+        .decode(&read("iovl.heic"), PixelLayout::Rgb8)
+        .unwrap();
+    assert_eq!((big.width, big.height), (96, 96));
+    assert_eq!(
+        big.data, small.data,
+        "32-bit overlay output must equal 16-bit overlay output"
+    );
+}
+
+#[test]
+fn iovl_negative_offset_clips_tile() {
+    // Tile at (-16,-16) on a 96x96 canvas: canvas (0..48,0..48) shows tile
+    // pixels (16..64,16..64); beyond x=48/y=48 is fill. This is the spec
+    // src_skip path. (libheif skips negative-offset tiles entirely and fails
+    // Nokia C021 — our compositing is the spec-compliant one; goldens are
+    // spec-derived from the TL=red TR=green BL=blue BR=yellow tile layout.)
+    let d = decode_rgb("iovl_negoff.heic");
+    assert_eq!((d.w, d.h), (96, 96));
+    assert_eq!(classify(d.px(10, 10)), Color::Red); // tile (26,26)
+    assert_eq!(classify(d.px(40, 10)), Color::Green); // tile (56,26)
+    assert_eq!(classify(d.px(10, 40)), Color::Blue); // tile (26,56)
+    assert_eq!(classify(d.px(40, 40)), Color::Yellow); // tile (56,56)
+    assert_eq!(
+        classify(d.px(60, 60)),
+        Color::Black,
+        "past clip boundary = fill"
+    );
+    assert_eq!(classify(d.px(90, 90)), Color::Black);
+}
+
+#[test]
+fn iovl_bad_version_is_unsupported() {
+    let err = DecoderConfig::new()
+        .decode(&read("iovl_badver.heic"), PixelLayout::Rgb8)
+        .unwrap_err();
+    assert!(
+        matches!(err.error(), HeicError::Unsupported(_)),
+        "overlay version!=0 should be Unsupported, got {:?}",
+        err.error()
+    );
+}
+
+#[test]
+fn iovl_oversized_canvas_hits_limit() {
+    // 40000x40000 canvas exceeds the default dimension limit and must be
+    // rejected BEFORE any allocation (decode.rs check_dimensions, line 496).
+    let err = DecoderConfig::new()
+        .decode(&read("iovl_huge_canvas.heic"), PixelLayout::Rgb8)
+        .unwrap_err();
+    assert!(
+        matches!(err.error(), HeicError::LimitExceeded(_)),
+        "oversized overlay canvas should be LimitExceeded, got {:?}",
+        err.error()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Derived-image recursion depth guard (MAX_DERIVED_DEPTH = 3)
+// ---------------------------------------------------------------------------
+#[test]
+fn iden_chain_depth2_decodes() {
+    // positive control: a 2-deep iden chain is within the limit.
+    let d = decode_rgb("iden_depth2.heic");
+    assert_eq!((d.w, d.h), (64, 64));
+}
+
+#[test]
+fn iden_chain_depth4_is_rejected() {
+    // 4 nested iden items exceed MAX_DERIVED_DEPTH and must error, not recurse
+    // unboundedly (stack-safety on adversarial nesting).
+    let err = DecoderConfig::new()
+        .decode(&read("iden_depth4.heic"), PixelLayout::Rgb8)
+        .unwrap_err();
+    assert!(
+        matches!(err.error(), HeicError::InvalidData(_)),
+        "over-deep iden chain should be InvalidData, got {:?}",
+        err.error()
     );
 }
