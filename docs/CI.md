@@ -119,9 +119,18 @@ Intel-specific**:
   **AMD** (Mesa `radeonsi`), or Intel (`iHD`); `vaapi-runtime.yml` already runs
   `examples/backend_decode … vaapi` + the bit-exact-vs-rust gate on a
   `[self-hosted, linux, vaapi]` runner. $0 marginal on owned hardware.
-- Or make VA-API work *inside* WSL via Mesa's D3D12 Gallium VA-API driver
-  (`LIBVA_DRIVER_NAME=d3d12`, which targets `/dev/dxg`) — future setup; not
-  wired yet.
+- VA-API *inside* WSL — **investigated, currently blocked.** The Mesa D3D12
+  Gallium VA driver (`d3d12_drv_video.so`) and the NVIDIA VA driver are both
+  installed, and the WSL GPU libs (`/usr/lib/wsl/lib`: `libd3d12.so`,
+  `libnvcuvid.so`) are present, but both fail `vaInitialize` (`d3d12` →
+  "resource allocation failed"; `nvidia` → "operation failed"). Root cause:
+  there is **no `/dev/dri` render node** in WSL, so libva's DRM display path has
+  nothing to open, and stock Mesa **23.2.1** (newest for Ubuntu 22.04) lacks the
+  dxcore/Win32 display path that bridges VA-API to `/dev/dxg`. To unblock would
+  need Mesa **24.x** (e.g. the `kisak/kisak-mesa` PPA, or a source build) with
+  the d3d12 video + Win32-display support — a system-wide change with uncertain
+  HEVC-decode payoff on NVIDIA-in-WSL. Not pursued; a real Linux+GPU box (above)
+  is the reliable path.
 
 **Org budget backstop (free, do regardless):** set an Actions product-level
 budget with "Stop usage when budget limit is reached" (e.g. $20/mo) so a
