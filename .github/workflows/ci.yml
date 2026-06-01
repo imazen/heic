@@ -439,6 +439,12 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
         run: cargo ndk -t arm64-v8a --platform 34 build -p heic-backend-mediacodec
 
+      # Lint the MediaCodec backend with the same -D warnings gate the other
+      # native backends get. clippy doesn't need the NDK linker (it only checks),
+      # so a plain --target build is enough and runs free on ubuntu.
+      - name: Clippy heic-backend-mediacodec (aarch64-linux-android)
+        run: cargo clippy -p heic-backend-mediacodec --target aarch64-linux-android -- -D warnings
+
       # Build the backend_decode EXAMPLE (an executable) so the link actually
       # runs — `cargo build -p <lib>` does not link, which is exactly why the
       # AMEDIAFORMAT_KEY_CSD_0 undefined-symbol bug (libmediandk API 28+) went
