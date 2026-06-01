@@ -2302,9 +2302,7 @@ impl<'a> SliceContext<'a> {
                 0u8
             };
             let residual = &mut self.residual_buf;
-            for i in 0..num_coeffs {
-                residual[i] = coeffs[i];
-            }
+            residual[..num_coeffs].copy_from_slice(&coeffs[..num_coeffs]);
             match rdpcm {
                 1 => {
                     for py in 0..size {

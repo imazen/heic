@@ -545,7 +545,7 @@ fn skip_hrd_parameters(
             low_delay_hrd = reader.read_bit()? != 0;
         }
         let cpb_cnt = if !low_delay_hrd {
-            (reader.read_ue()? + 1) as u32 // cpb_cnt_minus1 + 1
+            reader.read_ue()? + 1 // cpb_cnt_minus1 + 1
         } else {
             1
         };
