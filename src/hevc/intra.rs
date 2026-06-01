@@ -505,17 +505,20 @@ fn predict_planar(
         let row_start = (y as usize + py) * stride + x as usize;
 
         if block_fits {
+            // Per-row form: pred[px] = (row_base + (n-1-px)*left + (px+1)*right
+            // + a*top[px]) >> shift. `tops` is a contiguous slice and the trip
+            // count is fixed, so this auto-vectorizes (mul/shift/clamp/pack) on
+            // AVX2 and NEON without a hand-written kernel.
             let row = &mut plane[row_start..row_start + n];
-            for px in 0..n {
+            let tops = &border[center + 1..center + 1 + n];
+            let a = n_i - 1 - py_i;
+            let row_base = (py_i + 1) * bottom + n_i;
+            let shift = log2_size + 1;
+            for (px, (out, &top)) in row.iter_mut().zip(tops).enumerate() {
                 let px_i = px as i32;
-                let top = border[center + 1 + px];
-                let pred = ((n_i - 1 - px_i) * left
-                    + (px_i + 1) * right
-                    + (n_i - 1 - py_i) * top
-                    + (py_i + 1) * bottom
-                    + n_i)
-                    >> (log2_size + 1);
-                row[px] = pred.clamp(0, max_val) as u16;
+                let pred =
+                    (row_base + (n_i - 1 - px_i) * left + (px_i + 1) * right + a * top) >> shift;
+                *out = pred.clamp(0, max_val) as u16;
             }
         } else {
             for px in 0..n {
