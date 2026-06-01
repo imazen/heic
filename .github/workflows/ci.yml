@@ -56,6 +56,7 @@ jobs:
           HEIC_SKIP_WIN_HOST_TESTS: '1'
         run: >-
           cargo test
+          --test cov_features
           --test cov_decode_orchestration --test cov_public_api --test cov_metadata
           --test cov_zencodec --test cov_container --test cov_multicodec
           --features "backend-rust,std,av1,unci,zencodec,parallel,fallible-alloc"
@@ -500,7 +501,7 @@ jobs:
         run: >-
           cargo llvm-cov
           --lib
-          --test corpus_decode --test decode_heic --test parse_testdata
+          --test corpus_decode --test decode_heic --test parse_testdata --test cov_features
           --test cov_decode_orchestration --test cov_public_api --test cov_metadata
           --test cov_zencodec --test cov_container --test cov_multicodec
           --features "backend-rust,std,av1,unci,zencodec,parallel,fallible-alloc"
