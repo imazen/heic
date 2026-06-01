@@ -276,3 +276,83 @@ impl core::error::Error for ProbeError {
         }
     }
 }
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+    use alloc::boxed::Box;
+    use alloc::string::ToString;
+
+    #[test]
+    fn heic_error_display_and_debug_all_variants() {
+        let sink: Box<dyn core::error::Error + Send + Sync> = "sink boom".into();
+        let variants: alloc::vec::Vec<HeicError> = alloc::vec![
+            HeicError::InvalidContainer("ic"),
+            HeicError::InvalidData("id"),
+            HeicError::Unsupported("u"),
+            HeicError::NoPrimaryImage,
+            HeicError::HevcDecode(HevcError::InvalidBitstream("b")),
+            HeicError::BufferTooSmall {
+                required: 100,
+                actual: 50
+            },
+            HeicError::LimitExceeded("le"),
+            HeicError::OutOfMemory,
+            HeicError::Cancelled(StopReason::Cancelled),
+            HeicError::Sink(sink),
+            HeicError::UnsupportedCodec("uc"),
+            HeicError::NoBackendSelected,
+            HeicError::AllBackendsFailed("abf".to_string()),
+        ];
+        for v in &variants {
+            assert!(!alloc::format!("{v}").is_empty(), "empty Display for {v:?}");
+            assert!(!alloc::format!("{v:?}").is_empty());
+        }
+    }
+
+    #[test]
+    fn hevc_error_display_and_debug_all_variants() {
+        let variants: alloc::vec::Vec<HevcError> = alloc::vec![
+            HevcError::InvalidNalUnit("n"),
+            HevcError::InvalidBitstream("b"),
+            HevcError::MissingParameterSet("SPS"),
+            HevcError::InvalidParameterSet {
+                kind: "SPS",
+                msg: "m".into()
+            },
+            HevcError::CabacError("c"),
+            HevcError::UnsupportedProfile {
+                profile: 4,
+                level: 120
+            },
+            HevcError::Unsupported("u"),
+            HevcError::DecodingError("d"),
+            HevcError::AllocationFailed,
+            HevcError::DimensionOverflow,
+            HevcError::Cancelled(enough::StopReason::Cancelled),
+        ];
+        for v in &variants {
+            assert!(!alloc::format!("{v}").is_empty(), "empty Display for {v:?}");
+            assert!(!alloc::format!("{v:?}").is_empty());
+        }
+    }
+
+    #[test]
+    fn probe_error_display() {
+        for v in [ProbeError::NeedMoreData, ProbeError::InvalidFormat] {
+            assert!(!alloc::format!("{v}").is_empty());
+            assert!(!alloc::format!("{v:?}").is_empty());
+        }
+    }
+
+    #[test]
+    fn from_conversions() {
+        let h: HeicError = HevcError::InvalidBitstream("x").into();
+        assert!(matches!(h, HeicError::HevcDecode(_)));
+        let h: HeicError = StopReason::Cancelled.into();
+        assert!(matches!(h, HeicError::Cancelled(_)));
+        // core::error::Error::source / std error trait object usability
+        let e: HeicError = HeicError::OutOfMemory;
+        let _src = core::error::Error::source(&e);
+    }
+}

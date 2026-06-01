@@ -826,6 +826,70 @@ mod tests {
             .collect()
     }
 
+    /// Directly exercise the AVX2 (`_v3`) kernels via a summoned token and
+    /// assert they match the scalar reference bit-for-bit. The public `idctN`
+    /// dispatch resolves to the scalar path under llvm-cov instrumentation, so
+    /// this is the only way to both COVER the `_v3` SIMD code in
+    /// transform_simd.rs and verify the SIMD==scalar invariant on those kernels.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn simd_v3_kernels_match_scalar() {
+        use crate::hevc::transform_simd::{
+            dequantize_scalar, dequantize_v3, idct8_v3, idct16_v3, idct32_v3, idst4_v3,
+        };
+        use archmage::{ScalarToken, SimdToken, X64V3Token};
+        let Some(v3) = X64V3Token::summon() else {
+            eprintln!("CPU lacks AVX2 (X64V3): skipping _v3 kernel parity");
+            return;
+        };
+        let st = ScalarToken::summon().expect("scalar token always available");
+
+        for bd in [8u8, 10, 12] {
+            // idst4
+            let c = pseudo_coeffs(16, 90 + bd as u32);
+            let a16: &[i16; 16] = c[..16].try_into().unwrap();
+            let (mut s, mut r) = ([0i16; 16], [0i16; 16]);
+            idst4_v3(v3, a16, &mut s, bd);
+            idst4_inner(a16, &mut r, bd);
+            assert_eq!(s, r, "idst4_v3≠scalar bd={bd}");
+
+            // idct8
+            let c = pseudo_coeffs(64, 91 + bd as u32);
+            let a64: &[i16; 64] = c[..64].try_into().unwrap();
+            let (mut s, mut r) = ([0i16; 64], [0i16; 64]);
+            idct8_v3(v3, a64, &mut s, bd);
+            idct8_inner(a64, &mut r, bd);
+            assert_eq!(s, r, "idct8_v3≠scalar bd={bd}");
+
+            // idct16
+            let c = pseudo_coeffs(256, 92 + bd as u32);
+            let a256: &[i16; 256] = c[..256].try_into().unwrap();
+            let (mut s, mut r) = ([0i16; 256], [0i16; 256]);
+            idct16_v3(v3, a256, &mut s, bd);
+            idct16_inner(a256, &mut r, bd);
+            assert_eq!(s, r, "idct16_v3≠scalar bd={bd}");
+
+            // idct32
+            let c = pseudo_coeffs(1024, 93 + bd as u32);
+            let a1024: &[i16; 1024] = c[..1024].try_into().unwrap();
+            let (mut s, mut r) = ([0i16; 1024], [0i16; 1024]);
+            idct32_v3(v3, a1024, &mut s, bd);
+            idct32_inner(a1024, &mut r, bd);
+            assert_eq!(s, r, "idct32_v3≠scalar bd={bd}");
+        }
+
+        // dequantize: v3 vs scalar over a range of (combined_scale, shift).
+        for &(cs, shift) in &[(40i32, 0i32), (18432, 4), (65535, 6), (1024, 2)] {
+            let add = if shift > 0 { 1 << (shift - 1) } else { 0 };
+            let base = pseudo_coeffs(256, cs as u32 ^ (shift as u32) << 8);
+            let mut a = base.clone();
+            let mut b = base.clone();
+            dequantize_v3(v3, &mut a, cs, shift, add);
+            dequantize_scalar(st, &mut b, cs, shift, add);
+            assert_eq!(a, b, "dequantize_v3≠scalar cs={cs} shift={shift}");
+        }
+    }
+
     /// SIMD-vs-scalar parity for the inverse DCTs. The public `idctN`
     /// dispatches to the AVX2 (`_v3`) kernel on this host; `idctN_inner` is the
     /// scalar reference. They MUST produce identical output (the "SIMD must
