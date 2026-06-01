@@ -18,6 +18,12 @@ A 43-agent adversarially-verified review of all crates + native backends. Fixes 
 
 ### Fixed — 2026-05-31 review (correctness)
 - **10/12-bit limited-range YCbCr→RGB was ~4× too dark** — the `9576` Y-scale constant (8-bit fixed-point) was not rescaled as the shift grew with bit depth, clipping 10-bit limited-range white at ~25% brightness (every iPhone HDR / BT.2020 image through the 16-bit path). Now scales with bit depth; regression test covers 8/10/12-bit white→`0xFFFF` / black→0 (5be0203).
+- **Monochrome (4:0:0) HEVC decoded ~95% garbage** — the 4:0:0 path read `cbf_cb`/`cbf_cr` and `intra_chroma_pred_mode` syntax that a monochrome bitstream doesn't contain (H.265 gates them on `ChromaArrayType != 0`); each phantom CABAC bin desynced the decode after a few CTBs. The Apple HDR gain map (a 768×432 monochrome image) came out ~95% UNINIT/white; now decodes 0/331776 UNINIT. 4:2:0/4:2:2/4:4:4 unaffected (87c79fd8).
+- **MediaCodec rejected legitimate decoder-cropped output** — the geometry check demanded the SPS coded height even when MediaCodec emitted the (shorter) cropped buffer, erroring on every HEIC with coded≠visible height (e.g. example.heic 856→854). Caught by the new on-device Android-emulator runtime gate (c7b298c).
+- **Flat dequantize overflowed at high QP + high bit depth** — `scale * (1 << qp_per)` and `coef * combined_scale` overflowed i32 for 10/12/16-bit RExt content (panic under overflow-checks / fuzz, wrapped garbage in release). i64 fallback for the rare overflow-prone case; the perf-tuned i32 SIMD path is unchanged for 8-bit + normal-QP 10-bit (30304659).
+
+### Added — decode-completeness guard
+- The pure-Rust HEVC decoder now **errors on an incomplete decode** instead of returning sentinel pixels: if any coded luma sample remains at the UNINIT marker after slice decode (a truncated/corrupt bitstream the CABAC EOF-tolerance would otherwise let "succeed"), it returns `InvalidBitstream` rather than leaking `u16::MAX` (white) into the output. Verified against the bundled corpus (87c79fd8).
 
 ### Added — native HEVC backends + workspace
 - **`heic-core` workspace member**: shared types (`HevcBackend` trait, `BackendError`, `HvccParams`, `DecodedFrame`) and platform-neutral helpers (NAL conversion, YCbCr→RGB SIMD) used by every backend. `no_std + alloc`, `#![forbid(unsafe_code)]`, minimal dep surface. Lets backend crates depend on the shared contract without pulling in the parent crate. Commits c6ee4ab, edf1c0c.
