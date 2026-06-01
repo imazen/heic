@@ -93,6 +93,19 @@ fn decode_apple_hdr_gain_map() {
     let non_max = gain_map.data.iter().any(|&v| v != 255);
     assert!(non_zero, "gain map should not be all zeros");
     assert!(non_max, "gain map should not be all 255");
+
+    // Regression for the monochrome (4:0:0) CABAC desync: the gain map used to
+    // decode ~95% UNINIT, which downconverts to 255 — and the weak `non_max`
+    // check above still passed on the 5% real region. A correctly-decoded gain
+    // map (smooth, mostly low gain) is nowhere near saturated, so assert the
+    // 255 fraction is small. This would have failed at ~95% garbage.
+    let max_count = gain_map.data.iter().filter(|&&v| v == 255).count();
+    let max_frac = max_count as f64 / gain_map.data.len() as f64;
+    assert!(
+        max_frac < 0.5,
+        "gain map is {:.1}% saturated (255) — likely an incomplete/desynced decode",
+        max_frac * 100.0
+    );
 }
 
 #[test]

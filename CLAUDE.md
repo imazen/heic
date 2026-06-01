@@ -336,9 +336,8 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 - SAO filter (sao.rs) — H.265 8.7.3, band offset + edge offset
 - Grid-based HEIC decoding (idat, iref/dimg, tile assembly)
 - Alpha plane decoding from auxiliary images (auxl/auxC)
-- HDR gain map extraction (Apple HDR aux format) — ⚠ container/metadata path
-  works, but the gain-map PIXEL decode is ~95% UNINIT garbage (see Known Bugs);
-  do NOT treat decoded gain-map pixels as correct.
+- HDR gain map extraction (Apple HDR aux format) — incl. the monochrome (4:0:0)
+  pixel decode (fixed 2026-05-31; was ~95% UNINIT, see Known Bugs FIXED note)
 - Identity-derived (iden) and overlay (iovl) image types
 - Image mirror (imir) with ordered transform application (ipma order)
 - VUI color info parsing (video_full_range_flag, matrix_coefficients, color_primaries, transfer_characteristics)
@@ -444,49 +443,26 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 
 ## Known Bugs
 
-### Apple HDR gain map decodes ~95% UNINIT garbage (found 2026-05-31)
+### FIXED 2026-05-31: Apple HDR gain map decoded ~95% UNINIT (monochrome CABAC desync)
 
-**Severity: HIGH (wrong-pixels) — the "HDR gain map" feature is effectively
-broken; the `## Completed` claim for it is FALSE.** `decode_gain_map` on
-`testdata/apple-hdr/hdr-sample.heic` returns a 768×432 monochrome
-(`chroma_format_idc=0`, crop=(0,12,0,6)) frame in which **315392 of 331776 luma
-samples (~95%) are left at the UNINIT sentinel (u16::MAX)** — only ~128×128
-actually decodes (≈4 of ~84 CTBs at CTB=64). The undecoded region downconverts
-to 255, so the gain map is ~95% max-boost white garbage.
-
-Why the existing tests miss it: `decode_apple_hdr_gain_map` (tests/parse_testdata.rs)
-only asserts dims>0, `len==w*h`, "not all 0", and "not all 255" — the 5%
-real region satisfies "not all 255", so 95% garbage passes. (Classic weak-test /
-false-positive per this file's "Writing Good Code §1".)
-
-Found by a decode-completeness check (error if any luma sample stays UNINIT)
-added during the 2026-05-31 review's deferred-UNINIT work; the check is correct
-but was REVERTED because it (correctly) makes `decode_gain_map` error and breaks
-those tests — shipping the hard error is blocked on fixing THIS bug.
-
-ROOT CAUSE (narrowed 2026-05-31): it is a DECODE DESYNC, NOT truncation and NOT
-a grid. Probed via a temp diagnostic in `decode_gainmap_image_item`: the
-gain-map item is `id=10 type=Hvc1` (single HEVC image), `hevc_config=true`, with
-**image_data_len=25312 bytes** — a reasonable FULL size for a 768×432 monochrome
-gain map, so the slice data is all present. `decode_slice` returns Ok (no
-error) but only ~16384 luma samples get written, so the slice's CABAC
-terminates / desyncs early (mis-reads end_of_slice_segment_flag, or the
-monochrome 4:0:0 CU/residual path desyncs after a few CTBs). Candidates now:
-(a) monochrome (chroma_format_idc=0) CU decode mishandles the absent chroma →
-CABAC desync; (b) multi-slice gain map where subsequent slice headers fail.
-NEXT (needs a focused session): trace CABAC bin-by-bin vs dec265 on item 10's
-bitstream (use the existing CABAC tracker in src/hevc/debug.rs) and find the
-first divergent bin; check the 4:0:0 paths in ctu.rs (chroma CBF / residual
-skip) and slice.rs (end_of_slice handling). This is the first HEIC test asset
-with a monochrome HEVC stream, so the 4:0:0 path is likely under-exercised.
-
-WHEN FIXED: re-add the decode-completeness error in
-`hevc::decode_nal_units` (src/hevc/mod.rs, before `Ok(frame)`) —
-`if frame.y_plane.contains(&picture::UNINIT_SAMPLE) { return Err(InvalidBitstream(...)) }`
-— and strengthen the gain-map test to assert a low UNINIT/255 fraction. The
-corpus gate (`tests/corpus_decode.rs`) confirmed NO primary-image corpus file
-leaves UNINIT, so the completeness error is safe for the primary path once the
-gain map is fixed.
+The Apple HDR gain map (`apple-hdr/hdr-sample.heic`, a 768×432 **monochrome /
+4:0:0** HEVC image) decoded ~95% UNINIT garbage (downconverting to 255) because
+the 4:0:0 path read chroma syntax that isn't in the bitstream — each phantom
+CABAC bin desynced the decode after a few CTBs. H.265 gates those syntax
+elements on `ChromaArrayType != 0`; the decoder didn't. Fixed two sites in
+`src/hevc/ctu.rs`:
+- `cbf_cb`/`cbf_cr` (transform_tree, H.265 7.3.8.8): short-circuit to
+  `(false,false)` when `ChromaArrayType == 0`.
+- `intra_chroma_pred_mode` (`decode_intra_chroma_mode`, H.265 7.3.8.5): return
+  the luma mode without reading when `ChromaArrayType == 0`.
+Result: the gain map now decodes 0/331776 UNINIT. This unblocked the deferred
+decode-completeness guard (re-added in `decode_nal_units`: error if any luma
+sample stays UNINIT — verified safe against the full corpus). A stronger
+`decode_apple_hdr_gain_map` test now asserts the 255-saturation fraction < 50%.
+This was the first HEIC test asset with a monochrome stream, so the 4:0:0 path
+had been unexercised. KNOWN GAP: H.265's `ChromaArrayType == 3` carve-out (4:4:4
+reads cbf at the smallest TU) is still not implemented — 4:4:4 decodes at
+61.9dB so it's masked/rare; fix if a 4:4:4 regression appears.
 
 ### Deep safety+code review — 2026-05-31 (43-agent workflow, adversarially verified)
 

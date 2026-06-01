@@ -188,15 +188,20 @@ fn decode_nal_units(nal_units: &[bitstream::NalUnit<'_>]) -> Result<DecodedFrame
     // which would otherwise leak into the output clamped to white). The scan
     // short-circuits on the first sentinel; for a complete frame it is a single
     // linear pass, negligible vs decode cost.
-    // NOTE: a decode-completeness check here (error/clamp if any luma sample
-    // remains at the UNINIT sentinel) is the correct long-term guard against a
-    // truncated bitstream "succeeding" with undecoded CTBs — but it is BLOCKED
-    // on the gain-map decode bug recorded in CLAUDE.md (the Apple HDR gain map
-    // currently decodes only ~128x128 of 768x432, i.e. ~95% UNINIT, so a hard
-    // error would correctly reject it and break decode_gain_map). The raw
-    // u16::MAX leak into RGB output is already neutralized by the input clamp in
-    // heic-core's ycbcr_to_rgb_native. Re-add the completeness error here once
-    // the gain-map decode is fixed.
+    // Decode-completeness guard: a complete decode writes every coded luma
+    // sample. If any remain at the UNINIT sentinel, the bitstream was
+    // truncated/corrupt and the decoder ran out of data mid-frame (the CABAC
+    // EOF tolerance lets that "succeed" with undecoded CTBs) — fail loudly
+    // rather than return sentinel pixels (u16::MAX, clamped to white in RGB).
+    // Verified safe: the bundled corpus (tests/corpus_decode.rs) and the
+    // now-fixed monochrome gain map all decode with zero UNINIT. The scan
+    // short-circuits on the first sentinel.
+    if frame.y_plane.contains(&picture::UNINIT_SAMPLE) {
+        return Err(HevcError::InvalidBitstream(
+            "incomplete decode: undecoded luma samples remain (truncated bitstream)",
+        ));
+    }
+
     Ok(frame)
 }
 

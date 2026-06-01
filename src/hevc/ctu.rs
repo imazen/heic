@@ -1860,10 +1860,23 @@ impl<'a> SliceContext<'a> {
             false
         };
 
-        // Step 2: Decode cbf_cb and cbf_cr
-        // For 4:2:0, decode chroma cbf at this level if log2_size > 2
-        // cbf_cb/cbf_cr decoded if log2_size > 2 AND (trafoDepth == 0 OR parent cbf is set)
-        let (cbf_cb, cbf_cr) = if log2_size > 2 {
+        // Step 2: Decode cbf_cb and cbf_cr.
+        // H.265 7.3.8.8 gates these on `log2TrafoSize > 2 && ChromaArrayType != 0`
+        // (plus a `ChromaArrayType == 3` carve-out at the smallest size). For
+        // MONOCHROME (ChromaArrayType == 0) there is no chroma, so cbf_cb/cbf_cr
+        // are NOT present in the bitstream — reading them consumes ~2 phantom
+        // CABAC bins per TU and desyncs the entire decode (the Apple HDR gain
+        // map, a 4:0:0 stream, decoded ~95% UNINIT because of this). Infer 0.
+        // ChromaArrayType is 0 when chroma_format_idc == 0 OR
+        // separate_colour_plane_flag == 1.
+        let chroma_array_type = if self.sps.separate_colour_plane_flag {
+            0
+        } else {
+            self.sps.chroma_format_idc
+        };
+        let (cbf_cb, cbf_cr) = if chroma_array_type == 0 {
+            (false, false)
+        } else if log2_size > 2 {
             // Decode cbf_cb if trafo_depth == 0 (always) or parent had cbf_cb
             let cb = if trafo_depth == 0 || cbf_cb_parent {
                 let ctx_idx = context::CBF_CBCR + trafo_depth as usize;
@@ -2484,6 +2497,18 @@ impl<'a> SliceContext<'a> {
     /// - If first bin is 1: read 2 fixed-length bypass bits → modes 0-3
     /// - If candidate mode collides with luma mode → Angular34
     fn decode_intra_chroma_mode(&mut self, luma_mode: IntraPredMode) -> Result<IntraPredMode> {
+        // Monochrome (ChromaArrayType == 0): intra_chroma_pred_mode is NOT in
+        // the bitstream (H.265 7.3.8.5 gates it on ChromaArrayType != 0).
+        // Reading it consumes a phantom CABAC bin per CU and desyncs the decode.
+        // Chroma is unused for 4:0:0, so return the luma mode without reading.
+        let chroma_array_type = if self.sps.separate_colour_plane_flag {
+            0
+        } else {
+            self.sps.chroma_format_idc
+        };
+        if chroma_array_type == 0 {
+            return Ok(luma_mode);
+        }
         let ctx_idx = context::INTRA_CHROMA_PRED_MODE;
         let first_bin = self.cabac.decode_bin(&mut self.ctx[ctx_idx])?;
         if first_bin == 0 {
