@@ -17,6 +17,17 @@ A 43-agent adversarially-verified review of all crates + native backends. Fixes 
 - **Native FFI memory-safety**: VA-API `VAPictureParameterBufferHEVC` field order corrected to the libva ABI (`slice_parsing_fields` was 4 bytes early → driver read every later field wrong; pinned with compile-time `offset_of` asserts) + `unpack_planes` geometry validation against the mapped `VAImage` (OOB read) (274db91). D3D11VA bitstream-buffer bound check made width-safe (`as u32` truncation → >4 GiB OOB GPU write) (c840a02). MediaFoundation linear-unpack bounds check + IMFSample release-on-retry leak; native backends now reject non-4:2:0 sources (fall through to pure-Rust) instead of mislabeling a 4:2:0 buffer; VideoToolbox crop + plane null-check; MediaCodec NV12/NV21/planar disambiguation + crop bounds; D3D11VA per-slice slice-control + 0xFF ref-pic sentinel (19a998c).
 - **Fuzz-found panics on crafted slice headers / SPS** (nightly `fuzz_decode` + `fuzz_decode_limits`): entry-point byte-offset accumulation now saturates (`ctu.rs` — large `entry_point_offsets` overflowed the `u32` cumulative position); the slice-header `offset_minus1 + 1` saturates (`slice.rs` — `offset_len == 32` could read `u32::MAX`); and the SAO band/edge appliers clamp their region to the actual plane buffer (`sao.rs` — a malformed SPS could make `x_end`/`y_end`/`stride` exceed the plane, OOB-indexing `plane[y*stride+x]`). All three are no-ops for valid images (corpus + feature tests + `example.heic` unchanged) and pinned by regression seeds under `fuzz/regression/`.
 
+### Added — lossless 4:4:4 decode (2026-06-01)
+- **Lossless HEVC (`cu_transquant_bypass`) now decodes** — 10-bit 4:4:4 intra-NxN,
+  `matrix_coefficients=0` (GBR), bit-exact vs libheif. Five SE-trace-guided fixes:
+  the 4:4:4 `cbf` carve-out at the 4×4 leaf, 4:4:4 NxN per-PB chroma modes, parsing
+  the intra transform tree under bypass, the per-quadrant chroma **scan order**
+  (Angular 10/26 → vertical/horizontal, the final CABAC desync), and direct
+  bypass reconstruction (residual = coeff, + implicit RDPCM gated on the SPS flag).
+  Supported by full VUI + `hrd_parameters` + `sps_range_extension` parsing and
+  `matrix_coefficients=0` identity color (R=Cr, G=Y, B=Cb). No regression to the
+  existing corpus / 4:4:4 (`nokia_444` MAE 1.4) decode.
+
 ### Added — per-feature test coverage + CI (2026-05-31)
 - **`testdata/features/` — 25 small (<20 KB) per-feature HEIF fixtures** + `tests/cov_features.rs` (24 pixel-verified tests). Covers the `src/decode.rs` orchestration paths the synthetic/uncompressed corpora never reached: derived `grid` (2×2 + Nokia 3×2) / `iden` / `iovl`, `irot`/`imir`/`clap` transforms, auxiliary alpha, thumbnail, monochrome 4:0:0, 10-bit, 4:4:4 (Nokia MIAF003), nclx BT.709/BT.2020 signalling, EXIF/XMP, plus the overlay `version`-reject / canvas-`Limits` / 32-bit large-format / negative-offset `src_skip` branches and the `MAX_DERIVED_DEPTH` iden-chain rejection. Every transform/iden/iovl/4:4:4 golden was cross-checked pixel-for-pixel against libheif `heif-dec` 1.21.2. Reproducible via `scripts/gen_feature_fixtures.py`. This lifts `decode.rs` region coverage from 34.9 % to 51.3 %.
 - **CI gating**: the 24 feature tests run on every OS (behavior step) and feed the coverage job; the recursive corpus gate also walks `testdata/features/` (all 6 OSes + i686 + overflow-checks). `heic-backend-mediacodec` is now linted (`clippy -D warnings`, `--target aarch64-linux-android`) — previously the only compile-only backend.
