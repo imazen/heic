@@ -757,7 +757,11 @@ impl<'a> SliceContext<'a> {
         if (tiles || wpp) && !self.header.entry_point_offsets.is_empty() {
             let mut cumulative = 0u32;
             for &offset in &self.header.entry_point_offsets {
-                cumulative += offset;
+                // Untrusted slice-header deltas: a malformed file can sum past
+                // u32::MAX. Saturate — `cabac.seek_to` clamps to data.len(), so
+                // an over-large position yields a clean incomplete-decode error
+                // (caught by the UNINIT guard) rather than an overflow panic.
+                cumulative = cumulative.saturating_add(offset);
                 entry_byte_offsets.push(cumulative);
             }
         }
