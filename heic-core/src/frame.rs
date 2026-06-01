@@ -438,6 +438,23 @@ impl DecodedFrame {
                 self.matrix_coeffs,
                 &mut rgb,
             );
+        } else if self.chroma_format == 3 {
+            // SIMD-accelerated 4:4:4 path (full-resolution chroma, no upsampling).
+            color_convert::convert_444_to_rgb(
+                &self.y_plane,
+                &self.cb_plane,
+                &self.cr_plane,
+                w,
+                self.c_stride(),
+                y_start,
+                y_end,
+                x_start,
+                x_end,
+                shift as u32,
+                self.full_range,
+                self.matrix_coeffs,
+                &mut rgb,
+            );
         } else {
             for y in y_start..y_end {
                 for x in x_start..x_end {

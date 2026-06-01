@@ -406,6 +406,266 @@ pub(crate) fn scalar_pixel(
     *out_idx += 3;
 }
 
+/// Scalar single-pixel 4:4:4 conversion (full-resolution chroma: `cx == x`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn scalar_pixel_444(
+    y_plane: &[u16],
+    cb_plane: &[u16],
+    cr_plane: &[u16],
+    y_row: usize,
+    c_row: usize,
+    x: usize,
+    shift: u32,
+    y_bias: i32,
+    y_scale: i32,
+    cr_r: i32,
+    cb_g: i32,
+    cr_g: i32,
+    cb_b: i32,
+    rnd: i32,
+    shr: i32,
+    rgb: &mut [u8],
+    out_idx: &mut usize,
+) {
+    let y_val = (y_plane[y_row + x] >> shift) as i32;
+    let cb = ((cb_plane[c_row + x] >> shift) as i32) - 128;
+    let cr = ((cr_plane[c_row + x] >> shift) as i32) - 128;
+    let yv = (y_val - y_bias) * y_scale;
+    let r = (yv + cr_r * cr + rnd) >> shr;
+    let g = (yv + cb_g * cb + cr_g * cr + rnd) >> shr;
+    let b = (yv + cb_b * cb + rnd) >> shr;
+    rgb[*out_idx] = r.clamp(0, 255) as u8;
+    rgb[*out_idx + 1] = g.clamp(0, 255) as u8;
+    rgb[*out_idx + 2] = b.clamp(0, 255) as u8;
+    *out_idx += 3;
+}
+
+/// YCbCr 4:4:4 → RGB (full-resolution chroma, no upsampling). SIMD-dispatched.
+/// Same math as the 4:2:0 path; the only difference is that Cb/Cr are loaded at
+/// full resolution (one per luma sample) instead of subsampled + duplicated.
+#[allow(clippy::too_many_arguments)]
+pub fn convert_444_to_rgb(
+    y_plane: &[u16],
+    cb_plane: &[u16],
+    cr_plane: &[u16],
+    y_stride: usize,
+    c_stride: usize,
+    y_start: u32,
+    y_end: u32,
+    x_start: u32,
+    x_end: u32,
+    shift: u32,
+    full_range: bool,
+    matrix_coeffs: u8,
+    rgb: &mut [u8],
+) {
+    incant!(
+        convert_444_to_rgb(
+            y_plane,
+            cb_plane,
+            cr_plane,
+            y_stride,
+            c_stride,
+            y_start,
+            y_end,
+            x_start,
+            x_end,
+            shift,
+            full_range,
+            matrix_coeffs,
+            rgb
+        ),
+        [v3, scalar]
+    )
+}
+
+/// Scalar 4:4:4 → RGB (tight loop, hoisted coefficients).
+#[allow(clippy::too_many_arguments)]
+fn convert_444_to_rgb_scalar(
+    _token: ScalarToken,
+    y_plane: &[u16],
+    cb_plane: &[u16],
+    cr_plane: &[u16],
+    y_stride: usize,
+    c_stride: usize,
+    y_start: u32,
+    y_end: u32,
+    x_start: u32,
+    x_end: u32,
+    shift: u32,
+    full_range: bool,
+    matrix_coeffs: u8,
+    rgb: &mut [u8],
+) {
+    let (cr_r, cb_g, cr_g, cb_b, y_bias, y_scale, rnd, shr) =
+        get_coefficients(full_range, matrix_coeffs);
+    let mut out_idx = 0;
+    for y in y_start..y_end {
+        let y_row = y as usize * y_stride;
+        let c_row = y as usize * c_stride;
+        for x in x_start as usize..x_end as usize {
+            scalar_pixel_444(
+                y_plane,
+                cb_plane,
+                cr_plane,
+                y_row,
+                c_row,
+                x,
+                shift,
+                y_bias,
+                y_scale,
+                cr_r,
+                cb_g,
+                cr_g,
+                cb_b,
+                rnd,
+                shr,
+                rgb,
+                &mut out_idx,
+            );
+        }
+    }
+}
+
+/// AVX2 4:4:4 → RGB — 8 pixels per iteration, full-res chroma loaded directly.
+#[arcane]
+#[allow(clippy::too_many_arguments)]
+fn convert_444_to_rgb_v3(
+    _token: X64V3Token,
+    y_plane: &[u16],
+    cb_plane: &[u16],
+    cr_plane: &[u16],
+    y_stride: usize,
+    c_stride: usize,
+    y_start: u32,
+    y_end: u32,
+    x_start: u32,
+    x_end: u32,
+    shift: u32,
+    full_range: bool,
+    matrix_coeffs: u8,
+    rgb: &mut [u8],
+) {
+    let (cr_r, cb_g, cr_g, cb_b, y_bias, y_scale, rnd, shr) =
+        get_coefficients(full_range, matrix_coeffs);
+
+    let cr_r_v = _mm256_set1_epi32(cr_r);
+    let cb_g_v = _mm256_set1_epi32(cb_g);
+    let cr_g_v = _mm256_set1_epi32(cr_g);
+    let cb_b_v = _mm256_set1_epi32(cb_b);
+    let y_bias_v = _mm256_set1_epi32(y_bias);
+    let y_scale_v = _mm256_set1_epi32(y_scale);
+    let rnd_v = _mm256_set1_epi32(rnd);
+    let bias128_v = _mm256_set1_epi32(128);
+    let zero = _mm256_setzero_si256();
+    let max255 = _mm256_set1_epi32(255);
+    let shr_v = _mm_cvtsi32_si128(shr);
+    let shift_v = _mm_cvtsi32_si128(shift as i32);
+    let needs_shift = shift > 0;
+
+    let shuffle = _mm256_setr_epi8(
+        0, 4, 8, 1, 5, 9, 2, 6, 10, 3, 7, 11, -1, -1, -1, -1, 0, 4, 8, 1, 5, 9, 2, 6, 10, 3, 7, 11,
+        -1, -1, -1, -1,
+    );
+
+    let row_pixels = x_end.saturating_sub(x_start) as usize;
+    let simd_count = (row_pixels / 8) * 8;
+    let x_simd_end = x_start + simd_count as u32;
+
+    let mut out_idx = 0;
+    for y in y_start..y_end {
+        let y_row = y as usize * y_stride;
+        let c_row = y as usize * c_stride;
+
+        let mut x = x_start as usize;
+        let x_end_simd = x_simd_end as usize;
+        while x < x_end_simd {
+            let y_arr: &[u16; 8] = (&y_plane[y_row + x..y_row + x + 8]).try_into().unwrap();
+            let mut y_i32 = _mm256_cvtepu16_epi32(_mm_loadu_si128(y_arr));
+
+            // 4:4:4: full-resolution chroma — load 8 directly, no duplication.
+            let cb_arr: &[u16; 8] = (&cb_plane[c_row + x..c_row + x + 8]).try_into().unwrap();
+            let cr_arr: &[u16; 8] = (&cr_plane[c_row + x..c_row + x + 8]).try_into().unwrap();
+            let mut cb_i32 = _mm256_cvtepu16_epi32(_mm_loadu_si128(cb_arr));
+            let mut cr_i32 = _mm256_cvtepu16_epi32(_mm_loadu_si128(cr_arr));
+
+            if needs_shift {
+                y_i32 = _mm256_srl_epi32(y_i32, shift_v);
+                cb_i32 = _mm256_srl_epi32(cb_i32, shift_v);
+                cr_i32 = _mm256_srl_epi32(cr_i32, shift_v);
+            }
+
+            let yv = _mm256_mullo_epi32(_mm256_sub_epi32(y_i32, y_bias_v), y_scale_v);
+            let cb_adj = _mm256_sub_epi32(cb_i32, bias128_v);
+            let cr_adj = _mm256_sub_epi32(cr_i32, bias128_v);
+
+            let r = _mm256_sra_epi32(
+                _mm256_add_epi32(
+                    _mm256_add_epi32(yv, _mm256_mullo_epi32(cr_r_v, cr_adj)),
+                    rnd_v,
+                ),
+                shr_v,
+            );
+            let g = _mm256_sra_epi32(
+                _mm256_add_epi32(
+                    _mm256_add_epi32(
+                        _mm256_add_epi32(yv, _mm256_mullo_epi32(cb_g_v, cb_adj)),
+                        _mm256_mullo_epi32(cr_g_v, cr_adj),
+                    ),
+                    rnd_v,
+                ),
+                shr_v,
+            );
+            let b = _mm256_sra_epi32(
+                _mm256_add_epi32(
+                    _mm256_add_epi32(yv, _mm256_mullo_epi32(cb_b_v, cb_adj)),
+                    rnd_v,
+                ),
+                shr_v,
+            );
+
+            let r = _mm256_min_epi32(_mm256_max_epi32(r, zero), max255);
+            let g = _mm256_min_epi32(_mm256_max_epi32(g, zero), max255);
+            let b = _mm256_min_epi32(_mm256_max_epi32(b, zero), max255);
+
+            let rg = _mm256_packs_epi32(r, g);
+            let bz = _mm256_packs_epi32(b, zero);
+            let packed = _mm256_packus_epi16(rg, bz);
+            let interleaved = _mm256_shuffle_epi8(packed, shuffle);
+
+            let mut buf = [0u8; 32];
+            _mm256_storeu_si256(&mut buf, interleaved);
+            rgb[out_idx..out_idx + 12].copy_from_slice(&buf[..12]);
+            rgb[out_idx + 12..out_idx + 24].copy_from_slice(&buf[16..28]);
+            out_idx += 24;
+
+            x += 8;
+        }
+
+        for x in x_simd_end..x_end {
+            scalar_pixel_444(
+                y_plane,
+                cb_plane,
+                cr_plane,
+                y_row,
+                c_row,
+                x as usize,
+                shift,
+                y_bias,
+                y_scale,
+                cr_r,
+                cb_g,
+                cr_g,
+                cb_b,
+                rnd,
+                shr,
+                rgb,
+                &mut out_idx,
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,6 +707,50 @@ mod tests {
         convert_420_to_rgb(&y, &cb, &cr, 2, 1, 0, 2, 0, 2, 0, false, 1, &mut rgb);
         for px in rgb.chunks_exact(3) {
             assert_eq!(px, [255, 255, 255]);
+        }
+    }
+
+    /// 4:4:4 SIMD↔scalar parity: the dispatched `convert_444_to_rgb` (AVX2 on
+    /// x86, scalar elsewhere) must be bit-exact with an independent scalar
+    /// reference over a width that exercises both the SIMD body (16-px stride)
+    /// and the scalar tail. Covers black, white, and a full Y/Cb/Cr ramp.
+    #[test]
+    fn convert_444_matches_scalar_reference() {
+        let (w, h) = (20usize, 3usize); // 20 = one 16-px SIMD block + 4-px tail
+        let mut y = vec![0u16; w * h];
+        let mut cb = vec![0u16; w * h];
+        let mut cr = vec![0u16; w * h];
+        for j in 0..h {
+            for i in 0..w {
+                let p = j * w + i;
+                y[p] = ((i * 13 + j * 7) % 256) as u16;
+                cb[p] = ((i * 5 + j * 11 + 30) % 256) as u16;
+                cr[p] = ((i * 3 + j * 17 + 200) % 256) as u16;
+            }
+        }
+        for &(full_range, matrix) in &[(false, 1u8), (true, 9u8), (false, 5u8)] {
+            let mut got = vec![0u8; w * h * 3];
+            convert_444_to_rgb(
+                &y, &cb, &cr, w, w, 0, h as u32, 0, w as u32, 0, full_range, matrix, &mut got,
+            );
+            // Independent scalar reference.
+            let (cr_r, cb_g, cr_g, cb_b, y_bias, y_scale, rnd, shr) =
+                get_coefficients(full_range, matrix);
+            let mut want = vec![0u8; w * h * 3];
+            let mut o = 0;
+            for p in 0..w * h {
+                let yv = (y[p] as i32 - y_bias) * y_scale;
+                let cbv = cb[p] as i32 - 128;
+                let crv = cr[p] as i32 - 128;
+                want[o] = (((yv + cr_r * crv + rnd) >> shr).clamp(0, 255)) as u8;
+                want[o + 1] = (((yv + cb_g * cbv + cr_g * crv + rnd) >> shr).clamp(0, 255)) as u8;
+                want[o + 2] = (((yv + cb_b * cbv + rnd) >> shr).clamp(0, 255)) as u8;
+                o += 3;
+            }
+            assert_eq!(
+                got, want,
+                "444 SIMD≠scalar for full_range={full_range} matrix={matrix}"
+            );
         }
     }
 
