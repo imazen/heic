@@ -438,7 +438,14 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
   - Tile scan order: boundary detection, CABAC reinit at tile boundaries with entry point offsets
   - Remaining UNINIT vectors: TILES_A/B (complex tile CABAC desync within tiles), DELTAQP_A (PCM + complex content), DBLK_A/B (multi-slice inter desync), SDH_A (cu_qp_delta desync), MVDL1ZERO (scattered inter desync)
   - Deferred: SIMD MC (Phase 7), weighted prediction application
-- 4:4:4 chroma: decodes correctly (61.9dB), but no SIMD color conversion path (uses scalar)
+- 4:4:4 chroma: decodes correctly (61.9dB). Color conversion now has an AVX2
+  path (`convert_444_to_rgb`, 2026-06-01): x86 `to_rgb` 4.46ms→1.69ms (2.64x) on
+  nokia_444. **aarch64 keeps scalar by measurement** (Hetzner Ampere Altra: the
+  core's scalar auto-vectorization at 6.12ms beat both a naive 8px NEON, 12.1ms,
+  and a 16px `vst3q`-interleaved NEON, 7.23ms), so the tier is `[v3, scalar]`.
+  A NEON win likely needs i16-domain math or a stronger ARM core (Apple Silicon,
+  untested here) — re-measure before adding a NEON 444 path. Bit-exact vs scalar
+  on both arches (`convert_444_matches_scalar_reference`).
 - Dependent slice segments: not supported (2 vectors fail)
 
 ## Known Bugs
