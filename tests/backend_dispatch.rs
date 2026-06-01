@@ -346,6 +346,75 @@ fn d3d11va_vs_rust_synthetic_corpus() {
     report.assert_clean("D3D11VA↔Rust full corpus");
 }
 
+/// VA-API on Linux + real GPU: decode example.heic via the VA-API backend
+/// only, verify dimensions match. Gated on `HEIC_VAAPI_HW=1` because real
+/// decode needs a `/dev/dri` render node + a VA-API HEVC-decode driver
+/// (Mesa `radeonsi` on AMD — incl. the Ryzen 7000-series RDNA2 iGPU —, Intel
+/// `iHD`, or `nvidia-vaapi-driver`). Hosted GitHub ubuntu runners have no GPU,
+/// so they skip; `vaapi-runtime.yml` sets `HEIC_VAAPI_HW=1` on a self-hosted
+/// Linux+GPU runner. WSL2 also skips (no `/dev/dri`).
+///
+/// The compile-time FFI ABI gate (the `offset_of!` asserts in
+/// `heic-backend-vaapi/src/va_hevc.rs`) runs on every hosted build of the
+/// crate regardless — this test adds the missing *runtime decode* coverage.
+#[cfg(all(
+    feature = "backend-rust",
+    feature = "backend-vaapi",
+    target_os = "linux"
+))]
+#[test]
+fn vaapi_decodes_example_on_hardware() {
+    if std::env::var_os("HEIC_VAAPI_HW").is_none() {
+        eprintln!(
+            "HEIC_VAAPI_HW not set: skipping VA-API hardware test. \
+             Set it on a Linux host with a VA-API HEVC-decode GPU."
+        );
+        return;
+    }
+    let data = read_example();
+    let output = DecoderConfig::new()
+        .with_backend(Backend::Vaapi)
+        .decode(&data, PixelLayout::Rgba8)
+        .expect("VA-API should decode example.heic when HEIC_VAAPI_HW is set");
+    assert_eq!(output.width, 1280);
+    assert_eq!(output.height, 854);
+    assert_eq!(output.data.len(), 1280 * 854 * 4);
+}
+
+/// VA-API vs Rust corpus diff via zensim-regress on the synthetic sub-corpus.
+/// Same rationale as the D3D11VA gate: synth files exercise the full VA-API
+/// decode path (surface alloc, slice submission, NV12 readback, color
+/// conversion); per-driver chroma upsampling means we gate on perceptual
+/// similarity, not bit-exactness. Gated on `HEIC_VAAPI_HW=1`.
+#[cfg(all(
+    feature = "backend-rust",
+    feature = "backend-vaapi",
+    target_os = "linux"
+))]
+#[test]
+fn vaapi_vs_rust_corpus_diff() {
+    use zensim_regress::testing::RegressionTolerance;
+    if std::env::var_os("HEIC_VAAPI_HW").is_none() {
+        eprintln!("HEIC_VAAPI_HW not set: skipping VA-API corpus diff");
+        return;
+    }
+    let tolerance = RegressionTolerance::off_by_one()
+        .with_max_delta(40)
+        .with_max_pixels_different(100.0)
+        .with_min_similarity(40.0);
+    let report = common::compare_backends_via_zensim(
+        Backend::Rust,
+        Backend::Vaapi,
+        &tolerance,
+        common::CORPUS_DIRS,
+    );
+    eprintln!(
+        "VA-API↔Rust zensim diff: {}/{} matched",
+        report.matched, report.total
+    );
+    report.assert_clean("VA-API↔Rust corpus");
+}
+
 /// "Kitchen sink" extended-corpus exerciser for all native backends.
 ///
 /// Walks `$HEIC_EXTENDED_CORPUS` (a directory containing arbitrary HEIC
