@@ -46,6 +46,20 @@ jobs:
       - name: Corpus decode gate
         run: cargo test --test corpus_decode --features "backend-rust,std,av1,unci"
 
+      # Public-API coverage/behavior integration tests (decode orchestration,
+      # API surface, metadata, zencodec, container robustness, multi-codec).
+      # ~150 meaningful assertions over the bundled corpus + crafted inputs;
+      # runs on every OS. HEIC_SKIP_WIN_HOST_TESTS guards the WSL→Windows bridge
+      # (a no-op off WSL anyway).
+      - name: Behavior/coverage integration tests
+        env:
+          HEIC_SKIP_WIN_HOST_TESTS: '1'
+        run: >-
+          cargo test
+          --test cov_decode_orchestration --test cov_public_api --test cov_metadata
+          --test cov_zencodec --test cov_container --test cov_multicodec
+          --features "backend-rust,std,av1,unci,zencodec,parallel,fallible-alloc"
+
       - name: Check (backend-rust, no_std)
         run: cargo check --no-default-features --features backend-rust
 
@@ -476,7 +490,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Generate coverage
-        run: cargo llvm-cov --lib --features "backend-rust,std" --lcov --output-path lcov.info
+        # Cover the lib unit tests AND the behavior/coverage integration tests
+        # (cov_*, corpus, decode_heic, parse_testdata) so the number reflects the
+        # whole pure-Rust surface, not just --lib. The conformance.rs target is
+        # excluded (it downloads ITU vectors at runtime). HEIC_SKIP_WIN_HOST_TESTS
+        # guards the WSL→Windows bridge test.
+        env:
+          HEIC_SKIP_WIN_HOST_TESTS: '1'
+        run: >-
+          cargo llvm-cov
+          --lib
+          --test corpus_decode --test decode_heic --test parse_testdata
+          --test cov_decode_orchestration --test cov_public_api --test cov_metadata
+          --test cov_zencodec --test cov_container --test cov_multicodec
+          --features "backend-rust,std,av1,unci,zencodec,parallel,fallible-alloc"
+          --lcov --output-path lcov.info
 
       - name: Upload coverage
         uses: codecov/codecov-action@v5
