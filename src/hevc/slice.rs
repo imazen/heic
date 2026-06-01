@@ -608,7 +608,10 @@ impl SliceHeader {
                     }
                     let offset_len = offset_len_minus1 as u8 + 1;
                     for _ in 0..n {
-                        let offset = reader.read_bits(offset_len)? + 1; // offset_minus1 + 1
+                        // offset_minus1 + 1. With offset_len == 32 a malformed
+                        // header can read u32::MAX, so saturate rather than
+                        // overflow-panic; ctu.rs accumulates these saturating too.
+                        let offset = reader.read_bits(offset_len)?.saturating_add(1);
                         entry_point_offsets.push(offset);
                     }
                 }
