@@ -1,16 +1,19 @@
 name: D3D11VA runtime decode
 
-# Runtime gate for heic-backend-d3d11va: runs the DXVA HEVC decode on a real
-# Windows + HEVC-capable GPU. GitHub-hosted Windows runners have NO
+# Hosted-CI runtime gate for heic-backend-d3d11va: runs the DXVA HEVC decode on
+# a real Windows + HEVC-capable GPU. GitHub-hosted Windows runners have NO
 # decode-capable GPU (the WARP software device cannot video-decode), so this
 # targets a SELF-HOSTED Windows+GPU runner labeled [self-hosted, windows,
-# d3d11va].
+# d3d11va] — any decode-capable GPU (NVIDIA / AMD / Intel), not Intel-specific.
 #
-# COST IS BOUNDED BY CONSTRUCTION. A self-hosted runner on owned hardware (e.g.
-# a ~$200-300 Intel-iGPU mini-PC, which does DXVA HEVC decode) has $0 marginal
-# cost per job — there is no cloud account in scope, so no code bug, crash, or
-# leaked credential can produce a runaway bill. See docs/CI.md for the full
-# bounded-cost rationale and the org-level budget backstop.
+# NOTE: for LOCAL development this is usually unnecessary — `just test-win`
+# (scripts/win-test.ps1) already runs the D3D11VA + MediaFoundation tests on
+# your Windows host (e.g. an RTX 5070) from WSL, $0, no extra hardware. This
+# hosted job is only for gating on push without a developer present.
+#
+# COST IS BOUNDED BY CONSTRUCTION: a self-hosted runner on owned hardware has $0
+# marginal cost per job — no cloud account in scope, so no code bug, crash, or
+# leaked credential can produce a runaway bill. See docs/CI.md.
 #
 # PUBLIC-REPO TRUST MODEL. This runs only on push to main / tags, manual
 # dispatch, or a pull request a maintainer has labeled `gpu-ci` (applying a

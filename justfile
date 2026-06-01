@@ -12,6 +12,14 @@ test-all:
 test-parallel:
     cargo test --lib --features parallel
 
+# Run the Windows-native backend tests (MediaFoundation + D3D11VA) on the
+# Windows HOST via powershell.exe. Only does real work under WSL (the
+# backends are target_os=windows and need a real GPU + the HEVC codec, neither
+# of which exists in WSL); a no-op elsewhere. See scripts/win-test.ps1.
+# Set HEIC_SKIP_WIN_HOST_TESTS=1 to skip during fast iteration.
+test-win:
+    cargo test --test backend_dispatch windows_backends_via_host -- --nocapture
+
 # Check all feature permutations
 feature-check:
     cargo check
@@ -27,8 +35,9 @@ clippy:
 fmt:
     cargo fmt
 
-# Local CI sanity check
-ci: fmt clippy feature-check test test-parallel
+# Local CI sanity check. Under WSL, `test-win` also runs the Windows-native
+# backends (MF + D3D11VA) on the Windows host; elsewhere it's a no-op.
+ci: fmt clippy feature-check test test-parallel test-win
 
 # ── Release ──────────────────────────────────────────────────────────────
 #

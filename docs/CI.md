@@ -19,15 +19,15 @@ FFI backend crates. So CI has two jobs:
 | Backend | Compile / clippy | Runtime decode in CI | Where |
 |---|---|---|---|
 | `backend-rust` | all 6 OSes + i686 + wasm32 | ✅ corpus gate on all 6 OSes + i686 (32-bit) | `ci.yml` |
-| MediaFoundation | windows-latest (x64+arm64) | ⚠ `windows-11-arm` job runs, but the decode test **skips** unless the HEVC codec is installed (see note) | `ci.yml` |
+| MediaFoundation | windows-latest (x64+arm64) | 🏠 **Windows host** via `just test-win` (+ `windows-11-arm` CI when the codec is installed) | `scripts/win-test.ps1`, `ci.yml` |
 | VideoToolbox | macOS arm64 + Intel | ✅ `macos-latest` + `macos-15-intel` | `ci.yml` |
 | MediaCodec | aarch64-android (NDK) | ✅ **Android emulator** (x86_64, software HEVC) | `mediacodec-runtime.yml` |
-| VA-API | ubuntu (libva-dev) | ⏳ self-hosted Linux+GPU only | `vaapi-runtime.yml` |
-| D3D11VA | windows (x64+arm64) | ⏳ self-hosted Windows+GPU only | `d3d11va-runtime.yml` |
+| VA-API | ubuntu (libva-dev) | ⏳ real Linux+GPU only (no WSL — no `/dev/dri`) | `vaapi-runtime.yml` |
+| D3D11VA | windows (x64+arm64) | 🏠 **Windows host** via `just test-win` | `scripts/win-test.ps1`, `d3d11va-runtime.yml` |
 
-`✅` = runs on every push. `⏳` = workflow exists but needs a self-hosted GPU
-runner registered (see below) — until then those two run compile-only on hosted
-CI.
+`✅` = runs on every push (hosted CI). `🏠` = runs on the local Windows host
+from WSL via PowerShell (`just test-win`; $0, no extra hardware). `⏳` = needs a
+real Linux+GPU box (any vendor).
 
 ## Tier 1 — hosted, free, already wired (`ci.yml`, `fuzz.yml`)
 
@@ -83,53 +83,56 @@ close it, pick one:
 - **(heavier)** build/install `dec265` in CI and run the existing comparison
   with hard `assert!`s, `dec265` path made configurable.
 
-## Tier 2 — VA-API & D3D11VA need a GPU. Bounded-cost plan.
+## Tier 2 — the GPU backends. Use existing hardware, not a mini-PC.
 
-GitHub-hosted runners can't cover these: no GPU on Linux/Windows hosted images
-(the one GitHub T4 GPU runner needs a Team/Enterprise plan and exercises NVDEC
-via a Firefox-only `nvidia-vaapi-driver` shim, not the real `libva` / DXVA
-paths). The bounded-cost answer is **owned hardware**:
+The native GPU backends need a real GPU; GitHub-hosted runners have none (the
+one GitHub T4 GPU runner needs Team/Enterprise and exercises NVDEC via a
+Firefox-only `nvidia-vaapi-driver` shim, not the real `libva` / DXVA paths).
+An **Intel-iGPU mini-PC is NOT required** — the cleanest path uses hardware you
+already have, split by platform:
 
-> **Recommended: a self-hosted runner on an Intel N100/N150 mini-PC** (~$150–300
-> one-time). Its iGPU does real VA-API HEVC decode on Linux (iHD driver) and
-> real D3D11VA HEVC decode on Windows — one box can cover both by dual-boot.
-> **Marginal cost per job is $0**, so no code bug, crash, or leaked credential
-> can ever produce a runaway bill. Cost is bounded *by construction*, not by a
-> policy that has to fire correctly. (Cloud GPU with budget guardrails is
-> *bounded-after-the-fact* at best and adds real misconfig surface for this
-> low-volume use case — not worth it here.)
+### Windows: D3D11VA + MediaFoundation → the Windows host via PowerShell (no purchase)
 
-### To activate (one-time, user action)
+These backends are `#[cfg(target_os = "windows")]` and need a Windows GPU +
+the HEVC codec. If you develop in **WSL**, `cargo test` builds for Linux and
+can't touch them — so a bridge runs them on the **Windows host** (which has a
+real decode-capable GPU, e.g. an RTX 5070, and the HEVC Video Extensions):
 
-1. **Provision** an Intel-iGPU mini-PC. Linux: install `libva` + the iHD driver
-   (Kaby-Lake-or-newer for 10-bit HEVC), confirm `vainfo` lists HEVC decode and
-   `/dev/dri/renderD128` exists. Windows: install GPU drivers; the iGPU does
-   DXVA HEVC out of the box.
-2. **Register an ephemeral, repo-scoped self-hosted runner** with labels
-   `[self-hosted, linux, vaapi]` and/or `[self-hosted, windows, d3d11va]`.
-   Prefer JIT/ephemeral registration (one job then deregister) so state can't
-   persist between jobs; keep **no secrets** on the box.
-3. **Harden for the public repo**: Settings → Actions → Fork pull request
-   workflows → **"Require approval for all outside collaborators"**. The GPU
-   workflows already gate to push-to-main / `workflow_dispatch` / PRs labeled
-   `gpu-ci` (label = write access), so fork code never runs unapproved.
-4. **Org budget backstop (free, do regardless)**: set an Actions **product-level
-   budget with "Stop usage when budget limit is reached"** (e.g. $20/mo) on the
-   org. Even though self-hosted jobs bill $0, this caps any *accidental* hosted
-   GPU/runner spend (including a leaked-token spree) at a provable maximum,
-   satisfying "a leaked secret can't bill $50k" at the org level.
+- `just test-win` (or, under WSL, `just ci` runs it automatically; or bare
+  `cargo test` triggers the `windows_backends_via_host` bridge test) →
+  `scripts/win-test.ps1` runs `cargo test --test backend_dispatch
+  --features backend-rust,backend-mediafoundation,backend-d3d11va
+  --target x86_64-pc-windows-msvc` natively on Windows, against this same
+  checkout over the `\\wsl.localhost\<distro>\…` UNC path, with build artifacts
+  on a Windows-local target dir. `HEIC_SKIP_WIN_HOST_TESTS=1` skips it.
+- $0, no new hardware, no Intel iGPU. This is the local dev gate. (For *hosted*
+  CI, a self-hosted Windows+GPU runner via `d3d11va-runtime.yml` is still
+  optional; the dev loop no longer needs it.)
 
-Once a runner is up, `vaapi-runtime.yml` and `d3d11va-runtime.yml` start
-gating real decode automatically. Both run `examples/backend_decode` with a
-**single forced backend (no pure-Rust fallback)**, so a native-FFI failure is a
-hard error, plus the bit-exact-vs-rust synthetic-corpus gate.
+### Linux: VA-API → the one path without a local alternative
+
+VA-API does **not** run in WSL (no `/dev/dri`; only `/dev/dxg` — `vainfo`
+fails). So this is the genuine gap. Options, **any GPU vendor — not
+Intel-specific**:
+
+- A real Linux box with a GPU + VA-API driver — **NVIDIA** (`nvidia-vaapi-driver`),
+  **AMD** (Mesa `radeonsi`), or Intel (`iHD`); `vaapi-runtime.yml` already runs
+  `examples/backend_decode … vaapi` + the bit-exact-vs-rust gate on a
+  `[self-hosted, linux, vaapi]` runner. $0 marginal on owned hardware.
+- Or make VA-API work *inside* WSL via Mesa's D3D12 Gallium VA-API driver
+  (`LIBVA_DRIVER_NAME=d3d12`, which targets `/dev/dxg`) — future setup; not
+  wired yet.
+
+**Org budget backstop (free, do regardless):** set an Actions product-level
+budget with "Stop usage when budget limit is reached" (e.g. $20/mo) so a
+leaked token can't run up hosted-runner spend, regardless of the above.
 
 ## Implementation order
 
-1. **VA-API self-hosted first** — highest coverage-per-effort; iHD is the most
-   common real VA-API target and the largest unsafe surface (~115 lines).
-2. **D3D11VA self-hosted second** — same hardware class (can dual-boot the same
-   box); Windows ephemeral isolation is fiddlier.
+1. **Windows backends via the host bridge** — DONE: `just test-win` /
+   `scripts/win-test.ps1` runs MF + D3D11VA on your Windows GPU from WSL today.
+2. **VA-API on a real Linux+GPU box** (any vendor) — the remaining gap; wire
+   `vaapi-runtime.yml` to it, or set up the WSL d3d12 VA-API driver.
 3. **Conformance goldens** — closes the "49/49 is local-only" gap cheaply.
 
 ## The locally-verifiable runtime tool

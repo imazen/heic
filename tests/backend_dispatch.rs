@@ -37,6 +37,79 @@ fn mf_hevc_required() -> bool {
     }
 }
 
+/// Bridge: when developing in **WSL**, `cargo test` builds for Linux and CANNOT
+/// exercise the Windows-native backends — MediaFoundation and D3D11VA are
+/// `#[cfg(target_os = "windows")]` and need a real Windows GPU + the HEVC Video
+/// Extensions, neither of which exists inside WSL (no `/dev/dri`; VA-API is dead
+/// there). So this test detects WSL and runs those backends' tests on the
+/// **Windows host** via `powershell.exe` (the host has the GPU + codec), against
+/// this same checkout over the `\\wsl.localhost\<distro>\...` UNC path. See
+/// `scripts/win-test.ps1`.
+///
+/// It runs ONLY under WSL with a Windows PowerShell on PATH; on a plain Linux
+/// runner (CI) or any non-WSL host it is a clean no-op — the Windows backends
+/// genuinely cannot run there, the same platform-precondition gating the
+/// existing `HEIC_D3D11VA_HW` / `HEIC_RUN_VT_RUNTIME` tests use. Set
+/// `HEIC_SKIP_WIN_HOST_TESTS=1` to skip during fast local iteration.
+#[test]
+fn windows_backends_via_host() {
+    if std::env::var_os("HEIC_SKIP_WIN_HOST_TESTS").is_some() {
+        eprintln!("HEIC_SKIP_WIN_HOST_TESTS set: skipping Windows-host backend tests");
+        return;
+    }
+    let is_wsl = std::fs::read_to_string("/proc/version")
+        .map(|v| v.to_ascii_lowercase().contains("microsoft"))
+        .unwrap_or(false);
+    if !is_wsl {
+        eprintln!(
+            "not WSL: Windows-native backends can't run here; skipping \
+             (they run on Windows CI / the Windows host)"
+        );
+        return;
+    }
+    let Ok(distro) = std::env::var("WSL_DISTRO_NAME") else {
+        eprintln!("WSL_DISTRO_NAME unset: cannot form the \\\\wsl.localhost UNC path; skipping");
+        return;
+    };
+
+    // \\wsl.localhost\<distro>\home\lilith\work\zen\heic
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let unc = format!("\\\\wsl.localhost\\{distro}{}", manifest.replace('/', "\\"));
+    let script = format!("{unc}\\scripts\\win-test.ps1");
+
+    // Prefer classic powershell.exe (as the host bridge); fall back to pwsh.exe.
+    let mut last_err = None;
+    for shell in ["powershell.exe", "pwsh.exe"] {
+        match std::process::Command::new(shell)
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                &script,
+                "-CheckoutUnc",
+                &unc,
+            ])
+            .status()
+        {
+            Ok(status) => {
+                assert!(
+                    status.success(),
+                    "Windows-host backend tests failed (via {shell}); see output above. \
+                     Run them directly with: powershell.exe -File scripts/win-test.ps1 \
+                     -CheckoutUnc '{unc}'"
+                );
+                eprintln!("Windows-host backend tests passed via {shell}");
+                return;
+            }
+            Err(e) => last_err = Some(format!("{shell}: {e}")),
+        }
+    }
+    eprintln!(
+        "no Windows PowerShell found from WSL ({last_err:?}); skipping Windows-host backend tests"
+    );
+}
+
 #[cfg(feature = "backend-rust")]
 #[test]
 fn rust_backend_decodes_example() {
