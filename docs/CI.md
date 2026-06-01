@@ -22,19 +22,39 @@ FFI backend crates. So CI has two jobs:
 | MediaFoundation | windows-latest (x64+arm64) | 🏠 **Windows host** via `just test-win` (+ `windows-11-arm` CI when the codec is installed) | `scripts/win-test.ps1`, `ci.yml` |
 | VideoToolbox | macOS arm64 + Intel | ✅ `macos-latest` + `macos-15-intel` | `ci.yml` |
 | MediaCodec | aarch64-android (NDK) | ✅ **Android emulator** (x86_64, software HEVC) | `mediacodec-runtime.yml` |
-| VA-API | ubuntu (libva-dev) | ⏳ real Linux+GPU only (no WSL — no `/dev/dri`) | `vaapi-runtime.yml` |
+| VA-API | ubuntu (libva-dev) + compile-time `offset_of` ABI gate | 🖥️ real Linux+GPU (`HEIC_VAAPI_HW=1`, any vendor) — works natively, not in WSL | `vaapi-runtime.yml` |
 | D3D11VA | windows (x64+arm64) | 🏠 **Windows host** via `just test-win` | `scripts/win-test.ps1`, `d3d11va-runtime.yml` |
 
 `✅` = runs on every push (hosted CI). `🏠` = runs on the local Windows host
-from WSL via PowerShell (`just test-win`; $0, no extra hardware). `⏳` = needs a
-real Linux+GPU box (any vendor).
+from WSL via PowerShell (`just test-win`; $0, no extra hardware). `🖥️` = runs
+on a self-hosted Linux+GPU runner (any vendor; $0 marginal on owned hardware).
+
+**VA-API works on native Linux — it is not broken.** The earlier "⏳ gap"
+framing conflated two things: VA-API HEVC decode runs fine on any bare-metal
+Linux box with a GPU + driver (Mesa `radeonsi` on AMD — including the Ryzen
+7000-series RDNA2 iGPU on the dev box —, Intel `iHD`, or `nvidia-vaapi-driver`).
+What's *impossible* is real VA-API decode on a **GitHub-hosted** runner (no GPU,
+no `/dev/dri`) and in **WSL** (no `/dev/dri` render node). So hosted CI gets the
+compile-time FFI ABI gate (the `offset_of!` asserts in
+`heic-backend-vaapi/src/va_hevc.rs`, which run on every ubuntu build), and the
+*runtime* decode runs on a self-hosted GPU runner via `vaapi-runtime.yml`
+(which sets `HEIC_VAAPI_HW=1`).
 
 ## Tier 1 — hosted, free, already wired (`ci.yml`, `fuzz.yml`)
 
-- **Corpus decode gate** (`tests/corpus_decode.rs`): decodes all 95 committed
-  `testdata/` files (incl. 10-bit Apple HDR, grids, uncompressed HEIF) on every
-  OS; loud-fails if `testdata/` is missing (no graceful skip). The main matrix
-  no longer runs only `cargo test --lib`.
+- **Corpus decode gate** (`tests/corpus_decode.rs`): decodes every committed
+  `testdata/` file (incl. 10-bit Apple HDR, grids, uncompressed HEIF, and the
+  `testdata/features/` per-feature set) on every OS; loud-fails if `testdata/`
+  is missing (no graceful skip). The main matrix no longer runs only
+  `cargo test --lib`.
+- **Per-feature decode tests** (`tests/cov_features.rs`, 24 pixel-verified):
+  the small `testdata/features/` fixtures (derived `grid`/`iden`/`iovl`,
+  `irot`/`imir`/`clap` transforms, alpha, thumbnail, 4:0:0, 10-bit, 4:4:4,
+  nclx BT.709/BT.2020, EXIF/XMP, plus overlay version/limit/32-bit/negative-
+  offset and over-deep iden-chain rejection). Asserts real pixels, not
+  "decode accepted the bytes". Runs on every OS via the behavior step.
+- **MediaCodec clippy**: `heic-backend-mediacodec` is now linted
+  (`-D warnings`, `--target aarch64-linux-android`) — was compile-only.
 - **i686 + 32-bit decode correctness**: the `cross` job runs the corpus gate, not
   just `--lib` — exercises the 32-bit overflow/wrap fixes (NAL `checked_add`,
   `stsc` clamp, zencodec `checked_mul`).
@@ -109,16 +129,22 @@ real decode-capable GPU, e.g. an RTX 5070, and the HEVC Video Extensions):
   CI, a self-hosted Windows+GPU runner via `d3d11va-runtime.yml` is still
   optional; the dev loop no longer needs it.)
 
-### Linux: VA-API → the one path without a local alternative
+### Linux: VA-API → self-hosted GPU runner (works natively; WSL/hosted can't)
 
-VA-API does **not** run in WSL (no `/dev/dri`; only `/dev/dxg` — `vainfo`
-fails). So this is the genuine gap. Options, **any GPU vendor — not
+VA-API HEVC decode works on **any** bare-metal Linux box with a GPU + driver.
+The only places it can't run are **WSL** (no `/dev/dri`; only `/dev/dxg` —
+`vainfo` fails `vaInitialize`) and **GitHub-hosted runners** (no GPU at all).
+So the runtime decode lives on a self-hosted runner, **any GPU vendor — not
 Intel-specific**:
 
 - A real Linux box with a GPU + VA-API driver — **NVIDIA** (`nvidia-vaapi-driver`),
-  **AMD** (Mesa `radeonsi`), or Intel (`iHD`); `vaapi-runtime.yml` already runs
-  `examples/backend_decode … vaapi` + the bit-exact-vs-rust gate on a
-  `[self-hosted, linux, vaapi]` runner. $0 marginal on owned hardware.
+  **AMD** (Mesa `radeonsi`, incl. the Ryzen 7000-series RDNA2 iGPU), or Intel
+  (`iHD`). `vaapi-runtime.yml` runs the `vaapi_decode_test` example **and** the
+  gated `backend_dispatch` tests (`vaapi_decodes_example_on_hardware` +
+  `vaapi_vs_rust_corpus_diff`, turned on by `HEIC_VAAPI_HW=1`) on a
+  `[self-hosted, linux, vaapi]` runner. $0 marginal on owned hardware. The
+  hosted ubuntu job still covers compile + clippy + the compile-time
+  `offset_of!` ABI gate on every push.
 - VA-API *inside* WSL — **investigated, currently blocked.** The Mesa D3D12
   Gallium VA driver (`d3d12_drv_video.so`) and the NVIDIA VA driver are both
   installed, and the WSL GPU libs (`/usr/lib/wsl/lib`: `libd3d12.so`,

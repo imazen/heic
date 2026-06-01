@@ -443,6 +443,27 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 
 ## Known Bugs
 
+### Lossless HEVC (cu_transquant_bypass) not decoded — errors cleanly (2026-05-31)
+
+`testdata/features/lossless.heic` (heif-enc `-L`, RGB matrix=0, lossless via
+`cu_transquant_bypass_flag`) does **not** decode: it returns
+`InvalidBitstream("incomplete decode: undecoded luma samples remain")` from the
+UNINIT completeness guard. This is a missing codec feature, not corruption — the
+decoder errors cleanly (no panic, no wrong pixels). Pinned by
+`tests/cov_features.rs::lossless_errors_cleanly_until_supported`; when transquant
+bypass is implemented, flip that test to assert pixels. Status: ⚠ Partial
+(errors cleanly; feature unimplemented).
+
+### Negative-offset overlay: we are MORE spec-compliant than libheif (not a bug)
+
+For an `iovl` tile placed at a negative offset (e.g. `testdata/features/iovl_negoff.heic`,
+offset (-16,-16)), our decoder composites the tile's clipped on-canvas region per
+ISO 23008-12 §6.6.2.3, and `tests/cov_features.rs::iovl_negative_offset_clips_tile`
+asserts the spec-derived result. libheif 1.21.2 instead renders such overlays as
+all-fill (skips the tile) and **fails Nokia conformance C021 entirely** (offset
+(-640,-360), `heif-dec` rc=1). So the golden here is spec-derived, not
+libheif-derived — libheif is the incomplete reference for negative overlays.
+
 ### FIXED 2026-05-31: Apple HDR gain map decoded ~95% UNINIT (monochrome CABAC desync)
 
 The Apple HDR gain map (`apple-hdr/hdr-sample.heic`, a 768×432 **monochrome /
