@@ -119,6 +119,25 @@ pub struct Sps {
     pub color_primaries: u8,
     /// Transfer characteristics (from VUI). 1=BT.709, 13=sRGB, 16=PQ, 18=HLG, 2=unspecified
     pub transfer_characteristics: u8,
+    // --- sps_range_extension flags (H.265 7.3.2.2.2), default false ---
+    /// `transform_skip_rotation_enabled_flag`
+    pub transform_skip_rotation_enabled_flag: bool,
+    /// `transform_skip_context_enabled_flag`
+    pub transform_skip_context_enabled_flag: bool,
+    /// `implicit_rdpcm_enabled_flag` — gates intra residual DPCM (modes 10/26)
+    pub implicit_rdpcm_enabled_flag: bool,
+    /// `explicit_rdpcm_enabled_flag`
+    pub explicit_rdpcm_enabled_flag: bool,
+    /// `extended_precision_processing_flag`
+    pub extended_precision_processing_flag: bool,
+    /// `intra_smoothing_disabled_flag`
+    pub intra_smoothing_disabled_flag: bool,
+    /// `high_precision_offsets_enabled_flag`
+    pub high_precision_offsets_enabled_flag: bool,
+    /// `persistent_rice_adaptation_enabled_flag` — RExt coeff_abs_level Rice init
+    pub persistent_rice_adaptation_enabled_flag: bool,
+    /// `cabac_bypass_alignment_enabled_flag`
+    pub cabac_bypass_alignment_enabled_flag: bool,
 }
 
 impl Sps {
@@ -482,6 +501,71 @@ pub fn parse_vps(data: &[u8]) -> Result<Vps> {
     })
 }
 
+/// Parse and discard `hrd_parameters()` (H.265 E.3.2). We don't use the HRD
+/// values but must consume the exact bits to reach `sps_extension_present_flag`.
+fn skip_hrd_parameters(
+    reader: &mut BitstreamReader,
+    common_inf_present: bool,
+    max_num_sub_layers_minus1: u8,
+) -> Result<()> {
+    let mut nal_hrd = false;
+    let mut vcl_hrd = false;
+    let mut sub_pic_hrd = false;
+    if common_inf_present {
+        nal_hrd = reader.read_bit()? != 0;
+        vcl_hrd = reader.read_bit()? != 0;
+        if nal_hrd || vcl_hrd {
+            sub_pic_hrd = reader.read_bit()? != 0;
+            if sub_pic_hrd {
+                reader.read_bits(8)?; // tick_divisor_minus2
+                reader.read_bits(5)?; // du_cpb_removal_delay_increment_length_minus1
+                reader.read_bit()?; // sub_pic_cpb_params_in_pic_timing_sei_flag
+                reader.read_bits(5)?; // dpb_output_delay_du_length_minus1
+            }
+            reader.read_bits(4)?; // bit_rate_scale
+            reader.read_bits(4)?; // cpb_size_scale
+            if sub_pic_hrd {
+                reader.read_bits(4)?; // cpb_size_du_scale
+            }
+            reader.read_bits(5)?; // initial_cpb_removal_delay_length_minus1
+            reader.read_bits(5)?; // au_cpb_removal_delay_length_minus1
+            reader.read_bits(5)?; // dpb_output_delay_length_minus1
+        }
+    }
+    for _ in 0..=max_num_sub_layers_minus1 {
+        let fixed_pic_rate_general = reader.read_bit()? != 0;
+        let mut fixed_pic_rate_within_cvs = fixed_pic_rate_general;
+        if !fixed_pic_rate_general {
+            fixed_pic_rate_within_cvs = reader.read_bit()? != 0;
+        }
+        let mut low_delay_hrd = false;
+        if fixed_pic_rate_within_cvs {
+            reader.read_ue()?; // elemental_duration_in_tc_minus1
+        } else {
+            low_delay_hrd = reader.read_bit()? != 0;
+        }
+        let cpb_cnt = if !low_delay_hrd {
+            (reader.read_ue()? + 1) as u32 // cpb_cnt_minus1 + 1
+        } else {
+            1
+        };
+        for &present in &[nal_hrd, vcl_hrd] {
+            if present {
+                for _ in 0..cpb_cnt {
+                    reader.read_ue()?; // bit_rate_value_minus1
+                    reader.read_ue()?; // cpb_size_value_minus1
+                    if sub_pic_hrd {
+                        reader.read_ue()?; // cpb_size_du_value_minus1
+                        reader.read_ue()?; // bit_rate_du_value_minus1
+                    }
+                    reader.read_bit()?; // cbr_flag
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Parse Sequence Parameter Set
 pub fn parse_sps(data: &[u8]) -> Result<Sps> {
     let mut reader = BitstreamReader::new(data);
@@ -779,6 +863,15 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
     let mut matrix_coeffs = 2u8; // default: unspecified
     let mut colour_primaries = 2u8; // default: unspecified
     let mut transfer_chars = 2u8; // default: unspecified
+    let mut transform_skip_rotation_enabled_flag = false;
+    let mut transform_skip_context_enabled_flag = false;
+    let mut implicit_rdpcm_enabled_flag = false;
+    let mut explicit_rdpcm_enabled_flag = false;
+    let mut extended_precision_processing_flag = false;
+    let mut intra_smoothing_disabled_flag = false;
+    let mut high_precision_offsets_enabled_flag = false;
+    let mut persistent_rice_adaptation_enabled_flag = false;
+    let mut cabac_bypass_alignment_enabled_flag = false;
     if vui_parameters_present_flag {
         let aspect_ratio_info_present = reader.read_bit()? != 0;
         if aspect_ratio_info_present {
@@ -804,7 +897,68 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
                 matrix_coeffs = reader.read_bits(8)? as u8;
             }
         }
-        // Don't parse the rest of VUI — we only need color info
+        // Remaining VUI fields (H.265 E.2.1) — consumed to reach the SPS
+        // extension flags. We don't use these values.
+        let chroma_loc_info_present = reader.read_bit()? != 0;
+        if chroma_loc_info_present {
+            reader.read_ue()?; // chroma_sample_loc_type_top_field
+            reader.read_ue()?; // chroma_sample_loc_type_bottom_field
+        }
+        reader.read_bit()?; // neutral_chroma_indication_flag
+        reader.read_bit()?; // field_seq_flag
+        reader.read_bit()?; // frame_field_info_present_flag
+        let default_display_window = reader.read_bit()? != 0;
+        if default_display_window {
+            reader.read_ue()?; // def_disp_win_left_offset
+            reader.read_ue()?; // def_disp_win_right_offset
+            reader.read_ue()?; // def_disp_win_top_offset
+            reader.read_ue()?; // def_disp_win_bottom_offset
+        }
+        let vui_timing_info_present = reader.read_bit()? != 0;
+        if vui_timing_info_present {
+            reader.read_bits(32)?; // vui_num_units_in_tick
+            reader.read_bits(32)?; // vui_time_scale
+            let poc_proportional = reader.read_bit()? != 0;
+            if poc_proportional {
+                reader.read_ue()?; // vui_num_ticks_poc_diff_one_minus1
+            }
+            let hrd_present = reader.read_bit()? != 0;
+            if hrd_present {
+                skip_hrd_parameters(&mut reader, true, max_sub_layers_minus1)?;
+            }
+        }
+        let bitstream_restriction = reader.read_bit()? != 0;
+        if bitstream_restriction {
+            reader.read_bit()?; // tiles_fixed_structure_flag
+            reader.read_bit()?; // motion_vectors_over_pic_boundaries_flag
+            reader.read_bit()?; // restricted_ref_pic_lists_flag
+            reader.read_ue()?; // min_spatial_segmentation_idc
+            reader.read_ue()?; // max_bytes_per_pic_denom
+            reader.read_ue()?; // max_bits_per_min_cu_denom
+            reader.read_ue()?; // log2_max_mv_length_horizontal
+            reader.read_ue()?; // log2_max_mv_length_vertical
+        }
+    }
+
+    // sps_extension (H.265 7.3.2.2.1) → sps_range_extension (7.3.2.2.2)
+    let sps_extension_present_flag = reader.read_bit()? != 0;
+    if sps_extension_present_flag {
+        let sps_range_extension_flag = reader.read_bit()? != 0;
+        reader.read_bit()?; // sps_multilayer_extension_flag
+        reader.read_bit()?; // sps_3d_extension_flag
+        reader.read_bit()?; // sps_scc_extension_flag
+        reader.read_bits(4)?; // sps_extension_4bits
+        if sps_range_extension_flag {
+            transform_skip_rotation_enabled_flag = reader.read_bit()? != 0;
+            transform_skip_context_enabled_flag = reader.read_bit()? != 0;
+            implicit_rdpcm_enabled_flag = reader.read_bit()? != 0;
+            explicit_rdpcm_enabled_flag = reader.read_bit()? != 0;
+            extended_precision_processing_flag = reader.read_bit()? != 0;
+            intra_smoothing_disabled_flag = reader.read_bit()? != 0;
+            high_precision_offsets_enabled_flag = reader.read_bit()? != 0;
+            persistent_rice_adaptation_enabled_flag = reader.read_bit()? != 0;
+            cabac_bypass_alignment_enabled_flag = reader.read_bit()? != 0;
+        }
     }
 
     Ok(Sps {
@@ -846,6 +1000,15 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
         matrix_coeffs,
         color_primaries: colour_primaries,
         transfer_characteristics: transfer_chars,
+        transform_skip_rotation_enabled_flag,
+        transform_skip_context_enabled_flag,
+        implicit_rdpcm_enabled_flag,
+        explicit_rdpcm_enabled_flag,
+        extended_precision_processing_flag,
+        intra_smoothing_disabled_flag,
+        high_precision_offsets_enabled_flag,
+        persistent_rice_adaptation_enabled_flag,
+        cabac_bypass_alignment_enabled_flag,
     })
 }
 

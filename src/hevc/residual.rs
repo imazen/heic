@@ -223,7 +223,7 @@ pub fn decode_residual(
         }
     }
 
-    // Trace disabled (enable for debugging)
+    // Trace disabled (enable for debugging via HEIC_RC_DBG)
     #[cfg(feature = "std")]
     let rc_trace = false;
     #[cfg(not(feature = "std"))]

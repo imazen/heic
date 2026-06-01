@@ -420,6 +420,27 @@ impl DecodedFrame {
 
         let mut out_idx = 0;
 
+        if self.matrix_coeffs == 0 {
+            // Identity / GBR (H.273 matrix_coefficients == 0): the three planes
+            // are G (Y), B (Cb), R (Cr) directly — no matrix. Output R=Cr, G=Y,
+            // B=Cb with the bit-depth shift. Implies 4:4:4 (full-res chroma).
+            let c_stride = self.c_stride();
+            for y in y_start..y_end {
+                let y_row = y as usize * w;
+                let c_row = y as usize * c_stride;
+                for x in x_start..x_end {
+                    let g = (self.y_plane[y_row + x as usize] >> shift) as i32;
+                    let b = (self.cb_plane[c_row + x as usize] >> shift) as i32;
+                    let r = (self.cr_plane[c_row + x as usize] >> shift) as i32;
+                    rgb[out_idx] = r.clamp(0, 255) as u8;
+                    rgb[out_idx + 1] = g.clamp(0, 255) as u8;
+                    rgb[out_idx + 2] = b.clamp(0, 255) as u8;
+                    out_idx += 3;
+                }
+            }
+            return Ok(rgb);
+        }
+
         if self.chroma_format == 1 {
             // SIMD-accelerated 4:2:0 path (AVX2 when available, scalar fallback)
             let c_stride = self.c_stride();

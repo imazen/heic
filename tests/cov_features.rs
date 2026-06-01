@@ -365,19 +365,23 @@ fn xmp_metadata_extracted() {
 }
 
 // ---------------------------------------------------------------------------
-// Lossless (cu_transquant_bypass) — currently UNSUPPORTED.
-// Documents the gap: it must error CLEANLY (no panic, no wrong pixels), not
-// silently produce garbage. When lossless is implemented, flip this to assert
-// a correct decode. See CLAUDE.md "Known Bugs".
+// Lossless (cu_transquant_bypass, 10-bit 4:4:4 intra-NxN, matrix=0 GBR).
+// Decodes bit-exact vs libheif (verified via raw pixels) — a vertical
+// red→blue gradient: top red, bottom blue, green ~0 throughout.
 // ---------------------------------------------------------------------------
 #[test]
-fn lossless_errors_cleanly_until_supported() {
-    let data = read("lossless.heic");
-    let res = DecoderConfig::new().decode(&data, PixelLayout::Rgb8);
-    assert!(
-        res.is_err(),
-        "lossless now decodes — implement support and update this test to assert pixels"
-    );
+fn lossless_decodes_gradient() {
+    let d = decode_rgb("lossless.heic");
+    assert_eq!((d.w, d.h), (48, 48));
+    // top = red, bottom = blue (matrix=0 GBR: R=Cr plane, B=Cb plane).
+    assert_eq!(d.tl(), Color::Red, "lossless top should be red");
+    assert_eq!(d.tr(), Color::Red);
+    assert_eq!(d.bl(), Color::Blue, "lossless bottom should be blue");
+    assert_eq!(d.br(), Color::Blue);
+    // green channel is ~0 everywhere (red↔blue gradient has no green).
+    for &(x, y) in &[(1, 1), (24, 24), (46, 46), (1, 46)] {
+        assert!(d.px(x, y).1 < 30, "green should be ~0 at ({x},{y})");
+    }
 }
 
 // ---------------------------------------------------------------------------

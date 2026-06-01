@@ -1646,8 +1646,28 @@ impl<'a> SliceContext<'a> {
                         self.derive_intra_luma_mode(x0 + half, y0 + half, prev_flags[3])?;
                     self.store_intra_mode(x0 + half, y0 + half, log2_pu_size, luma_mode_3);
 
-                    let chroma_mode = self.decode_intra_chroma_mode(luma_mode_0)?;
-                    self.store_intra_chroma_mode(x0, y0, log2_cb_size, chroma_mode);
+                    // H.265 7.3.8.5: ChromaArrayType==3 (4:4:4) reads one
+                    // intra_chroma_pred_mode per luma PB (four for NxN); else one.
+                    let chroma_array_type = if self.sps.separate_colour_plane_flag {
+                        0
+                    } else {
+                        self.sps.chroma_format_idc
+                    };
+                    let chroma_mode = if chroma_array_type == 3 {
+                        let cm0 = self.decode_intra_chroma_mode(luma_mode_0)?;
+                        self.store_intra_chroma_mode(x0, y0, log2_pu_size, cm0);
+                        let cm1 = self.decode_intra_chroma_mode(luma_mode_1)?;
+                        self.store_intra_chroma_mode(x0 + half, y0, log2_pu_size, cm1);
+                        let cm2 = self.decode_intra_chroma_mode(luma_mode_2)?;
+                        self.store_intra_chroma_mode(x0, y0 + half, log2_pu_size, cm2);
+                        let cm3 = self.decode_intra_chroma_mode(luma_mode_3)?;
+                        self.store_intra_chroma_mode(x0 + half, y0 + half, log2_pu_size, cm3);
+                        cm0
+                    } else {
+                        let cm = self.decode_intra_chroma_mode(luma_mode_0)?;
+                        self.store_intra_chroma_mode(x0, y0, log2_cb_size, cm);
+                        cm
+                    };
 
                     (luma_mode_0, chroma_mode)
                 }
@@ -1736,8 +1756,11 @@ impl<'a> SliceContext<'a> {
                 frame.store_block_qp(x0, y0, cb_size, self.current_qpy as i8);
                 self.store_cbf(x0, y0, cb_size, false);
             }
-        } else if !self.cu_transquant_bypass_flag {
-            // Intra: residual always present (rqt_root_cbf implied 1)
+        } else {
+            // Intra: residual always present (rqt_root_cbf implied 1). The
+            // transform tree is parsed even under cu_transquant_bypass: bypass
+            // only skips the inverse transform/dequant in reconstruction, not
+            // the residual_coding syntax — skipping it desyncs CABAC.
             let intra_split_flag = part_mode == PartMode::PartNxN;
             self.decode_transform_tree(
                 x0,
@@ -1884,7 +1907,10 @@ impl<'a> SliceContext<'a> {
         };
         let (cbf_cb, cbf_cr) = if chroma_array_type == 0 {
             (false, false)
-        } else if log2_size > 2 {
+        } else if log2_size > 2 || chroma_array_type == 3 {
+            // H.265 7.3.8.8: cbf_cb/cbf_cr present when log2TrafoSize > 2 OR
+            // ChromaArrayType == 3 (4:4:4 reads them at the 4x4 leaf too, where
+            // chroma is decoded at the leaf rather than inherited from parent).
             // Decode cbf_cb if trafo_depth == 0 (always) or parent had cbf_cb
             let cb = if trafo_depth == 0 || cbf_cb_parent {
                 let ctx_idx = context::CBF_CBCR + trafo_depth as usize;
@@ -2027,7 +2053,10 @@ impl<'a> SliceContext<'a> {
         log2_size: u8,
         trafo_depth: u8,
         _intra_luma_mode: IntraPredMode,
-        intra_chroma_mode: IntraPredMode,
+        // Chroma mode is looked up per-leaf-position via `get_intra_chroma_mode_at`
+        // (4:4:4 NxN has a distinct chroma mode per quadrant), so the threaded
+        // value is no longer read here — kept for signature symmetry.
+        _intra_chroma_mode: IntraPredMode,
         cbf_cb: bool,
         cbf_cr: bool,
         frame: &mut DecodedFrame,
@@ -2132,15 +2161,23 @@ impl<'a> SliceContext<'a> {
             } else {
                 (log2_size - 1, x0 / 2, y0 / 2)
             };
+            // For 4:4:4 with NxN partitioning each chroma PB has its own mode
+            // (H.265 7.3.8.5); the single `intra_chroma_mode` threaded through
+            // the transform tree is only the first quadrant's. Look up the mode
+            // stored for THIS leaf position — it equals `intra_chroma_mode` for
+            // 2Nx2N/4:2:0, and is the per-quadrant mode for 4:4:4 NxN. Using the
+            // wrong mode picks the wrong scan order (Angular 10/26 select
+            // vertical/horizontal, not diagonal) and desyncs CABAC.
+            let chroma_mode_here = self.get_intra_chroma_mode_at(x0, y0);
             let chroma_scan_order = if is_intra_cu {
-                residual::get_scan_order(chroma_log2_size, intra_chroma_mode.as_u8(), 1)
+                residual::get_scan_order(chroma_log2_size, chroma_mode_here.as_u8(), 1)
             } else {
                 ScanOrder::Diagonal
             };
 
             // Predict Cb (intra only — inter MC already wrote prediction)
             if is_intra_cu {
-                intra::predict_intra(frame, cx, cy, chroma_log2_size, intra_chroma_mode, 1, sis)?;
+                intra::predict_intra(frame, cx, cy, chroma_log2_size, chroma_mode_here, 1, sis)?;
             }
             if cbf_cb {
                 self.decode_and_apply_residual(
@@ -2155,7 +2192,7 @@ impl<'a> SliceContext<'a> {
 
             // Predict Cr (intra only)
             if is_intra_cu {
-                intra::predict_intra(frame, cx, cy, chroma_log2_size, intra_chroma_mode, 2, sis)?;
+                intra::predict_intra(frame, cx, cy, chroma_log2_size, chroma_mode_here, 2, sis)?;
             }
             if cbf_cr {
                 self.decode_and_apply_residual(
@@ -2242,6 +2279,70 @@ impl<'a> SliceContext<'a> {
             2 => (self.qp_cr, self.sps.bit_depth_c()),
             _ => (self.qp_y, self.sps.bit_depth_y()),
         };
+
+        // Lossless (H.265 8.6.2): cu_transquant_bypass bypasses both scaling
+        // (dequant) and the inverse transform — the parsed coefficient levels
+        // ARE the residual samples, added directly to the prediction.
+        if self.cu_transquant_bypass_flag {
+            // Implicit residual DPCM (H.265 8.6.2): only when the SPS enables it
+            // AND the intra prediction is pure horizontal (10) or vertical (26);
+            // the residual is then cumulatively summed along that direction.
+            let rdpcm = if is_intra_cu && self.sps.implicit_rdpcm_enabled_flag {
+                let mode = if c_idx == 0 {
+                    self.get_intra_mode_at(x0, y0)
+                } else {
+                    self.get_intra_chroma_mode_at(x0, y0)
+                };
+                match mode.as_u8() {
+                    10 => 1u8, // horizontal: accumulate along rows
+                    26 => 2u8, // vertical: accumulate down columns
+                    _ => 0u8,
+                }
+            } else {
+                0u8
+            };
+            let residual = &mut self.residual_buf;
+            for i in 0..num_coeffs {
+                residual[i] = coeffs[i];
+            }
+            match rdpcm {
+                1 => {
+                    for py in 0..size {
+                        let row = py * size;
+                        for px in 1..size {
+                            residual[row + px] =
+                                residual[row + px].wrapping_add(residual[row + px - 1]);
+                        }
+                    }
+                }
+                2 => {
+                    for py in 1..size {
+                        let row = py * size;
+                        let prev = (py - 1) * size;
+                        for px in 0..size {
+                            residual[row + px] =
+                                residual[row + px].wrapping_add(residual[prev + px]);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            let max_val = (1i32 << bit_depth) - 1;
+            let (plane, stride) = frame.plane_mut(c_idx);
+            for py in 0..size {
+                let row_start = (y0 as usize + py) * stride + x0 as usize;
+                for px in 0..size {
+                    let idx = row_start + px;
+                    if idx < plane.len() {
+                        let pred = plane[idx] as i32;
+                        let r = residual[py * size + px] as i32;
+                        plane[idx] = (pred + r).clamp(0, max_val) as u16;
+                    }
+                }
+            }
+            return Ok(());
+        }
+
         let dequant_params = transform::DequantParams {
             qp,
             bit_depth,
