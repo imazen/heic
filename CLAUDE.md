@@ -464,14 +464,21 @@ added during the 2026-05-31 review's deferred-UNINIT work; the check is correct
 but was REVERTED because it (correctly) makes `decode_gain_map` error and breaks
 those tests — shipping the hard error is blocked on fixing THIS bug.
 
-ROOT CAUSE: not yet diagnosed. The gain-map HEVC bitstream stops after ~4 CTBs.
-Candidates: (a) the gain-map item's image-data extent is truncated/wrong when
-extracted from the container (`decode_item` gets too few bytes); (b) a CABAC
-desync / unsupported path on monochrome 4:0:0; (c) the gain map is tiled/grid
-and only the first tile decodes. NEXT: in `decode_gain_map`
-(src/decode.rs:2090, `decode_item(... gainmap_item ...)`), dump the gain-map
-item's image_data length + SPS coded size + slice count; compare bytes-available
-vs CTBs-expected to distinguish truncation (a) from decode desync (b).
+ROOT CAUSE (narrowed 2026-05-31): it is a DECODE DESYNC, NOT truncation and NOT
+a grid. Probed via a temp diagnostic in `decode_gainmap_image_item`: the
+gain-map item is `id=10 type=Hvc1` (single HEVC image), `hevc_config=true`, with
+**image_data_len=25312 bytes** — a reasonable FULL size for a 768×432 monochrome
+gain map, so the slice data is all present. `decode_slice` returns Ok (no
+error) but only ~16384 luma samples get written, so the slice's CABAC
+terminates / desyncs early (mis-reads end_of_slice_segment_flag, or the
+monochrome 4:0:0 CU/residual path desyncs after a few CTBs). Candidates now:
+(a) monochrome (chroma_format_idc=0) CU decode mishandles the absent chroma →
+CABAC desync; (b) multi-slice gain map where subsequent slice headers fail.
+NEXT (needs a focused session): trace CABAC bin-by-bin vs dec265 on item 10's
+bitstream (use the existing CABAC tracker in src/hevc/debug.rs) and find the
+first divergent bin; check the 4:0:0 paths in ctu.rs (chroma CBF / residual
+skip) and slice.rs (end_of_slice handling). This is the first HEIC test asset
+with a monochrome HEVC stream, so the 4:0:0 path is likely under-exercised.
 
 WHEN FIXED: re-add the decode-completeness error in
 `hevc::decode_nal_units` (src/hevc/mod.rs, before `Ok(frame)`) —
