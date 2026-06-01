@@ -410,3 +410,92 @@ impl DecodedFrameTransformExt for DecodedFrame {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hevc::DecodedFrame;
+
+    /// Build a small frame with distinct, deterministic per-plane pixel values.
+    fn frame(w: u32, h: u32, chroma: u8) -> DecodedFrame {
+        let mut f = DecodedFrame::with_params(w, h, 8, chroma).unwrap();
+        for (i, p) in f.y_plane.iter_mut().enumerate() {
+            *p = (i as u16) & 0x3FF;
+        }
+        for (i, p) in f.cb_plane.iter_mut().enumerate() {
+            *p = ((i as u16).wrapping_mul(3).wrapping_add(1)) & 0x3FF;
+        }
+        for (i, p) in f.cr_plane.iter_mut().enumerate() {
+            *p = ((i as u16).wrapping_mul(5).wrapping_add(2)) & 0x3FF;
+        }
+        f
+    }
+
+    fn planes_eq(a: &DecodedFrame, b: &DecodedFrame) -> bool {
+        a.width == b.width
+            && a.height == b.height
+            && a.y_plane == b.y_plane
+            && a.cb_plane == b.cb_plane
+            && a.cr_plane == b.cr_plane
+    }
+
+    #[test]
+    fn rotate_90_swaps_dims_and_roundtrips() {
+        let f = frame(4, 6, 1); // 4:2:0, even dims
+        let r1 = f.rotate_90_cw().unwrap();
+        assert_eq!((r1.width, r1.height), (6, 4), "90° swaps w/h");
+        let back = f
+            .rotate_90_cw()
+            .unwrap()
+            .rotate_90_cw()
+            .unwrap()
+            .rotate_90_cw()
+            .unwrap()
+            .rotate_90_cw()
+            .unwrap();
+        assert!(planes_eq(&f, &back), "rotate_90 ×4 must be identity");
+    }
+
+    #[test]
+    fn rotate_180_is_double_90_and_involution() {
+        let f = frame(4, 6, 1);
+        let r180 = f.rotate_180().unwrap();
+        assert_eq!((r180.width, r180.height), (4, 6));
+        let via_90 = f.rotate_90_cw().unwrap().rotate_90_cw().unwrap();
+        assert!(planes_eq(&r180, &via_90), "rotate_180 == two rotate_90");
+        assert!(
+            planes_eq(&f, &r180.rotate_180().unwrap()),
+            "rotate_180 is an involution"
+        );
+    }
+
+    #[test]
+    fn rotate_270_inverts_90() {
+        let f = frame(4, 6, 1);
+        let r270 = f.rotate_270_cw().unwrap();
+        assert_eq!((r270.width, r270.height), (6, 4));
+        let back = f.rotate_90_cw().unwrap().rotate_270_cw().unwrap();
+        assert!(planes_eq(&f, &back), "rotate_270 inverts rotate_90");
+    }
+
+    #[test]
+    fn mirrors_are_involutions_and_compose_to_180() {
+        let f = frame(4, 6, 1);
+        let h = f.mirror_horizontal().unwrap();
+        assert_eq!((h.width, h.height), (4, 6));
+        assert!(
+            planes_eq(&f, &h.mirror_horizontal().unwrap()),
+            "mirror_h involution"
+        );
+        let v = f.mirror_vertical().unwrap();
+        assert!(
+            planes_eq(&f, &v.mirror_vertical().unwrap()),
+            "mirror_v involution"
+        );
+        let hv = f.mirror_horizontal().unwrap().mirror_vertical().unwrap();
+        assert!(
+            planes_eq(&hv, &f.rotate_180().unwrap()),
+            "mirror_h∘mirror_v == rotate_180"
+        );
+    }
+}
