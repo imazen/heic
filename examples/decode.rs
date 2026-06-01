@@ -158,10 +158,71 @@ fn main() {
         );
 
         if let Some(path) = output_path {
-            write_ppm(path, &output.data, output.width, output.height);
+            // Preserve the source color profile (e.g. Display P3) so wide-gamut
+            // reds/greens don't get misinterpreted as sRGB. PPM can't carry an
+            // ICC profile; PNG can, so write PNG when the source is tagged.
+            let icc = decoder.extract_icc(&data).ok().flatten();
+            write_image(
+                path,
+                &output.data,
+                output.width,
+                output.height,
+                layout,
+                icc.as_deref(),
+            );
             println!("Wrote {}", path);
         }
     }
+}
+
+/// Write the decoded image, choosing the format by extension. `.png` writes a
+/// PNG with the source ICC profile embedded (color-managed, matches libheif);
+/// anything else writes a raw PPM and warns if a color profile would be lost.
+fn write_image(
+    path: &str,
+    data: &[u8],
+    width: u32,
+    height: u32,
+    layout: PixelLayout,
+    icc: Option<&[u8]>,
+) {
+    if path.to_ascii_lowercase().ends_with(".png") {
+        write_png(path, data, width, height, layout, icc);
+    } else {
+        if icc.is_some() {
+            eprintln!(
+                "note: source has an ICC color profile (e.g. Display P3) that a \
+                 PPM cannot carry — viewers will assume sRGB and saturated colors \
+                 may look wrong. Write a .png to preserve it."
+            );
+        }
+        write_ppm(path, data, width, height);
+    }
+}
+
+fn write_png(
+    path: &str,
+    data: &[u8],
+    width: u32,
+    height: u32,
+    layout: PixelLayout,
+    icc: Option<&[u8]>,
+) {
+    let file = std::fs::File::create(path).expect("create output file");
+    let w = std::io::BufWriter::new(file);
+    let color = match layout {
+        PixelLayout::Rgba8 | PixelLayout::Bgra8 => png::ColorType::Rgba,
+        _ => png::ColorType::Rgb,
+    };
+    let mut info = png::Info::with_size(width, height);
+    info.color_type = color;
+    info.bit_depth = png::BitDepth::Eight;
+    if let Some(profile) = icc {
+        info.icc_profile = Some(std::borrow::Cow::Owned(profile.to_vec()));
+    }
+    let enc = png::Encoder::with_info(w, info).expect("png info");
+    let mut writer = enc.write_header().expect("png header");
+    writer.write_image_data(data).expect("png data");
 }
 
 fn write_ppm(path: &str, rgb: &[u8], width: u32, height: u32) {
