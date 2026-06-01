@@ -339,6 +339,15 @@ impl DecodedFrame {
     /// Full-range: ×256, limited-range: ×2048 with combined Y/C scale factors.
     #[inline(always)]
     fn ycbcr_to_rgb(&self, y_val: i32, cb_val: i32, cr_val: i32) -> (u8, u8, u8) {
+        if self.matrix_coeffs == 0 {
+            // Identity / GBR (H.273 matrix_coefficients == 0): planes are
+            // G(Y) B(Cb) R(Cr) directly — no matrix, no chroma offset.
+            return (
+                cr_val.clamp(0, 255) as u8,
+                y_val.clamp(0, 255) as u8,
+                cb_val.clamp(0, 255) as u8,
+            );
+        }
         let cb = cb_val - 128;
         let cr = cr_val - 128;
 
