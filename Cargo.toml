@@ -38,9 +38,6 @@ keywords = ["heic", "heif", "hevc", "image", "decoder"]
 categories = ["multimedia::images", "parser-implementations"]
 include = [
     "/src/**",
-    "/tests/**",
-    "/fuzz/regression/**",
-    "/benches/**",
     "/examples/**",
     "/README.md",
     "/CHANGELOG.md",
