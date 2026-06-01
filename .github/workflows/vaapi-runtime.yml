@@ -93,6 +93,21 @@ jobs:
           set -o pipefail
           ./target/release/examples/vaapi_decode_test 2>&1 | tee /tmp/vaapi-runtime.log
 
+      # The gated backend_dispatch runtime tests (vaapi_decodes_example_on_hardware
+      # + vaapi_vs_rust_corpus_diff). HEIC_VAAPI_HW=1 turns them ON; they assert
+      # real-GPU decode dimensions + a zensim corpus diff vs the rust backend.
+      # On `ubuntu-latest` (no GPU) these still build but skip cleanly; on the
+      # self-hosted GPU runner they actually decode.
+      - name: Run VA-API dispatch tests (HEIC_VAAPI_HW)
+        if: inputs.runner != 'ubuntu-latest'
+        env:
+          HEIC_VAAPI_HW: '1'
+          LIBVA_DRIVER_NAME: ${{ inputs.driver == 'auto' && '' || inputs.driver }}
+        run: >-
+          cargo test --release --test backend_dispatch
+          --features 'backend-rust,backend-vaapi,std'
+          vaapi_ -- --nocapture
+
       - name: Upload run log
         if: always()
         uses: actions/upload-artifact@v4
