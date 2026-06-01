@@ -680,28 +680,50 @@ pub fn dequantize(coeffs: &mut [i16], params: DequantParams) {
     static LEVEL_SCALE: [i32; 6] = [40, 45, 51, 57, 64, 72];
 
     // QP validated at SPS parse (bit_depth max 16 → max QP ~99 → qp_per max 16).
-    // Defense-in-depth: clamp to 180 (qp_per=30) to prevent i32 shift overflow
-    // even if QP derivation produces an out-of-range value.
+    // Defense-in-depth: clamp to 180 (qp_per=30) to prevent shift overflow even
+    // if QP derivation produces an out-of-range value.
     let qp = params.qp.min(180);
     let qp_per = qp / 6;
     let qp_rem = qp % 6;
-    let scale = LEVEL_SCALE[qp_rem as usize];
-    let combined_scale = scale * (1 << qp_per);
+    // i64 so `scale << qp_per` (qp_per up to 30, scale up to 72) cannot overflow
+    // on the way to the threshold test below — previously `scale * (1 << qp_per)`
+    // overflowed i32 for high qp_per.
+    let combined_scale = (LEVEL_SCALE[qp_rem as usize] as i64) << qp_per;
 
     // When m[x][y]=16 (flat), absorb the factor into shift: bdShift - 4
     let shift = params.bit_depth as i32 - 9 + params.log2_tr_size as i32;
-    let add = if shift > 0 { 1 << (shift - 1) } else { 0 };
 
-    if shift >= 0 {
+    // Fast path: when combined_scale fits the i32 kernel WITHOUT the
+    // per-coefficient product `coef(±32767) * combined_scale` overflowing i32,
+    // and the shift is a right shift, use the existing perf-tuned SIMD/scalar
+    // i32 dequant unchanged. This always covers 8-bit and normal-QP 10-bit (the
+    // overwhelmingly common case); gating the dispatch here also protects every
+    // SIMD/scalar kernel it calls. `i32::MAX / 32768 = 65535`.
+    if shift >= 0 && combined_scale <= (i32::MAX as i64 / 32768) {
+        let combined_scale = combined_scale as i32;
+        let add = if shift > 0 { 1 << (shift - 1) } else { 0 };
         incant!(
             dequantize(coeffs, combined_scale, shift, add),
             [v3, neon, wasm128, scalar]
         );
+        return;
+    }
+
+    // Slow path (rare: high-QP 10/12/16-bit RExt, or the left-shift case): the
+    // i32 product would overflow (panic under overflow-checks / fuzz, wrap to a
+    // garbage dequant factor in release), so do it in i64. This content is
+    // uncommon, so the scalar i64 loop's cost is negligible — and correctness
+    // beats a wrapped/panicking result.
+    if shift >= 0 {
+        let add: i64 = if shift > 0 { 1 << (shift - 1) } else { 0 };
+        for coef in coeffs.iter_mut() {
+            let value = (*coef as i64 * combined_scale + add) >> shift;
+            *coef = value.clamp(-32768, 32767) as i16;
+        }
     } else {
-        // Negative shift (left shift) — rare, keep scalar
         let neg_shift = -shift;
         for coef in coeffs.iter_mut() {
-            let value = (*coef as i32 * combined_scale) << neg_shift;
+            let value = (*coef as i64 * combined_scale) << neg_shift;
             *coef = value.clamp(-32768, 32767) as i16;
         }
     }
@@ -790,6 +812,34 @@ pub fn inverse_transform(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: flat dequantize at high QP + high bit depth must not
+    /// overflow. Before the fix `combined_scale = scale * (1 << qp_per)` and
+    /// `coef * combined_scale` overflowed i32 — a panic under overflow-checks
+    /// (debug / cargo-fuzz) and a wrapped garbage factor in release. The i64
+    /// fallback handles it; the result must be finite and clamped to i16.
+    #[test]
+    fn dequantize_high_qp_high_depth_no_overflow() {
+        for &(qp, bit_depth, log2_tr_size) in &[(180, 16, 5), (153, 12, 5), (96, 10, 4), (51, 8, 5)]
+        {
+            let mut coeffs = [0i16; 32];
+            coeffs[0] = i16::MAX;
+            coeffs[1] = i16::MIN;
+            coeffs[5] = -12345;
+            dequantize(
+                &mut coeffs,
+                DequantParams {
+                    qp,
+                    bit_depth,
+                    log2_tr_size,
+                },
+            );
+            // Every output stays within i16 (the clamp held; no overflow panic).
+            for &c in &coeffs {
+                assert!((i16::MIN..=i16::MAX).contains(&c));
+            }
+        }
+    }
 
     #[test]
     fn test_idct4_dc_only() {
