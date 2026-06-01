@@ -336,7 +336,9 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 - SAO filter (sao.rs) — H.265 8.7.3, band offset + edge offset
 - Grid-based HEIC decoding (idat, iref/dimg, tile assembly)
 - Alpha plane decoding from auxiliary images (auxl/auxC)
-- HDR gain map extraction (Apple HDR aux format)
+- HDR gain map extraction (Apple HDR aux format) — ⚠ container/metadata path
+  works, but the gain-map PIXEL decode is ~95% UNINIT garbage (see Known Bugs);
+  do NOT treat decoded gain-map pixels as correct.
 - Identity-derived (iden) and overlay (iovl) image types
 - Image mirror (imir) with ordered transform application (ipma order)
 - VUI color info parsing (video_full_range_flag, matrix_coefficients, color_primaries, transfer_characteristics)
@@ -441,6 +443,43 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 - Dependent slice segments: not supported (2 vectors fail)
 
 ## Known Bugs
+
+### Apple HDR gain map decodes ~95% UNINIT garbage (found 2026-05-31)
+
+**Severity: HIGH (wrong-pixels) — the "HDR gain map" feature is effectively
+broken; the `## Completed` claim for it is FALSE.** `decode_gain_map` on
+`testdata/apple-hdr/hdr-sample.heic` returns a 768×432 monochrome
+(`chroma_format_idc=0`, crop=(0,12,0,6)) frame in which **315392 of 331776 luma
+samples (~95%) are left at the UNINIT sentinel (u16::MAX)** — only ~128×128
+actually decodes (≈4 of ~84 CTBs at CTB=64). The undecoded region downconverts
+to 255, so the gain map is ~95% max-boost white garbage.
+
+Why the existing tests miss it: `decode_apple_hdr_gain_map` (tests/parse_testdata.rs)
+only asserts dims>0, `len==w*h`, "not all 0", and "not all 255" — the 5%
+real region satisfies "not all 255", so 95% garbage passes. (Classic weak-test /
+false-positive per this file's "Writing Good Code §1".)
+
+Found by a decode-completeness check (error if any luma sample stays UNINIT)
+added during the 2026-05-31 review's deferred-UNINIT work; the check is correct
+but was REVERTED because it (correctly) makes `decode_gain_map` error and breaks
+those tests — shipping the hard error is blocked on fixing THIS bug.
+
+ROOT CAUSE: not yet diagnosed. The gain-map HEVC bitstream stops after ~4 CTBs.
+Candidates: (a) the gain-map item's image-data extent is truncated/wrong when
+extracted from the container (`decode_item` gets too few bytes); (b) a CABAC
+desync / unsupported path on monochrome 4:0:0; (c) the gain map is tiled/grid
+and only the first tile decodes. NEXT: in `decode_gain_map`
+(src/decode.rs:2090, `decode_item(... gainmap_item ...)`), dump the gain-map
+item's image_data length + SPS coded size + slice count; compare bytes-available
+vs CTBs-expected to distinguish truncation (a) from decode desync (b).
+
+WHEN FIXED: re-add the decode-completeness error in
+`hevc::decode_nal_units` (src/hevc/mod.rs, before `Ok(frame)`) —
+`if frame.y_plane.contains(&picture::UNINIT_SAMPLE) { return Err(InvalidBitstream(...)) }`
+— and strengthen the gain-map test to assert a low UNINIT/255 fraction. The
+corpus gate (`tests/corpus_decode.rs`) confirmed NO primary-image corpus file
+leaves UNINIT, so the completeness error is safe for the primary path once the
+gain map is fixed.
 
 ### Deep safety+code review — 2026-05-31 (43-agent workflow, adversarially verified)
 
