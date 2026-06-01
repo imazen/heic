@@ -1295,7 +1295,11 @@ impl<'a> SliceContext<'a> {
         // Handle QP delta depth: reset at quantization group boundaries
         // Log2MinCuQpDeltaSize = Log2CtbSizeY - diff_cu_qp_delta_depth
         if self.pps.cu_qp_delta_enabled_flag
-            && log2_cb_size >= self.sps.log2_ctb_size() - self.pps.diff_cu_qp_delta_depth
+            && log2_cb_size
+                >= self
+                    .sps
+                    .log2_ctb_size()
+                    .saturating_sub(self.pps.diff_cu_qp_delta_depth)
         {
             self.is_cu_qp_delta_coded = false;
             self.cu_qp_delta = 0;
@@ -3391,7 +3395,12 @@ impl<'a> SliceContext<'a> {
         x_cu_base: u32,
         y_cu_base: u32,
     ) {
-        let log2_min_cu_qp_delta_size = self.sps.log2_ctb_size() - self.pps.diff_cu_qp_delta_depth;
+        // saturating: a crafted PPS can set diff_cu_qp_delta_depth > log2_ctb_size
+        // (the underflow would panic under overflow-checks / fuzz on untrusted input).
+        let log2_min_cu_qp_delta_size = self
+            .sps
+            .log2_ctb_size()
+            .saturating_sub(self.pps.diff_cu_qp_delta_depth);
         let qg_mask = (1u32 << log2_min_cu_qp_delta_size) - 1;
 
         // Top-left pixel of current quantization group
