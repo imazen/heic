@@ -324,7 +324,7 @@ fn apply_sao_band_inplace(
     bit_depth: u8,
 ) {
     let max_val = (1i32 << bit_depth) - 1;
-    let band_shift = bit_depth - 5;
+    let band_shift = bit_depth.saturating_sub(5);
 
     // Build lookup table for the 32 bands
     let mut band_table = [0i16; 32];
@@ -332,6 +332,17 @@ fn apply_sao_band_inplace(
         let band_idx = (band_position + k) & 31;
         band_table[band_idx as usize] = offsets[k as usize];
     }
+
+    // Defensive clamp: a malformed SPS can make the SAO region exceed the
+    // plane buffer (plane.len() < stride*height), so an unclamped index would
+    // panic on untrusted input. This is a no-op for valid images, where
+    // plane.len() == stride*height and x_end <= width <= stride.
+    let stride_us = stride as usize;
+    if stride_us == 0 {
+        return;
+    }
+    let y_end = y_end.min((plane.len() / stride_us) as u32);
+    let x_end = x_end.min(stride);
 
     for y in y_start..y_end {
         let row = (y * stride) as usize;
@@ -374,13 +385,22 @@ fn apply_sao_edge(
         -(offsets[3] as i32),
     ];
 
+    let stride_u = stride as usize;
+    if stride_u == 0 {
+        return;
+    }
+    // Defensive: a malformed SPS can pass plane_w/plane_h that exceed the
+    // actual buffer; clamp to what src/dst hold so neighbor indexing can't go
+    // out of bounds. No-op for valid images (plane_w <= stride, buffer ==
+    // stride*plane_h). `saturating_sub` guards the tiny-plane underflow.
+    let plane_w = plane_w.min(stride);
+    let plane_h = plane_h.min((src.len().min(dst.len()) / stride_u) as u32);
+
     // Compute safe interior bounds where neighbor access never goes out of frame.
     let safe_x_start = x_start.max((-dx0).max(-dx1).max(0) as u32);
-    let safe_x_end = x_end.min(plane_w - dx0.max(dx1).max(0) as u32);
+    let safe_x_end = x_end.min(plane_w.saturating_sub(dx0.max(dx1).max(0) as u32));
     let safe_y_start = y_start.max((-dy0).max(-dy1).max(0) as u32);
-    let safe_y_end = y_end.min(plane_h - dy0.max(dy1).max(0) as u32);
-
-    let stride_u = stride as usize;
+    let safe_y_end = y_end.min(plane_h.saturating_sub(dy0.max(dy1).max(0) as u32));
     let dx0_u = dx0 as isize;
     let dy0_s = dy0 as isize * stride_u as isize;
     let dx1_u = dx1 as isize;
