@@ -2015,7 +2015,35 @@ pub(crate) fn decode_gain_map(data: &[u8], backends: &[crate::Backend]) -> Resul
         .primary_item()
         .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
 
-    // 1. Apple aux item path (existing).
+    // 1. Prefer the ISO 21496-1 `tmap` derived item (HEIF Amendment 1 — the
+    //    cross-vendor standard). Apple "Adaptive HDR" (iOS 18+) and Samsung HDR
+    //    files carry it, and it yields parseable ISO 21496-1 metadata
+    //    (`iso21496`). Checked BEFORE the legacy Apple aux so dual-format files
+    //    — which embed both a `tmap` and the proprietary `aux:hdrgainmap` for
+    //    back-compat — surface the standard metadata (a consistent
+    //    tmap-image + tmap-metadata pair) instead of the proprietary aux
+    //    headroom, which carries no ISO 21496-1 binary.
+    if let Some((tmap_item, gainmap_id, iso_bytes)) = find_tmap_gain_map(&container) {
+        let gainmap_item = container
+            .get_item(gainmap_id)
+            .ok_or_else(|| at!(HeicError::InvalidData("Missing tmap gain map item")))?;
+        // Optional XMP attached to the tmap item itself (rare but allowed).
+        let xmp = container
+            .find_xmp_for_item(tmap_item)
+            .map(|c| c.into_owned());
+        return decode_gainmap_image_item(
+            &container,
+            &gainmap_item,
+            xmp,
+            Some(iso_bytes),
+            GainMapOrigin::HeifTmap,
+            backends,
+        );
+    }
+
+    // 2. Legacy Apple `aux:hdrgainmap` fallback (pre-iOS-18). Proprietary
+    //    headroom metadata lives in XMP-RDF; there is no ISO 21496-1 binary, so
+    //    `iso21496` is `None` and the origin is `AppleAuxItem`.
     if let Some(&gainmap_id) = container
         .find_auxiliary_items(primary_item.id, "urn:com:apple:photo:2020:aux:hdrgainmap")
         .first()
@@ -2031,25 +2059,6 @@ pub(crate) fn decode_gain_map(data: &[u8], backends: &[crate::Backend]) -> Resul
                 .map(|c| c.into_owned()),
             None,
             GainMapOrigin::AppleAuxItem,
-            backends,
-        );
-    }
-
-    // 2. HEIF Amendment 1 `tmap` path.
-    if let Some((tmap_item, gainmap_id, iso_bytes)) = find_tmap_gain_map(&container) {
-        let gainmap_item = container
-            .get_item(gainmap_id)
-            .ok_or_else(|| at!(HeicError::InvalidData("Missing tmap gain map item")))?;
-        // Optional XMP attached to the tmap item itself (rare but allowed).
-        let xmp = container
-            .find_xmp_for_item(tmap_item)
-            .map(|c| c.into_owned());
-        return decode_gainmap_image_item(
-            &container,
-            &gainmap_item,
-            xmp,
-            Some(iso_bytes),
-            GainMapOrigin::HeifTmap,
             backends,
         );
     }
