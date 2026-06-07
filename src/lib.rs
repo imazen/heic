@@ -197,11 +197,17 @@ pub use backend::{Backend, recommended_backends};
 #[cfg(feature = "zencodec")]
 mod codec;
 
+#[cfg(feature = "image")]
+mod image;
+
 #[cfg(feature = "zencodec")]
 pub use codec::{
     HeicAuxiliaryInfo, HeicDecodeJob, HeicDecoder as HeicZenDecoder, HeicDecoderConfig,
     HeicStreamDecoder,
 };
+
+#[cfg(feature = "image")]
+pub use image::register_decoding_hook;
 
 // #[cfg(feature = "zennode")]
 // pub mod zennode_defs;
