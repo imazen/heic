@@ -11,6 +11,20 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 - **Default `cargo build` now fails with a `compile_error!` directing the user to enable a backend feature.** Previously the pure-Rust decoder shipped automatically as `default = ["std"]`; now the user MUST opt into at least one of `backend-rust`, `backend-mediafoundation`, `backend-videotoolbox`, `backend-mediacodec`, `backend-vaapi`, or `backend-d3d11va`. This is the 0.2.0 breaking change. The existing `default` build pulled in `heic`'s entire HEVC implementation unconditionally; the new layout makes the backend explicit so users on Apple / Android / Windows can pick the patent-licensed native decoder instead.
 - **`DecoderConfig` gains an allowlist API** (`with_backend`, `with_backends`, `recommended_backends`). Decoding without any backend in the allowlist returns `HeicError::NoBackendSelected`. `DecoderConfig::recommended_backends()` constructs a platform-aware default order from the compiled-in backends.
 
+### Added — `GainMapRender` modes in the zencodec adapter (2026-06-10)
+- `HeicDecodeJob::with_gain_map_render` (zencodec 0.1.21): `BaseOnly`
+  (default) attaches no gain-map extras; `Components` surfaces the decoded
+  Apple HDR gain map both as the canonical
+  `zencodec::decode::DecodedGainMap` (gray8 pixels + ISO 21496-1 params
+  parsed from the gain-map item's XMP) and as the native `HdrGainMap`;
+  `ReconstructHdr` downgrades to Components per the zencodec contract —
+  heic surfaces, it does not apply (`reconstructs_hdr()` stays false), so
+  the base is never silently SDR-labeled-HDR. Unknown future modes error.
+  The legacy `with_extract_gain_map` flag keeps attaching the native
+  `HdrGainMap` only. Deps: zencodec 0.1.19 → 0.1.21, zenpixels 0.2.10 →
+  0.2.11. Tests `gain_map_render_*` in `tests/cov_zencodec.rs` against the
+  committed `testdata/apple-hdr/hdr-sample.heic`.
+
 ### Added — orientation hint (`irot`/`imir`) honored by the zencodec adapter (2026-06-10)
 - The zencodec adapter now honors `OrientationHint` (via `HeicDecodeJob::with_orientation` / `HeicDecoderConfig::with_orientation`), matching zenjpeg so the two codecs report orientation consistently. Previously `HeicDecodeJob` inherited the no-op default and **silently ignored** the hint, always baking the HEIF container orientation into the pixels and reporting display dims with `Orientation::Identity`.
   - **`Preserve` (the zencodec default)**: the decoder keeps the pixels in stored orientation; `ImageInfo` reports the stored (coded) dimensions plus the intrinsic `Orientation` composed from `irot`+`imir`. `display_width()`/`display_height()` recover the upright dims. This is the convention zenjpeg already used.

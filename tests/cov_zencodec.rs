@@ -860,3 +860,63 @@ fn orientation_mirror_preserve_reports_flip_tag_without_swapping_dims() {
     assert_eq!(info.display_width(), info.width);
     assert_eq!(info.display_height(), info.height);
 }
+
+// ── GainMapRender modes (Apple HDR gain map) ────────────────────────────────
+
+/// Default (`BaseOnly`): no gain-map extras of either kind.
+#[test]
+fn gain_map_render_base_only_attaches_nothing() {
+    let data = read_fixture("apple-hdr/hdr-sample.heic");
+    let out = HeicDecoderConfig::new()
+        .job()
+        .decoder(Cow::Borrowed(&data), &[])
+        .expect("decoder")
+        .decode()
+        .expect("decode");
+    assert!(out.extras::<zencodec::decode::DecodedGainMap>().is_none());
+    assert!(out.extras::<heic::HdrGainMap>().is_none());
+}
+
+/// `Components` surfaces the decoded gain map both as the canonical
+/// `zencodec::decode::DecodedGainMap` (gray8 pixels + ISO 21496-1 params from
+/// the gain-map item's XMP) and as the native `HdrGainMap`.
+#[test]
+fn gain_map_render_components_surfaces_decoded_gain_map() {
+    let data = read_fixture("apple-hdr/hdr-sample.heic");
+    let out = HeicDecoderConfig::new()
+        .job()
+        .with_gain_map_render(zencodec::GainMapRender::Components)
+        .decoder(Cow::Borrowed(&data), &[])
+        .expect("decoder")
+        .decode()
+        .expect("decode");
+    let dgm = out
+        .extras::<zencodec::decode::DecodedGainMap>()
+        .expect("Components must surface the DecodedGainMap");
+    assert!(dgm.pixels.width() > 0 && dgm.pixels.height() > 0);
+    assert_eq!(dgm.metadata.channels, 1, "Apple gain maps are luma-only");
+    assert!(out.extras::<heic::HdrGainMap>().is_some());
+}
+
+/// heic surfaces but does not apply (`reconstructs_hdr()` is false):
+/// `ReconstructHdr` downgrades to Components and the base stays SDR-labeled.
+#[test]
+fn gain_map_render_reconstruct_downgrades_to_components() {
+    assert!(!<HeicDecoderConfig as DecoderConfig>::capabilities().reconstructs_hdr());
+    let data = read_fixture("apple-hdr/hdr-sample.heic");
+    let out = HeicDecoderConfig::new()
+        .job()
+        .with_gain_map_render(zencodec::GainMapRender::ReconstructHdr {
+            target_headroom: None,
+        })
+        .decoder(Cow::Borrowed(&data), &[])
+        .expect("decoder")
+        .decode()
+        .expect("decode");
+    assert!(out.extras::<zencodec::decode::DecodedGainMap>().is_some());
+    assert_ne!(
+        out.pixels().descriptor().channel_type(),
+        zenpixels::ChannelType::F32,
+        "base must stay SDR — heic never silently labels SDR as HDR"
+    );
+}

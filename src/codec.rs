@@ -219,6 +219,7 @@ impl zencodec::decode::DecoderConfig for HeicDecoderConfig {
             policy: None,
             extract_gain_map,
             extract_depth,
+            gain_map_render: zencodec::GainMapRender::default(),
         }
     }
 }
@@ -238,6 +239,11 @@ pub struct HeicDecodeJob {
     pub extract_gain_map: bool,
     /// Whether to decode the depth map when present (default: `false`).
     pub extract_depth: bool,
+    /// Gain-map rendition intent (zencodec 0.1.21). `Components` (and
+    /// `ReconstructHdr`, downgraded — heic surfaces, it does not apply)
+    /// additionally surfaces the decoded gain map as a
+    /// [`zencodec::decode::DecodedGainMap`]. Default `BaseOnly`.
+    gain_map_render: zencodec::GainMapRender,
 }
 
 /// Apply [`DecodePolicy`] to an [`ImageInfo`], stripping metadata fields
@@ -328,6 +334,15 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
 
     fn with_limits(mut self, limits: ResourceLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// heic surfaces gain maps but does not apply them
+    /// (`reconstructs_hdr()` is `false`): `ReconstructHdr` downgrades to
+    /// surfacing `Components` — the SDR base stays honestly labeled and the
+    /// caller applies the gain map one layer up (ultrahdr-core).
+    fn with_gain_map_render(mut self, render: zencodec::GainMapRender) -> Self {
+        self.gain_map_render = render;
         self
     }
 
@@ -432,6 +447,7 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
             policy: self.policy,
             extract_gain_map: self.extract_gain_map,
             extract_depth: self.extract_depth,
+            gain_map_render: self.gain_map_render,
         })
     }
 
@@ -660,6 +676,7 @@ pub struct HeicDecoder<'a> {
     extract_gain_map: bool,
     /// Whether to decode the depth map when present.
     extract_depth: bool,
+    gain_map_render: zencodec::GainMapRender,
 }
 
 impl zencodec::decode::Decode for HeicDecoder<'_> {
@@ -840,11 +857,55 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
                 auxiliary_types: aux_types,
             });
 
+            // Gain-map rendition intent. heic surfaces (it does not apply):
+            // Components surfaces the decoded gain map as a DecodedGainMap;
+            // ReconstructHdr downgrades to Components per the zencodec
+            // contract (reconstructs_hdr() is false — the base stays honestly
+            // SDR-labeled and the caller applies via ultrahdr-core). Unknown
+            // future modes are refused, never mis-rendered.
+            let surface_components = match self.gain_map_render {
+                zencodec::GainMapRender::BaseOnly => false,
+                zencodec::GainMapRender::Components
+                | zencodec::GainMapRender::ReconstructHdr { .. } => true,
+                _ => {
+                    return Err(at!(HeicError::Unsupported(
+                        "unrecognized GainMapRender mode"
+                    )));
+                }
+            };
+
             // Decode and attach the HDR gain map if requested and present.
-            if self.extract_gain_map
+            if (self.extract_gain_map || surface_components)
                 && pi.has_gain_map
                 && let Ok(gain_map) = crate::decode::decode_gain_map(data, &[crate::Backend::Rust])
             {
+                if surface_components {
+                    // Apple HDR gain maps are luma-only gray8; ISO 21496-1
+                    // params come from the gain-map item's XMP when present.
+                    let params = gain_map
+                        .xmp
+                        .as_deref()
+                        .and_then(|x| core::str::from_utf8(x).ok())
+                        .and_then(|x| ultrahdr_core::metadata::parse_xmp(x).ok())
+                        .map(|(md, _)| uhdr_metadata_to_zencodec(&md))
+                        .unwrap_or_default();
+                    let gm_info = zencodec::gainmap::GainMapInfo::new(
+                        params,
+                        gain_map.width,
+                        gain_map.height,
+                        1,
+                    );
+                    if let Ok(pixels) = zenpixels::PixelBuffer::from_vec(
+                        gain_map.data.clone(),
+                        gain_map.width,
+                        gain_map.height,
+                        zenpixels::PixelDescriptor::GRAY8_SRGB,
+                    ) {
+                        output
+                            .extensions_mut()
+                            .insert(zencodec::decode::DecodedGainMap::new(pixels, gm_info));
+                    }
+                }
                 output.extensions_mut().insert(gain_map);
             }
 
