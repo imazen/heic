@@ -31,9 +31,18 @@ feature-check:
 clippy:
     cargo clippy --all-targets --features parallel -- -D warnings
 
-# Format
+# Format (also regenerates the public-API surface snapshots)
 fmt:
     cargo fmt
+    cargo test --test public_api_doc --features backend-rust
+
+# Regenerate the public-API surface snapshots (docs/public-api/*.txt) only
+api-doc:
+    cargo test --test public_api_doc --features backend-rust
+
+# Verify the committed public-API snapshots are current (what CI runs)
+api-doc-check:
+    ZEN_API_DOC=check cargo test --test public_api_doc --features backend-rust
 
 # Local CI sanity check. Under WSL, `test-win` also runs the Windows-native
 # backends (MF + D3D11VA) on the Windows host; elsewhere it's a no-op.

@@ -129,6 +129,8 @@ zensim-regress = "0.3.1"
 # Uncomment + RUSTFLAGS='--cfg heic_reference' cargo test to enable
 # heic-wasm-rs = { path = "../../heic/heic-wasm-rs" }
 png = "0.18.1"
+# tests/public_api_doc.rs parses `cargo metadata` output for the feature list
+serde_json = "1.0.150"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(heic_reference)', 'cfg(fuzzing)'] }
