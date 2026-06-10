@@ -724,3 +724,139 @@ fn animation_unsupported() {
         "expected Unsupported, got {err:?}"
     );
 }
+
+// ── Orientation hint: Preserve (default) vs Correct ─────────────────────────
+//
+// The zencodec adapter honors `OrientationHint` the same way zenjpeg does, so
+// the two codecs report orientation consistently:
+//   - Preserve (default): pixels stay in stored orientation; `ImageInfo` reports
+//     the stored (coded) dims + the intrinsic `Orientation` tag.
+//   - Correct: the decoder bakes the image upright; `ImageInfo` reports the
+//     display dims + `Orientation::Identity`.
+// Either way `display_width()`/`display_height()` yield the upright dims.
+//
+// `irot90.heic` is a single HEVC item with an `irot` 90° rotation: stored
+// (coded) dims 64×40, display dims 40×64.
+
+const IROT90_REL: &str = "features/irot90.heic";
+const IROT90_STORED: (u32, u32) = (64, 40);
+const IROT90_DISPLAY: (u32, u32) = (40, 64);
+
+#[test]
+fn orientation_preserve_default_reports_stored_dims_and_tag() {
+    let data = read_fixture(IROT90_REL);
+    // Default config == OrientationHint::Preserve.
+    let info = HeicDecoderConfig::new().job().probe(&data).expect("probe");
+    assert_eq!(
+        (info.width, info.height),
+        IROT90_STORED,
+        "Preserve must report stored (coded, pre-rotation) dims"
+    );
+    assert!(
+        info.orientation.swaps_axes() && !info.orientation.is_identity(),
+        "Preserve must report the intrinsic 90/270 orientation tag, got {:?}",
+        info.orientation
+    );
+    assert_eq!(
+        (info.display_width(), info.display_height()),
+        IROT90_DISPLAY,
+        "display_width/height must yield the upright dims under Preserve"
+    );
+    // probe_full must agree with the lightweight probe.
+    let full = HeicDecoderConfig::new()
+        .job()
+        .probe_full(&data)
+        .expect("probe_full");
+    assert_eq!((full.width, full.height), IROT90_STORED);
+    assert_eq!(full.orientation, info.orientation);
+}
+
+#[test]
+fn orientation_correct_reports_display_dims_and_identity() {
+    let data = read_fixture(IROT90_REL);
+    let info = HeicDecoderConfig::new()
+        .with_orientation(zencodec::OrientationHint::Correct)
+        .job()
+        .probe(&data)
+        .expect("probe");
+    assert_eq!(
+        (info.width, info.height),
+        IROT90_DISPLAY,
+        "Correct must report display (post-rotation) dims"
+    );
+    assert_eq!(
+        info.orientation,
+        zenpixels::Orientation::Identity,
+        "Correct must report Identity — orientation is baked into the pixels"
+    );
+    assert_eq!(
+        (info.display_width(), info.display_height()),
+        IROT90_DISPLAY,
+    );
+}
+
+#[test]
+fn orientation_decode_dims_match_probe_for_both_hints() {
+    let data = read_fixture(IROT90_REL);
+
+    // Preserve (default): decoded pixels stay in stored orientation, and the
+    // output ImageInfo dims match the pixels.
+    let preserve = HeicDecoderConfig::new()
+        .job()
+        .decoder(Cow::Borrowed(&data), &[PixelDescriptor::RGB8_SRGB])
+        .expect("decoder")
+        .decode()
+        .expect("decode");
+    assert_eq!(
+        (preserve.width(), preserve.height()),
+        IROT90_STORED,
+        "Preserve decode must output stored-orientation pixels"
+    );
+    assert_eq!(
+        (preserve.info().width, preserve.info().height),
+        IROT90_STORED,
+        "Preserve decode ImageInfo dims must match the decoded pixels"
+    );
+    assert!(
+        preserve.info().orientation.swaps_axes(),
+        "Preserve decode must tag the intrinsic orientation"
+    );
+    assert_eq!(
+        (
+            preserve.info().display_width(),
+            preserve.info().display_height()
+        ),
+        IROT90_DISPLAY,
+    );
+
+    // Correct: decoded pixels are baked upright.
+    let correct = HeicDecoderConfig::new()
+        .with_orientation(zencodec::OrientationHint::Correct)
+        .job()
+        .decoder(Cow::Borrowed(&data), &[PixelDescriptor::RGB8_SRGB])
+        .expect("decoder")
+        .decode()
+        .expect("decode");
+    assert_eq!(
+        (correct.width(), correct.height()),
+        IROT90_DISPLAY,
+        "Correct decode must output display-orientation (upright) pixels"
+    );
+    assert_eq!(correct.info().orientation, zenpixels::Orientation::Identity,);
+}
+
+#[test]
+fn orientation_mirror_preserve_reports_flip_tag_without_swapping_dims() {
+    // `imir_h.heic` is a left↔right mirror (no axis swap): stored dims == display
+    // dims, but Preserve must still report a non-identity flip orientation.
+    let data = read_fixture("features/imir_h.heic");
+    let info = HeicDecoderConfig::new().job().probe(&data).expect("probe");
+    assert!(
+        !info.orientation.is_identity() && !info.orientation.swaps_axes(),
+        "imir Preserve must report a pure flip (non-identity, non-swapping), got {:?}",
+        info.orientation
+    );
+    // A mirror does not swap dims, so display dims equal stored dims.
+    assert_eq!(info.display_width(), info.width);
+    assert_eq!(info.display_height(), info.height);
+}

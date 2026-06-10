@@ -985,6 +985,7 @@ impl DecoderConfig {
             limits: None,
             stop: None,
             max_threads: None,
+            apply_orientation: true,
         }
     }
 
@@ -998,7 +999,7 @@ impl DecoderConfig {
     ///
     /// Returns an error if the data is not valid HEIC/HEIF format.
     pub fn decode_to_frame(&self, data: &[u8]) -> Result<hevc::DecodedFrame> {
-        decode::decode_to_frame(data, None, &Unstoppable, None, self.backends())
+        decode::decode_to_frame(data, None, &Unstoppable, None, self.backends(), true)
     }
 
     /// Estimate the peak memory usage for decoding an image of given dimensions.
@@ -1271,6 +1272,9 @@ pub struct DecodeRequest<'a> {
     /// is enabled, sequential otherwise). `Some(1)` forces single-threaded
     /// decode even when the `parallel` feature is on.
     max_threads: Option<usize>,
+    /// Whether to bake the image's orientation (`irot`/`imir`) into the
+    /// decoded pixels. Default `true`.
+    apply_orientation: bool,
 }
 
 impl<'a> DecodeRequest<'a> {
@@ -1279,6 +1283,19 @@ impl<'a> DecodeRequest<'a> {
     /// Default is `PixelLayout::Rgba8`.
     pub fn with_output_layout(mut self, layout: PixelLayout) -> Self {
         self.layout = layout;
+        self
+    }
+
+    /// Set whether the image's orientation transforms (`irot`/`imir`) are
+    /// baked into the decoded pixels.
+    ///
+    /// Default `true`: the decoder applies rotation/mirror so the output is in
+    /// display orientation (the historical, convenient behavior). Set `false`
+    /// to keep the pixels in their stored orientation — the caller is then
+    /// responsible for applying the orientation. The clean-aperture crop
+    /// (`clap`) is always applied regardless of this flag.
+    pub fn with_apply_orientation(mut self, apply_orientation: bool) -> Self {
+        self.apply_orientation = apply_orientation;
         self
     }
 
@@ -1329,6 +1346,7 @@ impl<'a> DecodeRequest<'a> {
             stop,
             self.max_threads,
             self._config.backends(),
+            self.apply_orientation,
         )?;
 
         let width = frame.cropped_width();
@@ -1395,6 +1413,7 @@ impl<'a> DecodeRequest<'a> {
             stop,
             self.max_threads,
             self._config.backends(),
+            self.apply_orientation,
         )?;
 
         let width = frame.cropped_width();
@@ -1474,6 +1493,7 @@ impl<'a> DecodeRequest<'a> {
             stop,
             self.max_threads,
             self._config.backends(),
+            self.apply_orientation,
         )?;
 
         let width = frame.cropped_width();
@@ -1520,6 +1540,7 @@ impl<'a> DecodeRequest<'a> {
             stop,
             self.max_threads,
             self._config.backends(),
+            self.apply_orientation,
         )
     }
 }

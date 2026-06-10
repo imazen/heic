@@ -127,6 +127,22 @@ pub struct HeicDecoderConfig {
     /// Default: `false`. Container metadata (`ImageInfo.supplements.depth_map`)
     /// is always populated during probe regardless of this flag.
     pub extract_depth: bool,
+    /// How to handle the image's stored orientation (`irot`/`imir`).
+    ///
+    /// Default: [`OrientationHint::Preserve`](zencodec::OrientationHint::Preserve)
+    /// — the zencodec ecosystem default. Under `Preserve` the decoder does
+    /// **not** bake the orientation into the pixels: [`decode`](Self::job)
+    /// returns pixels in stored orientation and [`ImageInfo`] reports the
+    /// stored dimensions plus the intrinsic [`Orientation`]. Under
+    /// [`Correct`](zencodec::OrientationHint::Correct) the decoder applies the
+    /// orientation and reports display dimensions with
+    /// [`Orientation::Identity`]. Either way
+    /// [`ImageInfo::display_width`]/[`display_height`](ImageInfo::display_height)
+    /// yield the upright dimensions.
+    ///
+    /// Set per-job via
+    /// [`DecodeJob::with_orientation`](zencodec::decode::DecodeJob::with_orientation).
+    pub orientation: zencodec::OrientationHint,
 }
 
 impl HeicDecoderConfig {
@@ -137,6 +153,7 @@ impl HeicDecoderConfig {
             inner: crate::DecoderConfig::new(),
             extract_gain_map: false,
             extract_depth: false,
+            orientation: zencodec::OrientationHint::Preserve,
         }
     }
 
@@ -157,6 +174,15 @@ impl HeicDecoderConfig {
     #[must_use]
     pub fn with_extract_depth(mut self, extract: bool) -> Self {
         self.extract_depth = extract;
+        self
+    }
+
+    /// Set how the decoder handles the image's stored orientation. See
+    /// [`orientation`](Self::orientation) for semantics. Default
+    /// [`OrientationHint::Preserve`](zencodec::OrientationHint::Preserve).
+    #[must_use]
+    pub fn with_orientation(mut self, hint: zencodec::OrientationHint) -> Self {
+        self.orientation = hint;
         self
     }
 }
@@ -310,14 +336,26 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
         self
     }
 
+    fn with_orientation(mut self, hint: zencodec::OrientationHint) -> Self {
+        self.config.orientation = hint;
+        self
+    }
+
     fn probe(&self, data: &[u8]) -> Result<ImageInfo, At<HeicError>> {
         self.limits
             .check_input_size(data.len() as u64)
             .map_err(|e| at!(HeicError::LimitExceeded(limit_exceeded_msg(e))))?;
         let native = crate::ImageInfo::from_bytes(data).map_err(probe_error_to_heic)?;
+        let apply = will_auto_orient(self.config.orientation);
+        let (w, h, orientation) = reported_dims_and_orientation(
+            native.width,
+            native.height,
+            primary_orientation(data),
+            apply,
+        );
         Ok(apply_policy(
             self.policy.as_ref(),
-            build_image_info_lightweight(&native),
+            build_image_info_lightweight(&native, w, h, orientation),
         ))
     }
 
@@ -332,9 +370,17 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
             None => &enough::Unstoppable,
         };
         let container = crate::heif::parse(data, stop_ref).ok();
+        let apply = will_auto_orient(self.config.orientation);
+        let intrinsic = container
+            .as_ref()
+            .and_then(|c| c.primary_item())
+            .map(|it| compose_orientation(&it.transforms))
+            .unwrap_or(Orientation::Identity);
+        let (w, h, orientation) =
+            reported_dims_and_orientation(native.width, native.height, intrinsic, apply);
         Ok(apply_policy(
             self.policy.as_ref(),
-            build_image_info_full(&native, container.as_ref(), native.width, native.height),
+            build_image_info_full(&native, container.as_ref(), w, h, orientation),
         ))
     }
 
@@ -350,7 +396,19 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
             native.color_primaries,
             native.transfer_characteristics,
         );
-        Ok(OutputInfo::full_decode(native.width, native.height, desc))
+        // Report the post-orientation output dims + what the decoder applies:
+        // `Correct` bakes the intrinsic orientation (output = display dims);
+        // `Preserve` applies nothing (output = stored dims, caller orients).
+        let apply = will_auto_orient(self.config.orientation);
+        let intrinsic = primary_orientation(data);
+        let (w, h, _) =
+            reported_dims_and_orientation(native.width, native.height, intrinsic, apply);
+        let orientation_applied = if apply {
+            intrinsic
+        } else {
+            Orientation::Identity
+        };
+        Ok(OutputInfo::full_decode(w, h, desc).with_orientation_applied(orientation_applied))
     }
 
     fn decoder(
@@ -616,6 +674,11 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
         let bit_depth = probe_info.as_ref().map_or(8, |pi| pi.bit_depth);
         let has_alpha = probe_info.as_ref().is_some_and(|pi| pi.has_alpha);
 
+        // Orientation policy: `Correct` bakes orientation into the pixels and
+        // reports `Identity`; `Preserve` (default) keeps stored orientation and
+        // reports the intrinsic orientation on the output `ImageInfo`.
+        let apply_orientation = will_auto_orient(self.config.orientation);
+
         // Negotiate output format
         let available = available_descriptors(has_alpha, bit_depth);
         let negotiated = negotiate_pixel_format(preferred, &available)
@@ -624,7 +687,11 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
         let (buf, width, height, has_alpha): (PixelBuffer, u32, u32, bool) = if is_16bit(negotiated)
         {
             // 16-bit path: decode to YCbCr frame, then convert at full precision.
-            let mut req = self.config.inner.decode_request(data);
+            let mut req = self
+                .config
+                .inner
+                .decode_request(data)
+                .with_apply_orientation(apply_orientation);
             if let Some(ref limits) = self.limits {
                 req = req.with_limits(limits);
             }
@@ -673,7 +740,8 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
                 .config
                 .inner
                 .decode_request(data)
-                .with_output_layout(layout);
+                .with_output_layout(layout)
+                .with_apply_orientation(apply_orientation);
             if let Some(ref limits) = self.limits {
                 req = req.with_limits(limits);
             }
@@ -729,9 +797,28 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
             icc_profile: None,
         };
         let pi_ref = probe_info.as_ref().unwrap_or(&fallback_info);
+        // `width`/`height` are the decoded frame's dims — stored orientation when
+        // `Preserve` (not baked), display orientation when `Correct` (baked) —
+        // so they ARE the dims to report. Tag with the intrinsic orientation
+        // unless it was baked in.
+        let report_orientation = if apply_orientation {
+            Orientation::Identity
+        } else {
+            container
+                .as_ref()
+                .and_then(|c| c.primary_item())
+                .map(|it| compose_orientation(&it.transforms))
+                .unwrap_or(Orientation::Identity)
+        };
         let info = apply_policy(
             self.policy.as_ref(),
-            build_image_info_full(pi_ref, container.as_ref(), width, height),
+            build_image_info_full(
+                pi_ref,
+                container.as_ref(),
+                width,
+                height,
+                report_orientation,
+            ),
         );
         let mut output =
             DecodeOutput::new(buf, info).with_source_encoding_details(HeicSourceEncoding);
@@ -832,8 +919,17 @@ impl HeicStreamDecoder {
         // Parse container once for metadata extraction and grid init
         let container = crate::heif::parse(data, stop_ref).ok();
 
-        // Build ImageInfo for the trait (uses pre-parsed container)
-        let info = build_image_info_full(pi, container.as_ref(), pi.width, pi.height);
+        // Build ImageInfo for the trait (uses pre-parsed container). The
+        // streaming path only handles transform-free grid images (grid
+        // eligibility bails on any `irot`/`imir`/`clap`), so the intrinsic
+        // orientation is always Identity here and stored == display dims.
+        let info = build_image_info_full(
+            pi,
+            container.as_ref(),
+            pi.width,
+            pi.height,
+            Orientation::Identity,
+        );
 
         // Try grid path for 8-bit, no-alpha images
         if pi.bit_depth <= 8
@@ -1249,19 +1345,111 @@ fn raw_to_pixel_buffer(
     }
 }
 
+// ── Orientation handling ────────────────────────────────────────────────────
+
+/// Whether the orientation hint requests baking the image's orientation into
+/// the decoded pixels. `Correct`/`CorrectAndTransform` bake; `Preserve`,
+/// `ExactTransform`, and any future variant do not (the safe default — keep
+/// pixels in stored orientation and report the orientation on `ImageInfo`).
+/// Mirrors zenjpeg's policy so the two codecs agree.
+fn will_auto_orient(hint: zencodec::OrientationHint) -> bool {
+    use zencodec::OrientationHint;
+    matches!(
+        hint,
+        OrientationHint::Correct | OrientationHint::CorrectAndTransform(_)
+    )
+}
+
+/// Compose the net intrinsic orientation from an item's HEIF transforms
+/// (`irot` rotation + `imir` mirror) in ipma listing order. `clap`
+/// (clean-aperture crop) is a crop, not an orientation, and is ignored.
+///
+/// The mapping mirrors the pixel ops applied in [`crate::decode`]: `irot`
+/// `angle` is clockwise degrees (`rotate_*_cw`); `imir` axis 0 is a top↔bottom
+/// flip (`mirror_vertical` ⇒ [`Orientation::FlipV`]) and axis 1 a left↔right
+/// flip (`mirror_horizontal` ⇒ [`Orientation::FlipH`]). Composed with
+/// [`Orientation::then`] in apply order so the result, applied to stored
+/// pixels, equals what a baking decode produces.
+fn compose_orientation(transforms: &[crate::heif::Transform]) -> Orientation {
+    use crate::heif::Transform;
+    let mut o = Orientation::Identity;
+    for t in transforms {
+        let step = match t {
+            Transform::Rotation(r) => match r.angle {
+                90 => Orientation::Rotate90,
+                180 => Orientation::Rotate180,
+                270 => Orientation::Rotate270,
+                _ => Orientation::Identity,
+            },
+            Transform::Mirror(m) => match m.axis {
+                0 => Orientation::FlipV,
+                1 => Orientation::FlipH,
+                _ => Orientation::Identity,
+            },
+            Transform::CleanAperture(_) => Orientation::Identity,
+        };
+        o = o.then(step);
+    }
+    o
+}
+
+/// Parse the container and compose the primary item's intrinsic orientation.
+/// Returns [`Orientation::Identity`] if parsing fails or there is no primary
+/// item. Used by the lightweight probe path, which has no container in hand.
+fn primary_orientation(data: &[u8]) -> Orientation {
+    crate::heif::parse(data, &enough::Unstoppable)
+        .ok()
+        .and_then(|c| {
+            c.primary_item()
+                .map(|it| compose_orientation(&it.transforms))
+        })
+        .unwrap_or(Orientation::Identity)
+}
+
+/// Resolve the dimensions and orientation tag to report on `ImageInfo`, given
+/// the display dimensions (as `crate::ImageInfo` reports them — orientation
+/// already folded into the dims), the composed intrinsic `orientation`, and
+/// whether the decoder will bake the orientation (`apply`).
+///
+/// - `apply == true` (e.g. `Correct`): the pixels are in display orientation,
+///   so report display dims + [`Orientation::Identity`].
+/// - `apply == false` (e.g. `Preserve`): the pixels stay in stored orientation,
+///   so report the stored dims (un-swap display dims for 90/270 rotations) plus
+///   the intrinsic orientation. `display_width`/`display_height` recover the
+///   upright dims.
+fn reported_dims_and_orientation(
+    display_w: u32,
+    display_h: u32,
+    orientation: Orientation,
+    apply: bool,
+) -> (u32, u32, Orientation) {
+    if apply {
+        (display_w, display_h, Orientation::Identity)
+    } else if orientation.swaps_axes() {
+        (display_h, display_w, orientation)
+    } else {
+        (display_w, display_h, orientation)
+    }
+}
+
 // ── Native → trait metadata conversion ─────────────────────────────────────
 
 /// Build a lightweight `zencodec::ImageInfo` from probe data only.
 ///
 /// Does NOT parse the HEIF container or extract ICC/EXIF/XMP/gain map.
 /// Used by `probe()` for cheap header-only metadata.
-fn build_image_info_lightweight(pi: &crate::ImageInfo) -> ImageInfo {
-    let mut info = ImageInfo::new(pi.width, pi.height, ImageFormat::Heic)
+fn build_image_info_lightweight(
+    pi: &crate::ImageInfo,
+    width: u32,
+    height: u32,
+    orientation: Orientation,
+) -> ImageInfo {
+    let mut info = ImageInfo::new(width, height, ImageFormat::Heic)
         .with_sequence(ImageSequence::Multi {
             image_count: Some(1),
             random_access: true,
         })
-        .with_orientation(Orientation::Identity) // Decoder applies transforms
+        .with_orientation(orientation)
         .with_alpha(pi.has_alpha)
         .with_bit_depth(pi.bit_depth)
         .with_channel_count(if pi.has_alpha { 4 } else { 3 })
@@ -1305,13 +1493,14 @@ fn build_image_info_full(
     container: Option<&crate::heif::HeifContainer<'_>>,
     width: u32,
     height: u32,
+    orientation: Orientation,
 ) -> ImageInfo {
     let mut info = ImageInfo::new(width, height, ImageFormat::Heic)
         .with_sequence(ImageSequence::Multi {
             image_count: Some(1),
             random_access: true,
         })
-        .with_orientation(Orientation::Identity) // Decoder applies transforms
+        .with_orientation(orientation)
         .with_alpha(pi.has_alpha)
         .with_bit_depth(pi.bit_depth)
         .with_channel_count(if pi.has_alpha { 4 } else { 3 })
@@ -1990,9 +2179,19 @@ mod tests {
         let job = config.job();
         let info = job.probe_full(&data).expect("probe_full should succeed");
 
-        // probe_full() should return dimensions
-        assert_eq!(info.width, 3024);
-        assert_eq!(info.height, 4032);
+        // Default config == OrientationHint::Preserve. classic-car is a portrait
+        // iPhone photo: stored (coded) landscape 4032×3024 with an `irot`,
+        // displayed portrait 3024×4032. Preserve reports the STORED dims + the
+        // intrinsic orientation tag; display_width/height recover the upright dims.
+        assert_eq!(info.width, 4032);
+        assert_eq!(info.height, 3024);
+        assert!(
+            info.orientation.swaps_axes(),
+            "portrait iPhone HEIC must report a 90/270 orientation under Preserve, got {:?}",
+            info.orientation
+        );
+        assert_eq!(info.display_width(), 3024);
+        assert_eq!(info.display_height(), 4032);
         assert_eq!(info.format, ImageFormat::Heic);
 
         // probe_full() should extract EXIF (iPhone image has EXIF)

@@ -55,6 +55,16 @@ struct DecodeBudget<'a> {
     /// (derived items, grid tiles, alpha, gain map) inherits the same
     /// list so a single allowlist governs the whole decode request.
     backends: &'a [crate::Backend],
+    /// Whether to apply the primary item's orientation transforms (`irot`,
+    /// `imir`) to the decoded pixels. Set at the top-level entry; `clap`
+    /// (clean-aperture crop) is always applied regardless. `true` matches the
+    /// historical default (bake orientation → display pixels). The zencodec
+    /// adapter sets `false` for `OrientationHint::Preserve` so the decoded
+    /// pixels stay in stored orientation and the orientation is reported on
+    /// `ImageInfo` instead. Only honored at `depth == 0` (the primary item);
+    /// derived sub-items always apply their own transforms as part of
+    /// composition.
+    apply_orientation: bool,
 }
 
 impl<'a> DecodeBudget<'a> {
@@ -63,7 +73,15 @@ impl<'a> DecodeBudget<'a> {
             depth: 0,
             invocations,
             backends,
+            apply_orientation: true,
         }
+    }
+
+    /// Set whether the primary item's orientation transforms are baked into
+    /// the decoded pixels (default `true`). See [`DecodeBudget::apply_orientation`].
+    fn with_apply_orientation(mut self, apply: bool) -> Self {
+        self.apply_orientation = apply;
+        self
     }
 
     fn deeper(&self) -> Self {
@@ -71,6 +89,7 @@ impl<'a> DecodeBudget<'a> {
             depth: self.depth + 1,
             invocations: self.invocations,
             backends: self.backends,
+            apply_orientation: self.apply_orientation,
         }
     }
 
@@ -165,6 +184,7 @@ pub(crate) fn decode_to_frame(
     stop: &dyn Stop,
     max_threads: Option<usize>,
     backends: &[crate::Backend],
+    apply_orientation: bool,
 ) -> Result<crate::hevc::DecodedFrame> {
     let limits = limits.unwrap_or(&NO_LIMITS);
 
@@ -186,7 +206,7 @@ pub(crate) fn decode_to_frame(
     check_stop(stop)?;
 
     let counter = DerivedCounter::new(0);
-    let budget = DecodeBudget::root(&counter, backends);
+    let budget = DecodeBudget::root(&counter, backends).with_apply_orientation(apply_orientation);
     let mut frame = decode_item(&container, &primary_item, budget, limits, stop, max_threads)?;
 
     check_stop(stop)?;
@@ -326,20 +346,26 @@ fn decode_item(
         frame.transfer_characteristics = *transfer_characteristics as u8;
     }
 
-    // Apply transformative properties in ipma listing order (HEIF spec requirement)
+    // Apply transformative properties in ipma listing order (HEIF spec requirement).
+    // `clap` (clean-aperture crop) always applies; orientation (`irot`/`imir`)
+    // is gated by `apply_orientation` at the top level (depth 0). Derived
+    // sub-items (depth > 0) always apply their own orientation as part of
+    // composition. When orientation is skipped, the pixels stay in stored
+    // orientation and the caller reports the orientation on `ImageInfo`.
+    let apply_orientation = budget.apply_orientation || budget.depth > 0;
     for transform in &item.transforms {
         match transform {
             Transform::CleanAperture(clap) => {
                 apply_clean_aperture(&mut frame, clap);
             }
-            Transform::Mirror(mirror) => {
+            Transform::Mirror(mirror) if apply_orientation => {
                 frame = match mirror.axis {
                     0 => frame.mirror_vertical()?,
                     1 => frame.mirror_horizontal()?,
                     _ => frame,
                 };
             }
-            Transform::Rotation(rotation) => {
+            Transform::Rotation(rotation) if apply_orientation => {
                 frame = match rotation.angle {
                     90 => frame.rotate_90_cw()?,
                     180 => frame.rotate_180()?,
@@ -347,6 +373,8 @@ fn decode_item(
                     _ => frame,
                 };
             }
+            // Orientation skipped (apply_orientation == false at the primary item).
+            Transform::Mirror(_) | Transform::Rotation(_) => {}
         }
     }
 
