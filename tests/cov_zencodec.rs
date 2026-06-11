@@ -895,6 +895,14 @@ fn gain_map_render_components_surfaces_decoded_gain_map() {
         .expect("Components must surface the DecodedGainMap");
     assert!(dgm.pixels.width() > 0 && dgm.pixels.height() > 0);
     assert_eq!(dgm.metadata.channels, 1, "Apple gain maps are luma-only");
+    // Params come from the EXIF MakerNote headroom — a real capture has
+    // headroom well above 1 stop. Defaulted params (the failure mode this
+    // pins: metadata source silently missing) would read 0.0 here.
+    assert!(
+        dgm.metadata.params.alternate_hdr_headroom > 0.5,
+        "MakerNote headroom must populate the ISO 21496-1 params, got {}",
+        dgm.metadata.params.alternate_hdr_headroom
+    );
     assert!(out.extras::<heic::HdrGainMap>().is_some());
 }
 
