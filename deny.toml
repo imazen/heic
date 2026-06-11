@@ -90,4 +90,7 @@ skip = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# The temporary [patch.crates-io] pin of ultrahdr-core to the imazen/ultrahdr
+# rev carrying the Apple MakerNote headroom parser (see Cargo.toml). Remove
+# together with the patch when the next ultrahdr-core release publishes.
+allow-git = ["https://github.com/imazen/ultrahdr"]
