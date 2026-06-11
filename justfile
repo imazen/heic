@@ -31,18 +31,20 @@ feature-check:
 clippy:
     cargo clippy --all-targets --features parallel -- -D warnings
 
-# Format (also regenerates the public-API surface snapshots)
+# Format (also regenerates the public-API surface snapshots).
+# The snapshot runner lives in the workspace-excluded apidoc/ package, so it
+# is never built or run by plain `cargo test` or any CI job.
 fmt:
     cargo fmt
-    cargo test --test public_api_doc --features backend-rust
+    cargo test --manifest-path apidoc/Cargo.toml
 
-# Regenerate the public-API surface snapshots (docs/public-api/*.txt) only
+# Regenerate the public-API surface snapshots (docs/public-api/) only
 api-doc:
-    cargo test --test public_api_doc --features backend-rust
+    cargo test --manifest-path apidoc/Cargo.toml
 
-# Verify the committed public-API snapshots are current (what CI runs)
+# Verify the committed snapshots are current
 api-doc-check:
-    ZEN_API_DOC=check cargo test --test public_api_doc --features backend-rust
+    ZEN_API_DOC=check cargo test --manifest-path apidoc/Cargo.toml
 
 # Local CI sanity check. Under WSL, `test-win` also runs the Windows-native
 # backends (MF + D3D11VA) on the Windows host; elsewhere it's a no-op.

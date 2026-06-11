@@ -1,0 +1,61 @@
+# heic public API — additions from non-default features
+# features: av1,backend-d3d11va,backend-mediacodec,backend-mediafoundation,backend-rust,backend-vaapi,backend-videotoolbox,fallible-alloc,parallel,std,unci,zencodec
+# (regenerated on every `cargo test` by zenutils-apidoc; ZEN_API_DOC=check verifies, =off skips).
+# Encodings: crate-name prefix stripped; auto traits collapse to a
+# count + exceptions; trait impls collapse to one roster line per
+# type (method signatures live at the trait definition); blanket
+# impls omitted; re-export duplicates annotated `[also: path]`.
+# DO NOT EDIT BY HAND — commit regenerated changes with the code.
+
+## summary
+#
+#   pub types (struct/enum/trait/alias)         5
+#   free functions                              2
+#   inherent methods                            5
+#   struct fields                               8
+#   enum variants                               1
+#   trait roster entries (type × trait)         9
+#   auto-trait-complete types                   2
+#   auto-trait exceptions                       3
+#
+# per-module pub lines:
+#   (root)                           21
+
+## items (21 lines)
+
+pub Backend::Vaapi
+pub struct HeicAuxiliaryInfo
+pub HeicAuxiliaryInfo::auxiliary_types: alloc::vec::Vec<AuxiliaryImageType>
+pub HeicAuxiliaryInfo::has_depth: bool
+pub HeicAuxiliaryInfo::has_gain_map: bool
+pub struct HeicDecodeJob
+pub HeicDecodeJob::extract_depth: bool
+pub HeicDecodeJob::extract_gain_map: bool
+pub struct HeicDecoderConfig
+pub HeicDecoderConfig::extract_depth: bool
+pub HeicDecoderConfig::extract_gain_map: bool
+pub HeicDecoderConfig::orientation: zencodec::orientation::OrientationHint
+pub fn HeicDecoderConfig::inner(&self) -> &DecoderConfig
+pub fn HeicDecoderConfig::new() -> Self
+pub fn HeicDecoderConfig::with_extract_depth(self, bool) -> Self
+pub fn HeicDecoderConfig::with_extract_gain_map(self, bool) -> Self
+pub fn HeicDecoderConfig::with_orientation(self, zencodec::orientation::OrientationHint) -> Self
+pub struct HeicStreamDecoder
+pub struct HeicZenDecoder<'a>
+pub fn cabac_bin_trace(u32)
+pub fn enable_deblock_trace()
+
+## trait impls (5 types)
+
+HeicAuxiliaryInfo: Clone, Debug
+HeicDecodeJob: zencodec::traits::decoding::DecodeJob<'a>
+HeicDecoderConfig: Clone, Debug, Default, zencodec::traits::decoding::DecoderConfig
+HeicStreamDecoder: zencodec::traits::decoder::StreamingDecode
+HeicZenDecoder<'_>: zencodec::traits::decoder::Decode
+
+## auto traits
+
+2 types implement all of: Freeze, RefUnwindSafe, Send, Sync, Unpin, UnwindSafe
+HeicDecodeJob: !RefUnwindSafe !UnwindSafe
+HeicStreamDecoder: !RefUnwindSafe !UnwindSafe
+HeicZenDecoder<'a>: !RefUnwindSafe !UnwindSafe

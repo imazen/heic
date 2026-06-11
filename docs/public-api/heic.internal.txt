@@ -1,0 +1,487 @@
+# heic public API — doc(hidden) items and excluded-feature surface
+# excluded features: (none)
+# (regenerated on every `cargo test` by zenutils-apidoc; ZEN_API_DOC=check verifies, =off skips).
+# Encodings: crate-name prefix stripped; auto traits collapse to a
+# count + exceptions; trait impls collapse to one roster line per
+# type (method signatures live at the trait definition); blanket
+# impls omitted; re-export duplicates annotated `[also: path]`.
+# DO NOT EDIT BY HAND — commit regenerated changes with the code.
+
+## summary
+#
+#   pub modules                                 3
+#   pub types (struct/enum/trait/alias)        29
+#   pub consts/statics                         48
+#   free functions                             10
+#   inherent methods                           94
+#   struct fields                             206
+#   enum variants                              30
+#   re-exports                                  1
+#   trait roster entries (type × trait)        84
+#   auto-trait-complete types                  28
+#
+# per-module pub lines:
+#   (root)                           11
+#   heif                            239
+#   hevc                            171
+
+## items (420 lines)
+
+#[non_exhaustive] pub enum heif::ItemType
+pub const heif::FourCC::AUXC: Self
+pub const heif::FourCC::AUXL: Self
+pub const heif::FourCC::AV1C: Self
+pub const heif::FourCC::CDSC: Self
+pub const heif::FourCC::CLAP: Self
+pub const heif::FourCC::CLLI: Self
+pub const heif::FourCC::CMPC: Self
+pub const heif::FourCC::CO64: Self
+pub const heif::FourCC::COLR: Self
+pub const heif::FourCC::DIMG: Self
+pub const heif::FourCC::FTYP: Self
+pub const heif::FourCC::HDLR: Self
+pub const heif::FourCC::HEV1: Self
+pub const heif::FourCC::HVC1: Self
+pub const heif::FourCC::HVCB: Self
+pub const heif::FourCC::HVCC: Self
+pub const heif::FourCC::IDAT: Self
+pub const heif::FourCC::IINF: Self
+pub const heif::FourCC::ILOC: Self
+pub const heif::FourCC::IMIR: Self
+pub const heif::FourCC::INFE: Self
+pub const heif::FourCC::IPCO: Self
+pub const heif::FourCC::IPMA: Self
+pub const heif::FourCC::IPRP: Self
+pub const heif::FourCC::IREF: Self
+pub const heif::FourCC::IROT: Self
+pub const heif::FourCC::ISPE: Self
+pub const heif::FourCC::MDAT: Self
+pub const heif::FourCC::MDCV: Self
+pub const heif::FourCC::MDHD: Self
+pub const heif::FourCC::MDIA: Self
+pub const heif::FourCC::META: Self
+pub const heif::FourCC::MINF: Self
+pub const heif::FourCC::MOOV: Self
+pub const heif::FourCC::PITM: Self
+pub const heif::FourCC::PIXI: Self
+pub const heif::FourCC::STBL: Self
+pub const heif::FourCC::STCO: Self
+pub const heif::FourCC::STSC: Self
+pub const heif::FourCC::STSD: Self
+pub const heif::FourCC::STSS: Self
+pub const heif::FourCC::STSZ: Self
+pub const heif::FourCC::THMB: Self
+pub const heif::FourCC::TKHD: Self
+pub const heif::FourCC::TRAK: Self
+pub const heif::FourCC::TREF: Self
+pub const heif::FourCC::UNCC: Self
+pub const hevc::params::MAX_SPS_DIM: u32
+pub enum heif::ColorInfo
+pub enum heif::ItemProperty
+pub enum heif::Transform
+pub fn AuxiliaryImageType::assert_fields_are_eq(&self)
+pub fn Backend::assert_fields_are_eq(&self)
+pub fn DepthRepresentationType::assert_fields_are_eq(&self)
+pub fn GainMapOrigin::assert_fields_are_eq(&self)
+pub fn PixelLayout::assert_fields_are_eq(&self)
+pub fn heif::AuxiliaryTypeProperty::clone(&self) -> heif::AuxiliaryTypeProperty
+pub fn heif::AuxiliaryTypeProperty::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn heif::Av1DecoderConfig::bit_depth(&self) -> u8
+pub fn heif::Av1DecoderConfig::chroma_format(&self) -> u8
+pub fn heif::Av1DecoderConfig::clone(&self) -> heif::Av1DecoderConfig
+pub fn heif::Av1DecoderConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn heif::CleanAperture::clone(&self) -> heif::CleanAperture
+pub fn heif::CleanAperture::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn heif::ColorInfo::clone(&self) -> heif::ColorInfo
+pub fn heif::ColorInfo::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn heif::CompressionConfig::clone(&self) -> heif::CompressionConfig
+pub fn heif::CompressionConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn heif::ContentLightLevelBox::clone(&self) -> heif::ContentLightLevelBox
+pub fn heif::ContentLightLevelBox::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn heif::FourCC::as_str(&self) -> &str
+pub fn heif::FourCC::assert_fields_are_eq(&self)
+pub fn heif::FourCC::clone(&self) -> heif::FourCC
+pub fn heif::FourCC::eq(&self, &heif::FourCC) -> bool
+pub fn heif::FourCC::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn heif::FourCC::from_bytes(&[u8]) -> core::option::Option<Self>
+pub fn heif::HeifContainer<'a>::find_all_auxiliary_items(&self, u32) -> alloc::vec::Vec<(u32, alloc::string::String)>
+pub fn heif::HeifContainer<'a>::find_auxiliary_items(&self, u32, &str) -> alloc::vec::Vec<u32>
+pub fn heif::HeifContainer<'a>::find_thumbnails(&self, u32) -> alloc::vec::Vec<u32>
+pub fn heif::HeifContainer<'a>::find_xmp_for_item(&self, u32) -> core::option::Option<alloc::borrow::Cow<'a, [u8]>>
+pub fn heif::HeifContainer<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn heif::HeifContainer<'a>::get_item(&self, u32) -> core::option::Option<heif::Item>
+pub fn heif::HeifContainer<'a>::get_item_data(&self, u32) -> Result<alloc::borrow::Cow<'a, [u8]>>
+pub fn heif::HeifContainer<'a>::get_item_references(&self, u32, heif::FourCC) -> alloc::vec::Vec<u32>
+pub fn heif::HeifContainer<'a>::items(&self) -> impl core::iter::traits::iterator::Iterator<Item = heif::Item> + '_
+pub fn heif::HeifContainer<'a>::primary_item(&self) -> core::option::Option<heif::Item>
+pub fn heif::HevcDecoderConfig::clone(&self) -> heif::HevcDecoderConfig
+pub fn heif::HevcDecoderConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn heif::ImageMirror::clone(&self) -> heif::ImageMirror
+pub fn heif::ImageMirror::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn heif::ImageRotation::clone(&self) -> heif::ImageRotation
+pub fn heif::ImageRotation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn heif::ImageSpatialExtents::clone(&self) -> heif::ImageSpatialExtents
+pub fn heif::ImageSpatialExtents::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn heif::Item::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn heif::ItemProperty::clone(&self) -> heif::ItemProperty
+pub fn heif::ItemProperty::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn heif::ItemType::assert_fields_are_eq(&self)
+pub fn heif::ItemType::clone(&self) -> heif::ItemType
+pub fn heif::ItemType::eq(&self, &heif::ItemType) -> bool
+pub fn heif::ItemType::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn heif::ItemType::from(heif::FourCC) -> Self
+pub fn heif::MasteringDisplayBox::clone(&self) -> heif::MasteringDisplayBox
+pub fn heif::MasteringDisplayBox::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn heif::Transform::clone(&self) -> heif::Transform
+pub fn heif::Transform::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn heif::UncompressedComponent::clone(&self) -> heif::UncompressedComponent
+pub fn heif::UncompressedComponent::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn heif::UncompressedConfig::clone(&self) -> heif::UncompressedConfig
+pub fn heif::UncompressedConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn heif::parse<'a>(&'a [u8], &dyn enough::Stop) -> Result<heif::HeifContainer<'a>>
+pub fn hevc::ImageInfo::clone(&self) -> hevc::ImageInfo
+pub fn hevc::ImageInfo::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn hevc::VideoDecoder::decode_annex_b(&mut self, &[u8]) -> core::result::Result<alloc::vec::Vec<heic_core::frame::DecodedFrame>, HevcError>
+pub fn hevc::VideoDecoder::decode_nal(&mut self, &hevc::bitstream::NalUnit<'_>) -> core::result::Result<core::option::Option<heic_core::frame::DecodedFrame>, HevcError>
+pub fn hevc::VideoDecoder::flush(&mut self)
+pub fn hevc::VideoDecoder::new(usize) -> Self
+pub fn hevc::decode(&[u8]) -> core::result::Result<heic_core::frame::DecodedFrame, HevcError>
+pub fn hevc::decode_with_config(&heif::HevcDecoderConfig, &[u8]) -> core::result::Result<heic_core::frame::DecodedFrame, HevcError>
+pub fn hevc::decode_with_config_stop(&heif::HevcDecoderConfig, &[u8], &dyn enough::Stop) -> core::result::Result<heic_core::frame::DecodedFrame, HevcError>
+pub fn hevc::enable_deblock_trace()
+pub fn hevc::get_info(&[u8]) -> core::result::Result<hevc::ImageInfo, HevcError>
+pub fn hevc::get_info_from_config(&heif::HevcDecoderConfig) -> core::result::Result<hevc::ImageInfo, HevcError>
+pub fn hevc::params::PcmParams::clone(&self) -> hevc::params::PcmParams
+pub fn hevc::params::PcmParams::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn hevc::params::Pps::clone(&self) -> hevc::params::Pps
+pub fn hevc::params::Pps::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn hevc::params::ProfileTierLevel::clone(&self) -> hevc::params::ProfileTierLevel
+pub fn hevc::params::ProfileTierLevel::default() -> hevc::params::ProfileTierLevel
+pub fn hevc::params::ProfileTierLevel::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn hevc::params::ScalingListData::clone(&self) -> hevc::params::ScalingListData
+pub fn hevc::params::ScalingListData::default() -> Self
+pub fn hevc::params::ScalingListData::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn hevc::params::ScalingListData::get_scaling_factor(&self, u8, u8, u32, u32) -> u8
+pub fn hevc::params::ScalingListData::new_default() -> Self
+pub fn hevc::params::ScalingListData::new_flat() -> Self
+pub fn hevc::params::Sps::bit_depth_c(&self) -> u8
+pub fn hevc::params::Sps::bit_depth_y(&self) -> u8
+pub fn hevc::params::Sps::chroma_array_type(&self) -> u8
+pub fn hevc::params::Sps::clone(&self) -> hevc::params::Sps
+pub fn hevc::params::Sps::ctb_size(&self) -> u32
+pub fn hevc::params::Sps::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn hevc::params::Sps::log2_ctb_size(&self) -> u8
+pub fn hevc::params::Sps::log2_max_tb_size(&self) -> u8
+pub fn hevc::params::Sps::log2_min_cb_size(&self) -> u8
+pub fn hevc::params::Sps::log2_min_tb_size(&self) -> u8
+pub fn hevc::params::Sps::pic_height_in_ctbs(&self) -> u32
+pub fn hevc::params::Sps::pic_width_in_ctbs(&self) -> u32
+pub fn hevc::params::TileInfo::clone(&self) -> hevc::params::TileInfo
+pub fn hevc::params::TileInfo::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn hevc::params::Vps::clone(&self) -> hevc::params::Vps
+pub fn hevc::params::Vps::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn hevc::params::parse_pps(&[u8]) -> core::result::Result<hevc::params::Pps, HevcError>
+pub fn hevc::params::parse_sps(&[u8]) -> core::result::Result<hevc::params::Sps, HevcError>
+pub fn hevc::params::parse_vps(&[u8]) -> core::result::Result<hevc::params::Vps, HevcError>
+pub VideoDecoder::disable_loop_filters: bool
+pub VideoDecoder::mv_trace_next_inter: bool
+pub VideoDecoder::mv_trace_poc: i32
+pub heif::AuxiliaryTypeProperty::aux_type: alloc::string::String
+pub heif::AuxiliaryTypeProperty::subtype_data: alloc::vec::Vec<u8>
+pub heif::Av1DecoderConfig::chroma_subsampling_x: bool
+pub heif::Av1DecoderConfig::chroma_subsampling_y: bool
+pub heif::Av1DecoderConfig::config_obus: alloc::vec::Vec<u8>
+pub heif::Av1DecoderConfig::high_bitdepth: bool
+pub heif::Av1DecoderConfig::monochrome: bool
+pub heif::Av1DecoderConfig::seq_level_idx_0: u8
+pub heif::Av1DecoderConfig::seq_profile: u8
+pub heif::Av1DecoderConfig::twelve_bit: bool
+pub heif::CleanAperture::height_d: u32
+pub heif::CleanAperture::height_n: u32
+pub heif::CleanAperture::horiz_off_d: u32
+pub heif::CleanAperture::horiz_off_n: i32
+pub heif::CleanAperture::vert_off_d: u32
+pub heif::CleanAperture::vert_off_n: i32
+pub heif::CleanAperture::width_d: u32
+pub heif::CleanAperture::width_n: u32
+pub heif::ColorInfo::IccProfile(alloc::vec::Vec<u8>)
+pub heif::ColorInfo::Nclx
+pub heif::ColorInfo::Nclx::color_primaries: u16
+pub heif::ColorInfo::Nclx::full_range: bool
+pub heif::ColorInfo::Nclx::matrix_coefficients: u16
+pub heif::ColorInfo::Nclx::transfer_characteristics: u16
+pub heif::CompressionConfig::compression_type: heif::FourCC
+pub heif::ContentLightLevelBox::max_content_light_level: u16
+pub heif::ContentLightLevelBox::max_frame_average_light_level: u16
+pub heif::HeifContainer::brand: heif::FourCC
+pub heif::HeifContainer::compatible_brands: alloc::vec::Vec<heif::FourCC>
+pub heif::HeifContainer::item_infos: alloc::vec::Vec<heif::boxes::ItemInfo>
+pub heif::HeifContainer::item_locations: alloc::vec::Vec<heif::boxes::ItemLocation>
+pub heif::HeifContainer::item_references: alloc::vec::Vec<heif::boxes::ItemReference>
+pub heif::HeifContainer::primary_item_id: u32
+pub heif::HeifContainer::properties: alloc::vec::Vec<heif::ItemProperty>
+pub heif::HeifContainer::property_associations: alloc::vec::Vec<heif::boxes::PropertyAssociation>
+pub heif::HevcDecoderConfig::bit_depth_chroma_minus8: u8
+pub heif::HevcDecoderConfig::bit_depth_luma_minus8: u8
+pub heif::HevcDecoderConfig::chroma_format: u8
+pub heif::HevcDecoderConfig::config_version: u8
+pub heif::HevcDecoderConfig::general_constraint_indicator_flags: u64
+pub heif::HevcDecoderConfig::general_level_idc: u8
+pub heif::HevcDecoderConfig::general_profile_compatibility_flags: u32
+pub heif::HevcDecoderConfig::general_profile_idc: u8
+pub heif::HevcDecoderConfig::general_profile_space: u8
+pub heif::HevcDecoderConfig::general_tier_flag: bool
+pub heif::HevcDecoderConfig::length_size_minus_one: u8
+pub heif::HevcDecoderConfig::nal_units: alloc::vec::Vec<alloc::vec::Vec<u8>>
+pub heif::ImageMirror::axis: u8
+pub heif::ImageRotation::angle: u16
+pub heif::ImageSpatialExtents::height: u32
+pub heif::ImageSpatialExtents::width: u32
+pub heif::Item::auxiliary_type_property: core::option::Option<heif::AuxiliaryTypeProperty>
+pub heif::Item::av1_config: core::option::Option<heif::Av1DecoderConfig>
+pub heif::Item::clean_aperture: core::option::Option<heif::CleanAperture>
+pub heif::Item::color_info: core::option::Option<heif::ColorInfo>
+pub heif::Item::compression_config: core::option::Option<heif::CompressionConfig>
+pub heif::Item::content_light_level: core::option::Option<heif::ContentLightLevelBox>
+pub heif::Item::dimensions: core::option::Option<(u32, u32)>
+pub heif::Item::hevc_config: core::option::Option<heif::HevcDecoderConfig>
+pub heif::Item::id: u32
+pub heif::Item::item_type: heif::ItemType
+pub heif::Item::mastering_display: core::option::Option<heif::MasteringDisplayBox>
+pub heif::Item::mirror: core::option::Option<heif::ImageMirror>
+pub heif::Item::name: alloc::string::String
+pub heif::Item::rotation: core::option::Option<heif::ImageRotation>
+pub heif::Item::transforms: alloc::vec::Vec<heif::Transform>
+pub heif::Item::uncompressed_config: core::option::Option<heif::UncompressedConfig>
+pub heif::ItemProperty::AuxiliaryType(heif::AuxiliaryTypeProperty)
+pub heif::ItemProperty::Av1Config(heif::Av1DecoderConfig)
+pub heif::ItemProperty::CleanAperture(heif::CleanAperture)
+pub heif::ItemProperty::ColorInfo(heif::ColorInfo)
+pub heif::ItemProperty::CompressionConfig(heif::CompressionConfig)
+pub heif::ItemProperty::ContentLightLevel(heif::ContentLightLevelBox)
+pub heif::ItemProperty::HevcConfig(heif::HevcDecoderConfig)
+pub heif::ItemProperty::ImageExtents(heif::ImageSpatialExtents)
+pub heif::ItemProperty::MasteringDisplay(heif::MasteringDisplayBox)
+pub heif::ItemProperty::Mirror(heif::ImageMirror)
+pub heif::ItemProperty::Rotation(heif::ImageRotation)
+pub heif::ItemProperty::UncompressedConfig(heif::UncompressedConfig)
+pub heif::ItemProperty::Unknown
+pub heif::ItemType::Av01
+pub heif::ItemType::Avc1
+pub heif::ItemType::Exif
+pub heif::ItemType::Grid
+pub heif::ItemType::Hvc1
+pub heif::ItemType::Iden
+pub heif::ItemType::Iovl
+pub heif::ItemType::Jpeg
+pub heif::ItemType::Mime
+pub heif::ItemType::Tmap
+pub heif::ItemType::Unci
+pub heif::ItemType::Unknown(heif::FourCC)
+pub heif::MasteringDisplayBox::max_luminance: u32
+pub heif::MasteringDisplayBox::min_luminance: u32
+pub heif::MasteringDisplayBox::primaries_xy: [(u16, u16); 3]
+pub heif::MasteringDisplayBox::white_point_xy: (u16, u16)
+pub heif::Transform::CleanAperture(heif::CleanAperture)
+pub heif::Transform::Mirror(heif::ImageMirror)
+pub heif::Transform::Rotation(heif::ImageRotation)
+pub heif::UncompressedComponent::component_align_size: u8
+pub heif::UncompressedComponent::component_bit_depth_minus_one: u8
+pub heif::UncompressedComponent::component_format: u8
+pub heif::UncompressedComponent::component_index: u16
+pub heif::UncompressedConfig::block_little_endian: bool
+pub heif::UncompressedConfig::block_pad_lsb: bool
+pub heif::UncompressedConfig::block_reversed: bool
+pub heif::UncompressedConfig::block_size: u8
+pub heif::UncompressedConfig::components: alloc::vec::Vec<heif::UncompressedComponent>
+pub heif::UncompressedConfig::components_little_endian: bool
+pub heif::UncompressedConfig::interleave_type: u8
+pub heif::UncompressedConfig::num_tile_cols_minus_one: u32
+pub heif::UncompressedConfig::num_tile_rows_minus_one: u32
+pub heif::UncompressedConfig::pad_unknown: bool
+pub heif::UncompressedConfig::pixel_size: u8
+pub heif::UncompressedConfig::profile: u32
+pub heif::UncompressedConfig::row_align_size: u32
+pub heif::UncompressedConfig::sampling_type: u8
+pub heif::UncompressedConfig::tile_align_size: u32
+pub hevc::ImageInfo::height: u32
+pub hevc::ImageInfo::width: u32
+pub hevc::VideoDecoder::disable_loop_filters: bool
+pub hevc::VideoDecoder::mv_trace_next_inter: bool
+pub hevc::VideoDecoder::mv_trace_poc: i32
+pub hevc::params::PcmParams::log2_diff_max_min_pcm_luma_coding_block_size: u8
+pub hevc::params::PcmParams::log2_min_pcm_luma_coding_block_size_minus3: u8
+pub hevc::params::PcmParams::pcm_loop_filter_disabled_flag: bool
+pub hevc::params::PcmParams::pcm_sample_bit_depth_chroma_minus1: u8
+pub hevc::params::PcmParams::pcm_sample_bit_depth_luma_minus1: u8
+pub hevc::params::Pps::cabac_init_present_flag: bool
+pub hevc::params::Pps::constrained_intra_pred_flag: bool
+pub hevc::params::Pps::cu_qp_delta_enabled_flag: bool
+pub hevc::params::Pps::deblocking_filter_control_present_flag: bool
+pub hevc::params::Pps::deblocking_filter_override_enabled_flag: bool
+pub hevc::params::Pps::dependent_slice_segments_enabled_flag: bool
+pub hevc::params::Pps::diff_cu_qp_delta_depth: u8
+pub hevc::params::Pps::entropy_coding_sync_enabled_flag: bool
+pub hevc::params::Pps::init_qp_minus26: i8
+pub hevc::params::Pps::lists_modification_present_flag: bool
+pub hevc::params::Pps::log2_parallel_merge_level_minus2: u8
+pub hevc::params::Pps::num_extra_slice_header_bits: u8
+pub hevc::params::Pps::num_ref_idx_l0_default_active_minus1: u8
+pub hevc::params::Pps::num_ref_idx_l1_default_active_minus1: u8
+pub hevc::params::Pps::output_flag_present_flag: bool
+pub hevc::params::Pps::pps_beta_offset_div2: i8
+pub hevc::params::Pps::pps_cb_qp_offset: i8
+pub hevc::params::Pps::pps_cr_qp_offset: i8
+pub hevc::params::Pps::pps_deblocking_filter_disabled_flag: bool
+pub hevc::params::Pps::pps_id: u8
+pub hevc::params::Pps::pps_loop_filter_across_slices_enabled_flag: bool
+pub hevc::params::Pps::pps_scaling_list: core::option::Option<hevc::params::ScalingListData>
+pub hevc::params::Pps::pps_scaling_list_data_present_flag: bool
+pub hevc::params::Pps::pps_slice_chroma_qp_offsets_present_flag: bool
+pub hevc::params::Pps::pps_tc_offset_div2: i8
+pub hevc::params::Pps::sign_data_hiding_enabled_flag: bool
+pub hevc::params::Pps::slice_segment_header_extension_present_flag: bool
+pub hevc::params::Pps::sps_id: u8
+pub hevc::params::Pps::tile_info: core::option::Option<hevc::params::TileInfo>
+pub hevc::params::Pps::tiles_enabled_flag: bool
+pub hevc::params::Pps::transform_skip_enabled_flag: bool
+pub hevc::params::Pps::transquant_bypass_enabled_flag: bool
+pub hevc::params::Pps::weighted_bipred_flag: bool
+pub hevc::params::Pps::weighted_pred_flag: bool
+pub hevc::params::ProfileTierLevel::general_frame_only_constraint_flag: bool
+pub hevc::params::ProfileTierLevel::general_interlaced_source_flag: bool
+pub hevc::params::ProfileTierLevel::general_level_idc: u8
+pub hevc::params::ProfileTierLevel::general_non_packed_constraint_flag: bool
+pub hevc::params::ProfileTierLevel::general_profile_compatibility_flag: [bool; 32]
+pub hevc::params::ProfileTierLevel::general_profile_idc: u8
+pub hevc::params::ProfileTierLevel::general_profile_space: u8
+pub hevc::params::ProfileTierLevel::general_progressive_source_flag: bool
+pub hevc::params::ProfileTierLevel::general_tier_flag: bool
+pub hevc::params::ScalingListData::dc_coef: [[u8; 6]; 2]
+pub hevc::params::ScalingListData::lists: [[[u8; 64]; 6]; 4]
+pub hevc::params::Sps::amp_enabled_flag: bool
+pub hevc::params::Sps::bit_depth_chroma_minus8: u8
+pub hevc::params::Sps::bit_depth_luma_minus8: u8
+pub hevc::params::Sps::cabac_bypass_alignment_enabled_flag: bool
+pub hevc::params::Sps::chroma_format_idc: u8
+pub hevc::params::Sps::color_primaries: u8
+pub hevc::params::Sps::conf_win_offset: (u32, u32, u32, u32)
+pub hevc::params::Sps::conformance_window_flag: bool
+pub hevc::params::Sps::explicit_rdpcm_enabled_flag: bool
+pub hevc::params::Sps::extended_precision_processing_flag: bool
+pub hevc::params::Sps::high_precision_offsets_enabled_flag: bool
+pub hevc::params::Sps::implicit_rdpcm_enabled_flag: bool
+pub hevc::params::Sps::intra_smoothing_disabled_flag: bool
+pub hevc::params::Sps::log2_diff_max_min_luma_coding_block_size: u8
+pub hevc::params::Sps::log2_diff_max_min_luma_transform_block_size: u8
+pub hevc::params::Sps::log2_max_pic_order_cnt_lsb_minus4: u8
+pub hevc::params::Sps::log2_min_luma_coding_block_size_minus3: u8
+pub hevc::params::Sps::log2_min_luma_transform_block_size_minus2: u8
+pub hevc::params::Sps::long_term_ref_pics_present_flag: bool
+pub hevc::params::Sps::long_term_ref_pics_sps: hevc::refpic::LongTermRefPicSps
+pub hevc::params::Sps::matrix_coeffs: u8
+pub hevc::params::Sps::max_sub_layers_minus1: u8
+pub hevc::params::Sps::max_transform_hierarchy_depth_inter: u8
+pub hevc::params::Sps::max_transform_hierarchy_depth_intra: u8
+pub hevc::params::Sps::num_short_term_ref_pic_sets: u8
+pub hevc::params::Sps::pcm_enabled_flag: bool
+pub hevc::params::Sps::pcm_params: core::option::Option<hevc::params::PcmParams>
+pub hevc::params::Sps::persistent_rice_adaptation_enabled_flag: bool
+pub hevc::params::Sps::pic_height_in_luma_samples: u32
+pub hevc::params::Sps::pic_width_in_luma_samples: u32
+pub hevc::params::Sps::ptl: hevc::params::ProfileTierLevel
+pub hevc::params::Sps::sample_adaptive_offset_enabled_flag: bool
+pub hevc::params::Sps::scaling_list: core::option::Option<hevc::params::ScalingListData>
+pub hevc::params::Sps::scaling_list_enabled_flag: bool
+pub hevc::params::Sps::separate_colour_plane_flag: bool
+pub hevc::params::Sps::short_term_rps: alloc::vec::Vec<hevc::refpic::ShortTermRefPicSet>
+pub hevc::params::Sps::sps_id: u8
+pub hevc::params::Sps::sps_temporal_mvp_enabled_flag: bool
+pub hevc::params::Sps::strong_intra_smoothing_enabled_flag: bool
+pub hevc::params::Sps::sub_layer_ordering_info_present_flag: bool
+pub hevc::params::Sps::temporal_id_nesting_flag: bool
+pub hevc::params::Sps::transfer_characteristics: u8
+pub hevc::params::Sps::transform_skip_context_enabled_flag: bool
+pub hevc::params::Sps::transform_skip_rotation_enabled_flag: bool
+pub hevc::params::Sps::video_full_range_flag: bool
+pub hevc::params::Sps::vps_id: u8
+pub hevc::params::Sps::vui_parameters_present_flag: bool
+pub hevc::params::TileInfo::column_widths: alloc::vec::Vec<u16>
+pub hevc::params::TileInfo::loop_filter_across_tiles_enabled_flag: bool
+pub hevc::params::TileInfo::num_tile_columns_minus1: u16
+pub hevc::params::TileInfo::num_tile_rows_minus1: u16
+pub hevc::params::TileInfo::row_heights: alloc::vec::Vec<u16>
+pub hevc::params::TileInfo::uniform_spacing_flag: bool
+pub hevc::params::Vps::base_layer_available_flag: bool
+pub hevc::params::Vps::base_layer_internal_flag: bool
+pub hevc::params::Vps::max_layers_minus1: u8
+pub hevc::params::Vps::max_sub_layers_minus1: u8
+pub hevc::params::Vps::ptl: hevc::params::ProfileTierLevel
+pub hevc::params::Vps::temporal_id_nesting_flag: bool
+pub hevc::params::Vps::vps_id: u8
+pub mod heif
+pub mod hevc
+pub mod hevc::params
+pub struct VideoDecoder [also: hevc]
+pub struct heif::AuxiliaryTypeProperty
+pub struct heif::Av1DecoderConfig
+pub struct heif::CleanAperture
+pub struct heif::CompressionConfig
+pub struct heif::ContentLightLevelBox
+pub struct heif::FourCC(pub [u8; 4])
+pub struct heif::HeifContainer<'a>
+pub struct heif::HevcDecoderConfig
+pub struct heif::ImageMirror
+pub struct heif::ImageRotation
+pub struct heif::ImageSpatialExtents
+pub struct heif::Item
+pub struct heif::MasteringDisplayBox
+pub struct heif::UncompressedComponent
+pub struct heif::UncompressedConfig
+pub struct hevc::ImageInfo
+pub struct hevc::params::PcmParams
+pub struct hevc::params::Pps
+pub struct hevc::params::ProfileTierLevel
+pub struct hevc::params::ScalingListData
+pub struct hevc::params::Sps
+pub struct hevc::params::TileInfo
+pub struct hevc::params::Vps
+pub use hevc::DecodedFrame
+
+## trait impls (31 types)
+
+Backend: TrivialClone
+DepthRepresentationType: TrivialClone
+GainMapOrigin: TrivialClone
+PixelLayout: TrivialClone
+heif::AuxiliaryTypeProperty: Clone, Debug
+heif::Av1DecoderConfig: Clone, Debug
+heif::CleanAperture: Clone, Copy, Debug, TrivialClone
+heif::ColorInfo: Clone, Debug
+heif::CompressionConfig: Clone, Debug
+heif::ContentLightLevelBox: Clone, Copy, Debug, TrivialClone
+heif::FourCC: Clone, Copy, Debug, Display, Eq, PartialEq, TrivialClone
+heif::HeifContainer<'a>: Debug
+heif::HevcDecoderConfig: Clone, Debug
+heif::ImageMirror: Clone, Copy, Debug, TrivialClone
+heif::ImageRotation: Clone, Copy, Debug, TrivialClone
+heif::ImageSpatialExtents: Clone, Copy, Debug, TrivialClone
+heif::Item: Debug
+heif::ItemProperty: Clone, Debug
+heif::ItemType: Clone, Copy, Debug, Eq, From<heif::FourCC>, PartialEq, TrivialClone
+heif::MasteringDisplayBox: Clone, Copy, Debug, TrivialClone
+heif::Transform: Clone, Copy, Debug, TrivialClone
+heif::UncompressedComponent: Clone, Debug
+heif::UncompressedConfig: Clone, Debug
+hevc::ImageInfo: Clone, Copy, Debug, TrivialClone
+hevc::params::PcmParams: Clone, Debug
+hevc::params::Pps: Clone, Debug
+hevc::params::ProfileTierLevel: Clone, Debug, Default
+hevc::params::ScalingListData: Clone, Debug, Default
+hevc::params::Sps: Clone, Debug
+hevc::params::TileInfo: Clone, Debug
+hevc::params::Vps: Clone, Debug
+
+## auto traits
+
+28 types implement all of: Freeze, RefUnwindSafe, Send, Sync, Unpin, UnwindSafe

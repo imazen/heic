@@ -1,4 +1,6 @@
 Cargo.lock
+# The workspace-excluded apidoc/ runner commits its lockfile for reproducible regen
+!apidoc/Cargo.lock
 heaptrack.*.zst
 conformance/vectors/
 .workongoing
