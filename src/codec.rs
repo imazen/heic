@@ -90,6 +90,7 @@ static HEIC_DECODE_CAPS: DecodeCapabilities = DecodeCapabilities::new()
     .with_enforces_max_memory(true)
     .with_enforces_max_input_bytes(true)
     .with_gain_map(true)
+    .with_reconstructs_hdr(true)
     .with_threads_supported_range(1, if cfg!(feature = "parallel") { 256 } else { 1 });
 
 // ── Supported descriptors ──────────────────────────────────────────────────
@@ -337,10 +338,10 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
         self
     }
 
-    /// heic surfaces gain maps but does not apply them
-    /// (`reconstructs_hdr()` is `false`): `ReconstructHdr` downgrades to
-    /// surfacing `Components` — the SDR base stays honestly labeled and the
-    /// caller applies the gain map one layer up (ultrahdr-core).
+    /// heic applies gain maps natively (`reconstructs_hdr()` is `true`):
+    /// `ReconstructHdr` decodes the SDR base, applies the Apple HDR gain map
+    /// via ultrahdr-core, and returns linear f32/f16 HDR pixels with the
+    /// content-light-level / mastering-display envelope populated.
     fn with_gain_map_render(mut self, render: zencodec::GainMapRender) -> Self {
         self.gain_map_render = render;
         self
@@ -701,90 +702,115 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
         let negotiated = negotiate_pixel_format(preferred, &available)
             .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
 
-        let (buf, width, height, has_alpha): (PixelBuffer, u32, u32, bool) = if is_16bit(negotiated)
-        {
-            // 16-bit path: decode to YCbCr frame, then convert at full precision.
-            let mut req = self
-                .config
-                .inner
-                .decode_request(data)
-                .with_apply_orientation(apply_orientation);
-            if let Some(ref limits) = self.limits {
-                req = req.with_limits(limits);
+        // Gain-map rendition intent (zencodec contract): BaseOnly decodes the
+        // SDR base; Components surfaces the decoded gain map alongside the
+        // base; ReconstructHdr applies the gain map natively. Unknown future
+        // modes are refused, never mis-rendered.
+        let (surface_components, reconstruct_target) = match self.gain_map_render {
+            zencodec::GainMapRender::BaseOnly => (false, None),
+            zencodec::GainMapRender::Components => (true, None),
+            zencodec::GainMapRender::ReconstructHdr { target_headroom } => {
+                (false, Some(target_headroom))
             }
-            if let Some(ref stop) = self.stop {
-                req = req.with_stop(stop);
+            _ => {
+                return Err(at!(HeicError::Unsupported(
+                    "unrecognized GainMapRender mode"
+                )));
             }
-            if self.thread_count > 0 {
-                req = req.with_max_threads(self.thread_count);
-            }
-            let frame = req.decode_yuv()?;
-
-            let has_alpha = frame.alpha_plane.is_some();
-            let w = frame.cropped_width();
-            let h = frame.cropped_height();
-
-            let wants_alpha = negotiated == PixelDescriptor::RGBA16_SRGB;
-            if has_alpha || wants_alpha {
-                let desc = cicp_descriptor(
-                    PixelDescriptor::RGBA16_SRGB,
-                    frame.color_primaries as u16,
-                    frame.transfer_characteristics as u16,
-                );
-                let rgba_data = frame.to_rgba16().map_err(crate::error::at_core)?;
-                let pixels = u16_vec_to_rgba(rgba_data);
-                let pb = PixelBuffer::from_pixels_erased(pixels, w, h)
-                    .map_err_at(|_| HeicError::InvalidData("pixel count mismatch"))?
-                    .with_descriptor(desc);
-                (pb, w, h, true)
-            } else {
-                let desc = cicp_descriptor(
-                    PixelDescriptor::RGB16_SRGB,
-                    frame.color_primaries as u16,
-                    frame.transfer_characteristics as u16,
-                );
-                let rgb_data = frame.to_rgb16().map_err(crate::error::at_core)?;
-                let pixels = u16_vec_to_rgb(rgb_data);
-                let pb = PixelBuffer::from_pixels_erased(pixels, w, h)
-                    .map_err_at(|_| HeicError::InvalidData("pixel count mismatch"))?
-                    .with_descriptor(desc);
-                (pb, w, h, false)
-            }
-        } else {
-            // 8-bit path: use negotiated layout for decode.
-            let layout = descriptor_to_layout(negotiated);
-            let mut req = self
-                .config
-                .inner
-                .decode_request(data)
-                .with_output_layout(layout)
-                .with_apply_orientation(apply_orientation);
-            if let Some(ref limits) = self.limits {
-                req = req.with_limits(limits);
-            }
-            if let Some(ref stop) = self.stop {
-                req = req.with_stop(stop);
-            }
-            if self.thread_count > 0 {
-                req = req.with_max_threads(self.thread_count);
-            }
-            let native_output = req.decode()?;
-            let has_alpha =
-                layout == crate::PixelLayout::Rgba8 || layout == crate::PixelLayout::Bgra8;
-            let w = native_output.width;
-            let h = native_output.height;
-            let mut pb = raw_to_pixel_buffer(native_output.data, w, h, native_output.layout)?;
-            // Apply CICP from probe
-            if let Some(ref pi) = probe_info {
-                let desc = cicp_descriptor(
-                    pb.descriptor(),
-                    pi.color_primaries,
-                    pi.transfer_characteristics,
-                );
-                pb = pb.with_descriptor(desc);
-            }
-            (pb, w, h, has_alpha)
         };
+        let reconstructing =
+            reconstruct_target.is_some() && probe_info.as_ref().is_some_and(|pi| pi.has_gain_map);
+
+        let (buf, width, height, has_alpha): (PixelBuffer, u32, u32, bool) =
+            if is_16bit(negotiated) && !reconstructing {
+                // 16-bit path: decode to YCbCr frame, then convert at full precision.
+                let mut req = self
+                    .config
+                    .inner
+                    .decode_request(data)
+                    .with_apply_orientation(apply_orientation);
+                if let Some(ref limits) = self.limits {
+                    req = req.with_limits(limits);
+                }
+                if let Some(ref stop) = self.stop {
+                    req = req.with_stop(stop);
+                }
+                if self.thread_count > 0 {
+                    req = req.with_max_threads(self.thread_count);
+                }
+                let frame = req.decode_yuv()?;
+
+                let has_alpha = frame.alpha_plane.is_some();
+                let w = frame.cropped_width();
+                let h = frame.cropped_height();
+
+                let wants_alpha = negotiated == PixelDescriptor::RGBA16_SRGB;
+                if has_alpha || wants_alpha {
+                    let desc = cicp_descriptor(
+                        PixelDescriptor::RGBA16_SRGB,
+                        frame.color_primaries as u16,
+                        frame.transfer_characteristics as u16,
+                    );
+                    let rgba_data = frame.to_rgba16().map_err(crate::error::at_core)?;
+                    let pixels = u16_vec_to_rgba(rgba_data);
+                    let pb = PixelBuffer::from_pixels_erased(pixels, w, h)
+                        .map_err_at(|_| HeicError::InvalidData("pixel count mismatch"))?
+                        .with_descriptor(desc);
+                    (pb, w, h, true)
+                } else {
+                    let desc = cicp_descriptor(
+                        PixelDescriptor::RGB16_SRGB,
+                        frame.color_primaries as u16,
+                        frame.transfer_characteristics as u16,
+                    );
+                    let rgb_data = frame.to_rgb16().map_err(crate::error::at_core)?;
+                    let pixels = u16_vec_to_rgb(rgb_data);
+                    let pb = PixelBuffer::from_pixels_erased(pixels, w, h)
+                        .map_err_at(|_| HeicError::InvalidData("pixel count mismatch"))?
+                        .with_descriptor(desc);
+                    (pb, w, h, false)
+                }
+            } else {
+                // 8-bit path: use negotiated layout for decode.
+                // ReconstructHdr forces RGBA8 — `apply_gainmap` consumes 8-bit
+                // SDR input (gain-map HEICs carry an 8-bit SDR base by design).
+                let layout = if reconstructing {
+                    crate::PixelLayout::Rgba8
+                } else {
+                    descriptor_to_layout(negotiated)
+                };
+                let mut req = self
+                    .config
+                    .inner
+                    .decode_request(data)
+                    .with_output_layout(layout)
+                    .with_apply_orientation(apply_orientation);
+                if let Some(ref limits) = self.limits {
+                    req = req.with_limits(limits);
+                }
+                if let Some(ref stop) = self.stop {
+                    req = req.with_stop(stop);
+                }
+                if self.thread_count > 0 {
+                    req = req.with_max_threads(self.thread_count);
+                }
+                let native_output = req.decode()?;
+                let has_alpha =
+                    layout == crate::PixelLayout::Rgba8 || layout == crate::PixelLayout::Bgra8;
+                let w = native_output.width;
+                let h = native_output.height;
+                let mut pb = raw_to_pixel_buffer(native_output.data, w, h, native_output.layout)?;
+                // Apply CICP from probe
+                if let Some(ref pi) = probe_info {
+                    let desc = cicp_descriptor(
+                        pb.descriptor(),
+                        pi.color_primaries,
+                        pi.transfer_characteristics,
+                    );
+                    pb = pb.with_descriptor(desc);
+                }
+                (pb, w, h, has_alpha)
+            };
 
         // Build ImageInfo with all available metadata.
         // Parse the HEIF container once for all metadata extraction.
@@ -837,6 +863,22 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
                 report_orientation,
             ),
         );
+        // Native HDR reconstruction: apply the gain map to the SDR base
+        // before packaging the output.
+        let (buf, info) = if reconstructing {
+            reconstruct_hdr_base(
+                buf,
+                info,
+                data,
+                container.as_ref(),
+                reconstruct_target.flatten(),
+                preferred,
+                stop_ref,
+            )?
+        } else {
+            (buf, info)
+        };
+
         let mut output =
             DecodeOutput::new(buf, info).with_source_encoding_details(HeicSourceEncoding);
 
@@ -857,37 +899,19 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
                 auxiliary_types: aux_types,
             });
 
-            // Gain-map rendition intent. heic surfaces (it does not apply):
-            // Components surfaces the decoded gain map as a DecodedGainMap;
-            // ReconstructHdr downgrades to Components per the zencodec
-            // contract (reconstructs_hdr() is false — the base stays honestly
-            // SDR-labeled and the caller applies via ultrahdr-core). Unknown
-            // future modes are refused, never mis-rendered.
-            let surface_components = match self.gain_map_render {
-                zencodec::GainMapRender::BaseOnly => false,
-                zencodec::GainMapRender::Components
-                | zencodec::GainMapRender::ReconstructHdr { .. } => true,
-                _ => {
-                    return Err(at!(HeicError::Unsupported(
-                        "unrecognized GainMapRender mode"
-                    )));
-                }
-            };
-
             // Decode and attach the HDR gain map if requested and present.
+            // (ReconstructHdr consumed the gain map above — `reconstructing`
+            // and `surface_components` are never both true.)
             if (self.extract_gain_map || surface_components)
                 && pi.has_gain_map
                 && let Ok(gain_map) = crate::decode::decode_gain_map(data, &[crate::Backend::Rust])
             {
                 if surface_components {
-                    // Apple HDR gain maps are luma-only gray8; ISO 21496-1
-                    // params come from the gain-map item's XMP when present.
-                    let params = gain_map
-                        .xmp
-                        .as_deref()
-                        .and_then(|x| core::str::from_utf8(x).ok())
-                        .and_then(|x| ultrahdr_core::metadata::parse_xmp(x).ok())
-                        .map(|(md, _)| uhdr_metadata_to_zencodec(&md))
+                    // Apple HDR gain maps are luma-only gray8; params come
+                    // from the EXIF MakerNote headroom when present.
+                    let params = container
+                        .as_ref()
+                        .and_then(apple_gain_map_params)
                         .unwrap_or_default();
                     let gm_info = zencodec::gainmap::GainMapInfo::new(
                         params,
@@ -1709,14 +1733,27 @@ fn limit_exceeded_msg(_e: zencodec::LimitExceeded) -> &'static str {
     "input data size exceeds max_input_bytes"
 }
 
+/// Apple HDR gain-map parameters from the primary item's EXIF MakerNote
+/// headroom (`ultrahdr_core::{parse_exif_for_apple_hdr, from_apple_headroom}`).
+///
+/// Apple HEICs carry no ISO 21496-1 box and no `hdrgm:` XMP — the MakerNote
+/// HDR headroom is the canonical parameter source (validated against real
+/// iPhone captures). Returns `None` when the EXIF or headroom is absent.
+fn apple_gain_map_params(
+    container: &crate::heif::HeifContainer<'_>,
+) -> Option<zencodec::GainMapParams> {
+    let exif = extract_exif_from_container(container)?;
+    let info = ultrahdr_core::parse_exif_for_apple_hdr(&exif)?;
+    ultrahdr_core::from_apple_headroom(&info)
+}
+
 /// Build a [`GainMapInfo`] from an Apple HDR HEIC auxiliary gain map item.
 ///
 /// Looks up the `urn:com:apple:photo:2020:aux:hdrgainmap` aux item for the
-/// primary, reads its `ispe` dimensions, parses the attached XMP via
-/// `ultrahdr_core::metadata::parse_xmp` (Adobe `hdrgm:` namespace), and builds
-/// the canonical zencodec gain map metadata. Returns `None` if any prerequisite
-/// (aux item, dimensions, parseable XMP) is missing — caller falls back to
-/// `GainMapPresence::Unknown`.
+/// primary, reads its `ispe` dimensions, and derives the canonical zencodec
+/// gain map metadata from the EXIF MakerNote headroom. Returns `None` if any
+/// prerequisite (aux item, dimensions, headroom metadata) is missing — caller
+/// falls back to `GainMapPresence::Unknown`.
 fn extract_apple_gain_map_info(
     container: &crate::heif::HeifContainer<'_>,
     primary_id: u32,
@@ -1726,34 +1763,90 @@ fn extract_apple_gain_map_info(
     let &gainmap_id = aux_ids.first()?;
     let aux_item = container.get_item(gainmap_id)?;
     let (width, height) = aux_item.dimensions?;
-    let xmp_bytes = container.find_xmp_for_item(gainmap_id)?;
-    let xmp_str = core::str::from_utf8(&xmp_bytes).ok()?;
-    let (uhdr_md, _len) = ultrahdr_core::metadata::parse_xmp(xmp_str).ok()?;
-    let params = uhdr_metadata_to_zencodec(&uhdr_md);
+    let params = apple_gain_map_params(container)?;
     // Apple HDR gain maps are luma-only (single channel).
     Some(GainMapInfo::new(params, width, height, 1))
 }
 
-/// Convert published `ultrahdr_core::GainMapMetadata` (flat per-axis arrays)
-/// to canonical [`zencodec::GainMapParams`] (per-channel structs). When
-/// ultrahdr-core publishes a release that uses zencodec types directly, this
-/// adapter can be deleted.
-fn uhdr_metadata_to_zencodec(md: &ultrahdr_core::GainMapMetadata) -> zencodec::GainMapParams {
-    let mut params = zencodec::GainMapParams::default();
-    for i in 0..3 {
-        params.channels[i] = zencodec::GainMapChannel {
-            min: md.gain_map_min[i],
-            max: md.gain_map_max[i],
-            gamma: md.gamma[i],
-            base_offset: md.base_offset[i],
-            alternate_offset: md.alternate_offset[i],
-        };
+/// Apply the HDR gain map to the decoded SDR base (`GainMapRender::ReconstructHdr`).
+///
+/// The caller forced the base decode to RGBA8 (`apply_gainmap` consumes 8-bit
+/// SDR input). `None` target reconstructs at the gain map's encoded maximum
+/// (`alternate_hdr_headroom` is log2 of the alternate/SDR peak ratio). A
+/// present-but-undecodable gain map or missing headroom metadata is an error —
+/// the caller asked for an HDR rendition, and silently returning SDR would
+/// misrepresent the image.
+fn reconstruct_hdr_base(
+    sdr: PixelBuffer,
+    mut info: ImageInfo,
+    data: &[u8],
+    container: Option<&crate::heif::HeifContainer<'_>>,
+    target_headroom: Option<f32>,
+    preferred: &[PixelDescriptor],
+    stop: &dyn enough::Stop,
+) -> Result<(PixelBuffer, ImageInfo), At<HeicError>> {
+    use ultrahdr_core::gainmap::{HdrOutputFormat, apply_gainmap};
+
+    /// SDR reference white (cd/m²) — 1.0 in the linear output maps here.
+    const SDR_WHITE_NITS: f32 = 203.0;
+
+    let gain_map = crate::decode::decode_gain_map(data, &[crate::Backend::Rust])?;
+    let params = container.and_then(apple_gain_map_params).ok_or_else(|| {
+        at!(HeicError::InvalidData(
+            "ReconstructHdr: no Apple HDR headroom metadata (EXIF MakerNote)"
+        ))
+    })?;
+
+    if params.direction() == zencodec::gainmap::GainMapDirection::BaseIsHdr {
+        // The base image IS the HDR rendition (alternate is SDR) — nothing
+        // to apply; the base decode already carries the HDR signaling.
+        return Ok((sdr, info));
     }
-    params.base_hdr_headroom = md.base_hdr_headroom;
-    params.alternate_hdr_headroom = md.alternate_hdr_headroom;
-    params.use_base_color_space = md.use_base_color_space;
-    params.backward_direction = md.backward_direction;
-    params
+
+    let gm = ultrahdr_core::GainMap {
+        width: gain_map.width,
+        height: gain_map.height,
+        channels: 1, // Apple HDR gain maps are luma-only
+        data: gain_map.data,
+    };
+
+    // Output form: honor an f16 preference; default linear f32 RGBA.
+    let wants_f16 = preferred
+        .iter()
+        .any(|d| d.channel_type() == zenpixels::ChannelType::F16);
+    let format = if wants_f16 {
+        HdrOutputFormat::LinearF16
+    } else {
+        HdrOutputFormat::LinearFloat
+    };
+
+    // `None` = full reconstruction at the gain map's encoded maximum.
+    let capacity_max = params.linear_alternate_headroom() as f32;
+    let display_boost = target_headroom.unwrap_or(capacity_max).max(1.0);
+
+    let hdr = apply_gainmap(&sdr, &gm, &params, display_boost, format, stop).map_err(|_| {
+        at!(HeicError::InvalidData(
+            "ReconstructHdr: gain-map apply failed"
+        ))
+    })?;
+
+    // Envelope: derived peak (capped at the reconstruction boost) + mastering
+    // display matching the base image's primaries (`apply_gainmap` preserves
+    // them; Apple HEIC bases are typically Display P3).
+    let peak_nits = SDR_WHITE_NITS * capacity_max.min(display_boost);
+    let primaries = match info.source_color.cicp.map(|c| c.color_primaries) {
+        Some(12) => [[0.680, 0.320], [0.265, 0.690], [0.150, 0.060]], // Display P3
+        Some(9) => [[0.708, 0.292], [0.170, 0.797], [0.131, 0.046]],  // BT.2020
+        _ => [[0.640, 0.330], [0.300, 0.600], [0.150, 0.060]],        // BT.709/sRGB
+    };
+    info.source_color.content_light_level = Some(ContentLightLevel::new(peak_nits as u16, 0));
+    info.source_color.mastering_display = Some(zencodec::MasteringDisplay::new(
+        primaries,
+        [0.3127, 0.3290],
+        peak_nits,
+        0.005,
+    ));
+    Ok((hdr, info))
 }
 
 /// Derive TransferFunction and ColorPrimaries from native CICP values.

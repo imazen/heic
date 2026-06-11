@@ -114,7 +114,7 @@ imgref = { version = "1.12.0", optional = true }
 garb = { version = "0.2.5", default-features = false, optional = true }
 rav1d-safe = { version = "0.5.3", optional = true, default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
 zenflate = { version = "0.3.4", optional = true, default-features = false }
-ultrahdr-core = { version = "0.4.1", optional = true, default-features = false }
+ultrahdr-core = { version = "0.5.0", optional = true, default-features = false }
 
 [dev-dependencies]
 criterion = "0.8.2"
@@ -187,3 +187,12 @@ harness = false
 # harness = false
 
 
+
+# ultrahdr-core 0.5.0 on crates.io predates the Apple MakerNote HDR-headroom
+# parser (parse_exif_for_apple_hdr / from_apple_headroom) that ReconstructHdr
+# needs. Patch to the imazen/ultrahdr rev that carries it until the next
+# ultrahdr-core release; remove this section and bump the version req then.
+# A git (not path) patch keeps CI and fresh clones working with no sibling
+# checkouts.
+[patch.crates-io]
+ultrahdr-core = { git = "https://github.com/imazen/ultrahdr", rev = "5527a239415356a9cbe6d933fe6942c8de0b3503" }

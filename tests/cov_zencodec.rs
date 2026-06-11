@@ -898,11 +898,12 @@ fn gain_map_render_components_surfaces_decoded_gain_map() {
     assert!(out.extras::<heic::HdrGainMap>().is_some());
 }
 
-/// heic surfaces but does not apply (`reconstructs_hdr()` is false):
-/// `ReconstructHdr` downgrades to Components and the base stays SDR-labeled.
+/// heic applies gain maps natively (`reconstructs_hdr()` is true):
+/// `ReconstructHdr` returns linear f32 HDR pixels brighter than SDR white,
+/// with the content-light-level / mastering-display envelope populated.
 #[test]
-fn gain_map_render_reconstruct_downgrades_to_components() {
-    assert!(!<HeicDecoderConfig as DecoderConfig>::capabilities().reconstructs_hdr());
+fn gain_map_render_reconstruct_applies_gain_map() {
+    assert!(<HeicDecoderConfig as DecoderConfig>::capabilities().reconstructs_hdr());
     let data = read_fixture("apple-hdr/hdr-sample.heic");
     let out = HeicDecoderConfig::new()
         .job()
@@ -913,10 +914,58 @@ fn gain_map_render_reconstruct_downgrades_to_components() {
         .expect("decoder")
         .decode()
         .expect("decode");
-    assert!(out.extras::<zencodec::decode::DecodedGainMap>().is_some());
-    assert_ne!(
-        out.pixels().descriptor().channel_type(),
-        zenpixels::ChannelType::F32,
-        "base must stay SDR — heic never silently labels SDR as HDR"
+
+    let desc = out.pixels().descriptor();
+    assert_eq!(desc.channel_type(), zenpixels::ChannelType::F32);
+    assert_eq!(desc.transfer(), zenpixels::TransferFunction::Linear);
+
+    // The HDR rendition must actually exceed SDR white (1.0 in linear)
+    // somewhere — this fixture has highlights with real headroom.
+    let max = out
+        .pixels()
+        .contiguous_bytes()
+        .chunks_exact(4)
+        .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+        .fold(0.0f32, f32::max);
+    assert!(
+        max > 1.0,
+        "expected HDR headroom above SDR white, max={max}"
+    );
+
+    let info = out.info();
+    let cll = info
+        .source_color
+        .content_light_level
+        .expect("ReconstructHdr must populate the content light level");
+    assert!(cll.max_content_light_level > 203);
+    assert!(info.source_color.mastering_display.is_some());
+
+    // Reconstruction consumed the gain map; no Components extras attach.
+    assert!(out.extras::<zencodec::decode::DecodedGainMap>().is_none());
+}
+
+/// `ReconstructHdr { target_headroom: Some(1.0) }` clamps the boost to
+/// SDR — output is linear but stays at (or barely above) SDR white.
+#[test]
+fn gain_map_render_reconstruct_honors_target_headroom() {
+    let data = read_fixture("apple-hdr/hdr-sample.heic");
+    let out = HeicDecoderConfig::new()
+        .job()
+        .with_gain_map_render(zencodec::GainMapRender::ReconstructHdr {
+            target_headroom: Some(1.0),
+        })
+        .decoder(Cow::Borrowed(&data), &[])
+        .expect("decoder")
+        .decode()
+        .expect("decode");
+    let max = out
+        .pixels()
+        .contiguous_bytes()
+        .chunks_exact(4)
+        .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+        .fold(0.0f32, f32::max);
+    assert!(
+        max <= 1.01,
+        "boost clamped to 1.0 must not exceed SDR white, max={max}"
     );
 }
