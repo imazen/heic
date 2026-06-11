@@ -1620,9 +1620,9 @@ fn build_image_info_full(
     if let Some(container) = container {
         let primary_item = container.primary_item();
 
-        // Upgrade gain map presence from Unknown to Available when we can parse
-        // the Apple HDR auxiliary item's XMP metadata. Falls back to Unknown if
-        // the aux item, dimensions, or hdrgm namespace is missing.
+        // Upgrade gain map presence from Unknown to Available when the EXIF
+        // MakerNote headroom yields real parameters. Falls back to Unknown if
+        // the aux item, dimensions, or headroom metadata is missing.
         if pi.has_gain_map
             && let Some(ref pri) = primary_item
             && let Some(gm_info) = extract_apple_gain_map_info(container, pri.id)
