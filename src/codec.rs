@@ -720,6 +720,12 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
         };
         let reconstructing =
             reconstruct_target.is_some() && probe_info.as_ref().is_some_and(|pi| pi.has_gain_map);
+        // HEIC gain-map items are stored display-oriented (they carry no
+        // irot/imir of their own), while the primary may. Reconstruct in
+        // display space so the gain map and the base align — otherwise the
+        // apply would stretch a portrait gain map across a landscape base.
+        // `report_orientation` below then correctly reports Identity.
+        let apply_orientation = apply_orientation || reconstructing;
 
         let (buf, width, height, has_alpha): (PixelBuffer, u32, u32, bool) =
             if is_16bit(negotiated) && !reconstructing {
@@ -907,12 +913,11 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
                 && let Ok(gain_map) = crate::decode::decode_gain_map(data, &[crate::Backend::Rust])
             {
                 if surface_components {
-                    // Apple HDR gain maps are luma-only gray8; params come
-                    // from the EXIF MakerNote headroom when present.
-                    let params = container
-                        .as_ref()
-                        .and_then(apple_gain_map_params)
-                        .unwrap_or_default();
+                    // heic surfaces gain maps as luma-only gray8; params come
+                    // from the ISO 21496-1 tmap payload when present, else
+                    // the Apple EXIF MakerNote headroom.
+                    let params =
+                        gain_map_params_from(&gain_map, container.as_ref()).unwrap_or_default();
                     let gm_info = zencodec::gainmap::GainMapInfo::new(
                         params,
                         gain_map.width,
@@ -1620,12 +1625,13 @@ fn build_image_info_full(
     if let Some(container) = container {
         let primary_item = container.primary_item();
 
-        // Upgrade gain map presence from Unknown to Available when the EXIF
-        // MakerNote headroom yields real parameters. Falls back to Unknown if
-        // the aux item, dimensions, or headroom metadata is missing.
+        // Upgrade gain map presence from Unknown to Available when the
+        // container yields real parameters (ISO 21496-1 tmap payload, else
+        // Apple EXIF MakerNote headroom). Falls back to Unknown if neither
+        // the metadata nor the gain-map item dimensions are present.
         if pi.has_gain_map
             && let Some(ref pri) = primary_item
-            && let Some(gm_info) = extract_apple_gain_map_info(container, pri.id)
+            && let Some(gm_info) = extract_gain_map_info(container, pri.id)
         {
             info.gain_map = GainMapPresence::Available(alloc::boxed::Box::new(gm_info));
         }
@@ -1736,9 +1742,10 @@ fn limit_exceeded_msg(_e: zencodec::LimitExceeded) -> &'static str {
 /// Apple HDR gain-map parameters from the primary item's EXIF MakerNote
 /// headroom (`ultrahdr_core::{parse_exif_for_apple_hdr, from_apple_headroom}`).
 ///
-/// Apple HEICs carry no ISO 21496-1 box and no `hdrgm:` XMP — the MakerNote
-/// HDR headroom is the canonical parameter source (validated against real
-/// iPhone captures). Returns `None` when the EXIF or headroom is absent.
+/// Legacy Apple aux-item HEICs carry no ISO 21496-1 payload and no `hdrgm:`
+/// XMP — the MakerNote HDR headroom is their canonical parameter source
+/// (validated against real iPhone captures). Returns `None` when the EXIF
+/// or headroom is absent.
 fn apple_gain_map_params(
     container: &crate::heif::HeifContainer<'_>,
 ) -> Option<zencodec::GainMapParams> {
@@ -1747,17 +1754,49 @@ fn apple_gain_map_params(
     ultrahdr_core::from_apple_headroom(&info)
 }
 
-/// Build a [`GainMapInfo`] from an Apple HDR HEIC auxiliary gain map item.
+/// Gain-map parameters for a decoded [`crate::HdrGainMap`].
 ///
-/// Looks up the `urn:com:apple:photo:2020:aux:hdrgainmap` aux item for the
-/// primary, reads its `ispe` dimensions, and derives the canonical zencodec
-/// gain map metadata from the EXIF MakerNote headroom. Returns `None` if any
-/// prerequisite (aux item, dimensions, headroom metadata) is missing — caller
-/// falls back to `GainMapPresence::Unknown`.
-fn extract_apple_gain_map_info(
+/// The ISO 21496-1 binary payload (HEIF Amendment 1 `tmap` — iOS 18+
+/// "Adaptive HDR" and Samsung HDR files) is authoritative when present: it
+/// carries the producer's real per-channel gain curve (gamma, min/max,
+/// offsets), where the MakerNote fallback can only synthesize a curve from
+/// the scalar headroom. Legacy Apple aux-item files have no ISO payload and
+/// use the MakerNote.
+fn gain_map_params_from(
+    gain_map: &crate::HdrGainMap,
+    container: Option<&crate::heif::HeifContainer<'_>>,
+) -> Option<zencodec::GainMapParams> {
+    if let Some(iso) = gain_map.iso21496.as_deref()
+        && let Ok(params) =
+            zencodec::gainmap::parse_iso21496_fmt(iso, zencodec::gainmap::Iso21496Format::AvifTmap)
+    {
+        return Some(params);
+    }
+    container.and_then(apple_gain_map_params)
+}
+
+/// Build a [`GainMapInfo`] from the container's gain-map metadata without
+/// decoding pixels.
+///
+/// Mirrors `decode_gain_map`'s precedence: the ISO 21496-1 `tmap` derived
+/// item first (params from its binary payload, dimensions from the
+/// referenced gain-map image item), then the legacy Apple aux item (`ispe`
+/// dimensions + EXIF MakerNote headroom). Returns `None` if neither yields
+/// parameters — caller falls back to `GainMapPresence::Unknown`.
+fn extract_gain_map_info(
     container: &crate::heif::HeifContainer<'_>,
     primary_id: u32,
 ) -> Option<GainMapInfo> {
+    if let Some((_tmap_id, gainmap_id, iso)) = crate::decode::find_tmap_gain_map(container)
+        && let Ok(params) =
+            zencodec::gainmap::parse_iso21496_fmt(&iso, zencodec::gainmap::Iso21496Format::AvifTmap)
+        && let Some(item) = container.get_item(gainmap_id)
+        && let Some((width, height)) = item.dimensions
+    {
+        // heic surfaces gain maps as luma-only (single channel).
+        return Some(GainMapInfo::new(params, width, height, 1));
+    }
+
     let aux_ids =
         container.find_auxiliary_items(primary_id, "urn:com:apple:photo:2020:aux:hdrgainmap");
     let &gainmap_id = aux_ids.first()?;
@@ -1791,9 +1830,10 @@ fn reconstruct_hdr_base(
     const SDR_WHITE_NITS: f32 = 203.0;
 
     let gain_map = crate::decode::decode_gain_map(data, &[crate::Backend::Rust])?;
-    let params = container.and_then(apple_gain_map_params).ok_or_else(|| {
+    let params = gain_map_params_from(&gain_map, container).ok_or_else(|| {
         at!(HeicError::InvalidData(
-            "ReconstructHdr: no Apple HDR headroom metadata (EXIF MakerNote)"
+            "ReconstructHdr: no gain-map parameters (neither ISO 21496-1 tmap \
+             metadata nor Apple EXIF MakerNote headroom)"
         ))
     })?;
 
@@ -1806,9 +1846,20 @@ fn reconstruct_hdr_base(
     let gm = ultrahdr_core::GainMap {
         width: gain_map.width,
         height: gain_map.height,
-        channels: 1, // Apple HDR gain maps are luma-only
+        channels: 1, // heic decodes gain maps luma-only (both origins)
         data: gain_map.data,
     };
+
+    // Both buffers are display-oriented (the caller decoded the base with
+    // orientation applied; gain-map items are stored display-oriented).
+    // Refuse a producer whose aspects still disagree rather than silently
+    // stretching gain across the wrong axis.
+    let transposed = (sdr.width() > sdr.height()) != (gm.width > gm.height);
+    if transposed && sdr.width() != sdr.height() && gm.width != gm.height {
+        return Err(at!(HeicError::InvalidData(
+            "ReconstructHdr: gain map and base orientation mismatch"
+        )));
+    }
 
     // Output form: honor an f16 preference; default linear f32 RGBA.
     let wants_f16 = preferred
@@ -1906,6 +1957,54 @@ fn u16_vec_to_rgba(data: alloc::vec::Vec<u16>) -> alloc::vec::Vec<Rgba<u16>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ISO 21496-1 tmap payload is the authoritative params source and
+    /// round-trips through `gain_map_params_from`.
+    #[test]
+    fn gain_map_params_prefer_iso21496() {
+        let mut expected = zencodec::GainMapParams::default();
+        expected.alternate_hdr_headroom = 1.5;
+        expected.channels[0].max = 1.5;
+        expected.channels[0].gamma = 0.7;
+        let iso = zencodec::gainmap::serialize_iso21496_fmt(
+            &expected,
+            zencodec::gainmap::Iso21496Format::AvifTmap,
+        );
+        let gm = crate::HdrGainMap {
+            data: vec![0u8; 4],
+            width: 2,
+            height: 2,
+            bit_depth: 8,
+            xmp: None,
+            iso21496: Some(iso),
+            origin: crate::GainMapOrigin::HeifTmap,
+        };
+        // No container: the MakerNote fallback is unavailable, so success
+        // proves the ISO payload alone supplies the params.
+        let params = gain_map_params_from(&gm, None).expect("ISO payload parses");
+        assert!((params.alternate_hdr_headroom - 1.5).abs() < 1e-3);
+        assert!((params.channels[0].gamma - 0.7).abs() < 1e-3);
+        assert_eq!(
+            params.direction(),
+            zencodec::gainmap::GainMapDirection::BaseIsSdr
+        );
+    }
+
+    /// Neither ISO payload nor container metadata → no params (the
+    /// ReconstructHdr caller turns this into an error, never silent SDR).
+    #[test]
+    fn gain_map_params_none_without_sources() {
+        let gm = crate::HdrGainMap {
+            data: vec![0u8; 4],
+            width: 2,
+            height: 2,
+            bit_depth: 8,
+            xmp: None,
+            iso21496: None,
+            origin: crate::GainMapOrigin::AppleAuxItem,
+        };
+        assert!(gain_map_params_from(&gm, None).is_none());
+    }
 
     #[test]
     fn config_creation() {

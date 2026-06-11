@@ -852,8 +852,13 @@ pub struct HdrGainMap {
     pub height: u32,
     /// Significant bits per sample in the source HEVC stream (typically 8).
     pub bit_depth: u8,
-    /// Raw XMP bytes from the gain map item (contains ISO 21496-1 metadata
-    /// for Apple HDR files). `None` outside the [`AppleAuxItem`] origin.
+    /// Raw XMP bytes attached to the gain map item, when present. `None`
+    /// outside the [`AppleAuxItem`] origin.
+    ///
+    /// Note: Apple's aux-item XMP is a small Apple-specific packet — it does
+    /// NOT carry ISO 21496-1 / `hdrgm:` gain-map parameters. Parameter
+    /// sources are [`iso21496`](Self::iso21496) (`tmap` files) or the EXIF
+    /// MakerNote HDR headroom (legacy Apple files).
     ///
     /// [`AppleAuxItem`]: GainMapOrigin::AppleAuxItem
     pub xmp: Option<Vec<u8>>,

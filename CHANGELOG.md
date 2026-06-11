@@ -11,6 +11,29 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 - **Default `cargo build` now fails with a `compile_error!` directing the user to enable a backend feature.** Previously the pure-Rust decoder shipped automatically as `default = ["std"]`; now the user MUST opt into at least one of `backend-rust`, `backend-mediafoundation`, `backend-videotoolbox`, `backend-mediacodec`, `backend-vaapi`, or `backend-d3d11va`. This is the 0.2.0 breaking change. The existing `default` build pulled in `heic`'s entire HEVC implementation unconditionally; the new layout makes the backend explicit so users on Apple / Android / Windows can pick the patent-licensed native decoder instead.
 - **`DecoderConfig` gains an allowlist API** (`with_backend`, `with_backends`, `recommended_backends`). Decoding without any backend in the allowlist returns `HeicError::NoBackendSelected`. `DecoderConfig::recommended_backends()` constructs a platform-aware default order from the compiled-in backends.
 
+### Added — ISO 21496-1 (`tmap`) parameters drive `ReconstructHdr` + gain-map info (2026-06-11)
+- The zencodec adapter's gain-map parameter source now mirrors
+  `decode_gain_map`'s container precedence: the ISO 21496-1 binary payload
+  from a HEIF Amendment 1 `tmap` derived item (iOS 18+ "Adaptive HDR",
+  Samsung HDR) is authoritative — it carries the producer's real gain curve
+  (gamma, min/max, offsets) — with the EXIF MakerNote headroom as the
+  legacy-Apple fallback. Applies to `ReconstructHdr`, `Components`
+  (`DecodedGainMap` params), and probe-time `GainMapPresence::Available`
+  info. Verified against real iOS 18 captures (ISO gamma 0.65/0.73 ≠ the
+  MakerNote-synthesized 1.0) and Samsung files (no XMP, no MakerNote — ISO
+  payload is their only source).
+- `ReconstructHdr` now decodes the base in display orientation: HEIC
+  gain-map items are stored display-oriented while the primary may carry
+  `irot`/`imir`, so applying in stored space stretched rotated captures'
+  gain maps across the wrong axis. The output reports `Identity`
+  orientation; an aspect-mismatch guard refuses inconsistent producers
+  rather than silently distorting.
+- New diagnostic example `examples/gain_map_info.rs`
+  (`--reconstruct` runs the adapter path and reports descriptor / peak
+  linear / CLL) for triaging real HDR captures.
+- Known issue #19 (pre-existing): the default 1 GiB memory estimate
+  rejects ~12.5 MP Samsung HDR files on plain decode.
+
 ### Added — native `ReconstructHdr` in the zencodec adapter (2026-06-10)
 - `GainMapRender::ReconstructHdr` now reconstructs natively instead of
   downgrading to `Components`: the adapter decodes the SDR base as RGBA8,

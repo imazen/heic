@@ -2099,7 +2099,9 @@ pub(crate) fn decode_gain_map(data: &[u8], backends: &[crate::Backend]) -> Resul
 /// Returns `(tmap_item_id, gainmap_item_id, iso21496_bytes)`. Per
 /// av1-avif §4.2.2 and ISO 21496-1, `tmap` references `[base, gainmap]`
 /// via `dimg`; the second reference is the gain map image.
-fn find_tmap_gain_map(container: &heif::HeifContainer<'_>) -> Option<(u32, u32, Vec<u8>)> {
+pub(crate) fn find_tmap_gain_map(
+    container: &heif::HeifContainer<'_>,
+) -> Option<(u32, u32, Vec<u8>)> {
     for tmap in container.items().filter(|i| i.item_type == ItemType::Tmap) {
         let refs = container.get_item_references(tmap.id, FourCC::DIMG);
         // Need at least two references (base + gain map); skip otherwise.
