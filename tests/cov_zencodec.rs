@@ -977,3 +977,39 @@ fn gain_map_render_reconstruct_honors_target_headroom() {
         "boost clamped to 1.0 must not exceed SDR white, max={max}"
     );
 }
+
+/// zencodec#27 item 3 pin: `ReconstructHdr` on a gain-map-less HEIC returns
+/// the base rendition (the image IS the image) instead of erroring —
+/// matching zenjpeg's contract. The error path is reserved for files whose
+/// gain-map signal is present but unusable.
+#[test]
+fn reconstruct_hdr_on_plain_heic_decodes_base() {
+    use zencodec::decode::{Decode, DecodeJob, DecoderConfig};
+    let data = std::fs::read("testdata/libheif-examples/example.heic").expect("fixture");
+
+    let base = heic::HeicDecoderConfig::new()
+        .job()
+        .decoder(data.as_slice().into(), &[])
+        .expect("decoder")
+        .decode()
+        .expect("BaseOnly decode");
+    let reconstruct = heic::HeicDecoderConfig::new()
+        .job()
+        .with_gain_map_render(zencodec::GainMapRender::ReconstructHdr {
+            target_headroom: None,
+        })
+        .decoder(data.as_slice().into(), &[])
+        .expect("decoder")
+        .decode()
+        .expect("ReconstructHdr on a plain HEIC must not error");
+
+    assert_eq!(
+        (base.pixels().width(), base.pixels().rows()),
+        (reconstruct.pixels().width(), reconstruct.pixels().rows())
+    );
+    assert_eq!(
+        base.pixels().contiguous_bytes(),
+        reconstruct.pixels().contiguous_bytes(),
+        "gain-map-less ReconstructHdr must return the base rendition"
+    );
+}

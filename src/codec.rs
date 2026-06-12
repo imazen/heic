@@ -1872,8 +1872,9 @@ fn reconstruct_hdr_base(
         HdrOutputFormat::LinearFloat
     };
 
-    // `None` = full reconstruction at the gain map's encoded maximum.
-    let capacity_max = params.linear_alternate_headroom() as f32;
+    // `None` = full reconstruction at the gain map's encoded maximum, via
+    // the canonical rounding route shared across adapters (heic#20).
+    let capacity_max = ultrahdr_core::full_reconstruction_boost(&params);
     let display_boost = target_headroom.unwrap_or(capacity_max).max(1.0);
 
     let hdr = apply_gainmap(&sdr, &gm, &params, display_boost, format, stop).map_err(|_| {

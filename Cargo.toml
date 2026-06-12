@@ -200,4 +200,8 @@ harness = false
 # A git (not path) patch keeps CI and fresh clones working with no sibling
 # checkouts.
 [patch.crates-io]
-ultrahdr-core = { git = "https://github.com/imazen/ultrahdr", rev = "5527a239415356a9cbe6d933fe6942c8de0b3503" }
+ultrahdr-core = { git = "https://github.com/imazen/ultrahdr", rev = "3ac20f99d45e985e09f274fc07181b238385e703" }
+
+[[example]]
+name = "gm20_probe"
+required-features = ["zencodec", "backend-rust"]
