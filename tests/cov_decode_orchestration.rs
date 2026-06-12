@@ -502,6 +502,7 @@ fn opaque_image_fills_alpha_with_255() {
 
 /// `uncompressed_*` fixtures that decode through the `unci` feature with the
 /// pure-Rust path. Each entry is `(relative path, width, height)`.
+#[cfg(feature = "unci")]
 const UNCI_FILES: &[(&str, u32, u32)] = &[
     ("libheif-examples/uncompressed_comp_RGB.heif", 30, 20),
     ("libheif-examples/uncompressed_comp_RGB_tiled.heif", 30, 20),
@@ -518,6 +519,7 @@ const UNCI_FILES: &[(&str, u32, u32)] = &[
     ),
 ];
 
+#[cfg(feature = "unci")]
 #[test]
 fn uncompressed_heif_decodes_with_expected_dims() {
     let cfg = DecoderConfig::new();
@@ -566,6 +568,7 @@ fn uncompressed_heif_decodes_with_expected_dims() {
     );
 }
 
+#[cfg(feature = "unci")]
 #[test]
 fn uncompressed_rgb_decode_into_matches_decode() {
     let Some(data) = read_fixture("libheif-examples/uncompressed_comp_RGB.heif") else {
@@ -583,6 +586,48 @@ fn uncompressed_rgb_decode_into_matches_decode() {
     assert_eq!(
         buf, reference.data,
         "decode_into must match decode for unci"
+    );
+}
+
+/// Regression test for heic#21: this suite must pass WITHOUT the `unci`
+/// feature too (it used to panic because the two tests above were not
+/// feature-gated). Repro file is the 2.2 KB 30x20
+/// `uncompressed_comp_RGB.heif`. Pins the without-feature contract: probing
+/// is container-level and feature-independent, while `decode` and
+/// `decode_into` fail with a clean `UnsupportedCodec` error — not a panic,
+/// and not some other variant.
+#[cfg(not(feature = "unci"))]
+#[test]
+fn uncompressed_heif_without_unci_errors_cleanly() {
+    let Some(data) = read_fixture("libheif-examples/uncompressed_comp_RGB.heif") else {
+        return;
+    };
+    let info = ImageInfo::from_bytes(&data).expect("probe must work without 'unci'");
+    assert_eq!((info.width, info.height), (30, 20), "probe dims");
+
+    let cfg = DecoderConfig::new();
+    let err = cfg
+        .decode(&data, PixelLayout::Rgba8)
+        .expect_err("decode must fail without 'unci'");
+    assert!(
+        matches!(err.error(), HeicError::UnsupportedCodec(_)),
+        "expected UnsupportedCodec from decode, got {:?}",
+        err.error(),
+    );
+
+    let size = info
+        .output_buffer_size(PixelLayout::Rgb8)
+        .expect("buffer size for 30x20 RGB8");
+    let mut buf = vec![0u8; size];
+    let err = cfg
+        .decode_request(&data)
+        .with_output_layout(PixelLayout::Rgb8)
+        .decode_into(&mut buf)
+        .expect_err("decode_into must fail without 'unci'");
+    assert!(
+        matches!(err.error(), HeicError::UnsupportedCodec(_)),
+        "expected UnsupportedCodec from decode_into, got {:?}",
+        err.error(),
     );
 }
 

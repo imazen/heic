@@ -11,6 +11,18 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 - **Default `cargo build` now fails with a `compile_error!` directing the user to enable a backend feature.** Previously the pure-Rust decoder shipped automatically as `default = ["std"]`; now the user MUST opt into at least one of `backend-rust`, `backend-mediafoundation`, `backend-videotoolbox`, `backend-mediacodec`, `backend-vaapi`, or `backend-d3d11va`. This is the 0.2.0 breaking change. The existing `default` build pulled in `heic`'s entire HEVC implementation unconditionally; the new layout makes the backend explicit so users on Apple / Android / Windows can pick the patent-licensed native decoder instead.
 - **`DecoderConfig` gains an allowlist API** (`with_backend`, `with_backends`, `recommended_backends`). Decoding without any backend in the allowlist returns `HeicError::NoBackendSelected`. `DecoderConfig::recommended_backends()` constructs a platform-aware default order from the compiled-in backends.
 
+### Fixed — orchestration suite red without the `unci` feature (2026-06-12, heic#21)
+- `tests/cov_decode_orchestration.rs` ran its two uncompressed-HEIF decode
+  tests unconditionally, so any feature set without `unci` (e.g. the
+  documented `--features zencodec,backend-rust`) failed with
+  `UnsupportedCodec`. The tests are now gated on `unci`, matching the
+  established `parse_testdata.rs` / `cov_multicodec.rs` pattern, and a new
+  `not(unci)` regression test (`uncompressed_heif_without_unci_errors_cleanly`,
+  pinned on the 2.2 KB `uncompressed_comp_RGB.heif`) asserts the
+  without-feature contract: probing still works and `decode` /
+  `decode_into` return a clean `UnsupportedCodec` error instead of
+  panicking. CI coverage (which always enables `unci`) is unchanged.
+
 ### Added — ISO 21496-1 (`tmap`) parameters drive `ReconstructHdr` + gain-map info (2026-06-11)
 - The zencodec adapter's gain-map parameter source now mirrors
   `decode_gain_map`'s container precedence: the ISO 21496-1 binary payload
