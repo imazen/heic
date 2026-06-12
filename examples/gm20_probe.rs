@@ -33,16 +33,23 @@ fn f32_diff_summary(label: &str, a: &[u8], b: &[u8]) {
         .zip(&fb)
         .map(|(x, y)| (x - y).abs())
         .fold(0.0f32, f32::max);
-    println!("{label}: {n} of {} f32 values differ, max abs {maxd:e}", fa.len());
+    println!(
+        "{label}: {n} of {} f32 values differ, max abs {maxd:e}",
+        fa.len()
+    );
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: gm20_probe <file.heic>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: gm20_probe <file.heic>");
     let data = std::fs::read(&path).unwrap();
 
     // ── Raw v2 composition ──────────────────────────────────────────────
     let dec = DecoderConfig::new();
-    let prim = dec.decode(&data, PixelLayout::Rgb8).expect("raw base decode");
+    let prim = dec
+        .decode(&data, PixelLayout::Rgb8)
+        .expect("raw base decode");
     let (w, h) = (prim.width, prim.height);
     let gm_dec = dec.decode_gain_map(&data).expect("raw gain-map decode");
     let exif = dec
