@@ -132,7 +132,8 @@ pub struct HeicDecoderConfig {
     ///
     /// Default: [`OrientationHint::Preserve`](zencodec::OrientationHint::Preserve)
     /// — the zencodec ecosystem default. Under `Preserve` the decoder does
-    /// **not** bake the orientation into the pixels: [`decode`](Self::job)
+    /// **not** bake the orientation into the pixels:
+    /// [`decode`](zencodec::decode::DecoderConfig::job)
     /// returns pixels in stored orientation and [`ImageInfo`] reports the
     /// stored dimensions plus the intrinsic [`Orientation`]. Under
     /// [`Correct`](zencodec::OrientationHint::Correct) the decoder applies the
