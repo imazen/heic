@@ -1217,9 +1217,9 @@ impl HeicStreamDecoder {
         // 32-bit-dims flag and output_width/height up to 0xFFFFFFFF drove an
         // uncapped allocation (OOM on 64-bit; usize-overflow undersized strip
         // buffer + OOB index on 32-bit/wasm). Mirror the parent's
-        // try_decode_grid_streaming, which uses limits.unwrap_or(&NO_LIMITS).
+        // try_decode_grid_streaming, which uses limits.unwrap_or(&DEFAULT_LIMITS).
         limits
-            .unwrap_or(&crate::decode::NO_LIMITS)
+            .unwrap_or(&crate::decode::DEFAULT_LIMITS)
             .check_dimensions(output_width, output_height)?;
 
         // Get tile info

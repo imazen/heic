@@ -275,6 +275,21 @@ impl PixelLayout {
 /// All fields default to `None` (no limit). Set limits to prevent
 /// resource exhaustion from adversarial or oversized input.
 ///
+/// # Server safety
+///
+/// `Limits::default()` is **all-`None` (uncapped)** — passing
+/// `Some(Limits::default())` to a decode therefore *removes* protection rather
+/// than adding it. (Passing `None`/omitting limits is different: the decoder
+/// then applies generous built-in default caps.) For untrusted input, start
+/// from [`Limits::server_defaults`] (16 384² / 256 MP / 1 GiB) and tighten from
+/// there, rather than `default()`:
+///
+/// ```
+/// use heic::Limits;
+///
+/// let limits = Limits::server_defaults(); // capped; safe for untrusted input
+/// ```
+///
 /// # Example
 ///
 /// ```
