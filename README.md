@@ -122,6 +122,29 @@ let output = DecoderConfig::new()
     .decode()?;
 ```
 
+### Errors (for a server)
+
+Decode methods return `Result<_, whereat::At<HeicError>>` — the `At` wrapper
+records the source location for your logs (`format!("{e}")`). Borrow the inner
+error with `e.error()` (or own it with `e.decompose().0`) and match `HeicError`
+to pick an HTTP status. `HeicError` is `#[non_exhaustive]`, so keep a wildcard arm:
+
+```rust
+use heic::{DecoderConfig, PixelLayout, HeicError};
+
+let status = match DecoderConfig::new().decode(&data, PixelLayout::Rgba8) {
+    Ok(_output) => 200,
+    Err(e) => match e.error() {
+        HeicError::LimitExceeded(_) | HeicError::OutOfMemory => 413, // Payload Too Large
+        HeicError::Unsupported(_) | HeicError::UnsupportedCodec(_) => 415, // Unsupported Media Type
+        HeicError::Cancelled(_) => 499, // client closed request
+        HeicError::NoBackendSelected => 500, // build misconfigured — enable a `backend-*` feature
+        // malformed input: InvalidContainer, InvalidData, NoPrimaryImage, HevcDecode(_), ...
+        _ => 400, // Bad Request
+    },
+};
+```
+
 ### Probe without decoding
 
 ```rust
