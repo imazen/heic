@@ -683,12 +683,26 @@ impl<'a> SliceContext<'a> {
 
         // Start from slice segment address
         let start_addr = self.header.slice_segment_address;
+
+        // `slice_segment_address` is attacker-controlled; it indexes per-CTB
+        // tables (e.g. `tile_scan_idx` below) and drives the CTB walk. An
+        // address at/beyond the picture's CTB count — or a zero-CTB picture —
+        // otherwise panics (OOB index `len N index N`, or a divide-by-zero in
+        // the `ctb_x`/`ctb_y` derivation when the picture is 0 CTBs wide).
+        // Reject as a malformed bitstream. Fuzz heic#26.
+        let total_ctus = pic_width_in_ctbs
+            .checked_mul(pic_height_in_ctbs)
+            .unwrap_or(0);
+        if total_ctus == 0 || start_addr >= total_ctus {
+            return Err(HevcError::InvalidBitstream(
+                "slice_segment_address out of range for picture CTB count",
+            ));
+        }
+
         self.ctb_y = start_addr / pic_width_in_ctbs;
         self.ctb_x = start_addr % pic_width_in_ctbs;
 
         let mut ctu_count = 0u32;
-        #[allow(unused_variables)]
-        let total_ctus = pic_width_in_ctbs * pic_height_in_ctbs;
 
         // Tiles: compute tile column/row boundaries and tile scan order
         // col_bd[i] = first CTB column of tile column i

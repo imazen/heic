@@ -11,6 +11,20 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 - **Default `cargo build` now fails with a `compile_error!` directing the user to enable a backend feature.** Previously the pure-Rust decoder shipped automatically as `default = ["std"]`; now the user MUST opt into at least one of `backend-rust`, `backend-mediafoundation`, `backend-videotoolbox`, `backend-mediacodec`, `backend-vaapi`, or `backend-d3d11va`. This is the 0.2.0 breaking change. The existing `default` build pulled in `heic`'s entire HEVC implementation unconditionally; the new layout makes the backend explicit so users on Apple / Android / Windows can pick the patent-licensed native decoder instead.
 - **`DecoderConfig` gains an allowlist API** (`with_backend`, `with_backends`, `recommended_backends`). Decoding without any backend in the allowlist returns `HeicError::NoBackendSelected`. `DecoderConfig::recommended_backends()` constructs a platform-aware default order from the compiled-in backends.
 
+### Fixed — HEVC slice_segment_address OOB panic on malformed input (2026-06-14, heic#26)
+- `decode_slice` used the attacker-controlled `slice_segment_address` to index the
+  per-CTB `tile_scan_idx` table and to derive `ctb_x`/`ctb_y` without bounds-
+  checking it against the picture's CTB count. An address ≥ CTB count panicked
+  (`len N index N` at `hevc/ctu.rs`), and a zero-CTB picture would divide by zero —
+  a DoS for any code decoding untrusted HEVC/HEIC. Found by the fuzz farm
+  (`fuzz_hevc_raw`, 64 distinct inputs, one site). Now rejected as
+  `HevcError::InvalidBitstream`. Regression: `fuzz/regression/crash-slice-addr-oob-26`,
+  newly exercised by `tests/fuzz_regression.rs::fuzz_regression_hevc_raw` (added —
+  the existing harness only drove the HEIF container path, which never reaches the
+  raw HEVC decoder where most fuzz bugs live). The `crash-*` gitignore rule now
+  exempts `fuzz/regression/` so curated seeds track without a `git add -f` (also
+  committing 5 previously-untracked named seeds).
+
 ### Fixed — orchestration suite red without the `unci` feature (2026-06-12, heic#21)
 - `tests/cov_decode_orchestration.rs` ran its two uncompressed-HEIF decode
   tests unconditionally, so any feature set without `unci` (e.g. the

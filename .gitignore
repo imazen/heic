@@ -64,6 +64,11 @@ oom-*
 timeout-*
 slow-unit-*
 !fuzz/Cargo.lock
+# ...but fuzz/regression/ holds CURATED, committed regression seeds (named
+# crash-*/oom-* after the bug they pin). Keep them tracked instead of forcing a
+# `git add -f` for every new one.
+!fuzz/regression/
+!fuzz/regression/**
 
 # Tooling noise
 .superwork/

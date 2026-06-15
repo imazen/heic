@@ -50,6 +50,32 @@ fn fuzz_regression_decode() {
     );
 }
 
+/// Run all regression inputs through the raw HEVC decoder (`heic::hevc::decode`).
+///
+/// Most fuzz-found crashes live in the HEVC core, not the HEIF container, and
+/// are reached via `fuzz_hevc_raw` — which feeds bytes straight to this entry
+/// point, bypassing container parsing. The container `decode()` test above does
+/// NOT exercise that path (a raw HEVC seed isn't a valid HEIF file and bails at
+/// the box parser), so without this the raw-bitstream regressions (e.g. the
+/// slice_segment_address OOB, heic#26) silently wouldn't be covered. Must not
+/// panic — any `Result` is acceptable.
+#[test]
+fn fuzz_regression_hevc_raw() {
+    let dir = regression_dir();
+    if !dir.exists() {
+        eprintln!("SKIP: fuzz/regression/ not found");
+        return;
+    }
+    for entry in std::fs::read_dir(&dir).expect("read regression dir") {
+        let path = entry.expect("entry").path();
+        if !path.is_file() {
+            continue;
+        }
+        let data = std::fs::read(&path).expect("read file");
+        let _ = heic::hevc::decode(&data);
+    }
+}
+
 /// Run all regression inputs through the probe pipeline.
 /// Must not panic.
 #[test]
