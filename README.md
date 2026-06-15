@@ -115,19 +115,27 @@ limits.max_height = Some(8192);
 limits.max_pixels = Some(64_000_000);
 limits.max_memory_bytes = Some(512 * 1024 * 1024);
 
+// A real, thread-safe cancellation token from the companion `almost-enough`
+// crate (`cargo add almost-enough`); pass `&enough::Unstoppable` to opt out.
+let stop = almost_enough::Stopper::new();
+let watcher = stop.clone(); // Stopper is Clone
+std::thread::spawn(move || watcher.cancel()); // e.g. on a deadline or client disconnect
+
 let output = DecoderConfig::new()
     .decode_request(&data)
     .with_output_layout(PixelLayout::Rgba8)
     .with_limits(&limits)
+    .with_stop(&stop)
     .decode()?;
 ```
 
 ### Errors (for a server)
 
 Decode methods return `Result<_, whereat::At<HeicError>>` — the `At` wrapper
-records the source location for your logs (`format!("{e}")`). Borrow the inner
-error with `e.error()` (or own it with `e.decompose().0`) and match `HeicError`
-to pick an HTTP status. `HeicError` is `#[non_exhaustive]`, so keep a wildcard arm:
+records the source location for your logs: read it with `e.location()`
+(`Option<&Location>`, giving `file()`/`line()`), or just `format!("{e}")`. Borrow
+the inner error with `e.error()` (or own it with `e.decompose().0`) and match
+`HeicError` to pick an HTTP status. `HeicError` is `#[non_exhaustive]`, so keep a wildcard arm:
 
 ```rust
 use heic::{DecoderConfig, PixelLayout, HeicError};
