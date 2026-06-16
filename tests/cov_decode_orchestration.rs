@@ -765,6 +765,39 @@ fn cancellation_token_aborts_decode() {
     );
 }
 
+/// A pre-cancelled `Stop` aborts a **single-image** (non-grid) decode too.
+///
+/// The grid case above already cancelled at the per-tile checkpoint; this
+/// covers the still-image HEVC path (`decode_with_config_stop` →
+/// `decode_nal_units` → `decode_slice` → the per-CTU loop in
+/// `SliceContext::decode_slice`). Before per-CTU cancellation was threaded
+/// in, this single-tile decode observed no stop checkpoint during HEVC decode
+/// and would have run to completion. The synthetic fixture is a single image
+/// with no tiles, so only the CTU-loop check can catch the cancellation.
+#[test]
+fn cancellation_aborts_single_image_decode() {
+    let Some(data) = read_fixture("synthetic/synth_8bit_q50.heic") else {
+        return;
+    };
+    // Sanity: this fixture is a single image, not a grid (no tile-entry
+    // checkpoint to mask what we're testing).
+    let info = ImageInfo::from_bytes(&data).expect("probe synthetic single image");
+    assert!(!info.has_thumbnail, "synthetic file has no thumbnail");
+
+    let cfg = DecoderConfig::new();
+    let stop = AlwaysStop;
+    let err = cfg
+        .decode_request(&data)
+        .with_stop(&stop)
+        .decode()
+        .expect_err("an always-stopped token must abort a single-image decode");
+    assert!(
+        matches!(err.error(), HeicError::Cancelled(_)),
+        "expected Cancelled for single-image decode, got {:?}",
+        err.error(),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 11. Backend allowlist orchestration
 // ---------------------------------------------------------------------------

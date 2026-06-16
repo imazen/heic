@@ -249,14 +249,25 @@ fn probe_fuzz_regression_seeds_no_panic() {
 // Limits — each knob below the image rejects, generous limits succeed
 // ===========================================================================
 
-/// `Limits::default()` is all-`None` (no caps) and decode succeeds with it.
+/// `Limits::default()` carries the **safe fallback** caps (NOT all-`None`), so
+/// it is never weaker than passing no limits at all — the footgun fix. A median
+/// sample (well under the caps) still decodes.
 #[test]
-fn limits_default_is_unbounded() {
+fn limits_default_carries_safe_fallback() {
     let limits = Limits::default();
-    assert_eq!(limits.max_width, None);
-    assert_eq!(limits.max_height, None);
-    assert_eq!(limits.max_pixels, None);
-    assert_eq!(limits.max_memory_bytes, None);
+    // Not None — the previous all-`None` default was a footgun (weaker than
+    // passing nothing, which the decoder bounds with the same fallback).
+    assert_eq!(limits.max_width, Some(16_384));
+    assert_eq!(limits.max_height, Some(16_384));
+    assert_eq!(limits.max_pixels, Some(268_435_456)); // 256 MP
+    assert_eq!(limits.max_memory_bytes, Some(1_073_741_824)); // 1 GiB
+
+    // default() == server_defaults(), field by field.
+    let srv = Limits::server_defaults();
+    assert_eq!(limits.max_width, srv.max_width);
+    assert_eq!(limits.max_height, srv.max_height);
+    assert_eq!(limits.max_pixels, srv.max_pixels);
+    assert_eq!(limits.max_memory_bytes, srv.max_memory_bytes);
 
     let data = read_fixture(EXAMPLE);
     let out = DecoderConfig::new()
@@ -264,7 +275,7 @@ fn limits_default_is_unbounded() {
         .with_output_layout(PixelLayout::Rgb8)
         .with_limits(&limits)
         .decode()
-        .expect("decode with default (unbounded) limits");
+        .expect("decode with default (safe-fallback) limits");
     assert_eq!((out.width, out.height), (1280, 854));
 }
 

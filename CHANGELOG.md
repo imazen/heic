@@ -11,6 +11,30 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 - **Default `cargo build` now fails with a `compile_error!` directing the user to enable a backend feature.** Previously the pure-Rust decoder shipped automatically as `default = ["std"]`; now the user MUST opt into at least one of `backend-rust`, `backend-mediafoundation`, `backend-videotoolbox`, `backend-mediacodec`, `backend-vaapi`, or `backend-d3d11va`. This is the 0.2.0 breaking change. The existing `default` build pulled in `heic`'s entire HEVC implementation unconditionally; the new layout makes the backend explicit so users on Apple / Android / Windows can pick the patent-licensed native decoder instead.
 - **`DecoderConfig` gains an allowlist API** (`with_backend`, `with_backends`, `recommended_backends`). Decoding without any backend in the allowlist returns `HeicError::NoBackendSelected`. `DecoderConfig::recommended_backends()` constructs a platform-aware default order from the compiled-in backends.
 
+### Fixed — `Limits::default()` footgun + per-CTU cancellation (2026-06-16, heic#29)
+- **`Limits::default()` now carries the safe fallback caps** (`16_384 × 16_384`,
+  256 MP, 1 GiB — identical to `Limits::server_defaults()`) instead of all-`None`
+  (`src/lib.rs`). Previously a caller who passed `Limits::default()` got an
+  *unbounded* decode — weaker than passing no limits at all, since the decoder
+  applies the same `NO_LIMITS` fallback (`decode.rs:173`) when no `Limits` is
+  supplied. A `Limits::default()` decode is now never weaker than the implicit
+  bound. Lifting an individual cap is still possible by setting that field to
+  `None` explicitly. Behavior change (not an API-signature break): a
+  `Limits::default()` decode of a >256 MP / >1 GiB image now returns
+  `LimitExceeded` where it previously proceeded. Pinned by
+  `cov_public_api.rs::limits_default_carries_safe_fallback` and
+  `lib.rs::limits_default_tests` (`default_is_safe_fallback_not_none`,
+  `default_rejects_over_256mp_dimension`, `explicit_all_none_is_unbounded`).
+- **Per-CTU cancellation in the HEVC slice loop.** `with_stop` was observed only
+  at tile entry, so a large single-tile intra frame (e.g. 16384×16384) could not
+  be interrupted once HEVC decode began. The CTU loop in
+  `SliceContext::decode_slice` (`src/hevc/ctu.rs`) now polls the `Stop` token
+  every `STOP_CHECK_CTU_INTERVAL` (256) CTUs — out of the per-sample inner work
+  — returning `HevcError::Cancelled` on cancellation. `stop` is threaded through
+  `decode_nal_units` → free `decode_slice` → `SliceContext::decode_slice` (the
+  still-image HEIC path; the multi-frame video path passes `Unstoppable`).
+  Pinned by `cov_decode_orchestration.rs::cancellation_aborts_single_image_decode`.
+
 ### Fixed — README: complete server setup, cancellation wiring, Rgba8 HDR behavior (2026-06-15)
 - Added one copy-pasteable server `Cargo.toml` line and spelled out the
   `backend-rust` / `std` landmine: empty `default-features` emits a
