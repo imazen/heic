@@ -11,6 +11,22 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 - **Default `cargo build` now fails with a `compile_error!` directing the user to enable a backend feature.** Previously the pure-Rust decoder shipped automatically as `default = ["std"]`; now the user MUST opt into at least one of `backend-rust`, `backend-mediafoundation`, `backend-videotoolbox`, `backend-mediacodec`, `backend-vaapi`, or `backend-d3d11va`. This is the 0.2.0 breaking change. The existing `default` build pulled in `heic`'s entire HEVC implementation unconditionally; the new layout makes the backend explicit so users on Apple / Android / Windows can pick the patent-licensed native decoder instead.
 - **`DecoderConfig` gains an allowlist API** (`with_backend`, `with_backends`, `recommended_backends`). Decoding without any backend in the allowlist returns `HeicError::NoBackendSelected`. `DecoderConfig::recommended_backends()` constructs a platform-aware default order from the compiled-in backends.
 
+### Fixed — README: complete server setup, cancellation wiring, Rgba8 HDR behavior (2026-06-15)
+- Added one copy-pasteable server `Cargo.toml` line and spelled out the
+  `backend-rust` / `std` landmine: empty `default-features` emits a
+  `compile_error!`, and `backend-rust` does NOT pull `std`, so a server that
+  picks only `backend-rust` silently loses `std::fs` until it adds `std`
+  explicitly (`Cargo.toml:56,75,83`). Showed `.with_stop()` wired into the
+  decode builder with a real cancellable token — documented that the parameter
+  is `&dyn enough::Stop`, the no-op is `enough::Unstoppable`, and
+  `almost_enough::Stopper` (`Stopper::new()` + `.cancel()`) is the ready-made
+  cancellable token (`src/lib.rs:1320`). Documented that a `PixelLayout::Rgba8`
+  request on a 10-bit/HDR HEIC truncates to 8 bits (`sample >> (bit_depth − 8)`)
+  with no PQ/HLG EOTF applied, and pointed at the precision-preserving
+  `decode_to_frame().to_rgba16()` `u16` path (`heic-core/src/frame.rs:752,1004`).
+  Found by an insulated external-developer usability test (README only, no
+  source) that concluded the natural server snippet would not compile first-try.
+
 ### Fixed — HEVC slice_segment_address OOB panic on malformed input (2026-06-14, heic#26)
 - `decode_slice` used the attacker-controlled `slice_segment_address` to index the
   per-CTB `tile_scan_idx` table and to derive `ctb_x`/`ctb_y` without bounds-
