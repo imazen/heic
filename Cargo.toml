@@ -145,6 +145,9 @@ codegen-units = 1
 [[example]]
 name = "decode"
 [[example]]
+name = "heaptrack_decode"
+required-features = ["backend-rust", "std"]
+[[example]]
 name = "bin_trace_emit"
 [[example]]
 name = "dump_hevc"
