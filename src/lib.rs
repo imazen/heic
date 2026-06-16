@@ -1650,11 +1650,16 @@ mod limits_default_tests {
     /// the unbounded behavior is still reachable, just no longer the default.
     #[test]
     fn explicit_all_none_is_unbounded() {
-        let mut none = Limits::default();
-        none.max_width = None;
-        none.max_height = None;
-        none.max_pixels = None;
-        none.max_memory_bytes = None;
+        // All four caps explicitly cleared — the unbounded value the docs say a
+        // caller sets to opt out of every limit. (Built as a struct literal
+        // rather than mutating `Limits::default()`, which carries the safe
+        // fallback, not all-`None`.)
+        let none = Limits {
+            max_width: None,
+            max_height: None,
+            max_pixels: None,
+            max_memory_bytes: None,
+        };
         assert!(none.check_dimensions(20_000, 20_000).is_ok());
         assert!(none.check_memory(8 * 1024 * 1024 * 1024).is_ok());
     }

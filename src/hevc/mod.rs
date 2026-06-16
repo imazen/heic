@@ -57,9 +57,9 @@ pub fn decode_with_config(config: &HevcDecoderConfig, image_data: &[u8]) -> Resu
 /// Same as [`decode_with_config`], but checks `stop` for cancellation.
 ///
 /// `stop` is observed both at tile entry (here) and *periodically inside the
-/// per-CTU decode loop* (every [`ctu::STOP_CHECK_CTU_INTERVAL`] CTUs — see
-/// [`ctu::SliceContext::decode_slice`]). That second check is what lets a
-/// single large intra frame (e.g. a 16384×16384 one-tile image) be cancelled
+/// per-CTU decode loop* (every 256 CTUs, the internal `STOP_CHECK_CTU_INTERVAL`,
+/// checked in the slice decode loop). That second check is what lets a single
+/// large intra frame (e.g. a 16384×16384 one-tile image) be cancelled
 /// mid-frame, instead of only between tiles of a grid.
 pub fn decode_with_config_stop(
     config: &HevcDecoderConfig,
