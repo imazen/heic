@@ -43,7 +43,7 @@ type Result<T> = core::result::Result<T, HevcError>;
 pub fn decode(data: &[u8]) -> Result<DecodedFrame> {
     // Parse NAL units
     let nal_units = bitstream::parse_nal_units(data)?;
-    decode_nal_units(&nal_units)
+    decode_nal_units(&nal_units, &enough::Unstoppable)
 }
 
 /// Decode HEVC from HEIC container (config + image data)
@@ -54,12 +54,13 @@ pub fn decode_with_config(config: &HevcDecoderConfig, image_data: &[u8]) -> Resu
     decode_with_config_stop(config, image_data, &enough::Unstoppable)
 }
 
-/// Same as [`decode_with_config`], but checks `stop` at tile entry
-/// so a multi-tile grid decode can cancel between tiles.
+/// Same as [`decode_with_config`], but checks `stop` for cancellation.
 ///
-/// The check is at the START — full-tile granularity, not
-/// per-CTU. For HEIC grids that's the right cadence (tiles take
-/// ~10-50 ms each; finer granularity would cost more than it saves).
+/// `stop` is observed both at tile entry (here) and *periodically inside the
+/// per-CTU decode loop* (every [`ctu::STOP_CHECK_CTU_INTERVAL`] CTUs — see
+/// [`ctu::SliceContext::decode_slice`]). That second check is what lets a
+/// single large intra frame (e.g. a 16384×16384 one-tile image) be cancelled
+/// mid-frame, instead of only between tiles of a grid.
 pub fn decode_with_config_stop(
     config: &HevcDecoderConfig,
     image_data: &[u8],
@@ -82,7 +83,7 @@ pub fn decode_with_config_stop(
     let mut slice_nals = bitstream::parse_length_prefixed_ext(image_data, length_size)?;
     nal_units.append(&mut slice_nals);
 
-    decode_nal_units(&nal_units)
+    decode_nal_units(&nal_units, stop)
 }
 
 /// Get image info from HEIC config
@@ -99,8 +100,15 @@ pub fn get_info_from_config(config: &HevcDecoderConfig) -> Result<ImageInfo> {
     Err(HevcError::MissingParameterSet("SPS"))
 }
 
-/// Internal: decode from parsed NAL units
-fn decode_nal_units(nal_units: &[bitstream::NalUnit<'_>]) -> Result<DecodedFrame> {
+/// Internal: decode from parsed NAL units.
+///
+/// `stop` is forwarded into the per-slice CTU loop so cancellation is observed
+/// mid-frame, not only at slice entry. Pass [`enough::Unstoppable`] when
+/// cancellation is not needed.
+fn decode_nal_units(
+    nal_units: &[bitstream::NalUnit<'_>],
+    stop: &dyn enough::Stop,
+) -> Result<DecodedFrame> {
     // Find and parse parameter sets
     let mut _vps = None;
     let mut sps = None;
@@ -177,7 +185,7 @@ fn decode_nal_units(nal_units: &[bitstream::NalUnit<'_>]) -> Result<DecodedFrame
     // Decode slice data (base layer only — skip enhancement layer NALs in L-HEVC streams)
     for nal in nal_units {
         if nal.nal_type.is_slice() && nal.nuh_layer_id == 0 {
-            decode_slice(nal, &sps, &pps, &mut frame)?;
+            decode_slice(nal, &sps, &pps, &mut frame, stop)?;
         }
     }
 
@@ -722,7 +730,10 @@ impl VideoDecoder {
             }
         }
 
-        ctx.decode_slice(&mut pic.frame)?;
+        // The multi-frame video decoder path does not currently surface a
+        // `Stop`; cancellation is plumbed through the still-image HEIC path
+        // (`decode_with_config_stop` → `decode_nal_units` → free `decode_slice`).
+        ctx.decode_slice(&mut pic.frame, &enough::Unstoppable)?;
 
         // Store loop filter parameters (deferred until all slices are decoded)
         // Each slice may have different deblocking offsets; the last slice's
@@ -866,11 +877,15 @@ fn apply_loop_filters(
 
 /// Stateless decode of a single slice (for HEIC I-frame images).
 /// Rejects P/B slices — use `VideoDecoder` for inter prediction.
+///
+/// `stop` is checked periodically inside the CTU loop so a large single-tile
+/// frame can be cancelled mid-decode.
 fn decode_slice(
     nal: &bitstream::NalUnit<'_>,
     sps: &params::Sps,
     pps: &params::Pps,
     frame: &mut DecodedFrame,
+    stop: &dyn enough::Stop,
 ) -> Result<()> {
     let parse_result = slice::SliceHeader::parse(nal, sps, pps)?;
     let slice_header = parse_result.header;
@@ -888,7 +903,7 @@ fn decode_slice(
         &nal.ep_byte_positions,
         data_offset,
     ));
-    ctx.decode_slice(frame)?;
+    ctx.decode_slice(frame, stop)?;
 
     apply_loop_filters(&slice_header, sps, pps, &ctx, frame);
 

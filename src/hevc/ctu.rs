@@ -17,6 +17,18 @@ const DEBUG_TRACE: bool = false;
 #[allow(dead_code)]
 const WPP_TRACE: bool = false;
 
+/// How often the per-CTU decode loop polls the cooperative [`enough::Stop`]
+/// token for cancellation.
+///
+/// The check is hoisted to CTU-block granularity (every `N` CTUs, masked with
+/// a power-of-two `& (N - 1)`) so it stays out of the innermost per-sample
+/// work. At a 64×64 CTB size, 256 CTUs is ~1 megapixel of luma per poll —
+/// on a 16384×16384 single-tile frame (65 536 CTUs) that is 256 polls,
+/// responsive within single-digit milliseconds while adding a single masked
+/// compare per CTU (negligible vs the CABAC + transform + prediction cost of
+/// decoding one CTU).
+pub(crate) const STOP_CHECK_CTU_INTERVAL: u32 = 256;
+
 /// Debug print macro gated behind DEBUG_TRACE const
 macro_rules! debug_trace {
     ($($arg:tt)*) => {
@@ -668,8 +680,17 @@ impl<'a> SliceContext<'a> {
         }
     }
 
-    /// Decode all CTUs in the slice
-    pub fn decode_slice(&mut self, frame: &mut DecodedFrame) -> Result<()> {
+    /// Decode all CTUs in the slice.
+    ///
+    /// `stop` is polled every [`STOP_CHECK_CTU_INTERVAL`] CTUs so a long
+    /// single-tile intra frame can be cancelled mid-decode; on cancellation
+    /// this returns [`HevcError::Cancelled`]. Pass [`enough::Unstoppable`]
+    /// when cancellation is not needed.
+    pub fn decode_slice(
+        &mut self,
+        frame: &mut DecodedFrame,
+        stop: &dyn enough::Stop,
+    ) -> Result<()> {
         // Initialize CABAC tracker for debugging
         debug::init_tracker();
 
@@ -804,6 +825,17 @@ impl<'a> SliceContext<'a> {
         }
 
         loop {
+            // Cooperative cancellation: poll the stop token at CTU-block
+            // granularity (first CTU, then every STOP_CHECK_CTU_INTERVAL) so a
+            // long single-tile intra frame — which only hits the slice-entry
+            // check once — can still be interrupted mid-decode. The check is
+            // hoisted out of `decode_ctu`'s per-sample work; one masked compare
+            // per CTU is negligible against a CTU's decode cost. Mirrors the
+            // slice-entry check in `mod::decode_with_config_stop`.
+            if ctu_count.is_multiple_of(STOP_CHECK_CTU_INTERVAL) && stop.should_stop() {
+                return Err(HevcError::Cancelled(enough::StopReason::Cancelled));
+            }
+
             // WPP: at start of each new row (ctb_x==0, ctb_y>0), restore saved context
             // and reinitialize CABAC at the substream entry point
             if wpp && self.ctb_x == 0 && self.ctb_y > 0 && pic_width_in_ctbs > 1 {

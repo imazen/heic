@@ -272,21 +272,31 @@ impl PixelLayout {
 
 /// Resource limits for decoding.
 ///
-/// All fields default to `None` (no limit). Set limits to prevent
-/// resource exhaustion from adversarial or oversized input.
+/// [`Limits::default()`] carries the same safe fallback the decoder applies
+/// when no `Limits` are supplied at all (`16_384 × 16_384`, 256 megapixels,
+/// 1 GiB) — see [`Limits::server_defaults`] for the rationale of those
+/// numbers. This is deliberate: a caller that passes `Limits::default()`
+/// gets a bounded decode, never a *weaker* one than passing nothing. Set a
+/// field to `None` to lift that particular cap, or set tighter values to
+/// further constrain adversarial or oversized input.
 ///
 /// # Example
 ///
 /// ```
 /// use heic::Limits;
 ///
+/// // Start from the safe defaults and tighten.
 /// let mut limits = Limits::default();
 /// limits.max_width = Some(8192);
 /// limits.max_height = Some(8192);
 /// limits.max_pixels = Some(64_000_000);
 /// limits.max_memory_bytes = Some(512 * 1024 * 1024);
+///
+/// // Or explicitly lift a cap (back to unlimited for that field).
+/// let mut unbounded_pixels = Limits::default();
+/// unbounded_pixels.max_pixels = None;
 /// ```
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Limits {
     /// Maximum image width in pixels
@@ -297,6 +307,21 @@ pub struct Limits {
     pub max_pixels: Option<u64>,
     /// Maximum memory usage in bytes
     pub max_memory_bytes: Option<u64>,
+}
+
+impl Default for Limits {
+    /// Returns the **safe fallback** caps (`16_384 × 16_384`, 256 megapixels,
+    /// 1 GiB), identical to [`Limits::server_defaults`].
+    ///
+    /// This is intentionally *not* an all-`None` (unlimited) value. The
+    /// decoder applies the same fallback internally when a caller supplies no
+    /// `Limits` at all, so `Limits::default()` must match it — otherwise
+    /// `Limits::default()` would be *weaker* than passing nothing, which is a
+    /// footgun. A caller who genuinely wants no cap on a field sets it to
+    /// `None` explicitly.
+    fn default() -> Self {
+        Self::server_defaults()
+    }
 }
 
 impl Limits {
@@ -1569,5 +1594,68 @@ fn round_f64(x: f64) -> f64 {
         floor_f64(x + 0.5)
     } else {
         -floor_f64(-x + 0.5)
+    }
+}
+
+#[cfg(test)]
+mod limits_default_tests {
+    use super::*;
+
+    /// `Limits::default()` carries the safe fallback (16_384² / 256 MP / 1 GiB),
+    /// identical to `server_defaults()` — NOT the old all-`None` (unlimited)
+    /// value. This is the footgun fix: a default `Limits` is never weaker than
+    /// passing no limits at all.
+    #[test]
+    fn default_is_safe_fallback_not_none() {
+        let d = Limits::default();
+        assert_eq!(d.max_width, Some(16_384));
+        assert_eq!(d.max_height, Some(16_384));
+        assert_eq!(d.max_pixels, Some(268_435_456)); // 256 MP
+        assert_eq!(d.max_memory_bytes, Some(1_073_741_824)); // 1 GiB
+
+        let s = Limits::server_defaults();
+        assert_eq!(d.max_width, s.max_width);
+        assert_eq!(d.max_height, s.max_height);
+        assert_eq!(d.max_pixels, s.max_pixels);
+        assert_eq!(d.max_memory_bytes, s.max_memory_bytes);
+    }
+
+    /// A dimension exceeding the 256-megapixel cap is rejected with
+    /// `Limits::default()` (it would have been silently accepted by the old
+    /// all-`None` default).
+    #[test]
+    fn default_rejects_over_256mp_dimension() {
+        let d = Limits::default();
+        // 20_000 × 20_000 = 400 MP — over both the 16_384 side cap and the
+        // 256 MP pixel cap. Either way, default() must reject it.
+        let r = d.check_dimensions(20_000, 20_000);
+        assert!(
+            matches!(r, Err(ref e) if matches!(e.error(), HeicError::LimitExceeded(_))),
+            "expected LimitExceeded for a >256MP dimension under default limits, got {r:?}"
+        );
+
+        // And a memory estimate above the 1 GiB cap is rejected too.
+        let mem = d.check_memory(2 * 1024 * 1024 * 1024); // 2 GiB
+        assert!(
+            matches!(mem, Err(ref e) if matches!(e.error(), HeicError::LimitExceeded(_))),
+            "expected LimitExceeded for a >1GiB estimate under default limits, got {mem:?}"
+        );
+
+        // A dimension within the caps is accepted.
+        assert!(d.check_dimensions(1280, 854).is_ok());
+    }
+
+    /// Contrast: an explicitly all-`None` `Limits` imposes no cap, so the same
+    /// oversized inputs pass. This documents *why* the default was changed —
+    /// the unbounded behavior is still reachable, just no longer the default.
+    #[test]
+    fn explicit_all_none_is_unbounded() {
+        let mut none = Limits::default();
+        none.max_width = None;
+        none.max_height = None;
+        none.max_pixels = None;
+        none.max_memory_bytes = None;
+        assert!(none.check_dimensions(20_000, 20_000).is_ok());
+        assert!(none.check_memory(8 * 1024 * 1024 * 1024).is_ok());
     }
 }
