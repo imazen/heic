@@ -86,7 +86,7 @@ let output = DecoderConfig::new()
 
 // Auto-pick a sensible order from the compiled-in backends.
 let output = DecoderConfig::new()
-    .recommended_backends()
+    .with_backends(&heic::recommended_backends())
     .decode(&data, PixelLayout::Rgba8)?;
 ```
 
@@ -263,7 +263,7 @@ let thumb = decoder.decode_thumbnail(&data, PixelLayout::Rgb8)?;  // smaller pre
 
 ```rust
 let gainmap = DecoderConfig::new().decode_gain_map(&data)?;
-// gainmap.data: Vec<f32> (normalized 0.0–1.0), gainmap.width, gainmap.height
+// gainmap.data: Vec<u8> (8-bit grayscale gain map pixels), gainmap.width, gainmap.height
 // Apply Apple HDR reconstruction:
 //   sdr_linear = sRGB_EOTF(sdr_pixel)
 //   gain_linear = sRGB_EOTF(gainmap_pixel)

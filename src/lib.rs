@@ -1085,14 +1085,22 @@ impl DecoderConfig {
         decode::has_gain_map(data)
     }
 
-    /// Decode the HDR gain map from an Apple HDR HEIC file.
+    /// Decode the HDR gain map from an Apple HDR or HEIF `tmap` HEIC file.
     ///
     /// Returns the grayscale gain map pixels (scaled to 8-bit), the source
-    /// bit depth, and any XMP metadata associated with the gain map item.
-    /// The gain map is typically lower resolution than the primary image.
+    /// bit depth, and whichever reconstruction metadata the container carries.
+    /// The gain map is typically lower resolution than the primary image, and
+    /// [`HdrGainMap::origin`] names which mechanism produced it.
     ///
-    /// The XMP metadata contains ISO 21496-1 / Apple HDR parameters needed
-    /// to apply the gain map. Parse it with `ultrahdr-core` or similar.
+    /// The parameters needed to apply the gain map come from one of two paths,
+    /// depending on the origin (see [`HdrGainMap`] for the full layout):
+    /// - [`HdrGainMap::xmp`] — Apple aux-item XMP (Apple-specific packet; does
+    ///   NOT carry ISO 21496-1 / `hdrgm:` parameters). Parse with
+    ///   `ultrahdr-core`. `None` for `tmap` gain maps.
+    /// - [`HdrGainMap::iso21496`] — raw ISO 21496-1 binary metadata from a
+    ///   HEIF Amendment 1 `tmap` derived item. Parse with e.g.
+    ///   `zencodec::gainmap::parse_iso21496_fmt(..., Iso21496Format::AvifTmap)`.
+    ///   `None` for the Apple aux-item path.
     ///
     /// # Errors
     ///
