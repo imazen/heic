@@ -49,6 +49,19 @@ Decodes most HEIC files from iPhones and cameras. 118/162 HEIF test files decode
 
 `heic` defers HEVC bitstream decoding to a pluggable backend. The parent crate parses the HEIF container, manages grid / alpha / gain-map orchestration, and walks a runtime allowlist of backends — falling through when a backend reports unavailable. Default `cargo build` fails with a `compile_error!` directing you to pick at least one.
 
+**Server / CLI setup — copy-paste this:**
+
+```toml
+heic = { version = "0.2.0", default-features = false, features = ["backend-rust", "std"] }
+```
+
+Two gotchas this line handles, both of which break a build if you miss them:
+
+- **`default-features` is empty** — with no `backend-*` feature enabled, the crate emits a `compile_error!`. You must opt into at least one backend; `backend-rust` is the always-available pure-Rust decoder.
+- **`backend-rust` does NOT imply `std`.** It is a `no_std + alloc` decoder by default, so a server that wants `std::fs`, threads, or the rayon `parallel` feature must list `std` explicitly. (Only the *native* backends — `backend-mediafoundation` etc. — pull `std` in transitively; `backend-rust` does not.) Omitting `std` is the most common first-try server build failure.
+
+(On the currently-published `0.1.x`, the pure-Rust decoder is always compiled and `std` is on by default, so neither gotcha applies; the `backend-rust` feature and the empty-default `compile_error!` arrive with `0.2.0`. The line above is correct for `0.2.0` onward.)
+
 | Backend | Cargo feature | Targets | Status |
 |---|---|---|---|
 | Pure-Rust HEVC | `backend-rust` | all | Production. 118/162 HEIF corpus, 49/49 ITU-T conformance vectors. |
@@ -89,7 +102,7 @@ let output = DecoderConfig::new()
 | `backend-mediacodec` | no | Android NDK `AMediaCodec` HEVC decoder (API 21+). |
 | `backend-vaapi` | no | Linux libva HEVC decoder (runtime FFI implemented; needs a GPU + VA-API driver at runtime). |
 | `backend-d3d11va` | no | Windows D3D11 DXVA HEVC decoder (runtime FFI implemented; needs an HEVC-capable GPU at runtime). |
-| `std` | yes | Standard library support. Disable for `no_std + alloc`. |
+| `std` | no | Standard library support (file I/O, threads). NOT pulled in by `backend-rust` — enable it explicitly for a server; the native backends imply it. Leave off for `no_std + alloc`. |
 | `parallel` | no | Parallel tile decoding via rayon. Implies `std`. |
 | `av1` | no | AV1 codec support via rav1d-safe. Implies `std`. |
 | `unci` | no | Uncompressed HEIF (ISO 23001-17) with deflate/zlib decompression via zenflate. |
@@ -106,8 +119,23 @@ println!("{}x{} image, {} bytes", output.width, output.height, output.data.len()
 
 ### Limits and cancellation
 
+`with_limits` rejects oversized inputs *before* allocation; `with_stop` lets you
+abort an in-flight decode (request timeout, client disconnect). The stop
+parameter is `&dyn enough::Stop`. The no-op token is `enough::Unstoppable`
+(both are re-exported as `heic::Unstoppable` / `heic::Stop`); for a *cancellable*
+token use `almost_enough::Stopper`, which is `Clone` + `Send` + `Sync` — hand a
+clone to a timeout/disconnect watcher and call `.cancel()` to stop the decode,
+which then returns `HeicError::Cancelled`.
+
+```toml
+# in addition to the `heic` line above:
+enough = "0.4.4"          # the Stop trait (re-exported by heic, so optional)
+almost-enough = "0.4.4"   # Stopper: a ready-made cancellable Stop
+```
+
 ```rust
 use heic::{DecoderConfig, PixelLayout, Limits};
+use almost_enough::Stopper;
 
 let mut limits = Limits::default();
 limits.max_width = Some(8192);
@@ -115,12 +143,60 @@ limits.max_height = Some(8192);
 limits.max_pixels = Some(64_000_000);
 limits.max_memory_bytes = Some(512 * 1024 * 1024);
 
+// A cancellable token. Clone it into whatever fires on timeout / disconnect.
+let stop = Stopper::new();
+{
+    let stop = stop.clone();
+    // e.g. spawn a watcher: on request timeout or socket close, `stop.cancel();`
+    // (here we just show the call you'd make from that watcher)
+    let _cancel_from_watcher = move || stop.cancel();
+}
+
 let output = DecoderConfig::new()
     .decode_request(&data)
     .with_output_layout(PixelLayout::Rgba8)
     .with_limits(&limits)
-    .decode()?;
+    .with_stop(&stop)        // omit this (or pass &heic::Unstoppable) to never cancel
+    .decode()?;              // returns Err(HeicError::Cancelled) if `stop.cancel()` fired
 ```
+
+The one-shot `DecoderConfig::new().decode(&data, layout)` and probe/extract APIs
+use `Unstoppable` internally, so they cannot be cancelled — reach for the
+`decode_request(..).with_stop(..)` builder when you need to abort.
+
+### Bit depth and HDR — what `PixelLayout::Rgba8` gives you
+
+`PixelLayout` is 8-bit only (`Rgb8`, `Rgba8`, `Bgr8`, `Bgra8`). Decoding a
+**10-bit HEIC** (iPhone HDR, BT.2020) to one of these **silently downconverts to
+8 bits** by a right-shift of `bit_depth − 8` (i.e. `sample >> 2` for 10-bit) —
+the low bits are dropped. The decode succeeds; there is no error or warning.
+
+Just as important: **no transfer function (EOTF) is applied.** If the file is PQ
+(`transfer_characteristics == 16`) or HLG (`== 18`), the 8-bit output samples are
+still PQ/HLG-encoded code values, *not* tone-mapped SDR. The decoder parses and
+exposes the transfer characteristic (`ImageInfo::transfer_characteristics`, and
+`DecodedFrame::transfer_characteristics` after `decode_to_frame`) but leaves the
+EOTF + tone-mapping to you. So `Rgba8` on an HDR HEIC = "the HDR signal,
+quantized to 8 bits, in its original (PQ/HLG) domain" — fine for a quick preview,
+wrong if you need correct color without doing the tone-map yourself.
+
+To **keep the full 10-bit precision**, skip `PixelLayout` and use the YCbCr→RGB
+`u16` path on the decoded frame, which scales each sample to the full `u16` range
+(`val * 65535 / ((1 << bit_depth) − 1)`) instead of truncating:
+
+```rust
+use heic::DecoderConfig;
+
+let frame = DecoderConfig::new().decode_to_frame(&data)?; // raw YCbCr, native depth
+let rgba16: Vec<u16> = frame.to_rgba16()?;                // 4×u16 per pixel, precision kept
+// frame.to_rgb16() for 3×u16. Cropping (conformance window) is applied.
+// Still no EOTF — branch on frame.transfer_characteristics (16=PQ, 18=HLG) to
+// apply the right transfer + tone-map for your output.
+let (w, h) = (frame.cropped_width(), frame.cropped_height());
+```
+
+`decode_to_frame` does not take `with_limits` / `with_stop`; if you need limits or
+cancellation on a 16-bit path, gate on `ImageInfo::from_bytes` first.
 
 ### Errors (for a server)
 
