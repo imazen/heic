@@ -11,6 +11,17 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 - **Default `cargo build` now fails with a `compile_error!` directing the user to enable a backend feature.** Previously the pure-Rust decoder shipped automatically as `default = ["std"]`; now the user MUST opt into at least one of `backend-rust`, `backend-mediafoundation`, `backend-videotoolbox`, `backend-mediacodec`, `backend-vaapi`, or `backend-d3d11va`. This is the 0.2.0 breaking change. The existing `default` build pulled in `heic`'s entire HEVC implementation unconditionally; the new layout makes the backend explicit so users on Apple / Android / Windows can pick the patent-licensed native decoder instead.
 - **`DecoderConfig` gains an allowlist API** (`with_backend`, `with_backends`, `recommended_backends`). Decoding without any backend in the allowlist returns `HeicError::NoBackendSelected`. `DecoderConfig::recommended_backends()` constructs a platform-aware default order from the compiled-in backends.
 
+### Added — heaptrack decode allocation-profiling harness (2026-06-16)
+- `examples/heaptrack_decode.rs`: a reusable harness that decodes a HEIC/HEIF
+  file from bytes via `DecoderConfig::decode_request(..).decode()` in a loop, for
+  profiling heap-allocation behavior under heaptrack/valgrind. Defaults to the
+  bundled `example.heic` (1280×854, grid of 6 HEVC tiles) decoded 8×; a path +
+  iteration count can be passed. Profiled result is healthy: ~88 allocations and
+  ~13 temporaries per decode (O(small constant), not per-pixel or per-CTU), peak
+  heap ≈ 9 MiB ≈ 2× the RGBA8 output (O(image)), and the leaked-allocation count
+  stays pinned at 2 process statics regardless of iteration count (no per-decode
+  leak, no unbounded growth). Driven by `just heaptrack-decode`.
+
 ### Fixed — `Limits::default()` footgun + per-CTU cancellation (2026-06-16, heic#29)
 - **`Limits::default()` now carries the safe fallback caps** (`16_384 × 16_384`,
   256 MP, 1 GiB — identical to `Limits::server_defaults()`) instead of all-`None`

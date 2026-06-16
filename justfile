@@ -157,3 +157,11 @@ fuzz-coverage:
 # Run fuzz regression tests
 fuzz-regression:
     cargo test --all-features --test fuzz_regression
+
+# Profile decode-from-bytes heap allocations with heaptrack (needs heaptrack installed).
+# Defaults to the bundled example.heic (1280x854) decoded 8x; pass a path + iters to override.
+# Inspect with: heaptrack_print /tmp/heic-ht.zst
+heaptrack-decode *ARGS:
+    cargo build --release --example heaptrack_decode --features backend-rust,std
+    rm -f /tmp/heic-ht.zst
+    heaptrack --output /tmp/heic-ht ./target/release/examples/heaptrack_decode {{ARGS}}
