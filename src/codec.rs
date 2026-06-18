@@ -1643,6 +1643,17 @@ fn build_image_info_full(
             && let Some(crate::heif::ColorInfo::IccProfile(icc)) = &item.color_info
         {
             info = info.with_icc_profile(icc.clone());
+            // When nclx primaries are unspecified, recognize the ICC and
+            // surface its CICP so lenient consumers get resolved color
+            // without re-parsing the profile — Apple HEICs leave nclx
+            // unspecified and carry the gamut (typically Display P3) only in
+            // the ICC. The ICC stays the CMS authority (`with_cicp` does not
+            // change `color_authority`); this just fills the convenience CICP.
+            if pi.color_primaries == 2
+                && let Some(cicp) = zenpixels::icc::identify_common(icc).and_then(|id| id.to_cicp())
+            {
+                info = info.with_cicp(cicp);
+            }
         }
 
         // EXIF extraction

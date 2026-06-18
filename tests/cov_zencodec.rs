@@ -1013,3 +1013,35 @@ fn reconstruct_hdr_on_plain_heic_decodes_base() {
         "gain-map-less ReconstructHdr must return the base rendition"
     );
 }
+
+/// Apple HEICs leave nclx primaries unspecified and carry the gamut only in
+/// an ICC profile. The adapter recognizes the ICC (`zenpixels::icc`) and
+/// surfaces the resolved CICP (Display P3 = primaries 12, sRGB transfer 13)
+/// on `source_color`, while the ICC remains the CMS authority — so lenient
+/// consumers get resolved color without re-parsing the profile.
+#[test]
+fn apple_unspecified_nclx_plus_icc_resolves_to_display_p3_cicp() {
+    let data =
+        std::fs::read(testdata_dir().join("apple-hdr/hdr-sample.heic")).expect("apple-hdr fixture");
+    let out = HeicDecoderConfig::new()
+        .job()
+        .decoder(Cow::Borrowed(data.as_slice()), &[])
+        .expect("decoder")
+        .decode()
+        .expect("decode apple-hdr");
+    let sc = &out.info().source_color;
+    assert!(sc.icc_profile.is_some(), "apple-hdr carries an ICC profile");
+    let cicp = sc
+        .cicp
+        .expect("ICC-recognized CICP must be surfaced for unspecified nclx");
+    assert_eq!(
+        (cicp.color_primaries, cicp.transfer_characteristics),
+        (12, 13),
+        "Display P3 primaries + sRGB transfer"
+    );
+    assert_eq!(
+        sc.color_authority,
+        zenpixels::ColorAuthority::Icc,
+        "ICC remains the CMS authority; CICP is the resolved convenience"
+    );
+}
