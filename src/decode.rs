@@ -168,9 +168,13 @@ fn decode_tiles_parallel(
 /// `max_width` / `max_height` are above HEVC Level 6.2 (8192×4320) so
 /// any conforming HEIC decodes; `max_pixels` is the same 256 Mpx ceiling
 /// some other zen codecs use; `max_memory_bytes` is 1 GiB, generous for
-/// 8K/16K stills but well below the multi-GiB OOM the previous
-/// `NO_LIMITS` (all-`None`) configuration permitted.
-pub(crate) static NO_LIMITS: Limits = Limits {
+/// 8K/16K stills but well below the multi-GiB OOM an all-`None`
+/// (uncapped) configuration would permit.
+///
+/// Named `DEFAULT_LIMITS` because it is exactly that — the limits applied by
+/// default. (It is *not* "no limits"; see [`crate::Limits::server_defaults`],
+/// whose values it mirrors.)
+pub(crate) static DEFAULT_LIMITS: Limits = Limits {
     max_width: Some(16_384),
     max_height: Some(16_384),
     max_pixels: Some(256 * 1024 * 1024),
@@ -186,7 +190,7 @@ pub(crate) fn decode_to_frame(
     backends: &[crate::Backend],
     apply_orientation: bool,
 ) -> Result<crate::hevc::DecodedFrame> {
-    let limits = limits.unwrap_or(&NO_LIMITS);
+    let limits = limits.unwrap_or(&DEFAULT_LIMITS);
 
     check_stop(stop)?;
 
@@ -1392,7 +1396,7 @@ pub(crate) fn try_decode_grid_streaming(
     max_threads: Option<usize>,
     backends: &[crate::Backend],
 ) -> Result<Option<(u32, u32)>> {
-    let limits = limits.unwrap_or(&NO_LIMITS);
+    let limits = limits.unwrap_or(&DEFAULT_LIMITS);
     // `backends` is only consumed by the sequential fallback path that is
     // cfg-gated to `not(feature = "parallel")`. Silence unused-var warning
     // when parallel is on.
@@ -1611,7 +1615,7 @@ pub(crate) fn try_decode_grid_to_sink(
     max_threads: Option<usize>,
     backends: &[crate::Backend],
 ) -> Result<Option<(u32, u32)>> {
-    let limits = limits.unwrap_or(&NO_LIMITS);
+    let limits = limits.unwrap_or(&DEFAULT_LIMITS);
     // `backends` is only consumed by the sequential fallback path that is
     // cfg-gated to `not(feature = "parallel")`. Silence unused-var warning
     // when parallel is on.
@@ -2302,7 +2306,7 @@ pub(crate) fn decode_thumbnail(
         &container,
         &thumb_item,
         DecodeBudget::root(&counter, backends),
-        &NO_LIMITS,
+        &DEFAULT_LIMITS,
         stop,
         None,
     )?;
@@ -2686,16 +2690,16 @@ mod tests {
     /// passes `None` reject obvious OOM-bait dimensions like
     /// 65535x65535.
     #[test]
-    fn default_no_limits_rejects_large_dimensions() {
+    fn default_limits_reject_large_dimensions() {
         // The audit's CR-2 example: pic_width=65535, pic_height=65535.
-        // Under the old NO_LIMITS (all None), check_dimensions returned
-        // Ok and the decoder went on to allocate ~8 GiB. The new
-        // defaults must reject this.
-        let res = NO_LIMITS.check_dimensions(65535, 65535);
+        // Under an all-`None` limits config, check_dimensions returned
+        // Ok and the decoder went on to allocate ~8 GiB. The default
+        // limits must reject this.
+        let res = DEFAULT_LIMITS.check_dimensions(65535, 65535);
         assert!(res.is_err(), "default limits must reject 65535x65535");
 
         // A reasonable still (8K) is accepted.
-        let ok = NO_LIMITS.check_dimensions(7680, 4320);
+        let ok = DEFAULT_LIMITS.check_dimensions(7680, 4320);
         assert!(ok.is_ok(), "default limits must accept 8K");
     }
 }
