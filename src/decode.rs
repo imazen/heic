@@ -179,6 +179,7 @@ pub(crate) static DEFAULT_LIMITS: Limits = Limits {
     max_height: Some(16_384),
     max_pixels: Some(256 * 1024 * 1024),
     max_memory_bytes: Some(1024 * 1024 * 1024),
+    alloc_pref: crate::alloc_util::AllocPreference::CodecDefault,
 };
 
 /// Core decode-to-frame implementation shared by all entry points.
@@ -527,8 +528,11 @@ fn decode_iovl(
     // Check canvas dimensions against limits
     limits.check_dimensions(canvas_width, canvas_height)?;
 
-    // Read per-tile offsets
-    let mut offsets = Vec::with_capacity(tile_ids.len());
+    // Read per-tile offsets. Small bounded scratch (one entry per dimg tile,
+    // and the tile count is bounded by the resource limits), so the per-site
+    // default is infallible; an explicit `Fallible` still forces try_reserve.
+    let mut offsets: Vec<(i32, i32)> =
+        crate::alloc_util::vec_with_capacity(limits.alloc_pref, false, tile_ids.len())?;
     for _ in 0..tile_ids.len() {
         let (x, y) = if large {
             if pos + 8 > iovl_data.len() {
@@ -739,10 +743,10 @@ fn decode_av1_item(
         )));
     }
 
-    let mut obu_data = Vec::new();
-    obu_data
-        .try_reserve(total_len)
-        .map_err(|_| at!(HeicError::OutOfMemory))?;
+    // Concatenated AV1 payload (config OBUs + image data). Attacker-influenced
+    // size (capped at 256 MiB above), so the per-site default is fallible.
+    let mut obu_data: Vec<u8> =
+        crate::alloc_util::vec_with_capacity(limits.alloc_pref, true, total_len)?;
     obu_data.extend_from_slice(&config.config_obus);
     obu_data.extend_from_slice(image_data);
 
@@ -965,11 +969,10 @@ fn decode_unci_item(
     // Decompress if compression config is present
     let pixel_data: alloc::borrow::Cow<'_, [u8]> =
         if let Some(ref cmp_config) = item.compression_config {
-            let mut decompressed = Vec::new();
-            decompressed
-                .try_reserve(expected_size)
-                .map_err(|_| at!(HeicError::OutOfMemory))?;
-            decompressed.resize(expected_size, 0);
+            // Full decompressed `unci` surface (size bounded above by
+            // min(512 MiB, max_memory_bytes)). Untrusted, so default fallible.
+            let mut decompressed: Vec<u8> =
+                crate::alloc_util::alloc_filled(limits.alloc_pref, true, expected_size)?;
 
             let mut decompressor = zenflate::Decompressor::new();
             let result = match &cmp_config.compression_type.0 {
@@ -1972,7 +1975,11 @@ fn decode_alpha_plane(
 
     // Use u64 arithmetic to avoid u32 overflow
     let total_pixels = usize::try_from((primary_w as u64).checked_mul(primary_h as u64)?).ok()?;
-    let mut alpha_plane = Vec::with_capacity(total_pixels);
+    // Full-image alpha plane, sized from the (untrusted) primary dimensions →
+    // default fallible. This fn returns Option, so an alloc failure maps to
+    // `None` (the same graceful give-up as the other `?`/`.ok()?` sites here).
+    let mut alpha_plane: Vec<u16> =
+        crate::alloc_util::vec_with_capacity(limits.alloc_pref, true, total_pixels).ok()?;
 
     if alpha_w == primary_w && alpha_h == primary_h {
         // Same dimensions — direct copy of Y plane from cropped region.
@@ -2151,10 +2158,14 @@ fn decode_gainmap_image_item(
     let y_start = frame.crop_top;
     let x_start = frame.crop_left;
 
-    let mut grayscale = Vec::new();
-    grayscale
-        .try_reserve(total_pixels)
-        .map_err(|_| at!(HeicError::OutOfMemory))?;
+    // Full-image gain-map grayscale plane. Direct-API path (no caller
+    // AllocPreference reaches here), so `CodecDefault` resolves to this site's
+    // own default: fallible, because `total_pixels` is image-sized.
+    let mut grayscale: Vec<u8> = crate::alloc_util::vec_with_capacity(
+        crate::alloc_util::AllocPreference::CodecDefault,
+        true,
+        total_pixels,
+    )?;
 
     for y in 0..height {
         for x in 0..width {
@@ -2451,10 +2462,13 @@ pub(crate) fn decode_depth(data: &[u8], backends: &[crate::Backend]) -> Result<c
         .checked_mul(height as usize)
         .ok_or_else(|| at!(HeicError::LimitExceeded("depth map dimensions overflow")))?;
 
-    let mut depth_data = Vec::new();
-    depth_data
-        .try_reserve(total_pixels)
-        .map_err(|_| at!(HeicError::OutOfMemory))?;
+    // Full-image depth (Y) plane. Direct-API path; `CodecDefault` resolves to
+    // the site default: fallible, because `total_pixels` is image-sized.
+    let mut depth_data: Vec<u16> = crate::alloc_util::vec_with_capacity(
+        crate::alloc_util::AllocPreference::CodecDefault,
+        true,
+        total_pixels,
+    )?;
 
     let y_start = frame.crop_top;
     let x_start = frame.crop_left;
@@ -2546,7 +2560,18 @@ fn decode_aux_to_grayscale(
     let y_start = frame.crop_top;
     let x_start = frame.crop_left;
 
-    let mut grayscale = Vec::with_capacity((width * height) as usize);
+    // Overflow-checked so a large auxiliary image can't wrap the byte count to
+    // a small value before the allocation.
+    let total_pixels = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| at!(HeicError::LimitExceeded("auxiliary dimensions overflow")))?;
+    // Full-image auxiliary grayscale plane. Direct-API path; `CodecDefault`
+    // resolves to the site default: fallible, because it is image-sized.
+    let mut grayscale: Vec<u8> = crate::alloc_util::vec_with_capacity(
+        crate::alloc_util::AllocPreference::CodecDefault,
+        true,
+        total_pixels,
+    )?;
     for y in 0..height {
         for x in 0..width {
             let src_idx = ((y_start + y) * frame.width + (x_start + x)) as usize;

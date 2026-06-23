@@ -11,6 +11,29 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 - **Default `cargo build` now fails with a `compile_error!` directing the user to enable a backend feature.** Previously the pure-Rust decoder shipped automatically as `default = ["std"]`; now the user MUST opt into at least one of `backend-rust`, `backend-mediafoundation`, `backend-videotoolbox`, `backend-mediacodec`, `backend-vaapi`, or `backend-d3d11va`. This is the 0.2.0 breaking change. The existing `default` build pulled in `heic`'s entire HEVC implementation unconditionally; the new layout makes the backend explicit so users on Apple / Android / Windows can pick the patent-licensed native decoder instead.
 - **`DecoderConfig` gains an allowlist API** (`with_backend`, `with_backends`, `recommended_backends`). Decoding without any backend in the allowlist returns `HeicError::NoBackendSelected`. `DecoderConfig::recommended_backends()` constructs a platform-aware default order from the compiled-in backends.
 
+### Added — honor `AllocPreference` + `estimate_decode_resources` (2026-06-23)
+- **`AllocPreference` (3-mode, per-site) is now honored at the untrusted decode
+  allocation sites.** Big image-sized buffers (the full-image alpha / gain-map /
+  depth-map / auxiliary planes, the concatenated AV1 OBU payload, the `unci`
+  decompressed surface) default to the fallible `try_reserve` path (graceful
+  `HeicError::OutOfMemory` on a crafted container); small bounded scratch (the
+  per-tile overlay-offset list) defaults to the fast infallible path. An
+  explicit `Fallible` / `Infallible` overrides every site; `CodecDefault` keeps
+  each site's default. Threaded via a new `pub(crate)` field on the internal
+  `Limits`, set from `ResourceLimits::prefer_fallible_allocations` at the
+  `zencodec` decode boundary; the direct decode API is unchanged. New
+  `src/alloc_util.rs` (a local 3-mode mirror enum + helpers, present even
+  without the optional `zencodec` feature). Also adds a `checked_mul` overflow
+  guard at the auxiliary-grayscale site. (`src/alloc_util.rs`, `src/decode.rs`,
+  `src/codec.rs`, `src/lib.rs`.)
+- **`HeicDecoderConfig` now implements `estimate_decode_resources`** (zencodec
+  `DecoderConfig` trait): peak from the native `estimate_memory` upper bound
+  (YCbCr planes + output buffer + deblock metadata, a safe over-count for grids)
+  and a `~25 Mpix/s` HEVC-decode wall-time model, reported `SERIAL` and
+  core-scaled via `at_cores`. (`src/codec.rs`.) Verified byte-identical decode
+  across all three `AllocPreference` modes for the grid + single-image fixtures
+  and a peak/time-monotonicity estimate test in `tests/cov_zencodec.rs`.
+
 ### Added — heaptrack decode allocation-profiling harness (2026-06-16)
 - `examples/heaptrack_decode.rs`: a reusable harness that decodes a HEIC/HEIF
   file from bytes via `DecoderConfig::decode_request(..).decode()` in a loop, for

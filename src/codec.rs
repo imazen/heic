@@ -211,6 +211,38 @@ impl zencodec::decode::DecoderConfig for HeicDecoderConfig {
         &HEIC_DECODE_CAPS
     }
 
+    fn estimate_decode_resources(
+        &self,
+        image: &zencodec::estimate::ImageCharacteristics,
+        compute: &zencodec::estimate::ComputeEnvironment,
+    ) -> zencodec::estimate::ResourceEstimate {
+        use zencodec::estimate::{ResourceEstimate, ThreadingInformation};
+
+        // Peak working set: the native `estimate_memory` upper bound — full
+        // YCbCr planes (4:2:0, u16/sample) + the output buffer at the requested
+        // layout + the deblocking metadata. For a grid image this over-counts
+        // (tiles are decoded into a tile-sized frame and color-converted into
+        // the output strip-by-strip), so it is a safe upper bound. The HEVC
+        // AV1-tile/grid assembly buffers it covers are heic's own; the inner
+        // HEVC decoder's transient per-CTU scratch is bounded and not modelled.
+        let layout = layout_for_descriptor(image.descriptor());
+        let peak = crate::DecoderConfig::estimate_memory(image.width(), image.height(), layout);
+
+        // Wall time: HEVC intra decode is heavy. Measured single-thread on this
+        // box ≈ 25 Mpix/s (1.09 MP example.heic ~54 ms; 12.2 MP iPhone still
+        // ~451 ms sequential). Conservative, content-independent.
+        const DECODE_MPIX_PER_S: u64 = 25;
+        let pixels = u64::from(image.width()).saturating_mul(u64::from(image.height()));
+        let wall_ms = pixels / (DECODE_MPIX_PER_S * 1_000) + 1;
+
+        // SERIAL for the peak/time model: tile parallelism (the optional
+        // `parallel` feature) only shortens grid wall-time, it does not lower
+        // the peak, and the serial time is a valid upper bound.
+        ResourceEstimate::new(peak, wall_ms)
+            .with_threading(ThreadingInformation::SERIAL)
+            .at_cores(compute.cores())
+    }
+
     fn job<'a>(self) -> Self::Job<'a> {
         let extract_gain_map = self.extract_gain_map;
         let extract_depth = self.extract_depth;
@@ -268,7 +300,16 @@ fn apply_policy(policy: Option<&DecodePolicy>, mut info: ImageInfo) -> ImageInfo
 impl HeicDecodeJob {
     /// Build native limits from zencodec ResourceLimits.
     fn native_limits(&self) -> Option<crate::Limits> {
-        if !self.limits.has_any() {
+        let alloc_pref = crate::alloc_util::AllocPreference::from_zencodec(
+            self.limits.prefer_fallible_allocations,
+        );
+        // When no size/memory caps are set AND the alloc preference is the
+        // default, there is nothing to thread — `None` lets the decode path
+        // fall back to `DEFAULT_LIMITS` (which already carries `CodecDefault`).
+        // But an explicit Fallible/Infallible must survive even with no caps,
+        // so build a Limits in that case too.
+        if !self.limits.has_any() && alloc_pref == crate::alloc_util::AllocPreference::CodecDefault
+        {
             return None;
         }
         let mut limits = crate::Limits::default();
@@ -276,6 +317,7 @@ impl HeicDecodeJob {
         limits.max_height = self.limits.max_height.map(u64::from);
         limits.max_pixels = self.limits.max_pixels;
         limits.max_memory_bytes = self.limits.max_memory_bytes;
+        limits.alloc_pref = alloc_pref;
         Some(limits)
     }
 }
@@ -310,6 +352,21 @@ fn available_descriptors(has_alpha: bool, bit_depth: u8) -> alloc::vec::Vec<Pixe
 /// Check whether a negotiated descriptor is a 16-bit format.
 fn is_16bit(desc: PixelDescriptor) -> bool {
     desc == PixelDescriptor::RGB16_SRGB || desc == PixelDescriptor::RGBA16_SRGB
+}
+
+/// Pick the native [`crate::PixelLayout`] that best bounds the output buffer
+/// for a negotiated descriptor, used only by the resource estimate.
+///
+/// heic's `PixelLayout` is 8-bit-only (3 or 4 Bpp), so a 16-bit output is not
+/// representable here — but the estimate's dominant term is the u16 YCbCr
+/// working set from `estimate_memory`, which already scales with bit depth, so
+/// an alpha-presence choice (Rgb8 vs Rgba8) is a sound conservative bound.
+fn layout_for_descriptor(desc: &PixelDescriptor) -> crate::PixelLayout {
+    if desc.has_alpha() {
+        crate::PixelLayout::Rgba8
+    } else {
+        crate::PixelLayout::Rgb8
+    }
 }
 
 /// Map a negotiated PixelDescriptor to a native PixelLayout for 8-bit decode.

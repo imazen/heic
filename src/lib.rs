@@ -183,6 +183,7 @@ pub(crate) fn alloc_vec_fallible<T: Clone>(
     Ok(v)
 }
 
+mod alloc_util;
 mod auxiliary;
 mod backend;
 mod decode;
@@ -322,6 +323,16 @@ pub struct Limits {
     pub max_pixels: Option<u64>,
     /// Maximum memory usage in bytes
     pub max_memory_bytes: Option<u64>,
+    /// Per-site allocation-fallibility preference, applied at the untrusted
+    /// decode allocation sites (full-image planes, concatenated payloads).
+    ///
+    /// Internal carrier (`pub(crate)`): the `zencodec` decode adapter
+    /// ([`crate::codec`]) sets it from
+    /// `ResourceLimits::prefer_fallible_allocations`; the direct decode API
+    /// leaves it `CodecDefault`, so each allocation site keeps its own default
+    /// (big untrusted buffers fallible, small bounded scratch infallible). See
+    /// [`crate::alloc_util`].
+    pub(crate) alloc_pref: crate::alloc_util::AllocPreference,
 }
 
 impl Default for Limits {
@@ -365,6 +376,7 @@ impl Limits {
             max_height: Some(16_384),
             max_pixels: Some(268_435_456),
             max_memory_bytes: Some(1_073_741_824),
+            alloc_pref: crate::alloc_util::AllocPreference::CodecDefault,
         }
     }
 
@@ -1682,6 +1694,7 @@ mod limits_default_tests {
             max_height: None,
             max_pixels: None,
             max_memory_bytes: None,
+            alloc_pref: crate::alloc_util::AllocPreference::CodecDefault,
         };
         assert!(none.check_dimensions(20_000, 20_000).is_ok());
         assert!(none.check_memory(8 * 1024 * 1024 * 1024).is_ok());

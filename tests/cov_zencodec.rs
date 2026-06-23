@@ -1045,3 +1045,117 @@ fn apple_unspecified_nclx_plus_icc_resolves_to_display_p3_cicp() {
         "ICC remains the CMS authority; CICP is the resolved convenience"
     );
 }
+
+// ── AllocPreference: fallibility never changes the decoded pixels ─────────────
+
+/// Decode `data` through the zencodec adapter under the given
+/// [`zencodec::AllocPreference`] (or the unset / `CodecDefault` default when
+/// `None`) and return the decoded pixels as a tightly-packed byte vector.
+fn decode_rgb_bytes(data: &[u8], pref: Option<zencodec::AllocPreference>) -> Vec<u8> {
+    let job = HeicDecoderConfig::new().job();
+    let job = match pref {
+        Some(p) => job.with_limits(ResourceLimits::none().with_prefer_fallible_allocations(p)),
+        None => job,
+    };
+    let output = job
+        .decoder(Cow::Borrowed(data), &[PixelDescriptor::RGB8_SRGB])
+        .expect("decoder creation")
+        .decode()
+        .expect("decode of committed fixture should succeed");
+    let pixels = output.pixels();
+    let w = pixels.width();
+    let h = pixels.rows();
+    let mut packed = Vec::with_capacity(w as usize * h as usize * 3);
+    for y in 0..h {
+        packed.extend_from_slice(pixels.row(y));
+    }
+    packed
+}
+
+/// Decoding under `AllocPreference::Fallible` (the `try_reserve` path) and
+/// `AllocPreference::Infallible` must produce byte-identical pixels to the
+/// default (`CodecDefault`) decode — fallibility is an allocation-strategy
+/// choice, never a correctness or rounding change.
+#[test]
+fn fallible_alloc_decode_matches_default() {
+    use zencodec::AllocPreference;
+
+    // Both the grid path (multi-tile assembly, the `decode_iovl`/grid buffers)
+    // and the single-image path must agree across all three modes.
+    for rel in [EXAMPLE_REL, SYNTH_REL] {
+        let data = read_fixture(rel);
+        let default = decode_rgb_bytes(&data, None); // CodecDefault
+        let fallible = decode_rgb_bytes(&data, Some(AllocPreference::Fallible));
+        let infallible = decode_rgb_bytes(&data, Some(AllocPreference::Infallible));
+
+        assert!(
+            !default.is_empty(),
+            "{rel}: decoded buffer must be non-empty"
+        );
+        assert_eq!(
+            default, fallible,
+            "{rel}: Fallible decode must be byte-identical to the default decode"
+        );
+        assert_eq!(
+            default, infallible,
+            "{rel}: Infallible decode must be byte-identical to the default decode"
+        );
+    }
+}
+
+// NOTE: an end-to-end "enormous container under Fallible returns OutOfMemory"
+// test is intentionally omitted — the byte counts a real (committed) HEIC can
+// demand are small enough that a box with swap may satisfy the `try_reserve`,
+// which would make such a test flaky on this shared workstation. The
+// graceful-OOM behaviour is covered deterministically at the helper level by
+// `crate::alloc_util::tests::alloc_filled_fallible_oom_returns_err` and
+// `vec_with_capacity_fallible_oom_returns_err` (each requests `usize::MAX / 2`,
+// which no allocator can satisfy).
+
+// ── estimate_decode_resources ────────────────────────────────────────────────
+
+/// The decode-resource estimate models a non-trivial peak (it must at least
+/// cover the output buffer) and a non-zero wall time, and scales monotonically
+/// with image area.
+#[test]
+fn estimate_decode_resources_models_peak_and_time() {
+    use zencodec::estimate::{ComputeEnvironment, ImageCharacteristics};
+
+    let cfg = HeicDecoderConfig::new();
+    let compute = ComputeEnvironment::new().with_cores(4);
+
+    let small = ImageCharacteristics::new(256, 256, PixelDescriptor::RGB8_SRGB);
+    let large = ImageCharacteristics::new(4096, 4096, PixelDescriptor::RGBA8_SRGB);
+
+    let est_small = cfg.estimate_decode_resources(&small, &compute);
+    let est_large = cfg.estimate_decode_resources(&large, &compute);
+
+    // Peak must at least cover the output buffer (256*256*3 for the small RGB).
+    let small_output = 256u64 * 256 * 3;
+    let small_peak = est_small
+        .peak_memory_bytes_est()
+        .expect("heic models its decode peak");
+    assert!(
+        small_peak >= small_output,
+        "peak {small_peak} must cover the {small_output}-byte output buffer"
+    );
+
+    // Wall time is modelled (non-None) and non-zero.
+    assert!(
+        est_small.wall_ms().is_some_and(|ms| ms >= 1),
+        "decode wall time must be modelled and at least 1 ms"
+    );
+
+    // Larger image → larger peak and longer time (the model is area-driven).
+    let large_peak = est_large
+        .peak_memory_bytes_est()
+        .expect("heic models its decode peak");
+    assert!(
+        large_peak > small_peak,
+        "4096² peak {large_peak} must exceed 256² peak {small_peak}"
+    );
+    assert!(
+        est_large.wall_ms() >= est_small.wall_ms(),
+        "larger image must not be estimated faster"
+    );
+}
