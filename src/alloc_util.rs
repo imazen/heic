@@ -22,9 +22,9 @@
 //!
 //! ## Why a local enum
 //!
-//! The cross-codec policy type is [`zencodec::AllocPreference`], but `zencodec`
-//! is an **optional** dependency of this crate — the core decode pipeline in
-//! [`crate::decode`] compiles without it. So the policy that travels with
+//! The cross-codec policy type is [`zencodec::AllocPreference`], but the core
+//! decode pipeline in [`crate::decode`] is deliberately kept free of `zencodec`
+//! types. So the policy that travels with
 //! [`crate::Limits`] through that pipeline is this always-present mirror enum.
 //! The `zencodec` adapter ([`crate::codec`]) converts
 //! `zencodec::AllocPreference` into this at the decode boundary (see
@@ -44,9 +44,6 @@ use crate::error::HeicError;
 /// behaviour change for callers that never set it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
-// `Fallible`/`Infallible` are only constructed via the zencodec `From` impl below
-// (and tests); without the `zencodec` feature they're reachable API but unbuilt.
-#[cfg_attr(not(feature = "zencodec"), allow(dead_code))]
 pub(crate) enum AllocPreference {
     /// Let each call site decide. Big untrusted-sized buffers favour the
     /// fallible path; small bounded scratch favours the infallible path.
@@ -66,9 +63,7 @@ pub(crate) enum AllocPreference {
 impl AllocPreference {
     /// Map a [`zencodec::AllocPreference`] onto this crate's mirror enum.
     ///
-    /// Used at the `zencodec` decode boundary; `#[cfg]`-gated to the same
-    /// feature as the adapter so the core build never references `zencodec`.
-    #[cfg(feature = "zencodec")]
+    /// Used at the `zencodec` decode boundary.
     #[inline]
     #[must_use]
     pub(crate) fn from_zencodec(pref: zencodec::AllocPreference) -> Self {
@@ -219,20 +214,25 @@ mod tests {
     #[test]
     fn alloc_filled_fallible_oom_returns_err() {
         // Request an impossibly large allocation; the fallible path must
-        // return Err (mapped to OutOfMemory) rather than abort.
-        let r = alloc_filled::<u8>(AllocPreference::Fallible, true, usize::MAX / 2);
+        // return Err (mapped to OutOfMemory) rather than abort. Use `usize::MAX`
+        // (not `/ 2`) so the byte count exceeds `isize::MAX` and the reserve
+        // fails deterministically on 32-bit too (where `usize::MAX / 2` ≈ 2 GiB
+        // can actually be reserved).
+        let r = alloc_filled::<u8>(AllocPreference::Fallible, true, usize::MAX);
         assert!(r.is_err());
         assert!(matches!(r.unwrap_err().error(), HeicError::OutOfMemory));
     }
 
     #[test]
     fn vec_with_capacity_fallible_oom_returns_err() {
-        let r = vec_with_capacity::<u8>(AllocPreference::Fallible, true, usize::MAX / 2);
+        // `usize::MAX` (not `/ 2`) so the byte count exceeds `isize::MAX` and
+        // the reserve fails deterministically on 32-bit too (where `usize::MAX
+        // / 2` ≈ 2 GiB can actually be reserved — the i686 CI failure).
+        let r = vec_with_capacity::<u8>(AllocPreference::Fallible, true, usize::MAX);
         assert!(r.is_err());
         assert!(matches!(r.unwrap_err().error(), HeicError::OutOfMemory));
     }
 
-    #[cfg(feature = "zencodec")]
     #[test]
     fn from_zencodec_maps_all_three_modes() {
         assert_eq!(

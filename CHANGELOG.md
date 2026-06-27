@@ -10,7 +10,59 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 - **Default `cargo build` now fails with a `compile_error!` directing the user to enable a backend feature.** Previously the pure-Rust decoder shipped automatically as `default = ["std"]`; now the user MUST opt into at least one of `backend-rust`, `backend-mediafoundation`, `backend-videotoolbox`, `backend-mediacodec`, `backend-vaapi`, or `backend-d3d11va`. This is the 0.2.0 breaking change. The existing `default` build pulled in `heic`'s entire HEVC implementation unconditionally; the new layout makes the backend explicit so users on Apple / Android / Windows can pick the patent-licensed native decoder instead.
 - **`DecoderConfig` gains an allowlist API** (`with_backend`, `with_backends`, `recommended_backends`). Decoding without any backend in the allowlist returns `HeicError::NoBackendSelected`. `DecoderConfig::recommended_backends()` constructs a platform-aware default order from the compiled-in backends.
+- **Removed the optional `zencodec` cargo feature.** The zencodec integration (the `HeicDecoderConfig` / `HeicDecodeJob` / `HeicZenDecoder` / `HeicStreamDecoder` adapter and the `CategorizedError` impls) is now always compiled in, and `zencodec` is a required dependency. Callers that enabled `--features zencodec` must drop it — the feature no longer exists; the integration itself is unchanged. Raises the workspace MSRV 1.89 → 1.92 (via the now-required `ultrahdr-core`).
+- **The `zencodec` decode-trait impls now return `At<zencodec::CodecError>`** (the shared "envelope", Pattern B) instead of `At<HeicError>`. Breaking only for callers that matched the **zencodec-trait** boundary error as `HeicError` — switch to `err.error().category()` (an `ErrorCategory`) / `err.error().codec()` (`Some("heic")`), or the `CodecErrorExt` accessors. The native rich-error API (`DecoderConfig::decode`, `decode_rgba8`, `ImageInfo::from_bytes`, …) is unchanged and still returns `At<HeicError>`.
 
+### Changed — `zencodec` is now a required, always-on dependency (2026-06-28)
+- The optional `zencodec` cargo feature is removed and the adapter always compiles. The dependencies the feature used to pull (`zencodec`, `zenpixels`, `rgb`, `imgref`, `garb`, `bytemuck`, `ultrahdr-core`) are now unconditional, and `zencodec` is bumped 0.1.21 → 0.1.25. The integration stays `no_std`-clean — the `--no-default-features --features backend-rust` build is unchanged — so only the removed feature flag affects callers. The now-unconditional `ultrahdr-core` raises the workspace MSRV 1.89 → 1.92. (`Cargo.toml`, `src/lib.rs`, `src/error.rs`, `src/alloc_util.rs`, `.github/workflows/ci.yml`, `deny.toml`.)
+
+### Added — codec-agnostic error taxonomy (`zencodec::CategorizedError`) (2026-06-27)
+- **`HeicError`, `HevcError`, and the caller-facing `ProbeError` now implement
+  `zencodec::CategorizedError`** (`codec_name() = Some("heic")` + a total `category()`),
+  mapping every variant to a coarse `zencodec::ErrorCategory` so a consumer can
+  route on the category (HTTP status, retry policy, logging) without naming the
+  concrete enums. `HeicError::HevcDecode` delegates to the nested `HevcError`'s
+  own per-variant classification (instead of a blanket `Internal`); `Cancelled`
+  delegates to `enough::StopReason` (Cancelled vs TimedOut); `ProbeError::Corrupt`
+  delegates to the wrapped `At<HeicError>` (the blanket `At<E>` impl forwards the
+  category through the location wrapper). The stringly `HeicError::LimitExceeded`
+  variant cannot preserve a specific `LimitKind`, so it reports the representative
+  `LimitsExceeded(Pixels)`. Additive and gated behind the optional `zencodec`
+  feature; the native error enums are unchanged. (`src/error.rs`.)
+
+### Changed — `zencodec` trait impls return the `CodecError` envelope (Pattern B) (2026-06-28)
+- **The `zencodec` decode-trait impls (`HeicDecoderConfig`, `HeicDecodeJob`,
+  `HeicZenDecoder`, `HeicStreamDecoder`) now declare `type Error =
+  At<zencodec::CodecError>`** — the shared envelope — instead of `At<HeicError>`,
+  so a generic consumer recovers the `ErrorCategory` **and** the `"heic"` codec
+  name *through `Dyn*` dispatch*: after the trait error is erased to a
+  `Box<dyn Error>` (e.g. `DynDecodeJob::probe`), `CodecErrorExt::{error_category,
+  codec_error}` downcast to the concrete `At<CodecError>` and read both axes. The
+  old `At<HeicError>` was not recoverable once erased (no `CodecError` in the
+  chain), so the category was lost — this is the gap Pattern B closes.
+- A one-impl bridge `From<HeicError> for At<zencodec::CodecError>` carries a bare
+  native error into the envelope (reading category + codec name off its
+  `CategorizedError`); already-located `At<HeicError>` internals convert at the
+  trait boundary with `.map_err(zencodec::CodecError::of)`, so the decode logic
+  and its internal `?` sites are untouched. `HeicError`/`HevcError`/`ProbeError`
+  and their `CategorizedError` impls are unchanged — they are now the *detail* +
+  category source inside the envelope. The native rich-error API
+  (`DecoderConfig::decode`, `decode_rgba8`, `ImageInfo::from_bytes`, …) still
+  returns `At<HeicError>` directly; only the `zencodec` trait boundary changed.
+  Proven by a forcing test that drives heic through `DynDecoderConfig`, erases to
+  `BoxedError`, and asserts `MalformedImage` + `"heic"` survive.
+  (`src/error.rs`, `src/codec.rs`, `tests/cov_zencodec.rs`.)
+
+### Fixed
+- **CI fix-forward for two pre-existing `src/alloc_util.rs` breaks introduced
+  with the AllocPreference work (`f4279ad6`), which had left `main` red.**
+  (1) `AllocPreference::{Fallible, Infallible}` are only constructed via the
+  `zencodec`-gated `from_zencodec` and in tests, so the core (non-`zencodec`)
+  build failed `-D dead_code`; now `#[cfg_attr(not(feature = "zencodec"),
+  allow(dead_code))]`. (2) The fallible-OOM tests requested `usize::MAX / 2`
+  bytes, which is reservable on 32-bit and made the `i686` job fail; now
+  `usize::MAX`, whose byte count exceeds `isize::MAX` so the reserve fails
+  deterministically on every target. (`src/alloc_util.rs`.)
 ### Fixed
 - Silence a pre-existing `dead_code` clippy error on `AllocPreference::{Fallible,Infallible}`
   in non-`zencodec` builds (those variants are only constructed via the `zencodec` `From`

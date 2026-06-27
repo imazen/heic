@@ -59,7 +59,7 @@ jobs:
           --test cov_features
           --test cov_decode_orchestration --test cov_public_api --test cov_metadata
           --test cov_zencodec --test cov_container --test cov_multicodec
-          --features "backend-rust,std,av1,unci,zencodec,parallel,fallible-alloc"
+          --features "backend-rust,std,av1,unci,parallel,fallible-alloc"
 
       - name: Check (backend-rust, no_std)
         run: cargo check --no-default-features --features backend-rust
@@ -113,14 +113,8 @@ jobs:
       - name: Test (backend-rust + parallel)
         run: cargo test --lib --features "backend-rust,parallel"
 
-      - name: Test (backend-rust + zencodec)
-        run: cargo test --lib --features "backend-rust,zencodec"
-
-      - name: Test (backend-rust + parallel + zencodec)
-        run: cargo test --lib --features "backend-rust,parallel,zencodec"
-
       - name: Test (all publishable features)
-        run: cargo test --lib --features "backend-rust,std,fallible-alloc,parallel,zencodec"
+        run: cargo test --lib --features "backend-rust,std,fallible-alloc,parallel"
 
       # av1 + unci are publishable features but were never lint-/unit-gated.
       - name: Test (backend-rust + av1 + unci)
@@ -160,7 +154,7 @@ jobs:
       - uses: obi1kenobi/cargo-semver-checks-action@v2
         with:
           feature-group: only-explicit-features
-          features: "backend-rust,std,zencodec"
+          features: "backend-rust,std"
         continue-on-error: true
 
   # Doc build must be warning-free (broken intra-doc links, etc.).
@@ -174,7 +168,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo doc
-        run: cargo doc --no-deps --features "backend-rust,std,av1,unci,zencodec"
+        run: cargo doc --no-deps --features "backend-rust,std,av1,unci"
 
   clippy:
     name: Clippy
@@ -189,11 +183,8 @@ jobs:
       - name: Clippy (backend-rust + parallel)
         run: cargo clippy --lib --features "backend-rust,parallel" -- -D warnings
 
-      - name: Clippy (backend-rust + zencodec)
-        run: cargo clippy --lib --features "backend-rust,zencodec" -- -D warnings
-
       - name: Clippy (all publishable features)
-        run: cargo clippy --lib --features "backend-rust,std,fallible-alloc,parallel,zencodec" -- -D warnings
+        run: cargo clippy --lib --features "backend-rust,std,fallible-alloc,parallel" -- -D warnings
 
       - name: Clippy (av1 + unci + tests)
         run: cargo clippy --tests --features "backend-rust,std,av1,unci" -- -D warnings
@@ -510,7 +501,7 @@ jobs:
           --test corpus_decode --test decode_heic --test parse_testdata --test cov_features
           --test cov_decode_orchestration --test cov_public_api --test cov_metadata
           --test cov_zencodec --test cov_container --test cov_multicodec
-          --features "backend-rust,std,av1,unci,zencodec,parallel,fallible-alloc"
+          --features "backend-rust,std,av1,unci,parallel,fallible-alloc"
           --lcov --output-path lcov.info
 
       - name: Upload coverage

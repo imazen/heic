@@ -195,10 +195,8 @@ pub mod hevc;
 
 pub use backend::{Backend, recommended_backends};
 
-#[cfg(feature = "zencodec")]
 mod codec;
 
-#[cfg(feature = "zencodec")]
 pub use codec::{
     HeicAuxiliaryInfo, HeicDecodeJob, HeicDecoder as HeicZenDecoder, HeicDecoderConfig,
     HeicStreamDecoder,
@@ -213,6 +211,25 @@ pub use auxiliary::{
 };
 pub use error::{HeicError, HevcError, ProbeError, Result};
 pub use hevc::{DecodedFrame, VideoDecoder};
+
+/// Decode a HEIC/HEIF image to tightly-packed 8-bit RGBA in one call.
+///
+/// Returns `(rgba, width, height)`, where `rgba` is `width * height * 4` bytes.
+/// Decoding applies the decoder's safe default resource limits (16384×16384,
+/// 256 MP, 1 GiB), so untrusted input can't exhaust memory; HDR / 10-bit content
+/// is downconverted to 8-bit. For 16-bit/HDR output, tighter [`Limits`],
+/// cancellation, zero-copy [`DecodeRequest::decode_into`], probing, or metadata,
+/// use [`DecoderConfig`].
+///
+/// ```no_run
+/// let data = std::fs::read("photo.heic").unwrap();
+/// let (rgba, width, height) = heic::decode_rgba8(&data).unwrap();
+/// assert_eq!(rgba.len(), width as usize * height as usize * 4);
+/// ```
+pub fn decode_rgba8(heic: &[u8]) -> Result<(Vec<u8>, u32, u32)> {
+    let out = DecoderConfig::new().decode(heic, PixelLayout::Rgba8)?;
+    Ok((out.data, out.width, out.height))
+}
 
 /// Enable deblocking filter trace output (writes to /tmp/our_deblock_trace.txt)
 #[cfg(feature = "std")]

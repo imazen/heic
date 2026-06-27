@@ -10,10 +10,6 @@
 //! - `push_decoder` (the RowSinkAdapter path) reassembles to the same image
 //! - `ResourceLimits` → native `Limits` conversion enforces tight limits
 //! - malformed / truncated / crafted bytes return a clean `Err` (no panic)
-//!
-//! Requires the `zencodec` feature.
-
-#![cfg(feature = "zencodec")]
 
 use std::path::{Path, PathBuf};
 
@@ -22,7 +18,10 @@ use heic::{HeicDecoderConfig, HeicStreamDecoder, HeicZenDecoder};
 use zencodec::decode::{
     Decode, DecodeJob, DecodeRowSink, DecoderConfig, StreamingDecode, negotiate_pixel_format,
 };
-use zencodec::{ImageFormat, ResourceLimits, ThreadingPolicy};
+use zencodec::{
+    CodecError, CodecErrorExt, ErrorCategory, ImageFormat, LimitKind, ResourceLimits,
+    ThreadingPolicy,
+};
 use zenpixels::{PixelDescriptor, PixelSliceMut};
 
 use std::borrow::Cow;
@@ -195,6 +194,45 @@ fn probe_rejects_non_heic_bytes() {
             "probe must reject non-HEIC bytes: {junk:?}"
         );
     }
+}
+
+/// MANDATORY Pattern-B forcing test (the proof). Drive heic through
+/// [`DynDecoderConfig`], erase the error to `BoxedError`, and assert the
+/// [`ErrorCategory`] *and* codec name survive dyn dispatch.
+///
+/// Under Pattern A (`type Error = At<HeicError>`) both would be `None` once
+/// erased — an `At<HeicError>` is not downcastable to the `At<CodecError>`
+/// envelope that [`CodecErrorExt`] recovers. Under Pattern B (the envelope) they
+/// are `Some`. That contrast is exactly what this test pins.
+#[test]
+fn dyn_dispatch_error_carries_category_and_codec() {
+    // Scoped here so `DynDecoderConfig::estimate_decode_resources` does not
+    // collide with the `DecoderConfig` method of the same name elsewhere.
+    use zencodec::decode::DynDecoderConfig;
+
+    // 64 bytes: long enough to clear `ImageInfo::from_bytes`'s 12-byte length
+    // guard, but bytes[4..8] != b"ftyp" so it fails the real format check
+    // (InvalidFormat → MalformedImage), not an EOF / short-header guard.
+    let malformed = [0xABu8; 64];
+
+    let cfg = HeicDecoderConfig::new();
+    let dyn_cfg: &dyn DynDecoderConfig = &cfg;
+    let erased = dyn_cfg
+        .dyn_job()
+        .probe(&malformed)
+        .expect_err("malformed input must fail the dyn probe");
+
+    // The real category this bad input yields is MalformedImage.
+    assert_eq!(
+        erased.error_category(),
+        Some(ErrorCategory::MalformedImage),
+        "category must survive erasure to BoxedError under Pattern B"
+    );
+    assert_eq!(
+        erased.codec_error().and_then(CodecError::codec),
+        Some("heic"),
+        "codec name must survive erasure to BoxedError under Pattern B"
+    );
 }
 
 #[test]
@@ -457,10 +495,17 @@ fn tight_max_input_bytes_rejected_at_decoder() {
     // HeicZenDecoder has no Debug impl, so match instead of expect_err.
     match job.decoder(Cow::Borrowed(&data), &[PixelDescriptor::RGB8_SRGB]) {
         Ok(_) => panic!("64-byte input cap must reject a multi-KB file"),
-        Err(err) => assert!(
-            matches!(err.error(), heic::HeicError::LimitExceeded(_)),
-            "expected LimitExceeded, got {err:?}"
-        ),
+        // Pattern B: the native `HeicError::LimitExceeded` is now carried inside
+        // the `CodecError` envelope. Assert the category + codec survive — the
+        // faithful equivalent of the old `matches!(err.error(), LimitExceeded)`.
+        Err(err) => {
+            assert_eq!(
+                err.error().category(),
+                ErrorCategory::LimitsExceeded(LimitKind::Pixels),
+                "input-size cap must surface as LimitsExceeded, got {err:?}"
+            );
+            assert_eq!(err.error().codec(), Some("heic"));
+        }
     }
 }
 
@@ -719,10 +764,14 @@ fn animation_unsupported() {
         .animation_frame_decoder(Cow::Borrowed(&data), &[PixelDescriptor::RGB8_SRGB]);
     assert!(result.is_err(), "animation must be unsupported");
     let err = result.err().unwrap();
-    assert!(
-        matches!(err.error(), heic::HeicError::Unsupported(_)),
-        "expected Unsupported, got {err:?}"
+    // Pattern B: the native `HeicError::Unsupported` rides inside the envelope —
+    // assert the category + codec survive instead of the native variant.
+    assert_eq!(
+        err.error().category(),
+        ErrorCategory::UnsupportedImageFeature,
+        "HEIC animation must surface as UnsupportedImageFeature, got {err:?}"
     );
+    assert_eq!(err.error().codec(), Some("heic"));
 }
 
 // ── Orientation hint: Preserve (default) vs Correct ─────────────────────────

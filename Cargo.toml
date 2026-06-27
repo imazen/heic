@@ -20,7 +20,9 @@ resolver = "3"
 # needs ONE version bump. See RELEASING.md for the full flow.
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.89"
+# 1.92 (raised from 1.89): `ultrahdr-core`, now an unconditional dependency
+# (the zencodec integration is always compiled), requires Rust 1.92.
+rust-version = "1.92"
 license = "AGPL-3.0-only OR LicenseRef-Imazen-Commercial"
 repository = "https://github.com/imazen/heic"
 authors = ["Imazen LLC"]
@@ -81,19 +83,9 @@ backend-vaapi = ["std", "dep:heic-backend-vaapi"]
 backend-d3d11va = ["std", "dep:heic-backend-d3d11va"]
 
 # ── Cross-cutting flags ──────────────────────────────────────────────────
-std = ["archmage/std", "heic-core/std", "ultrahdr-core?/std"]
+std = ["archmage/std", "heic-core/std", "ultrahdr-core/std"]
 fallible-alloc = []
 parallel = ["std", "dep:rayon"]
-zencodec = [
-    "std",
-    "dep:zencodec",
-    "dep:zenpixels",
-    "dep:rgb",
-    "dep:imgref",
-    "dep:garb",
-    "dep:bytemuck",
-    "dep:ultrahdr-core",
-]
 av1 = ["std", "dep:rav1d-safe"]
 unci = ["dep:zenflate"]
 
@@ -111,15 +103,15 @@ magetypes = { version = "0.9.16", default-features = false }
 safe_unaligned_simd = "0.2.5"
 memchr = { version = "2.8.0", default-features = false }
 rayon = { version = "1.11.0", optional = true }
-zencodec = { version = "0.1.21", optional = true }
-zenpixels = { version = "0.2.11", default-features = false, features = ["rgb", "imgref"], optional = true }
-rgb = { version = "0.8.53", default-features = false, features = ["as-bytes"], optional = true }
-bytemuck = { version = "1.21", default-features = false, features = ["extern_crate_alloc"], optional = true }
-imgref = { version = "1.12.0", optional = true }
-garb = { version = "0.2.5", default-features = false, optional = true }
+zencodec = { version = "0.1.25" }
+zenpixels = { version = "0.2.11", default-features = false, features = ["rgb", "imgref"] }
+rgb = { version = "0.8.53", default-features = false, features = ["as-bytes"] }
+bytemuck = { version = "1.21", default-features = false, features = ["extern_crate_alloc"] }
+imgref = { version = "1.12.0" }
+garb = { version = "0.2.5", default-features = false }
 rav1d-safe = { version = "0.5.3", optional = true, default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
 zenflate = { version = "0.3.4", optional = true, default-features = false }
-ultrahdr-core = { version = "0.5.0", optional = true, default-features = false }
+ultrahdr-core = { version = "0.5.0", default-features = false }
 
 [dev-dependencies]
 criterion = "0.8.2"
@@ -183,7 +175,7 @@ name = "backend_decode"
 required-features = ["backend-rust", "std"]
 [[example]]
 name = "gain_map_info"
-required-features = ["backend-rust", "zencodec", "std"]
+required-features = ["backend-rust", "std"]
 # compare_support requires heic-wasm-rs (uncomment dep + add [[example]] to use)
 
 [[bench]]
@@ -205,7 +197,11 @@ harness = false
 # checkouts.
 [patch.crates-io]
 ultrahdr-core = { git = "https://github.com/imazen/ultrahdr", rev = "3ac20f99d45e985e09f274fc07181b238385e703" }
+# TEMP: until zencodec 0.1.26 ships (PR #103) — pulls the CategorizedError /
+# ErrorCategory taxonomy this crate now implements. Remove and bump the
+# `zencodec` dependency to the released version once 0.1.26 is published.
+zencodec = { git = "https://github.com/imazen/zencodec", branch = "cancellation-classification-99" }
 
 [[example]]
 name = "gm20_probe"
-required-features = ["zencodec", "backend-rust"]
+required-features = ["backend-rust"]

@@ -131,6 +131,31 @@ impl From<HevcError> for At<HeicError> {
     }
 }
 
+/// Pattern B envelope bridge: a **bare** [`HeicError`] converts into the shared
+/// [`zencodec::CodecError`] envelope as `At<CodecError>`, reading its
+/// [`category`](zencodec::CategorizedError::category) and codec name (`"heic"`)
+/// from the value. This is what lets the `zencodec` *trait* impls (on
+/// [`HeicDecoderConfig`](crate::HeicDecoderConfig) and its decode job / decoder
+/// types) declare `type Error = At<CodecError>`, so a generic
+/// consumer recovers the category and codec name *through `Dyn*` dispatch* —
+/// after the error is erased to a `Box<dyn Error>` — by downcasting to the
+/// concrete `At<CodecError>`. (The native rich-error API keeps returning
+/// `At<HeicError>` directly; only the trait boundary uses this envelope.)
+///
+/// `.start_at()` begins the location trace; [`CodecError::of`](zencodec::CodecError::of)
+/// keeps it on the outside (`At<CodecError>`). An
+/// `impl From<At<HeicError>> for At<CodecError>` is impossible (orphan rule —
+/// `At` is foreign and non-fundamental), so an *already-located* `At<HeicError>`
+/// converts at the boundary with `.map_err(zencodec::CodecError::of)` instead;
+/// this bridge handles bare `HeicError` constructions (via `?` / `.into()`).
+impl From<HeicError> for At<zencodec::CodecError> {
+    #[track_caller]
+    fn from(e: HeicError) -> Self {
+        use whereat::ErrorAtExt;
+        zencodec::CodecError::of(e.start_at())
+    }
+}
+
 // Promote heic-core's small DecodedFrame-construction error to the parent
 // HevcError so the rust decoder's `try_vec![...]?` and DecodedFrame methods
 // (now living in heic-core) compose naturally with the parent's error type.
@@ -277,6 +302,123 @@ impl core::error::Error for ProbeError {
     }
 }
 
+// ── Codec-agnostic error taxonomy (zencodec PR #103) ───────────────────────
+//
+// Maps every native error variant to exactly one coarse
+// [`zencodec::ErrorCategory`] so a consumer can route on the category (HTTP
+// status, retry policy, logging) without naming these enums. `zencodec` is an
+// optional dependency, so these impls are feature-gated; the native enums are
+// unchanged and remain the public error surface. The blanket
+// `impl CategorizedError for At<E>` in zencodec forwards through the `At<…>`
+// location wrapper these errors are returned in, so `At<HeicError>::category()`
+// works automatically.
+
+/// Coarse [`zencodec::ErrorCategory`] for a [`HeicError`].
+impl zencodec::CategorizedError for HeicError {
+    fn codec_name(&self) -> Option<&'static str> {
+        Some("heic")
+    }
+
+    fn category(&self) -> zencodec::ErrorCategory {
+        use zencodec::ErrorCategory as C;
+        match self {
+            // Corrupt / invalid container or bitstream content.
+            Self::InvalidContainer(_) | Self::InvalidData(_) => C::MalformedImage,
+            // A parseable container missing its required primary item — bad
+            // input (it is surfaced under `ProbeError::Corrupt`), not a bug.
+            Self::NoPrimaryImage => C::MalformedImage,
+            // A valid HEIC feature this decoder does not implement. The message
+            // bundles several flavours (overlay version, unci component layout,
+            // construction_method, GainMapRender mode, …); the codec *type* not
+            // being handled has its own `UnsupportedCodec` arm, so the best
+            // single fit here is "unsupported feature".
+            Self::Unsupported(_) => C::UnsupportedImageFeature,
+            // The image's codec/profile itself is not handled (AV1 without the
+            // `av1` feature, JPEG, H.264, …).
+            Self::UnsupportedCodec(_) => C::UnsupportedImageType,
+            // Delegate to the nested HEVC error's own classification.
+            Self::HevcDecode(e) => e.category(),
+            // A caller-supplied output buffer is too small for `decode_into`.
+            Self::BufferTooSmall { .. } => C::InvalidBuffer,
+            // A `ResourceLimits` cap was exceeded. The stringly variant cannot
+            // preserve the specific `LimitKind` — its sites span width / height /
+            // pixel-count / memory / input-size / element-count overflows — so it
+            // is reported under the representative `Pixels` kind; the message
+            // still names the specific cap. (Codecs that need the exact kind can
+            // recover the cause from the trace.)
+            Self::LimitExceeded(_) => C::LimitsExceeded(zencodec::LimitKind::Pixels),
+            // A real allocation failure, distinct from a configured cap.
+            Self::OutOfMemory => C::OutOfMemory,
+            // Cooperative cancellation — delegate (Cancelled vs TimedOut).
+            Self::Cancelled(r) => r.category(),
+            // A decode sink (the caller's output) reported an I/O failure.
+            Self::Sink(_) => C::Io(zencodec::CodecIoKind::opaque()),
+            // An empty backend allowlist in the caller's `DecoderConfig`: bad
+            // caller configuration, not bad image data.
+            Self::NoBackendSelected => C::InvalidParameters,
+            // No backend produced an image (none installed, or every backend
+            // rejected the bitstream) — a mixed sub-component failure.
+            Self::AllBackendsFailed(_) => C::Internal,
+        }
+    }
+}
+
+/// Coarse [`zencodec::ErrorCategory`] for a [`HevcError`].
+///
+/// Delegated to by [`HeicError::HevcDecode`] so the parent error inherits the
+/// per-variant HEVC classification instead of a blanket `Internal`.
+impl zencodec::CategorizedError for HevcError {
+    fn codec_name(&self) -> Option<&'static str> {
+        Some("heic")
+    }
+
+    fn category(&self) -> zencodec::ErrorCategory {
+        use zencodec::ErrorCategory as C;
+        match self {
+            // Corrupt / invalid HEVC bitstream content.
+            Self::InvalidNalUnit(_)
+            | Self::InvalidBitstream(_)
+            | Self::MissingParameterSet(_)
+            | Self::InvalidParameterSet { .. }
+            | Self::CabacError(_) => C::MalformedImage,
+            // A profile/level this decoder does not handle.
+            Self::UnsupportedProfile { .. } => C::UnsupportedImageType,
+            // A valid HEVC feature we don't implement (e.g. dependent slices).
+            Self::Unsupported(_) => C::UnsupportedImageFeature,
+            // Internal decode-invariant failures (missing current picture,
+            // internal map size overflows) — not attributable to the input.
+            Self::DecodingError(_) => C::Internal,
+            // Allocation failure.
+            Self::AllocationFailed => C::OutOfMemory,
+            // width × height overflow — a (computed) pixel-count limit.
+            Self::DimensionOverflow => C::LimitsExceeded(zencodec::LimitKind::Pixels),
+            // Cooperative cancellation — delegate.
+            Self::Cancelled(r) => r.category(),
+        }
+    }
+}
+
+/// Coarse [`zencodec::ErrorCategory`] for a [`ProbeError`] (caller-facing, from
+/// header probing).
+impl zencodec::CategorizedError for ProbeError {
+    fn codec_name(&self) -> Option<&'static str> {
+        Some("heic")
+    }
+
+    fn category(&self) -> zencodec::ErrorCategory {
+        use zencodec::ErrorCategory as C;
+        match self {
+            // Truncated header / insufficient input.
+            Self::NeedMoreData => C::UnexpectedEof,
+            // Magic bytes don't match — this isn't a HEIC/HEIF file at all.
+            Self::InvalidFormat => C::UnsupportedImageType,
+            // A present-but-malformed header: delegate to the wrapped located
+            // `HeicError` (the `At<E>` blanket impl forwards its category).
+            Self::Corrupt(e) => e.category(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod error_tests {
     use super::*;
@@ -354,5 +496,139 @@ mod error_tests {
         // core::error::Error::source / std error trait object usability
         let e: HeicError = HeicError::OutOfMemory;
         let _src = core::error::Error::source(&e);
+    }
+}
+
+#[cfg(test)]
+mod category_tests {
+    use super::*;
+    use alloc::boxed::Box;
+    use zencodec::{CategorizedError, ErrorCategory as C, LimitKind as L};
+
+    #[test]
+    fn heic_error_category_maps_every_variant() {
+        assert_eq!(HeicError::NoPrimaryImage.codec_name(), Some("heic"));
+        let sink: Box<dyn core::error::Error + Send + Sync> = "boom".into();
+        let cases: alloc::vec::Vec<(HeicError, C)> = alloc::vec![
+            (HeicError::InvalidContainer("c"), C::MalformedImage),
+            (HeicError::InvalidData("d"), C::MalformedImage),
+            (HeicError::NoPrimaryImage, C::MalformedImage),
+            (HeicError::Unsupported("u"), C::UnsupportedImageFeature),
+            (HeicError::UnsupportedCodec("av1"), C::UnsupportedImageType),
+            (
+                HeicError::HevcDecode(HevcError::InvalidBitstream("b")),
+                C::MalformedImage,
+            ),
+            (
+                HeicError::BufferTooSmall {
+                    required: 10,
+                    actual: 4,
+                },
+                C::InvalidBuffer,
+            ),
+            (
+                HeicError::LimitExceeded("pixel count exceeds limit"),
+                C::LimitsExceeded(L::Pixels),
+            ),
+            (HeicError::OutOfMemory, C::OutOfMemory),
+            (HeicError::Cancelled(StopReason::Cancelled), C::Cancelled),
+            (HeicError::Cancelled(StopReason::TimedOut), C::TimedOut),
+            (
+                HeicError::Sink(sink),
+                C::Io(zencodec::CodecIoKind::opaque())
+            ),
+            (HeicError::NoBackendSelected, C::InvalidParameters),
+            (HeicError::AllBackendsFailed("abf".into()), C::Internal),
+        ];
+        for (err, want) in &cases {
+            assert_eq!(err.category(), *want, "wrong category for {err:?}");
+        }
+    }
+
+    #[test]
+    fn hevc_decode_delegates_to_inner_category() {
+        // The parent inherits the nested HEVC classification rather than a
+        // blanket `Internal`.
+        assert_eq!(
+            HeicError::HevcDecode(HevcError::UnsupportedProfile {
+                profile: 4,
+                level: 120
+            })
+            .category(),
+            C::UnsupportedImageType,
+        );
+        assert_eq!(
+            HeicError::HevcDecode(HevcError::DimensionOverflow).category(),
+            C::LimitsExceeded(L::Pixels),
+        );
+        assert_eq!(
+            HeicError::HevcDecode(HevcError::Cancelled(StopReason::TimedOut)).category(),
+            C::TimedOut,
+        );
+    }
+
+    #[test]
+    fn hevc_error_category_maps_every_variant() {
+        assert_eq!(HevcError::DimensionOverflow.codec_name(), Some("heic"));
+        let cases: alloc::vec::Vec<(HevcError, C)> = alloc::vec![
+            (HevcError::InvalidNalUnit("n"), C::MalformedImage),
+            (HevcError::InvalidBitstream("b"), C::MalformedImage),
+            (HevcError::MissingParameterSet("SPS"), C::MalformedImage),
+            (
+                HevcError::InvalidParameterSet {
+                    kind: "SPS",
+                    msg: "m".into()
+                },
+                C::MalformedImage,
+            ),
+            (HevcError::CabacError("c"), C::MalformedImage),
+            (
+                HevcError::UnsupportedProfile {
+                    profile: 4,
+                    level: 120
+                },
+                C::UnsupportedImageType,
+            ),
+            (HevcError::Unsupported("u"), C::UnsupportedImageFeature),
+            (HevcError::DecodingError("d"), C::Internal),
+            (HevcError::AllocationFailed, C::OutOfMemory),
+            (HevcError::DimensionOverflow, C::LimitsExceeded(L::Pixels)),
+            (HevcError::Cancelled(StopReason::Cancelled), C::Cancelled),
+        ];
+        for (err, want) in &cases {
+            assert_eq!(err.category(), *want, "wrong category for {err:?}");
+        }
+    }
+
+    #[test]
+    fn probe_error_category_maps_every_variant() {
+        assert_eq!(ProbeError::NeedMoreData.codec_name(), Some("heic"));
+        assert_eq!(ProbeError::NeedMoreData.category(), C::UnexpectedEof);
+        assert_eq!(
+            ProbeError::InvalidFormat.category(),
+            C::UnsupportedImageType
+        );
+        // Corrupt delegates to the wrapped located HeicError.
+        assert_eq!(
+            ProbeError::Corrupt(at!(HeicError::InvalidData("x"))).category(),
+            C::MalformedImage,
+        );
+        assert_eq!(
+            ProbeError::Corrupt(at!(HeicError::NoPrimaryImage)).category(),
+            C::MalformedImage,
+        );
+    }
+
+    #[test]
+    fn category_and_codec_name_forward_through_at() {
+        // The form codecs actually return: At<HeicError>. The blanket
+        // `impl CategorizedError for At<E>` forwards both axes.
+        let located: At<HeicError> = at!(HeicError::Cancelled(StopReason::TimedOut));
+        assert_eq!(located.category(), C::TimedOut);
+        assert_eq!(located.codec_name(), Some("heic"));
+
+        let located2: At<HevcError> = at!(HevcError::CabacError("x"));
+        assert_eq!(located2.category(), C::MalformedImage);
+        assert_eq!(located2.codec_name(), Some("heic"));
     }
 }

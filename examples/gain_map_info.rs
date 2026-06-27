@@ -10,7 +10,7 @@
 //! peak linear value, and derived content-light-level envelope.
 //!
 //! Usage:
-//!   cargo run --example gain_map_info --features backend-rust,zencodec -- [--reconstruct] <file>...
+//!   cargo run --example gain_map_info --features backend-rust,std -- [--reconstruct] <file>...
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
