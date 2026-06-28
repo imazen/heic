@@ -6,14 +6,14 @@
 # impls omitted; re-export duplicates annotated `[also: path]`.
 # DO NOT EDIT BY HAND — commit regenerated changes with the code.
 #
-# files: heic.txt 198 lines (supported surface) | heic.features.txt 30 added (features: av1,backend-d3d11va,backend-mediacodec,backend-mediafoundation,backend-rust,backend-vaapi,backend-videotoolbox,fallible-alloc,parallel,std,unci,zencodec) | heic.internal.txt 452 lines (709 hidden + 0 excluded-feature)
+# files: heic.txt 197 lines (supported surface) | heic.features.txt 30 added (features: av1,backend-d3d11va,backend-mediacodec,backend-mediafoundation,backend-rust,backend-vaapi,backend-videotoolbox,fallible-alloc,parallel,std,unci,zencodec) | heic.internal.txt 452 lines (709 hidden + 0 excluded-feature)
 
 ## summary
 #
 #   pub modules                                 1
 #   pub types (struct/enum/trait/alias)        20
 #   pub consts/statics                          4
-#   free functions                              2
+#   free functions                              1
 #   inherent methods                           38
 #   struct fields                              56
 #   enum variants                              47
@@ -23,9 +23,9 @@
 #   auto-trait exceptions                       3
 #
 # per-module pub lines:
-#   (root)                          176
+#   (root)                          175
 
-## items (176 lines)
+## items (175 lines)
 
 pub mod heic
 pub use At
@@ -200,7 +200,6 @@ pub SegmentationMatte::matte_type: AuxiliaryImageType
 pub SegmentationMatte::width: u32
 pub trait RowSink
 pub fn RowSink::demand(&mut self, u32, u32, usize) -> &mut [u8]
-pub fn decode_rgba8(&[u8]) -> Result<(alloc::vec::Vec<u8>, u32, u32)>
 pub fn recommended_backends() -> alloc::vec::Vec<Backend>
 pub type Result<T> = core::result::Result<T, whereat::at::At<HeicError>>
 
