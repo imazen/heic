@@ -44,6 +44,9 @@ use crate::error::HeicError;
 /// behaviour change for callers that never set it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
+// `Fallible`/`Infallible` are only constructed via the zencodec `From` impl below
+// (and tests); without the `zencodec` feature they're reachable API but unbuilt.
+#[cfg_attr(not(feature = "zencodec"), allow(dead_code))]
 pub(crate) enum AllocPreference {
     /// Let each call site decide. Big untrusted-sized buffers favour the
     /// fallible path; small bounded scratch favours the infallible path.

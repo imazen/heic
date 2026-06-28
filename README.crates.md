@@ -24,6 +24,16 @@ heic = { version = "0.2.0", default-features = false, features = ["backend-rust"
 ```
 
 ```rust
+// One-shot: decode to tightly-packed 8-bit RGBA + dimensions.
+let data = std::fs::read("image.heic")?;
+let (rgba, width, height) = heic::decode_rgba8(&data)?;
+println!("{width}x{height}, {} bytes", rgba.len());
+```
+
+For a different pixel layout, resource limits, cancellation, zero-copy decode into
+your own buffer, probing, or metadata, use the `DecoderConfig` builder:
+
+```rust
 use heic::{DecoderConfig, PixelLayout};
 
 let data = std::fs::read("image.heic")?;

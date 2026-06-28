@@ -11,6 +11,16 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 - **Default `cargo build` now fails with a `compile_error!` directing the user to enable a backend feature.** Previously the pure-Rust decoder shipped automatically as `default = ["std"]`; now the user MUST opt into at least one of `backend-rust`, `backend-mediafoundation`, `backend-videotoolbox`, `backend-mediacodec`, `backend-vaapi`, or `backend-d3d11va`. This is the 0.2.0 breaking change. The existing `default` build pulled in `heic`'s entire HEVC implementation unconditionally; the new layout makes the backend explicit so users on Apple / Android / Windows can pick the patent-licensed native decoder instead.
 - **`DecoderConfig` gains an allowlist API** (`with_backend`, `with_backends`, `recommended_backends`). Decoding without any backend in the allowlist returns `HeicError::NoBackendSelected`. `DecoderConfig::recommended_backends()` constructs a platform-aware default order from the compiled-in backends.
 
+### Added
+- One-shot `heic::decode_rgba8(&[u8]) -> Result<(Vec<u8>, u32, u32)>` — decode to
+  tightly-packed 8-bit RGBA + dimensions in one call (safe default limits; HDR/10-bit
+  downconverted to 8-bit). Additive; the `DecoderConfig` builder path is unchanged.
+
+### Fixed
+- Silence a pre-existing `dead_code` clippy error on `AllocPreference::{Fallible,Infallible}`
+  in non-`zencodec` builds (those variants are only constructed via the `zencodec` `From`
+  impl) with `#[cfg_attr(not(feature = "zencodec"), allow(dead_code))]`.
+
 ### Documentation — README overhaul (2026-06-28)
 - README split into `README.md` (GitHub, full badge row) + generated `README.crates.md` (crates.io, no badges) via `readme = "README.crates.md"`; added a `## Quick start` section, the MSRV badge, the rendered crosslink footer (placed last), absolute license links, and `crates.io:skip` markers around the perf table. Fixed stale `DecoderConfig::estimate_memory()` references to show the real `(width, height, layout)` signature and documented that `Limits::default()` carries safe server caps.
 
