@@ -1,4 +1,6 @@
-# heic [![CI](https://img.shields.io/github/actions/workflow/status/imazen/heic/ci.yml?style=flat-square&label=CI)](https://github.com/imazen/heic/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/heic?style=flat-square)](https://crates.io/crates/heic) [![lib.rs](https://img.shields.io/crates/v/heic?style=flat-square&label=lib.rs&color=blue)](https://lib.rs/crates/heic) [![docs.rs](https://img.shields.io/docsrs/heic?style=flat-square)](https://docs.rs/heic) [![MSRV](https://img.shields.io/badge/MSRV-1.89-blue?style=flat-square)](https://doc.rust-lang.org/cargo/reference/manifest.html#the-rust-version-field) [![license](https://img.shields.io/crates/l/heic?style=flat-square)](#license)
+<!-- GENERATED FROM README.md by zenutils gen-readme-crates.sh — DO NOT EDIT. -->
+
+# heic
 
 HEIC/HEIF image decoder for Rust. Ships with a pure-Rust HEVC backend AND optional native backends for Windows (Media Foundation), Apple (VideoToolbox), Android (MediaCodec), and Linux (VA-API) — pick the patent-licensed path that ships with the platform, or fall back to the pure-Rust decoder. The parent crate is `#![forbid(unsafe_code)]`; FFI lives in isolated subcrates.
 
@@ -301,20 +303,6 @@ let gainmap = DecoderConfig::new().decode_gain_map(&data)?;
 
 ## Performance
 
-<!-- crates.io:skip-start -->
-Indicative decode timings on an AMD Ryzen 9 7950X (WSL2, Rust 1.93, release
-profile: thin LTO, codegen-units=1). The criterion benchmark (`cargo bench --bench
-decode`) reads its inputs from `$HEIC_TEST_DIR`, so reproduce against your own
-corpus.
-
-| Image | Time |
-|-------|------|
-| 1280x854 (single tile) | 54 ms |
-| 3024x4032 (48-tile, sequential) | 451 ms |
-| 3024x4032 (48-tile, `parallel`) | 180 ms |
-| Probe (metadata only) | 1.3 µs |
-| EXIF extraction | 4.4 µs |
-<!-- crates.io:skip-end -->
 
 SIMD-accelerated on x86-64 (AVX2 for color conversion, IDCT 8/16/32, residual add, dequantize; SSE4.1 for IDST 4x4) and AArch64 (NEON for color conversion, IDCT 8/16/32, IDST 4x4). Scalar fallback when SIMD is unavailable.
 

@@ -38,12 +38,13 @@ rust-version.workspace = true
 license.workspace = true
 description = "Pure Rust HEIC/HEIF image decoder with SIMD acceleration"
 repository.workspace = true
+readme = "README.crates.md"
 keywords = ["heic", "heif", "hevc", "image", "decoder"]
 categories = ["multimedia::images", "parser-implementations"]
 include = [
     "/src/**",
     "/examples/**",
-    "/README.md",
+    "/README.crates.md",
     "/CHANGELOG.md",
     "/LICENSE*",
 ]
