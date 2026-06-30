@@ -74,20 +74,25 @@ pub fn parse_short_term_rps(
     };
 
     if inter_ref_pic_set_prediction_flag {
-        // Inter-RPS prediction: derive from a previous set
+        // Inter-RPS prediction: derive from a previous set.
+        // delta_idx_minus1 is read as ue(v), so a malformed bitstream can make it
+        // far larger than st_rps_idx. Do the index arithmetic in a wider type with
+        // checked ops so an out-of-range value yields a decode error instead of an
+        // integer-overflow panic (e.g. delta_idx_minus1 == 255 overflowing `+ 1`).
         let delta_idx_minus1 = if st_rps_idx == num_short_term_ref_pic_sets {
             // In slice header: delta_idx_minus1 is present
-            reader.read_ue()? as u8
+            reader.read_ue()?
         } else {
             0
         };
 
-        let ref_rps_idx =
-            st_rps_idx
-                .checked_sub(delta_idx_minus1 + 1)
-                .ok_or(HevcError::InvalidBitstream(
-                    "inter_ref_pic_set: ref index out of range",
-                ))?;
+        // ref_rps_idx = st_rps_idx - (delta_idx_minus1 + 1)
+        let ref_rps_idx = u32::from(st_rps_idx)
+            .checked_sub(delta_idx_minus1)
+            .and_then(|v| v.checked_sub(1))
+            .ok_or(HevcError::InvalidBitstream(
+                "inter_ref_pic_set: ref index out of range",
+            ))?;
 
         if ref_rps_idx as usize >= prev_sets.len() {
             return Err(HevcError::InvalidBitstream(
