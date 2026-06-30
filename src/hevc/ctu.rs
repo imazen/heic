@@ -358,10 +358,19 @@ fn compute_tile_boundaries(
         }
         bd
     } else {
+        // Explicit per-column widths (column_widths[i] = width_minus1, each up to
+        // u16::MAX). A conformant stream's widths partition the picture exactly, so
+        // every boundary is <= pic_width_in_ctbs. A malformed stream can make the
+        // running sum explode (20 columns * 65536), which would otherwise drive
+        // `build_tile_scan_order`'s inner range `col_bd[tc]..col_bd[tc+1]` into a
+        // multi-billion-element push and OOM. Saturate each boundary to
+        // pic_width_in_ctbs so the returned boundaries stay monotonic and bounded;
+        // the scan-order push count is then capped at pic_width_in_ctbs *
+        // pic_height_in_ctbs and out-of-range tiles collapse to empty ranges.
         let mut bd = vec![0u32];
         let mut pos = 0u32;
         for &w in &tile_info.column_widths {
-            pos += w as u32 + 1;
+            pos = pos.saturating_add(w as u32 + 1).min(pic_width_in_ctbs);
             bd.push(pos);
         }
         bd.push(pic_width_in_ctbs);
@@ -375,10 +384,13 @@ fn compute_tile_boundaries(
         }
         bd
     } else {
+        // See the column_widths note above: clamp each running boundary to
+        // pic_height_in_ctbs so a malformed row_heights sum cannot blow up the
+        // tile-scan allocation.
         let mut bd = vec![0u32];
         let mut pos = 0u32;
         for &h in &tile_info.row_heights {
-            pos += h as u32 + 1;
+            pos = pos.saturating_add(h as u32 + 1).min(pic_height_in_ctbs);
             bd.push(pos);
         }
         bd.push(pic_height_in_ctbs);
