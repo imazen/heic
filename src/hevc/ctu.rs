@@ -848,6 +848,20 @@ impl<'a> SliceContext<'a> {
                 return Err(HevcError::Cancelled(enough::StopReason::Cancelled));
             }
 
+            // Bail out of a truncated/over-declaring slice. A conformant slice
+            // terminates via end_of_slice_segment_flag before its CABAC data is
+            // exhausted; once the decoder has fabricated more zero-bytes past the
+            // end of the (sub)stream than the substream itself contained, every
+            // remaining CTU is garbage. Without this, a tiny input declaring a
+            // huge picture (e.g. 16384×16384 ⇒ ~1M CTUs) grinds through them all
+            // for tens of seconds (fuzz #34). `seek_to`/`reinit` reset the
+            // over-read budget so valid multi-tile / WPP substreams are unaffected.
+            if self.cabac.overread_past_data() {
+                return Err(HevcError::InvalidBitstream(
+                    "CABAC read past end of slice data (truncated or over-declared picture)",
+                ));
+            }
+
             // WPP: at start of each new row (ctb_x==0, ctb_y>0), restore saved context
             // and reinitialize CABAC at the substream entry point
             if wpp && self.ctb_x == 0 && self.ctb_y > 0 && pic_width_in_ctbs > 1 {
