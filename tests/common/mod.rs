@@ -78,7 +78,7 @@ pub fn compare_backends_via_zensim(
     use zensim::{RgbaSlice, Zensim, ZensimProfile};
     use zensim_regress::testing::check_regression;
 
-    let zensim = Zensim::new(ZensimProfile::PreviewV0_2);
+    let zensim = Zensim::new(ZensimProfile::A);
     let mut report = DiffReport::default();
 
     for dir in dirs {

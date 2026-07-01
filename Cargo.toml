@@ -128,8 +128,13 @@ imgref = "1.12.0"
 # Perceptual cross-backend RGBA comparison for the dispatcher integration
 # tests — zensim does multi-scale XYB similarity scoring; zensim-regress
 # wraps it with structured tolerance / report semantics for diff testing.
-zensim = "0.2.7"
-zensim-regress = "0.3.1"
+# Pinned to the imazen/zensim `main` rev that removed the legacy linear
+# PreviewV0_1/PreviewV0_2 profiles (A-only): published zensim 0.2.7 predates
+# `ZensimProfile::A`, so the diff harness (which now scores with `A`) needs
+# the unreleased 0.3.x. Drop the git pins for plain versions once zensim
+# 0.3.x + zensim-regress 0.4.x publish to crates.io.
+zensim = { git = "https://github.com/imazen/zensim", rev = "493c91cdd7af" }
+zensim-regress = { git = "https://github.com/imazen/zensim", rev = "493c91cdd7af" }
 # heic-wasm-rs: reference decoder for comparison tests
 # Uncomment + RUSTFLAGS='--cfg heic_reference' cargo test to enable
 # heic-wasm-rs = { path = "../../heic/heic-wasm-rs" }
