@@ -12,6 +12,17 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 - **`DecoderConfig` gains an allowlist API** (`with_backend`, `with_backends`, `recommended_backends`). Decoding without any backend in the allowlist returns `HeicError::NoBackendSelected`. `DecoderConfig::recommended_backends()` constructs a platform-aware default order from the compiled-in backends.
 
 ### Fixed
+- **HEVC decoder: reject out-of-range `cu_qp_delta` instead of overflowing i32** (fuzz heic#40,
+  `src/hevc/ctu.rs`). A crafted CABAC EGk suffix can decode a huge `cu_qp_delta_abs`; the QPY
+  reconstruction (`ctu.rs:3665`) then overflowed `i32` on malformed input. Now validates
+  `CuQpDeltaVal` against its H.265 §7.4.9.14 range `[-(26+QpBdOffsetY/2), 25+QpBdOffsetY/2]` at
+  decode time and returns `InvalidBitstream`. No change for conforming bitstreams.
+- **HEVC decoder: validate weighted-prediction weight deltas to their spec range** (fuzz heic#41,
+  `src/hevc/slice.rs`). `delta_luma_weight`/`delta_chroma_weight` (list 0 and list 1) were read as
+  `se(v) as i16` and added to the denominator, overflowing `i16` on malformed input
+  (`slice.rs:811`). Now validates each delta against the H.265 §7.4.7.3 range `[-128, 127]` via a
+  shared `read_weight_delta` helper before the add, returning `InvalidBitstream` otherwise. No
+  change for conforming bitstreams.
 - Silence a pre-existing `dead_code` clippy error on `AllocPreference::{Fallible,Infallible}`
   in non-`zencodec` builds (those variants are only constructed via the `zencodec` `From`
   impl) with `#[cfg_attr(not(feature = "zencodec"), allow(dead_code))]`.

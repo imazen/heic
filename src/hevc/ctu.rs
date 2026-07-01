@@ -2163,7 +2163,18 @@ impl<'a> SliceContext<'a> {
                 0
             };
             self.is_cu_qp_delta_coded = true;
-            self.cu_qp_delta = cu_qp_delta_abs as i32 * (1 - 2 * cu_qp_delta_sign as i32);
+            // H.265 7.4.9.14: CuQpDeltaVal = cu_qp_delta_abs * (1 - 2 * cu_qp_delta_sign_flag)
+            // is constrained to the range [-(26 + QpBdOffsetY/2), +(25 + QpBdOffsetY/2)].
+            // A crafted CABAC EGk suffix can decode a huge cu_qp_delta_abs; reject it here
+            // (rather than let the QPY reconstruction below overflow i32).
+            let cu_qp_delta = (cu_qp_delta_abs as i64) * (1 - 2 * cu_qp_delta_sign as i64);
+            let qp_bd_offset_y = 6 * (self.sps.bit_depth_y() as i64 - 8);
+            if cu_qp_delta < -(26 + qp_bd_offset_y / 2) || cu_qp_delta > 25 + qp_bd_offset_y / 2 {
+                return Err(HevcError::InvalidBitstream(
+                    "cu_qp_delta out of range [-(26+QpBdOffsetY/2), 25+QpBdOffsetY/2]",
+                ));
+            }
+            self.cu_qp_delta = cu_qp_delta as i32;
             se_trace("cu_qp_delta", self.cu_qp_delta as i64, &self.cabac);
 
             // Re-derive quantization parameters with the actual delta
