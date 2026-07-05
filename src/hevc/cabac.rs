@@ -203,17 +203,6 @@ impl<'a> CabacDecoder<'a> {
         (self.byte_pos, self.data.len(), self.byte_pos as u32 * 8)
     }
 
-    /// Number of synthetic zero-bytes fabricated since the real bitstream (or
-    /// the current substream, after `seek_to`/`reinit`) was exhausted.
-    ///
-    /// Used by the CTU decode loop to detect a truncated/over-declaring slice:
-    /// once decoding has run far past the end of the available data, the
-    /// remaining CTUs are all fabricated garbage and the loop bails with a
-    /// decode error rather than grinding through them (fuzz #34).
-    pub fn overread_bytes(&self) -> u32 {
-        self.overread_bytes
-    }
-
     /// True once the decoder has fabricated more zero-bytes past the end of its
     /// data than the data itself contained (plus a small slack for the final
     /// renorm look-ahead a conformant stream legitimately performs).
