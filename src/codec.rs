@@ -2003,11 +2003,22 @@ fn layout_to_descriptor(layout: crate::PixelLayout) -> PixelDescriptor {
 }
 
 /// Convert `ProbeError` to `At<HeicError>` for trait compatibility.
+///
+/// `ProbeError` has its own [`zencodec::CategorizedError`] impl that maps
+/// `NeedMoreData` -> `UnexpectedEof` and `InvalidFormat` -> `UnsupportedImageType`
+/// (see `error.rs`), but callers here go through `HeicError`'s categorization
+/// instead (the zencodec trait boundary declares `type Error = At<CodecError>`
+/// built from `At<HeicError>`, not from `ProbeError` directly — see the
+/// `Pattern B envelope bridge` doc comment on `From<HeicError> for
+/// At<CodecError>`). Preserve the same two categories here via
+/// `HeicError::Truncated` / `HeicError::NotHeif` rather than collapsing both
+/// into `HeicError::InvalidData` (`MalformedImage`), which would misreport a
+/// truncated/unrecognized input as a corrupt one.
 fn probe_error_to_heic(e: crate::ProbeError) -> At<HeicError> {
     match e {
-        crate::ProbeError::NeedMoreData => at!(HeicError::InvalidData("not enough data to probe")),
+        crate::ProbeError::NeedMoreData => at!(HeicError::Truncated("not enough data to probe")),
         crate::ProbeError::InvalidFormat => {
-            at!(HeicError::InvalidData("not a valid HEIC/HEIF file"))
+            at!(HeicError::NotHeif("not a valid HEIC/HEIF file"))
         }
         crate::ProbeError::Corrupt(inner) => inner,
     }
@@ -2271,11 +2282,21 @@ mod tests {
 
     #[test]
     fn probe_error_conversion() {
-        let e = probe_error_to_heic(crate::ProbeError::NeedMoreData);
-        assert!(matches!(e.error(), HeicError::InvalidData(_)));
+        use zencodec::{CategorizedError, ErrorCategory};
 
+        // NeedMoreData -> Truncated -> UnexpectedEof, NOT MalformedImage: a
+        // truncated input is not the same failure as a corrupt one (fixes
+        // both collapsing into `InvalidData`/`MalformedImage`).
+        let e = probe_error_to_heic(crate::ProbeError::NeedMoreData);
+        assert!(matches!(e.error(), HeicError::Truncated(_)));
+        assert_eq!(e.error().category(), ErrorCategory::UnexpectedEof);
+
+        // InvalidFormat -> NotHeif -> UnsupportedImageType: "not a HEIC/HEIF
+        // file at all" is not the same failure as "a HEIC/HEIF file with
+        // corrupt content" (also fixes collapsing into `MalformedImage`).
         let e = probe_error_to_heic(crate::ProbeError::InvalidFormat);
-        assert!(matches!(e.error(), HeicError::InvalidData(_)));
+        assert!(matches!(e.error(), HeicError::NotHeif(_)));
+        assert_eq!(e.error().category(), ErrorCategory::UnsupportedImageType);
 
         let e = probe_error_to_heic(crate::ProbeError::Corrupt(at!(HeicError::NoPrimaryImage)));
         assert!(matches!(e.error(), HeicError::NoPrimaryImage));

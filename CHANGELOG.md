@@ -13,6 +13,23 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 - **Removed the optional `zencodec` cargo feature.** The zencodec integration (the `HeicDecoderConfig` / `HeicDecodeJob` / `HeicZenDecoder` / `HeicStreamDecoder` adapter and the `CategorizedError` impls) is now always compiled in, and `zencodec` is a required dependency. Callers that enabled `--features zencodec` must drop it — the feature no longer exists; the integration itself is unchanged. Raises the workspace MSRV 1.89 → 1.92 (via the now-required `ultrahdr-core`).
 - **The `zencodec` decode-trait impls now return `At<zencodec::CodecError>`** (the shared "envelope", Pattern B) instead of `At<HeicError>`. Breaking only for callers that matched the **zencodec-trait** boundary error as `HeicError` — switch to `err.error().category()` (an `ErrorCategory`) / `err.error().codec()` (`Some("heic")`), or the `CodecErrorExt` accessors. The native rich-error API (`DecoderConfig::decode`, `decode_rgba8`, `ImageInfo::from_bytes`, …) is unchanged and still returns `At<HeicError>`.
 
+### Fixed — `probe_error_to_heic` collapsed two distinct probe failures into `MalformedImage`
+- **`ProbeError::NeedMoreData` and `ProbeError::InvalidFormat` both mapped to
+  `HeicError::InvalidData` (category `MalformedImage`) at the `zencodec` trait
+  boundary** (`probe_error_to_heic`, `src/codec.rs`), even though `ProbeError`
+  itself already has a correct `CategorizedError` impl mapping `NeedMoreData`
+  -> `UnexpectedEof` and `InvalidFormat` -> `UnsupportedImageType` — the
+  distinction was lost going through `HeicError`, whose own categorization
+  the trait-boundary error is built from. A truncated input (retry once more
+  bytes arrive) and a non-HEIC input (never valid) were both reported as "the
+  image is corrupt", the wrong category for both a retry policy and an HTTP
+  status. Added `HeicError::Truncated` (`UnexpectedEof`) and
+  `HeicError::NotHeif` (`UnsupportedImageType`) and route
+  `probe_error_to_heic` through them instead of the shared `InvalidData`
+  variant. `probe_error_conversion` (which pinned the old, wrong mapping) now
+  asserts both the new variants and their `category()`. (`src/error.rs`,
+  `src/codec.rs`.)
+
 ### Changed — `zencodec` is now a required, always-on dependency (2026-06-28)
 - The optional `zencodec` cargo feature is removed and the adapter always compiles. The dependencies the feature used to pull (`zencodec`, `zenpixels`, `rgb`, `imgref`, `garb`, `bytemuck`, `ultrahdr-core`) are now unconditional, and `zencodec` is bumped 0.1.21 → 0.1.25. The integration stays `no_std`-clean — the `--no-default-features --features backend-rust` build is unchanged — so only the removed feature flag affects callers. The now-unconditional `ultrahdr-core` raises the workspace MSRV 1.89 → 1.92. (`Cargo.toml`, `src/lib.rs`, `src/error.rs`, `src/alloc_util.rs`, `.github/workflows/ci.yml`, `deny.toml`.)
 

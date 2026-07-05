@@ -20,6 +20,18 @@ pub enum HeicError {
     InvalidContainer(&'static str),
     /// Invalid or corrupt data
     InvalidData(&'static str),
+    /// Input ended before enough bytes were available to probe/parse the
+    /// container header — distinct from [`InvalidData`](Self::InvalidData):
+    /// the bytes seen so far are consistent with a HEIC/HEIF file, there just
+    /// aren't enough of them yet (truncated download, streamed input cut
+    /// short, …).
+    Truncated(&'static str),
+    /// The input's magic bytes / container brand don't match any recognized
+    /// HEIF/HEIC brand — this isn't a HEIC/HEIF file at all, as opposed to
+    /// [`InvalidData`](Self::InvalidData) (a HEIF file whose content is
+    /// corrupt) or [`Unsupported`](Self::Unsupported) (a recognized feature
+    /// this decoder doesn't implement).
+    NotHeif(&'static str),
     /// Unsupported feature
     Unsupported(&'static str),
     /// No primary image found in container
@@ -65,6 +77,8 @@ impl fmt::Display for HeicError {
         match self {
             Self::InvalidContainer(msg) => write!(f, "invalid HEIF container: {msg}"),
             Self::InvalidData(msg) => write!(f, "invalid data: {msg}"),
+            Self::Truncated(msg) => write!(f, "truncated input: {msg}"),
+            Self::NotHeif(msg) => write!(f, "not a HEIC/HEIF file: {msg}"),
             Self::Unsupported(msg) => write!(f, "unsupported: {msg}"),
             Self::NoPrimaryImage => write!(f, "no primary image in container"),
             Self::HevcDecode(e) => write!(f, "HEVC decode error: {e}"),
@@ -327,6 +341,13 @@ impl zencodec::CategorizedError for HeicError {
             // A parseable container missing its required primary item — bad
             // input (it is surfaced under `ProbeError::Corrupt`), not a bug.
             Self::NoPrimaryImage => C::MalformedImage,
+            // Not enough bytes yet to probe/parse the header — the caller
+            // should retry once more data is available, not treat this as a
+            // malformed image.
+            Self::Truncated(_) => C::UnexpectedEof,
+            // The input isn't a HEIC/HEIF file at all (magic bytes / brand
+            // don't match), as opposed to a recognized-but-corrupt one.
+            Self::NotHeif(_) => C::UnsupportedImageType,
             // A valid HEIC feature this decoder does not implement. The message
             // bundles several flavours (overlay version, unci component layout,
             // construction_method, GainMapRender mode, …); the codec *type* not
@@ -431,6 +452,8 @@ mod error_tests {
         let variants: alloc::vec::Vec<HeicError> = alloc::vec![
             HeicError::InvalidContainer("ic"),
             HeicError::InvalidData("id"),
+            HeicError::Truncated("t"),
+            HeicError::NotHeif("nh"),
             HeicError::Unsupported("u"),
             HeicError::NoPrimaryImage,
             HeicError::HevcDecode(HevcError::InvalidBitstream("b")),
@@ -513,6 +536,8 @@ mod category_tests {
             (HeicError::InvalidContainer("c"), C::MalformedImage),
             (HeicError::InvalidData("d"), C::MalformedImage),
             (HeicError::NoPrimaryImage, C::MalformedImage),
+            (HeicError::Truncated("t"), C::UnexpectedEof),
+            (HeicError::NotHeif("nh"), C::UnsupportedImageType),
             (HeicError::Unsupported("u"), C::UnsupportedImageFeature),
             (HeicError::UnsupportedCodec("av1"), C::UnsupportedImageType),
             (
