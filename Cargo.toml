@@ -133,8 +133,8 @@ imgref = "1.12.0"
 # `ZensimProfile::A`, so the diff harness (which now scores with `A`) needs
 # the unreleased 0.3.x. Drop the git pins for plain versions once zensim
 # 0.3.x + zensim-regress 0.4.x publish to crates.io.
-zensim = { git = "https://github.com/imazen/zensim", rev = "493c91cdd7af" }
-zensim-regress = { git = "https://github.com/imazen/zensim", rev = "493c91cdd7af" }
+zensim = { version = "0.3.0", git = "https://github.com/imazen/zensim", rev = "493c91cdd7af" }
+zensim-regress = { version = "0.4.0", git = "https://github.com/imazen/zensim", rev = "493c91cdd7af" }
 # heic-wasm-rs: reference decoder for comparison tests
 # Uncomment + RUSTFLAGS='--cfg heic_reference' cargo test to enable
 # heic-wasm-rs = { path = "../../heic/heic-wasm-rs" }

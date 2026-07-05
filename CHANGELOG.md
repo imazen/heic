@@ -12,6 +12,12 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 - **`DecoderConfig` gains an allowlist API** (`with_backend`, `with_backends`, `recommended_backends`). Decoding without any backend in the allowlist returns `HeicError::NoBackendSelected`. `DecoderConfig::recommended_backends()` constructs a platform-aware default order from the compiled-in backends.
 
 ### Fixed
+- **CI: `cargo deny check` (Supply-chain job) green again** (`deny.toml`, `Cargo.toml`). The
+  `zensim`/`zensim-regress` dev-dependency git pins (and their own transitive `zenanalyze` git
+  dependency, via `zenpredict`) were never added to `[sources].allow-git`, and were declared with no
+  `version` requirement (flagged as `bans.wildcards`). Added both git sources to the allowlist and
+  pinned `version = "0.3.0"`/`"0.4.0"` (matching the resolved `Cargo.lock` versions at the pinned
+  rev) alongside the existing `git`/`rev`; no behavior change, dev-dependencies only.
 - **HEVC decoder: reject out-of-range `cu_qp_delta` instead of overflowing i32** (fuzz heic#40,
   `src/hevc/ctu.rs`). A crafted CABAC EGk suffix can decode a huge `cu_qp_delta_abs`; the QPY
   reconstruction (`ctu.rs:3665`) then overflowed `i32` on malformed input. Now validates
