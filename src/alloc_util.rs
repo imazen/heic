@@ -218,16 +218,28 @@ mod tests {
     #[cfg(feature = "unci")]
     #[test]
     fn alloc_filled_fallible_oom_returns_err() {
-        // Request an impossibly large allocation; the fallible path must
-        // return Err (mapped to OutOfMemory) rather than abort.
-        let r = alloc_filled::<u8>(AllocPreference::Fallible, true, usize::MAX / 2);
+        // Request a byte count that exceeds `isize::MAX` on every target
+        // (32-bit and 64-bit alike): Rust's allocator rejects any request
+        // over that bound with a capacity-overflow error before it ever
+        // touches the OS allocator, so this is Err deterministically rather
+        // than depending on how much free virtual address space the host
+        // happens to have. `usize::MAX / 2` (~2 GiB on i686) used to be used
+        // here, but 2 GiB is well within reservable virtual address space on
+        // 32-bit Linux (it only *reserves*, never *commits*, the memory), so
+        // it flaked green on i686 CI instead of erroring.
+        let r = alloc_filled::<u8>(AllocPreference::Fallible, true, usize::MAX);
         assert!(r.is_err());
         assert!(matches!(r.unwrap_err().error(), HeicError::OutOfMemory));
     }
 
     #[test]
     fn vec_with_capacity_fallible_oom_returns_err() {
-        let r = vec_with_capacity::<u8>(AllocPreference::Fallible, true, usize::MAX / 2);
+        // See `alloc_filled_fallible_oom_returns_err` above: `usize::MAX`
+        // (not `usize::MAX / 2`) is required to guarantee a capacity-overflow
+        // Err on 32-bit targets, where `usize::MAX / 2` (~2 GiB) is
+        // reservable virtual address space and does not fail (this test was
+        // red on i686 CI with the halved value).
+        let r = vec_with_capacity::<u8>(AllocPreference::Fallible, true, usize::MAX);
         assert!(r.is_err());
         assert!(matches!(r.unwrap_err().error(), HeicError::OutOfMemory));
     }

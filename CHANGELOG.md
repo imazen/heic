@@ -18,6 +18,13 @@ All notable changes to the `heic` crate are documented in this file. Format foll
   `version` requirement (flagged as `bans.wildcards`). Added both git sources to the allowlist and
   pinned `version = "0.3.0"`/`"0.4.0"` (matching the resolved `Cargo.lock` versions at the pinned
   rev) alongside the existing `git`/`rev`; no behavior change, dev-dependencies only.
+- **Test: `vec_with_capacity_fallible_oom_returns_err` (and the unci-gated
+  `alloc_filled_fallible_oom_returns_err`) no longer flake on i686** (`src/alloc_util.rs`). Both
+  requested `usize::MAX / 2` bytes to force a fallible-alloc `Err`; on i686 that's only ~2 GiB,
+  which is reservable (not committed) virtual address space and could succeed instead of erroring.
+  Now requests `usize::MAX`, which exceeds `isize::MAX` on every target and is rejected as a
+  capacity-overflow `Err` before ever reaching the OS allocator — deterministic regardless of host
+  address space.
 - **HEVC decoder: reject out-of-range `cu_qp_delta` instead of overflowing i32** (fuzz heic#40,
   `src/hevc/ctu.rs`). A crafted CABAC EGk suffix can decode a huge `cu_qp_delta_abs`; the QPY
   reconstruction (`ctu.rs:3665`) then overflowed `i32` on malformed input. Now validates
