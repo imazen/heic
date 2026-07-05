@@ -93,4 +93,11 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # The temporary [patch.crates-io] pin of ultrahdr-core to the imazen/ultrahdr
 # rev carrying the Apple MakerNote headroom parser (see Cargo.toml). Remove
 # together with the patch when the next ultrahdr-core release publishes.
-allow-git = ["https://github.com/imazen/ultrahdr"]
+# zensim (dev-dep, backend-diff scoring harness) is pinned to an unreleased git
+# rev; zenanalyze is zensim's own transitive git dependency (zenpredict).
+# Remove both together with the git pins once zensim publishes a matching release.
+allow-git = [
+    "https://github.com/imazen/ultrahdr",
+    "https://github.com/imazen/zensim",
+    "https://github.com/imazen/zenanalyze",
+]
