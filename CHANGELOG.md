@@ -43,6 +43,34 @@ All notable changes to the `heic` crate are documented in this file. Format foll
   (`slice.rs:811`). Now validates each delta against the H.265 §7.4.7.3 range `[-128, 127]` via a
   shared `read_weight_delta` helper before the add, returning `InvalidBitstream` otherwise. No
   change for conforming bitstreams.
+- **HEVC decoder: clamp non-uniform tile boundaries to the picture's CTB extent** (fuzz heic#33,
+  heic#37, `src/hevc/ctu.rs`). `compute_tile_boundaries` summed attacker-controlled
+  `column_width`/`row_height` values (each up to `u16::MAX`, up to 20 columns / 22 rows) into
+  `col_bd`/`row_bd` with no upper bound; a malformed PPS could make a single tile span a
+  multi-thousand-CTB range, so `build_tile_scan_order`'s nested boundary loops pushed billions of
+  `(u32, u32)` entries into an unbounded `Vec` and OOM'd (`malloc(2 GiB)` observed via both the raw
+  HEVC entry point, `fuzz_hevc_raw` #33, and the HEIF container path, `fuzz_decode_unci` #37 — same
+  root cause and fix). Each running boundary is now saturated to `pic_width`/`height_in_ctbs`. No
+  change for conforming bitstreams (valid streams already partition the picture within its extent).
+- **HEVC decoder: bail CABAC decode instead of grinding through a truncated slice's declared CTU
+  count** (fuzz heic#34, `src/hevc/cabac.rs` + `src/hevc/ctu.rs`). A truncated slice declaring a
+  large picture (up to ~1M CTUs) kept decoding CTUs after its CABAC data was exhausted —
+  `decode_bypass`/bit-reads fabricate synthetic zero-bytes past end (standard CABAC tail behavior),
+  so `end_of_slice_segment_flag` never fired and the loop ground through every declared CTU (~51s
+  wall on a 294-byte input). `CabacDecoder` now counts zero-bytes fabricated past end-of-data
+  (`overread_bytes`, reset on `seek_to`/`reinit` for each tile/WPP substream); the CTU loop bails
+  with `InvalidBitstream` once that count exceeds the (sub)stream's own length plus slack, well past
+  the few-byte final-renorm look-ahead a conformant stream performs. No change for conforming
+  bitstreams.
+- **HEVC decoder: bound inter-RPS `delta_idx` to avoid a u8 add-overflow panic** (fuzz heic#35,
+  heic#36, `src/hevc/refpic.rs` + `src/hevc/slice.rs`). `parse_short_term_rps` computed
+  `ref_rps_idx` as `st_rps_idx.checked_sub(delta_idx_minus1 + 1)`, but `delta_idx_minus1` is read as
+  `ue(v)` and truncated to `u8`; a malformed slice-header inline RPS with `delta_idx_minus1 == 255`
+  overflowed the `u8` `+ 1` and panicked (`refpic.rs:87`). Now computed in `u32` with chained
+  `checked_sub`, returning `InvalidBitstream` for any out-of-range value. Reached via both the HEIF
+  container decode (`fuzz_decode_unci` #36, x86_64) and the AV1 fuzz dispatch (`fuzz_decode_av1`
+  #35, arm64) — same call path (`slice.rs` → `parse_short_term_rps`). No change for valid
+  bitstreams.
 - Silence a pre-existing `dead_code` clippy error on `AllocPreference::{Fallible,Infallible}`
   in non-`zencodec` builds (those variants are only constructed via the `zencodec` `From`
   impl) with `#[cfg_attr(not(feature = "zencodec"), allow(dead_code))]`.
