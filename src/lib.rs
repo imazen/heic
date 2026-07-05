@@ -220,7 +220,7 @@ pub use hevc::{DecodedFrame, VideoDecoder};
 /// Decoding applies the decoder's safe default resource limits (16384×16384,
 /// 256 MP, 1 GiB), so untrusted input can't exhaust memory; HDR / 10-bit content
 /// is downconverted to 8-bit. For 16-bit/HDR output, tighter [`Limits`],
-/// cancellation, zero-copy [`DecoderConfig::decode_into`], probing, or metadata,
+/// cancellation, zero-copy [`DecodeRequest::decode_into`], probing, or metadata,
 /// use [`DecoderConfig`].
 ///
 /// ```no_run
