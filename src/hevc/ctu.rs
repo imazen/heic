@@ -2313,9 +2313,13 @@ impl<'a> SliceContext<'a> {
             prefix += 1;
         }
         if prefix == 5 {
-            // EGk(0) bypass suffix
+            // EGk(0) bypass suffix. decode_egk_bypass(0) can return up to
+            // u32::MAX - 1 for a crafted bitstream, so `suffix + 5` can
+            // overflow u32 — reject rather than wrap/panic.
             let suffix = self.cabac.decode_egk_bypass(0)?;
-            Ok(suffix + 5)
+            suffix.checked_add(5).ok_or(HevcError::InvalidBitstream(
+                "cu_qp_delta_abs EGk suffix overflow",
+            ))
         } else {
             Ok(prefix)
         }

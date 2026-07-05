@@ -25,6 +25,13 @@ All notable changes to the `heic` crate are documented in this file. Format foll
   Now requests `usize::MAX`, which exceeds `isize::MAX` on every target and is rejected as a
   capacity-overflow `Err` before ever reaching the OS allocator — deterministic regardless of host
   address space.
+- **HEVC decoder: reject `cu_qp_delta_abs` EGk suffix overflow instead of panicking**
+  (`src/hevc/ctu.rs`). `decode_cu_qp_delta_abs` computed `suffix + 5` after an EGk(0) bypass decode
+  with no overflow check; `decode_egk_bypass(0)` can legally return up to `u32::MAX - 1` for a
+  crafted (non-conforming) bitstream, so the add could overflow `u32` — a panic with overflow
+  checks on. Found by code review while auditing the neighboring range-check added for fuzz heic#40
+  below. Now uses `checked_add` and returns `InvalidBitstream` on overflow. No change for any value
+  a conforming bitstream can produce.
 - **HEVC decoder: reject out-of-range `cu_qp_delta` instead of overflowing i32** (fuzz heic#40,
   `src/hevc/ctu.rs`). A crafted CABAC EGk suffix can decode a huge `cu_qp_delta_abs`; the QPY
   reconstruction (`ctu.rs:3665`) then overflowed `i32` on malformed input. Now validates
