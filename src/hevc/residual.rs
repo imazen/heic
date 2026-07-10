@@ -31,14 +31,19 @@ pub enum ScanOrder {
 
 /// Get scan order based on intra prediction mode and component index.
 ///
-/// Per H.265 Table 6-5:
+/// Per H.265 7.3.8.11:
 /// - Luma: directional scan at log2_size 2 (4x4) and 3 (8x8)
-/// - Chroma: directional scan at log2_size 2 only
-pub fn get_scan_order(log2_size: u8, intra_mode: u8, c_idx: u8) -> ScanOrder {
+/// - Chroma: directional scan at log2_size 2, and also at 3 when ChromaArrayType == 3
+pub fn get_scan_order(log2_size: u8, intra_mode: u8, c_idx: u8, chroma_444: bool) -> ScanOrder {
+    // H.265 7.3.8.11: the mode-dependent scan applies when
+    //   log2TrafoSize == 2, OR (log2TrafoSize == 3 && cIdx == 0),
+    //   OR (log2TrafoSize == 3 && ChromaArrayType == 3).
+    // The last clause was missing: 4:4:4 chroma at 8x8 got the diagonal scan, which
+    // reads the significance map in the wrong order and desyncs CABAC.
     let use_directional = if c_idx == 0 {
         log2_size == 2 || log2_size == 3
     } else {
-        log2_size == 2
+        log2_size == 2 || (log2_size == 3 && chroma_444)
     };
 
     if use_directional {
