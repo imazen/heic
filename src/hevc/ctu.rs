@@ -510,9 +510,23 @@ impl<'a> SliceContext<'a> {
         let qp_i_cb = slice_qp + pps.pps_cb_qp_offset as i32 + header.slice_cb_qp_offset as i32;
         let qp_i_cr = slice_qp + pps.pps_cr_qp_offset as i32 + header.slice_cr_qp_offset as i32;
 
-        // Apply chroma QP mapping table (H.265 Table 8-10)
-        let qp_cb = chroma_qp_mapping(qp_i_cb.clamp(0, 57));
-        let qp_cr = chroma_qp_mapping(qp_i_cr.clamp(0, 57));
+        // H.265 8.6.1: Table 8-10 applies ONLY to ChromaArrayType == 1 (4:2:0).
+        // For 4:2:2 and 4:4:4, QpC = Min(qPi, 51). Below qPi 30 the table is the
+        // identity, so this only diverges on high-QP content.
+        let chroma_array_type = if sps.separate_colour_plane_flag {
+            0
+        } else {
+            sps.chroma_format_idc
+        };
+        let map_qp = |qp_i: i32| -> i32 {
+            if chroma_array_type == 1 {
+                chroma_qp_mapping(qp_i.clamp(0, 57))
+            } else {
+                qp_i.clamp(0, 51)
+            }
+        };
+        let qp_cb = map_qp(qp_i_cb);
+        let qp_cr = map_qp(qp_i_cr);
 
         debug_trace!(
             "DEBUG: Chroma QP: qp_y={}, qp_cb={}, qp_cr={}",
@@ -2072,7 +2086,7 @@ impl<'a> SliceContext<'a> {
                 let sis = self.sps.strong_intra_smoothing_enabled_flag;
                 let is_intra_cu = self.get_pred_mode_at(x0, y0) == PredMode::Intra;
                 let scan_order = if is_intra_cu {
-                    residual::get_scan_order(2, intra_chroma_mode.as_u8(), 1)
+                    residual::get_scan_order(2, intra_chroma_mode.as_u8(), 1, false)
                 } else {
                     ScanOrder::Diagonal
                 };
@@ -2205,7 +2219,7 @@ impl<'a> SliceContext<'a> {
         }
 
         let scan_order = if is_intra_cu {
-            residual::get_scan_order(log2_size, actual_luma_mode.as_u8(), 0)
+            residual::get_scan_order(log2_size, actual_luma_mode.as_u8(), 0, false)
         } else {
             ScanOrder::Diagonal // Inter always uses diagonal scan
         };
@@ -2253,7 +2267,7 @@ impl<'a> SliceContext<'a> {
             // vertical/horizontal, not diagonal) and desyncs CABAC.
             let chroma_mode_here = self.get_intra_chroma_mode_at(x0, y0);
             let chroma_scan_order = if is_intra_cu {
-                residual::get_scan_order(chroma_log2_size, chroma_mode_here.as_u8(), 1)
+                residual::get_scan_order(chroma_log2_size, chroma_mode_here.as_u8(), 1, is_444)
             } else {
                 ScanOrder::Diagonal
             };
