@@ -759,11 +759,11 @@ mod category_tests {
             (HeicError::OutOfMemory, C::Resource(Res::OutOfMemory)),
             (
                 HeicError::Cancelled(StopReason::Cancelled),
-                C::Lifecycle(StopReason::Cancelled),
+                C::Stopped(StopReason::Cancelled),
             ),
             (
                 HeicError::Cancelled(StopReason::TimedOut),
-                C::Lifecycle(StopReason::TimedOut),
+                C::Stopped(StopReason::TimedOut),
             ),
             (
                 HeicError::Sink(sink),
@@ -811,7 +811,7 @@ mod category_tests {
         );
         assert_eq!(
             HeicError::HevcDecode(HevcError::Cancelled(StopReason::TimedOut)).category(),
-            C::Lifecycle(StopReason::TimedOut),
+            C::Stopped(StopReason::TimedOut),
         );
     }
 
@@ -855,7 +855,7 @@ mod category_tests {
             ),
             (
                 HevcError::Cancelled(StopReason::Cancelled),
-                C::Lifecycle(StopReason::Cancelled),
+                C::Stopped(StopReason::Cancelled),
             ),
             (
                 HevcError::CoreUnclassified("x".to_string()),
@@ -894,7 +894,7 @@ mod category_tests {
         // The form codecs actually return: At<HeicError>. The blanket
         // `impl CategorizedError for At<E>` forwards both axes.
         let located: At<HeicError> = at!(HeicError::Cancelled(StopReason::TimedOut));
-        assert_eq!(located.category(), C::Lifecycle(StopReason::TimedOut));
+        assert_eq!(located.category(), C::Stopped(StopReason::TimedOut));
         assert_eq!(located.codec_name(), Some("heic"));
 
         let located2: At<HevcError> = at!(HevcError::CabacError("x"));

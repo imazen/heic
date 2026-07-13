@@ -146,7 +146,7 @@ png = "0.18.1"
 # input must categorize as an incomplete-input ErrorCategory, never panic,
 # never silently decode). Drop for a crates.io version dep once zencodec
 # 0.1.26 + testkit publish.
-zencodec-testkit = { git = "https://github.com/imazen/zencodec", rev = "2427387f86c77fdf773ae2fa219926a49cd32d99" }
+zencodec-testkit = { git = "https://github.com/imazen/zencodec", rev = "44ca79279b265ba7dfe01a2b31ef74788429509a" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(heic_reference)', 'cfg(fuzzing)'] }
@@ -224,7 +224,7 @@ ultrahdr-core = { git = "https://github.com/imazen/ultrahdr", rev = "3ac20f99d45
 # merged). The zencodec-testkit dev-dep above is pinned to the SAME rev so
 # both resolve to one unified zencodec. Drop for the crates.io version once
 # zencodec 0.1.26 + testkit publish.
-zencodec = { git = "https://github.com/imazen/zencodec", rev = "2427387f86c77fdf773ae2fa219926a49cd32d99" }
+zencodec = { git = "https://github.com/imazen/zencodec", rev = "44ca79279b265ba7dfe01a2b31ef74788429509a" }
 
 [[example]]
 name = "gm20_probe"
