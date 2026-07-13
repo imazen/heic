@@ -196,7 +196,7 @@ impl Default for HeicDecoderConfig {
 }
 
 impl zencodec::decode::DecoderConfig for HeicDecoderConfig {
-    type Error = At<HeicError>;
+    type Error = At<zencodec::CodecError>;
     type Job<'a> = HeicDecodeJob;
 
     fn formats() -> &'static [ImageFormat] {
@@ -320,105 +320,21 @@ impl HeicDecodeJob {
         limits.alloc_pref = alloc_pref;
         Some(limits)
     }
-}
 
-/// Build the "available descriptors" list for format negotiation based on
-/// image properties (alpha, bit depth).
-fn available_descriptors(has_alpha: bool, bit_depth: u8) -> alloc::vec::Vec<PixelDescriptor> {
-    let mut available = alloc::vec::Vec::with_capacity(5);
-    if bit_depth > 8 {
-        // 16-bit formats first when source is >8-bit
-        if has_alpha {
-            available.push(PixelDescriptor::RGBA16_SRGB);
-            available.push(PixelDescriptor::RGB16_SRGB);
-        } else {
-            available.push(PixelDescriptor::RGB16_SRGB);
-            available.push(PixelDescriptor::RGBA16_SRGB);
-        }
-    }
-    // 8-bit formats
-    if has_alpha {
-        available.push(PixelDescriptor::RGBA8_SRGB);
-        available.push(PixelDescriptor::BGRA8_SRGB);
-        available.push(PixelDescriptor::RGB8_SRGB);
-    } else {
-        available.push(PixelDescriptor::RGB8_SRGB);
-        available.push(PixelDescriptor::RGBA8_SRGB);
-        available.push(PixelDescriptor::BGRA8_SRGB);
-    }
-    available
-}
+    // ── Pattern B: native-error bodies behind the thin trait wrappers ──────
+    //
+    // Each `*_inner` method is the exact pre-migration trait-method body
+    // (returning the native `At<HeicError>`, unchanged internal logic); the
+    // `zencodec::decode::DecodeJob` impl above wraps each with
+    // `.map_err(zencodec::CodecError::of)` to reach the shared envelope
+    // `type Error = At<CodecError>`. This keeps the (previously reviewed,
+    // tested) internals untouched and isolates the Pattern-B bridge to one
+    // line per method.
 
-/// Check whether a negotiated descriptor is a 16-bit format.
-fn is_16bit(desc: PixelDescriptor) -> bool {
-    desc == PixelDescriptor::RGB16_SRGB || desc == PixelDescriptor::RGBA16_SRGB
-}
-
-/// Pick the native [`crate::PixelLayout`] that best bounds the output buffer
-/// for a negotiated descriptor, used only by the resource estimate.
-///
-/// heic's `PixelLayout` is 8-bit-only (3 or 4 Bpp), so a 16-bit output is not
-/// representable here — but the estimate's dominant term is the u16 YCbCr
-/// working set from `estimate_memory`, which already scales with bit depth, so
-/// an alpha-presence choice (Rgb8 vs Rgba8) is a sound conservative bound.
-fn layout_for_descriptor(desc: &PixelDescriptor) -> crate::PixelLayout {
-    if desc.has_alpha() {
-        crate::PixelLayout::Rgba8
-    } else {
-        crate::PixelLayout::Rgb8
-    }
-}
-
-/// Map a negotiated PixelDescriptor to a native PixelLayout for 8-bit decode.
-fn descriptor_to_layout(desc: PixelDescriptor) -> crate::PixelLayout {
-    if desc.pixel_format() == PixelDescriptor::BGRA8_SRGB.pixel_format() {
-        crate::PixelLayout::Bgra8
-    } else if desc.pixel_format() == PixelDescriptor::RGBA8_SRGB.pixel_format() {
-        crate::PixelLayout::Rgba8
-    } else {
-        crate::PixelLayout::Rgb8
-    }
-}
-
-impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
-    type Error = At<HeicError>;
-    type Dec = HeicDecoder<'a>;
-    type StreamDec = HeicStreamDecoder;
-    type AnimationFrameDec = Unsupported<At<HeicError>>;
-
-    fn with_stop(mut self, stop: zencodec::StopToken) -> Self {
-        self.stop = Some(stop);
-        self
-    }
-
-    fn with_limits(mut self, limits: ResourceLimits) -> Self {
-        self.limits = limits;
-        self
-    }
-
-    /// heic applies gain maps natively (`reconstructs_hdr()` is `true`):
-    /// `ReconstructHdr` decodes the SDR base, applies the Apple HDR gain map
-    /// via ultrahdr-core, and returns linear f32/f16 HDR pixels with the
-    /// content-light-level / mastering-display envelope populated.
-    fn with_gain_map_render(mut self, render: zencodec::GainMapRender) -> Self {
-        self.gain_map_render = render;
-        self
-    }
-
-    fn with_policy(mut self, policy: DecodePolicy) -> Self {
-        self.policy = Some(policy);
-        self
-    }
-
-    fn with_orientation(mut self, hint: zencodec::OrientationHint) -> Self {
-        self.config.orientation = hint;
-        self
-    }
-
-    fn probe(&self, data: &[u8]) -> Result<ImageInfo, At<HeicError>> {
+    fn probe_inner(&self, data: &[u8]) -> Result<ImageInfo, At<HeicError>> {
         self.limits
             .check_input_size(data.len() as u64)
-            .map_err(|e| at!(HeicError::LimitExceeded(limit_exceeded_msg(e))))?;
+            .map_err(|e| at!(HeicError::ResourceLimit(e)))?;
         let native = crate::ImageInfo::from_bytes(data).map_err(probe_error_to_heic)?;
         let apply = will_auto_orient(self.config.orientation);
         let (w, h, orientation) = reported_dims_and_orientation(
@@ -433,10 +349,10 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
         ))
     }
 
-    fn probe_full(&self, data: &[u8]) -> Result<ImageInfo, At<HeicError>> {
+    fn probe_full_inner(&self, data: &[u8]) -> Result<ImageInfo, At<HeicError>> {
         self.limits
             .check_input_size(data.len() as u64)
-            .map_err(|e| at!(HeicError::LimitExceeded(limit_exceeded_msg(e))))?;
+            .map_err(|e| at!(HeicError::ResourceLimit(e)))?;
         let native = crate::ImageInfo::from_bytes(data).map_err(probe_error_to_heic)?;
         // Parse the HEIF container once and extract all metadata from it
         let stop_ref: &dyn enough::Stop = match self.stop {
@@ -458,10 +374,10 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
         ))
     }
 
-    fn output_info(&self, data: &[u8]) -> Result<OutputInfo, At<HeicError>> {
+    fn output_info_inner(&self, data: &[u8]) -> Result<OutputInfo, At<HeicError>> {
         self.limits
             .check_input_size(data.len() as u64)
-            .map_err(|e| at!(HeicError::LimitExceeded(limit_exceeded_msg(e))))?;
+            .map_err(|e| at!(HeicError::ResourceLimit(e)))?;
         let native = crate::ImageInfo::from_bytes(data).map_err(probe_error_to_heic)?;
         let available = available_descriptors(native.has_alpha, native.bit_depth);
         let base_desc = available[0]; // default for this image
@@ -485,14 +401,14 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
         Ok(OutputInfo::full_decode(w, h, desc).with_orientation_applied(orientation_applied))
     }
 
-    fn decoder(
+    fn decoder_inner<'a>(
         mut self,
         data: Cow<'a, [u8]>,
         preferred: &[PixelDescriptor],
     ) -> Result<HeicDecoder<'a>, At<HeicError>> {
         self.limits
             .check_input_size(data.len() as u64)
-            .map_err(|e| at!(HeicError::LimitExceeded(limit_exceeded_msg(e))))?;
+            .map_err(|e| at!(HeicError::ResourceLimit(e)))?;
         let thread_count = policy_to_threads(self.limits.threading());
         let stop = self.stop.take();
         let limits = self.native_limits();
@@ -510,7 +426,7 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
         })
     }
 
-    fn push_decoder(
+    fn push_decoder_inner<'a>(
         self,
         data: Cow<'a, [u8]>,
         sink: &mut dyn DecodeRowSink,
@@ -518,7 +434,7 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
     ) -> Result<OutputInfo, At<HeicError>> {
         self.limits
             .check_input_size(data.len() as u64)
-            .map_err(|e| at!(HeicError::LimitExceeded(limit_exceeded_msg(e))))?;
+            .map_err(|e| at!(HeicError::ResourceLimit(e)))?;
         // Probe for image properties
         let probe_info = crate::ImageInfo::from_bytes(&data).ok();
         let has_alpha = probe_info.as_ref().is_some_and(|pi| pi.has_alpha);
@@ -526,13 +442,16 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
 
         // Negotiate output format
         let available = available_descriptors(has_alpha, bit_depth);
-        let negotiated = negotiate_pixel_format(preferred, &available)
-            .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
+        let negotiated = negotiate_pixel_format(preferred, &available).ok_or_else(|| {
+            at!(HeicError::UnsupportedOperation(
+                zencodec::UnsupportedOperation::PixelFormat
+            ))
+        })?;
 
         if is_16bit(negotiated) {
             // 16-bit: full decode, then push rows
-            let dec = self.decoder(data, preferred)?;
-            let output = <HeicDecoder<'_> as zencodec::decode::Decode>::decode(dec)?;
+            let dec = self.decoder_inner(data, preferred)?;
+            let output = dec.decode_inner()?;
             let ps = output.pixels();
             let desc = ps.descriptor();
             let w = ps.width();
@@ -611,14 +530,14 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
         Ok(OutputInfo::full_decode(w, h, desc))
     }
 
-    fn streaming_decoder(
+    fn streaming_decoder_inner<'a>(
         self,
         data: Cow<'a, [u8]>,
         preferred: &[PixelDescriptor],
     ) -> Result<HeicStreamDecoder, At<HeicError>> {
         self.limits
             .check_input_size(data.len() as u64)
-            .map_err(|e| at!(HeicError::LimitExceeded(limit_exceeded_msg(e))))?;
+            .map_err(|e| at!(HeicError::ResourceLimit(e)))?;
         let thread_count = policy_to_threads(self.limits.threading());
         HeicStreamDecoder::new(
             &data,
@@ -628,15 +547,154 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
             thread_count,
         )
     }
+}
+
+/// Build the "available descriptors" list for format negotiation based on
+/// image properties (alpha, bit depth).
+fn available_descriptors(has_alpha: bool, bit_depth: u8) -> alloc::vec::Vec<PixelDescriptor> {
+    let mut available = alloc::vec::Vec::with_capacity(5);
+    if bit_depth > 8 {
+        // 16-bit formats first when source is >8-bit
+        if has_alpha {
+            available.push(PixelDescriptor::RGBA16_SRGB);
+            available.push(PixelDescriptor::RGB16_SRGB);
+        } else {
+            available.push(PixelDescriptor::RGB16_SRGB);
+            available.push(PixelDescriptor::RGBA16_SRGB);
+        }
+    }
+    // 8-bit formats
+    if has_alpha {
+        available.push(PixelDescriptor::RGBA8_SRGB);
+        available.push(PixelDescriptor::BGRA8_SRGB);
+        available.push(PixelDescriptor::RGB8_SRGB);
+    } else {
+        available.push(PixelDescriptor::RGB8_SRGB);
+        available.push(PixelDescriptor::RGBA8_SRGB);
+        available.push(PixelDescriptor::BGRA8_SRGB);
+    }
+    available
+}
+
+/// Check whether a negotiated descriptor is a 16-bit format.
+fn is_16bit(desc: PixelDescriptor) -> bool {
+    desc == PixelDescriptor::RGB16_SRGB || desc == PixelDescriptor::RGBA16_SRGB
+}
+
+/// Pick the native [`crate::PixelLayout`] that best bounds the output buffer
+/// for a negotiated descriptor, used only by the resource estimate.
+///
+/// heic's `PixelLayout` is 8-bit-only (3 or 4 Bpp), so a 16-bit output is not
+/// representable here — but the estimate's dominant term is the u16 YCbCr
+/// working set from `estimate_memory`, which already scales with bit depth, so
+/// an alpha-presence choice (Rgb8 vs Rgba8) is a sound conservative bound.
+fn layout_for_descriptor(desc: &PixelDescriptor) -> crate::PixelLayout {
+    if desc.has_alpha() {
+        crate::PixelLayout::Rgba8
+    } else {
+        crate::PixelLayout::Rgb8
+    }
+}
+
+/// Map a negotiated PixelDescriptor to a native PixelLayout for 8-bit decode.
+fn descriptor_to_layout(desc: PixelDescriptor) -> crate::PixelLayout {
+    if desc.pixel_format() == PixelDescriptor::BGRA8_SRGB.pixel_format() {
+        crate::PixelLayout::Bgra8
+    } else if desc.pixel_format() == PixelDescriptor::RGBA8_SRGB.pixel_format() {
+        crate::PixelLayout::Rgba8
+    } else {
+        crate::PixelLayout::Rgb8
+    }
+}
+
+impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
+    type Error = At<zencodec::CodecError>;
+    type Dec = HeicDecoder<'a>;
+    type StreamDec = HeicStreamDecoder;
+    type AnimationFrameDec = Unsupported<At<zencodec::CodecError>>;
+
+    fn with_stop(mut self, stop: zencodec::StopToken) -> Self {
+        self.stop = Some(stop);
+        self
+    }
+
+    fn with_limits(mut self, limits: ResourceLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// heic applies gain maps natively (`reconstructs_hdr()` is `true`):
+    /// `ReconstructHdr` decodes the SDR base, applies the Apple HDR gain map
+    /// via ultrahdr-core, and returns linear f32/f16 HDR pixels with the
+    /// content-light-level / mastering-display envelope populated.
+    fn with_gain_map_render(mut self, render: zencodec::GainMapRender) -> Self {
+        self.gain_map_render = render;
+        self
+    }
+
+    fn with_policy(mut self, policy: DecodePolicy) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+
+    fn with_orientation(mut self, hint: zencodec::OrientationHint) -> Self {
+        self.config.orientation = hint;
+        self
+    }
+
+    fn probe(&self, data: &[u8]) -> Result<ImageInfo, At<zencodec::CodecError>> {
+        self.probe_inner(data).map_err(zencodec::CodecError::of)
+    }
+
+    fn probe_full(&self, data: &[u8]) -> Result<ImageInfo, At<zencodec::CodecError>> {
+        self.probe_full_inner(data)
+            .map_err(zencodec::CodecError::of)
+    }
+
+    fn output_info(&self, data: &[u8]) -> Result<OutputInfo, At<zencodec::CodecError>> {
+        self.output_info_inner(data)
+            .map_err(zencodec::CodecError::of)
+    }
+
+    fn decoder(
+        self,
+        data: Cow<'a, [u8]>,
+        preferred: &[PixelDescriptor],
+    ) -> Result<HeicDecoder<'a>, At<zencodec::CodecError>> {
+        self.decoder_inner(data, preferred)
+            .map_err(zencodec::CodecError::of)
+    }
+
+    fn push_decoder(
+        self,
+        data: Cow<'a, [u8]>,
+        sink: &mut dyn DecodeRowSink,
+        preferred: &[PixelDescriptor],
+    ) -> Result<OutputInfo, At<zencodec::CodecError>> {
+        self.push_decoder_inner(data, sink, preferred)
+            .map_err(zencodec::CodecError::of)
+    }
+
+    fn streaming_decoder(
+        self,
+        data: Cow<'a, [u8]>,
+        preferred: &[PixelDescriptor],
+    ) -> Result<HeicStreamDecoder, At<zencodec::CodecError>> {
+        self.streaming_decoder_inner(data, preferred)
+            .map_err(zencodec::CodecError::of)
+    }
 
     fn animation_frame_decoder(
         self,
         _data: Cow<'a, [u8]>,
         _preferred: &[PixelDescriptor],
-    ) -> Result<Unsupported<At<HeicError>>, At<HeicError>> {
-        Err(at!(HeicError::Unsupported(
-            "HEIC does not support animation decoding",
-        )))
+    ) -> Result<Unsupported<At<zencodec::CodecError>>, At<zencodec::CodecError>> {
+        // Invocation-origin, not image-bytes-origin: HEIC has no concept of
+        // an animation at all, so this is "the caller asked for an
+        // operation this codec doesn't support" (zencodec's
+        // `UnsupportedOperation::AnimationDecode`), not a fault in any
+        // particular image's bytes.
+        Err(HeicError::UnsupportedOperation(zencodec::UnsupportedOperation::AnimationDecode).into())
     }
 }
 
@@ -739,9 +797,18 @@ pub struct HeicDecoder<'a> {
 }
 
 impl zencodec::decode::Decode for HeicDecoder<'_> {
-    type Error = At<HeicError>;
+    type Error = At<zencodec::CodecError>;
 
-    fn decode(self) -> Result<DecodeOutput, At<HeicError>> {
+    fn decode(self) -> Result<DecodeOutput, At<zencodec::CodecError>> {
+        self.decode_inner().map_err(zencodec::CodecError::of)
+    }
+}
+
+impl HeicDecoder<'_> {
+    /// Pattern B: the exact pre-migration `decode()` trait-method body,
+    /// returning the native `At<HeicError>` unchanged — see the `*_inner`
+    /// comment on `impl HeicDecodeJob` for the rationale.
+    fn decode_inner(self) -> Result<DecodeOutput, At<HeicError>> {
         let data: &[u8] = &self.data;
         let preferred = &self.preferred;
 
@@ -757,8 +824,11 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
 
         // Negotiate output format
         let available = available_descriptors(has_alpha, bit_depth);
-        let negotiated = negotiate_pixel_format(preferred, &available)
-            .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
+        let negotiated = negotiate_pixel_format(preferred, &available).ok_or_else(|| {
+            at!(HeicError::UnsupportedOperation(
+                zencodec::UnsupportedOperation::PixelFormat
+            ))
+        })?;
 
         // Gain-map rendition intent (zencodec contract): BaseOnly decodes the
         // SDR base; Components surfaces the decoded gain map alongside the
@@ -771,7 +841,12 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
                 (false, Some(target_headroom))
             }
             _ => {
-                return Err(at!(HeicError::Unsupported(
+                // Invocation-origin: `GainMapRender` is `#[non_exhaustive]`,
+                // so this only fires for a variant added to zencodec after
+                // this crate was compiled — the caller's request names a
+                // real (to them) render mode this build doesn't recognize,
+                // not a fault in the image bytes.
+                return Err(at!(HeicError::InvalidRequest(
                     "unrecognized GainMapRender mode"
                 )));
             }
@@ -1104,8 +1179,11 @@ impl HeicStreamDecoder {
 
         // Non-grid fallback: full decode upfront
         let available = available_descriptors(pi.has_alpha, pi.bit_depth);
-        let negotiated = negotiate_pixel_format(preferred, &available)
-            .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
+        let negotiated = negotiate_pixel_format(preferred, &available).ok_or_else(|| {
+            at!(HeicError::UnsupportedOperation(
+                zencodec::UnsupportedOperation::PixelFormat
+            ))
+        })?;
 
         let pixels: PixelBuffer = if is_16bit(negotiated) {
             let mut req = config.decode_request(data);
@@ -1316,8 +1394,11 @@ impl HeicStreamDecoder {
 
         // Negotiate 8-bit layout for grid tiles (no alpha, ≤8-bit)
         let available = available_descriptors(false, 8);
-        let negotiated = negotiate_pixel_format(preferred, &available)
-            .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
+        let negotiated = negotiate_pixel_format(preferred, &available).ok_or_else(|| {
+            at!(HeicError::UnsupportedOperation(
+                zencodec::UnsupportedOperation::PixelFormat
+            ))
+        })?;
         let layout = descriptor_to_layout(negotiated);
 
         Ok(Some(GridState {
@@ -1407,12 +1488,13 @@ impl HeicStreamDecoder {
         self.current_grid_row += 1;
         Ok(Some((y_offset, grid.output_width, strip_h)))
     }
-}
 
-impl zencodec::decode::StreamingDecode for HeicStreamDecoder {
-    type Error = At<HeicError>;
-
-    fn next_batch(&mut self) -> Result<Option<(u32, zenpixels::PixelSlice<'_>)>, At<HeicError>> {
+    /// Pattern B: the exact pre-migration `next_batch()` trait-method body,
+    /// returning the native `At<HeicError>` unchanged — see the `*_inner`
+    /// comment on `impl HeicDecodeJob` for the rationale.
+    fn next_batch_inner(
+        &mut self,
+    ) -> Result<Option<(u32, zenpixels::PixelSlice<'_>)>, At<HeicError>> {
         if self.grid.is_some() {
             let result = self.decode_grid_row()?;
             match result {
@@ -1444,6 +1526,16 @@ impl zencodec::decode::StreamingDecode for HeicStreamDecoder {
         } else {
             Ok(None)
         }
+    }
+}
+
+impl zencodec::decode::StreamingDecode for HeicStreamDecoder {
+    type Error = At<zencodec::CodecError>;
+
+    fn next_batch(
+        &mut self,
+    ) -> Result<Option<(u32, zenpixels::PixelSlice<'_>)>, At<zencodec::CodecError>> {
+        self.next_batch_inner().map_err(zencodec::CodecError::of)
     }
 
     fn info(&self) -> &ImageInfo {
@@ -1803,11 +1895,6 @@ fn extract_xmp_from_container(
     None
 }
 
-/// Convert a [`zencodec::LimitExceeded`] to a static error message for [`HeicError::LimitExceeded`].
-fn limit_exceeded_msg(_e: zencodec::LimitExceeded) -> &'static str {
-    "input data size exceeds max_input_bytes"
-}
-
 /// Apple HDR gain-map parameters from the primary item's EXIF MakerNote
 /// headroom (`ultrahdr_core::{parse_exif_for_apple_hdr, from_apple_headroom}`).
 ///
@@ -1992,11 +2079,22 @@ fn layout_to_descriptor(layout: crate::PixelLayout) -> PixelDescriptor {
 }
 
 /// Convert `ProbeError` to `At<HeicError>` for trait compatibility.
+///
+/// `ProbeError` has its own `zencodec::CategorizedError` impl that maps
+/// `NeedMoreData` -> `Image(UnexpectedEof)` and `InvalidFormat` ->
+/// `Image(Unsupported(Type))` (see `error.rs`), but callers here go through
+/// `HeicError`'s categorization instead (the zencodec trait boundary
+/// declares `type Error = At<CodecError>` built from `At<HeicError>`, not
+/// from `ProbeError` directly — see the Pattern B envelope bridge doc
+/// comment on `From<HeicError> for At<CodecError>`). Preserve the same two
+/// categories here via `HeicError::Truncated` / `HeicError::NotHeif` rather
+/// than collapsing both into `HeicError::InvalidData` (`Image(Malformed)`),
+/// which would misreport a truncated/unrecognized input as a corrupt one.
 fn probe_error_to_heic(e: crate::ProbeError) -> At<HeicError> {
     match e {
-        crate::ProbeError::NeedMoreData => at!(HeicError::InvalidData("not enough data to probe")),
+        crate::ProbeError::NeedMoreData => at!(HeicError::Truncated("not enough data to probe")),
         crate::ProbeError::InvalidFormat => {
-            at!(HeicError::InvalidData("not a valid HEIC/HEIF file"))
+            at!(HeicError::NotHeif("not a valid HEIC/HEIF file"))
         }
         crate::ProbeError::Corrupt(inner) => inner,
     }
@@ -2260,11 +2358,27 @@ mod tests {
 
     #[test]
     fn probe_error_conversion() {
-        let e = probe_error_to_heic(crate::ProbeError::NeedMoreData);
-        assert!(matches!(e.error(), HeicError::InvalidData(_)));
+        use zencodec::{CategorizedError, ErrorCategory, ImageError, UnsupportedImageKind};
 
+        // NeedMoreData -> Truncated -> Image(UnexpectedEof), NOT
+        // Image(Malformed): a truncated input is not the same failure as a
+        // corrupt one.
+        let e = probe_error_to_heic(crate::ProbeError::NeedMoreData);
+        assert!(matches!(e.error(), HeicError::Truncated(_)));
+        assert_eq!(
+            e.error().category(),
+            ErrorCategory::Image(ImageError::UnexpectedEof)
+        );
+
+        // InvalidFormat -> NotHeif -> Image(Unsupported(Type)): "not a
+        // HEIC/HEIF file at all" is not the same failure as "a HEIC/HEIF
+        // file with corrupt content".
         let e = probe_error_to_heic(crate::ProbeError::InvalidFormat);
-        assert!(matches!(e.error(), HeicError::InvalidData(_)));
+        assert!(matches!(e.error(), HeicError::NotHeif(_)));
+        assert_eq!(
+            e.error().category(),
+            ErrorCategory::Image(ImageError::Unsupported(UnsupportedImageKind::Type))
+        );
 
         let e = probe_error_to_heic(crate::ProbeError::Corrupt(at!(HeicError::NoPrimaryImage)));
         assert!(matches!(e.error(), HeicError::NoPrimaryImage));
@@ -2355,6 +2469,7 @@ mod tests {
 
     #[test]
     fn probe_enforces_max_input_bytes() {
+        use zencodec::CategorizedError;
         use zencodec::decode::{DecodeJob as _, DecoderConfig as _};
 
         let path =
@@ -2372,9 +2487,12 @@ mod tests {
         let result = job.probe(&data);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(
-            matches!(err.error(), HeicError::LimitExceeded(_)),
-            "expected LimitExceeded, got {err:?}"
+        assert_eq!(
+            err.category(),
+            zencodec::ErrorCategory::Resource(zencodec::ResourceError::Limits(
+                zencodec::LimitKind::InputSize
+            )),
+            "expected a resource-limit category, got {err:?}"
         );
     }
 
@@ -2400,6 +2518,7 @@ mod tests {
 
     #[test]
     fn decoder_enforces_max_input_bytes() {
+        use zencodec::CategorizedError;
         use zencodec::decode::{DecodeJob as _, DecoderConfig as _};
 
         let path =
@@ -2416,14 +2535,18 @@ mod tests {
         let result = job.decoder(Cow::Borrowed(&data), &[PixelDescriptor::RGB8_SRGB]);
         assert!(result.is_err());
         let err = result.err().unwrap();
-        assert!(
-            matches!(err.error(), HeicError::LimitExceeded(_)),
-            "expected LimitExceeded, got {err:?}"
+        assert_eq!(
+            err.category(),
+            zencodec::ErrorCategory::Resource(zencodec::ResourceError::Limits(
+                zencodec::LimitKind::InputSize
+            )),
+            "expected a resource-limit category, got {err:?}"
         );
     }
 
     #[test]
     fn probe_full_enforces_max_input_bytes() {
+        use zencodec::CategorizedError;
         use zencodec::decode::{DecodeJob as _, DecoderConfig as _};
 
         let path =
@@ -2440,9 +2563,12 @@ mod tests {
         let result = job.probe_full(&data);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(
-            matches!(err.error(), HeicError::LimitExceeded(_)),
-            "expected LimitExceeded, got {err:?}"
+        assert_eq!(
+            err.category(),
+            zencodec::ErrorCategory::Resource(zencodec::ResourceError::Limits(
+                zencodec::LimitKind::InputSize
+            )),
+            "expected a resource-limit category, got {err:?}"
         );
     }
 

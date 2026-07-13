@@ -332,6 +332,17 @@ pub(crate) fn decode_one_tile(
     };
 
     let mut last_err: Option<String> = None;
+    // Set only when a backend was available and its `decode_hevc` call
+    // itself rejected the bitstream (`BackendError::Decode`) — as opposed to
+    // reporting itself unavailable (`is_available() == false`, or
+    // `BackendError::Unavailable` returned from `decode_hevc` — a runtime-
+    // only unavailability discoverable only at call time, e.g. "no HEVC
+    // decoder registered for this profile on this install", distinct from
+    // the coarse compile-time `is_available()` check). This is the
+    // structured signal `HeicError::AllBackendsFailed::rejected_bitstream`
+    // carries: "no backend could even be tried" (env/deployment gap) vs
+    // "every available backend rejected this specific input" (image fault).
+    let mut rejected_bitstream = false;
     for &b in backends {
         #[cfg(feature = "backend-rust")]
         if b == Backend::Rust {
@@ -361,17 +372,23 @@ pub(crate) fn decode_one_tile(
             }
             Err(BackendError::Decode(m)) => {
                 last_err = Some(truncate_backend_msg(&format!("{}: {m}", b.name())));
+                rejected_bitstream = true;
             }
             // BackendError is #[non_exhaustive]; new variants without a
             // specific mapping fall through to the "try next backend" path.
+            // Unclear whether an unrecognized future variant reflects an
+            // attempted-and-rejected decode or an unavailability — leave
+            // `rejected_bitstream` unset (conservative: don't confidently
+            // claim an image-bytes fault without evidence).
             Err(other) => {
                 last_err = Some(truncate_backend_msg(&format!("{}: {other}", b.name())));
             }
         }
     }
-    Err(at!(HeicError::AllBackendsFailed(
-        last_err.unwrap_or_else(|| "no backends were available".into())
-    )))
+    Err(at!(HeicError::AllBackendsFailed {
+        detail: last_err.unwrap_or_else(|| "no backends were available".into()),
+        rejected_bitstream,
+    }))
 }
 
 /// Cap per-backend error message length so a misbehaving FFI string

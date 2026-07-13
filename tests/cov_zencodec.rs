@@ -451,15 +451,20 @@ fn push_decoder_grid_reassembles_to_one_shot() {
 
 #[test]
 fn tight_max_input_bytes_rejected_at_decoder() {
+    use zencodec::{CategorizedError, ErrorCategory, LimitKind, ResourceError};
+
     let data = read_fixture(EXAMPLE_REL);
     let limits = ResourceLimits::none().with_max_input_bytes(64);
     let job = HeicDecoderConfig::new().job().with_limits(limits);
-    // HeicZenDecoder has no Debug impl, so match instead of expect_err.
+    // HeicZenDecoder has no Debug impl, so match instead of expect_err. The
+    // trait boundary returns `At<CodecError>` (Pattern B) — route on
+    // `.category()`, not a downcast to the native `HeicError`.
     match job.decoder(Cow::Borrowed(&data), &[PixelDescriptor::RGB8_SRGB]) {
         Ok(_) => panic!("64-byte input cap must reject a multi-KB file"),
-        Err(err) => assert!(
-            matches!(err.error(), heic::HeicError::LimitExceeded(_)),
-            "expected LimitExceeded, got {err:?}"
+        Err(err) => assert_eq!(
+            err.category(),
+            ErrorCategory::Resource(ResourceError::Limits(LimitKind::InputSize)),
+            "expected a resource-limit category, got {err:?}"
         ),
     }
 }
@@ -712,16 +717,23 @@ fn crafted_grid_descriptor_garbage_rejected() {
 
 #[test]
 fn animation_unsupported() {
-    // HEIC has no animation; the adapter must report Unsupported, not panic.
+    use zencodec::{CategorizedError, ErrorCategory, RequestError, UnsupportedOperation};
+
+    // HEIC has no animation; the adapter must report an invocation-origin
+    // Unsupported (the caller asked for an operation this codec doesn't
+    // support — not an image-bytes fault), never panic.
     let data = read_fixture(EXAMPLE_REL);
     let result = HeicDecoderConfig::new()
         .job()
         .animation_frame_decoder(Cow::Borrowed(&data), &[PixelDescriptor::RGB8_SRGB]);
     assert!(result.is_err(), "animation must be unsupported");
     let err = result.err().unwrap();
-    assert!(
-        matches!(err.error(), heic::HeicError::Unsupported(_)),
-        "expected Unsupported, got {err:?}"
+    assert_eq!(
+        err.category(),
+        ErrorCategory::Request(RequestError::Unsupported(
+            UnsupportedOperation::AnimationDecode
+        )),
+        "expected Request(Unsupported(AnimationDecode)), got {err:?}"
     );
 }
 
