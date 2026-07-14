@@ -564,7 +564,7 @@ impl zencodec::CategorizedError for ProbeError {
 /// [`category`](zencodec::CategorizedError::category) *and* the codec name
 /// through `Dyn*` dispatch, after erasure to a boxed `dyn Error`.
 ///
-/// `.start_at()` begins the location trace; [`CodecError::of`] keeps it on
+/// `.start_at()` begins the location trace; [`CodecError::of`](zencodec::CodecError::of) keeps it on
 /// the outside (`At<CodecError>`). An `impl From<At<HeicError>> for
 /// At<CodecError>` is impossible (orphan rule — `At` is foreign and
 /// non-fundamental), so an *already-located* `At<HeicError>` converts at the

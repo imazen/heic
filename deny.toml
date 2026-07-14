@@ -96,8 +96,13 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # zensim (dev-dep, backend-diff scoring harness) is pinned to an unreleased git
 # rev; zenanalyze is zensim's own transitive git dependency (zenpredict).
 # Remove both together with the git pins once zensim publishes a matching release.
+# zencodec (dev-dep, via zencodec-testkit) is an unpublished-by-design
+# conformance-harness workspace member of the zencodec repo — see the
+# zencodec-testkit comment in Cargo.toml. This entry stays permanently; it
+# is not a temporary pin like the others above.
 allow-git = [
     "https://github.com/imazen/ultrahdr",
     "https://github.com/imazen/zensim",
     "https://github.com/imazen/zenanalyze",
+    "https://github.com/imazen/zencodec",
 ]
