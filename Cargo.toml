@@ -142,11 +142,17 @@ png = "0.18.1"
 # zencodec conformance harness — an unpublished-by-design workspace member of
 # the zencodec repo (see its CLAUDE.md: "zencodec-testkit/ (member,
 # unpublished)"), so this stays a git dependency even now that zencodec
-# itself is a normal crates.io dep above. Pinned to the v0.1.26 release
-# commit for reproducibility. Provides `check_decode_truncation_series` (a
-# truncated input must categorize as an incomplete-input ErrorCategory,
-# never panic, never silently decode).
-zencodec-testkit = { version = "0.1.0", git = "https://github.com/imazen/zencodec", rev = "998edf5f5152f675bbe3b4e959470dffe1536c36" }
+# itself is a normal crates.io dep above. zencodec-testkit's OWN Cargo.toml
+# depends on its sibling `zencodec` via `path = ".."`, NOT the registry — so
+# without the [patch.crates-io] entry below, Cargo would resolve TWO
+# distinct `zencodec` crate instances (crates.io 0.1.26 + this git
+# checkout's path copy) and every testkit conformance check would fail to
+# typecheck (E0277, "multiple different versions of crate `zencodec`").
+# Pinned to the v0.1.26 tag (== commit 998edf5f, byte-identical to the
+# published crate) so both resolve to one unified zencodec. Provides
+# `check_decode_truncation_series` (a truncated input must categorize as an
+# incomplete-input ErrorCategory, never panic, never silently decode).
+zencodec-testkit = { version = "0.1.0", git = "https://github.com/imazen/zencodec", tag = "v0.1.26" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(heic_reference)', 'cfg(fuzzing)'] }
@@ -218,6 +224,18 @@ harness = false
 # checkouts.
 [patch.crates-io]
 ultrahdr-core = { git = "https://github.com/imazen/ultrahdr", rev = "3ac20f99d45e985e09f274fc07181b238385e703" }
+# zencodec-testkit (dev-dependency above) is unpublished and depends on its
+# sibling `zencodec` crate via a workspace `path = ".."`, not the registry.
+# Patching the registry `zencodec` dependency onto the SAME git tag unifies
+# the graph onto one zencodec crate instance instead of two (registry +
+# git-path-copy) — without this, cargo resolves two distinct `zencodec`
+# types and every testkit conformance check fails E0277 ("multiple
+# different versions of crate `zencodec`"). Pinned to v0.1.26, which is
+# content-identical to the crates.io 0.1.26 release (same tag/commit), so
+# this is not a version skew, purely a graph-unification patch. Remove once
+# zencodec-testkit itself publishes to crates.io (it is unpublished by
+# design today — see zencodec's own CLAUDE.md — so there is no target date).
+zencodec = { git = "https://github.com/imazen/zencodec", tag = "v0.1.26" }
 
 [[example]]
 name = "gm20_probe"
