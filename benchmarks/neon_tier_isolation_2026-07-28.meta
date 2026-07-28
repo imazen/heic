@@ -1,0 +1,44 @@
+# heic NEON vs forced-scalar — first tier-isolated measurement
+date:    2026-07-28
+host:    Apple M4 Pro (12 core), macOS, aarch64
+command: cargo bench --bench tier_isolation --features backend-rust,_dev
+build:   release, NO -C target-cpu=native
+backend: backend-rust (the pure-Rust HEVC decoder — the one carrying the SIMD)
+corpus:  codec-corpus/heic-conformance/valid, largest decodable files
+
+## Result — essentially FLAT
+
+| file        | NEON      | scalar    | speedup |
+|-------------|-----------|-----------|---------|
+| image2.heic | 325.09ms  | 326.61ms  |  1.005x |
+| C012.heic   |  23.352ms |  23.555ms |  1.009x |
+
+Under 1% either way. NEON is contributing almost nothing to end-to-end HEIC
+decode on this host.
+
+## Reading this correctly
+
+This is NOT a regression and probably NOT a defect. HEVC decode is dominated by
+CABAC entropy decoding, which is inherently serial (each bin's context depends
+on the previous one) and cannot be vectorised. The SIMD kernels this crate does
+have — 4 files under src/ mentioning neon — sit in the pixel stages
+(prediction / transform / deblock) downstream of that, so even a large speedup
+there moves the total very little. A ~1% end-to-end result is the expected
+shape for an entropy-bound codec, not evidence of broken dispatch.
+
+What it DOES mean: further NEON work on this crate's pixel kernels has a very
+low ceiling. Amdahl's law caps it at whatever fraction of decode is not CABAC,
+and these numbers bound that fraction at a few percent for these inputs. If
+HEIC decode speed matters, the lever is the entropy decoder, not more SIMD.
+
+NOT MEASURED here: the per-stage split. Confirming CABAC dominance would need a
+profile; the claim above is the standard explanation for this shape, and is
+offered as the likely cause, not as something measured on this run.
+
+## Bench portability note
+
+benches/decode.rs hardcodes `/home/lilith/work/heic` (a Linux home path) as its
+default test-image root, so it silently benchmarks nothing on any other machine.
+This bench instead discovers files from the shared codec-corpus conformance set
+via a repo-relative path, honours HEIC_CORPUS_DIR, and skips loudly when the
+corpus is missing.

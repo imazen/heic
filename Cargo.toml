@@ -56,6 +56,11 @@ autoexamples = false
 # the README for the available backends and their target_os requirements.
 default = []
 
+# Dev-only: enables archmage/testable_dispatch so benches/tier_isolation.rs can
+# disable the baseline SIMD token (NEON on aarch64) and measure a real scalar
+# arm. Never enable in a published build.
+_dev = ["archmage/testable_dispatch"]
+
 # ── HEVC backend selection ────────────────────────────────────────────────
 # Every build must enable at least one backend whose target_os matches the
 # host. Native backends ship as separate workspace member crates and are
@@ -196,6 +201,11 @@ required-features = ["backend-rust", "std"]
 name = "gain_map_info"
 required-features = ["backend-rust", "zencodec", "std"]
 # compare_support requires heic-wasm-rs (uncomment dep + add [[example]] to use)
+
+[[bench]]
+name = "tier_isolation"
+harness = false
+required-features = ["_dev"]
 
 [[bench]]
 name = "decode"
