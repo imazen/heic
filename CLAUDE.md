@@ -769,3 +769,28 @@ src/
 ## FEEDBACK.md
 
 See `/home/lilith/.claude/CLAUDE.md` for global instructions including feedback logging.
+
+## aarch64 / NEON: decode is NOT SIMD-bound (measured 2026-07-28)
+
+`benches/tier_isolation.rs` (`--features "_dev,backend-rust"`) compares whole
+decode with the NEON token enabled vs forced off:
+
+| image  | neon      | scalar    | delta  |
+|--------|-----------|-----------|--------|
+| image1 | 449.76 ms | 448.48 ms | -0.3%  |
+| image2 | 331.64 ms | 337.20 ms | +1.7%  |
+| C012   |  23.70 ms |  23.79 ms | +0.4%  |
+
+So the SIMD tier moves total decode by under 2%, and on image1 it is fractionally
+negative. Time is dominated by inherently serial work (bitstream / CABAC), not by
+the vector kernels. **Do not invest in NEON kernel work here expecting end-to-end
+gains — the ceiling is ~2%.** Profile where decode time actually goes first.
+
+Two caveats on reading that table:
+- NEON is BASELINE on aarch64, so the "scalar" arm is still autovectorized by
+  LLVM. A ~1.00x result means "hand-written NEON is no better than what LLVM
+  emits", NOT "SIMD is unused".
+- These are end-to-end numbers; they cannot show an individual kernel that is
+  slower than its own fallback. If per-kernel work is ever wanted here, a
+  per-kernel bench is needed first (see zenresize's `benches/kernel_tiers.rs`,
+  where exactly that gap was hiding a kernel running at 0.94x).
