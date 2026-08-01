@@ -15,7 +15,7 @@ use archmage::prelude::*;
 use safe_unaligned_simd::x86_64::{_mm_loadu_si64, _mm_loadu_si128, _mm256_storeu_si256};
 
 #[cfg(target_arch = "aarch64")]
-use super::color_convert_neon::convert_420_to_rgb_neon;
+use super::color_convert_neon::{convert_420_to_rgb_neon, convert_444_to_rgb_neon};
 
 #[cfg(target_arch = "wasm32")]
 use super::color_convert_wasm::convert_420_to_rgb_wasm128;
@@ -475,13 +475,13 @@ pub fn convert_444_to_rgb(
             matrix_coeffs,
             rgb
         ),
-        [v3, scalar]
+        [v3, neon, scalar]
     )
 }
 
 /// Scalar 4:4:4 → RGB (tight loop, hoisted coefficients).
 #[allow(clippy::too_many_arguments)]
-fn convert_444_to_rgb_scalar(
+pub(crate) fn convert_444_to_rgb_scalar(
     _token: ScalarToken,
     y_plane: &[u16],
     cb_plane: &[u16],

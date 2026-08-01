@@ -146,5 +146,64 @@ fn bench_tiers(c: &mut Criterion) {
     set_simd(true);
 }
 
-criterion_group!(benches, bench_tiers);
+/// The 4:4:4 colour-conversion kernel, isolated.
+///
+/// Added 2026-08-01 alongside its NEON arm. `convert_444_to_rgb` dispatched
+/// `[v3, scalar]` — an AVX2 arm but no NEON arm — so every aarch64 4:4:4
+/// decode ran the scalar per-pixel loop. The whole-decode bench above cannot
+/// surface that: heic decode is CABAC-bound (it measures ~1.00x overall), so
+/// colour conversion is a small enough fraction that a fully-scalar kernel
+/// disappears into the noise. That is exactly why this one is measured on its
+/// own.
+fn bench_color_444(c: &mut Criterion) {
+    if !set_simd(true) || !set_simd(false) {
+        eprintln!("[color_444] SIMD tier not toggleable here. Skipping.");
+        return;
+    }
+    set_simd(true);
+
+    // 1920x1080 4:4:4, the shape this path exists for.
+    const W: usize = 1920;
+    const H: usize = 1080;
+    let mut s = 0x9e37_79b9u32;
+    let mut plane = || -> Vec<u16> {
+        (0..W * H)
+            .map(|_| {
+                s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                ((s >> 16) & 0xFF) as u16
+            })
+            .collect()
+    };
+    let (y, cb, cr) = (plane(), plane(), plane());
+    let mut rgb = vec![0u8; W * H * 3];
+
+    let mut group = c.benchmark_group("convert_444_to_rgb");
+    group.throughput(criterion::Throughput::Elements((W * H) as u64));
+    for (arm, simd) in [(TIER_NAME, true), ("scalar", false)] {
+        group.bench_function(arm, |b| {
+            set_simd(simd);
+            b.iter(|| {
+                heic_core::color_convert::convert_444_to_rgb(
+                    std::hint::black_box(&y),
+                    &cb,
+                    &cr,
+                    W,
+                    W,
+                    0,
+                    H as u32,
+                    0,
+                    W as u32,
+                    0,
+                    false,
+                    1,
+                    &mut rgb,
+                )
+            })
+        });
+    }
+    set_simd(true);
+    group.finish();
+}
+
+criterion_group!(benches, bench_tiers, bench_color_444);
 criterion_main!(benches);
