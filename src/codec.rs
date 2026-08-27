@@ -1457,7 +1457,9 @@ impl HeicStreamDecoder {
                 break;
             }
             let mut tile_frame =
-                crate::hevc::decode_with_config(&grid.tile_config, &grid.tile_data[tile_idx])?;
+                crate::hevc::decode_with_config(&grid.tile_config, &grid.tile_data[tile_idx])
+                    .map_err(crate::error::hevc_at)
+                    .at()?;
 
             if let Some((fr, mc)) = grid.color_override {
                 tile_frame.full_range = fr;
@@ -2087,14 +2089,15 @@ fn layout_to_descriptor(layout: crate::PixelLayout) -> PixelDescriptor {
 /// categories here via `HeicError::Truncated` / `HeicError::NotHeif` rather
 /// than collapsing both into `HeicError::InvalidData` (`Image(Malformed)`),
 /// which would misreport a truncated/unrecognized input as a corrupt one.
-fn probe_error_to_heic(e: crate::ProbeError) -> At<HeicError> {
-    match e {
-        crate::ProbeError::NeedMoreData => at!(HeicError::Truncated("not enough data to probe")),
-        crate::ProbeError::InvalidFormat => {
-            at!(HeicError::NotHeif("not a valid HEIC/HEIF file"))
-        }
+///
+/// `map_error` keeps the probe's origin trace (for `Corrupt`, the container /
+/// parameter-set line that rejected the input) instead of restarting it here.
+fn probe_error_to_heic(e: At<crate::ProbeError>) -> At<HeicError> {
+    e.map_error(|p| match p {
+        crate::ProbeError::NeedMoreData => HeicError::Truncated("not enough data to probe"),
+        crate::ProbeError::InvalidFormat => HeicError::NotHeif("not a valid HEIC/HEIF file"),
         crate::ProbeError::Corrupt(inner) => inner,
-    }
+    })
 }
 
 /// Reinterpret `Vec<u16>` as `Vec<Rgb<u16>>` via bytemuck.
@@ -2360,7 +2363,7 @@ mod tests {
         // NeedMoreData -> Truncated -> Image(UnexpectedEof), NOT
         // Image(Malformed): a truncated input is not the same failure as a
         // corrupt one.
-        let e = probe_error_to_heic(crate::ProbeError::NeedMoreData);
+        let e = probe_error_to_heic(at!(crate::ProbeError::NeedMoreData));
         assert!(matches!(e.error(), HeicError::Truncated(_)));
         assert_eq!(
             e.error().category(),
@@ -2370,14 +2373,14 @@ mod tests {
         // InvalidFormat -> NotHeif -> Image(Unsupported(Type)): "not a
         // HEIC/HEIF file at all" is not the same failure as "a HEIC/HEIF
         // file with corrupt content".
-        let e = probe_error_to_heic(crate::ProbeError::InvalidFormat);
+        let e = probe_error_to_heic(at!(crate::ProbeError::InvalidFormat));
         assert!(matches!(e.error(), HeicError::NotHeif(_)));
         assert_eq!(
             e.error().category(),
             ErrorCategory::Image(ImageError::Unsupported(UnsupportedImageKind::Type))
         );
 
-        let e = probe_error_to_heic(crate::ProbeError::Corrupt(at!(HeicError::NoPrimaryImage)));
+        let e = probe_error_to_heic(at!(crate::ProbeError::Corrupt(HeicError::NoPrimaryImage)));
         assert!(matches!(e.error(), HeicError::NoPrimaryImage));
     }
 

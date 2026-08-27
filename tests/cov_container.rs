@@ -152,7 +152,7 @@ fn ftyp(major: &[u8; 4], compatible: &[&[u8; 4]]) -> Vec<u8> {
 fn probe_empty_and_tiny_is_need_more_data() {
     assert!(matches!(
         ImageInfo::from_bytes(&[]),
-        Err(ProbeError::NeedMoreData)
+        Err(e) if matches!(e.error(), ProbeError::NeedMoreData)
     ));
     // 11 bytes: still under the 12-byte threshold even though it starts
     // plausibly.
@@ -160,7 +160,7 @@ fn probe_empty_and_tiny_is_need_more_data() {
     almost.truncate(11);
     assert!(matches!(
         ImageInfo::from_bytes(&almost),
-        Err(ProbeError::NeedMoreData)
+        Err(e) if matches!(e.error(), ProbeError::NeedMoreData)
     ));
 }
 
@@ -173,13 +173,13 @@ fn probe_non_ftyp_magic_is_invalid_format() {
     let data = b"\x00\x00\x00\x10mdatHELLOWORLD";
     assert!(matches!(
         ImageInfo::from_bytes(data),
-        Err(ProbeError::InvalidFormat)
+        Err(e) if matches!(e.error(), ProbeError::InvalidFormat)
     ));
     // Pure noise, long enough to pass the length gate.
     let noise = [0xABu8; 64];
     assert!(matches!(
         ImageInfo::from_bytes(&noise),
-        Err(ProbeError::InvalidFormat)
+        Err(e) if matches!(e.error(), ProbeError::InvalidFormat)
     ));
 }
 
@@ -191,7 +191,7 @@ fn probe_ftyp_with_foreign_brand_is_corrupt() {
     // Valid box framing, brand "qt  " (QuickTime) + no HEIF compatible brand.
     let data = ftyp(b"qt  ", &[b"qt  "]);
     match ImageInfo::from_bytes(&data) {
-        Err(ProbeError::Corrupt(_)) => {}
+        Err(e) if matches!(e.error(), ProbeError::Corrupt(_)) => {}
         other => panic!("expected Corrupt for foreign brand, got {other:?}"),
     }
     // The full decode path routes through heif::parse too and must also reject.
@@ -216,7 +216,7 @@ fn probe_truncated_ftyp_content_is_corrupt() {
     // Pad to >= 12 total so the probe length-gate passes and we reach parse.
     assert!(data.len() >= 12);
     match ImageInfo::from_bytes(&data) {
-        Err(ProbeError::Corrupt(_)) => {}
+        Err(e) if matches!(e.error(), ProbeError::Corrupt(_)) => {}
         // A NeedMoreData here would also be acceptable, but the box has a
         // self-consistent (short) size so the parser reaches the content
         // check — assert it's the corrupt branch.
@@ -231,7 +231,7 @@ fn probe_truncated_ftyp_content_is_corrupt() {
 fn probe_valid_ftyp_no_meta_has_no_primary() {
     let data = ftyp(b"heic", &[b"mif1", b"heic"]);
     match ImageInfo::from_bytes(&data) {
-        Err(ProbeError::Corrupt(_)) => {}
+        Err(e) if matches!(e.error(), ProbeError::Corrupt(_)) => {}
         other => panic!("expected Corrupt(NoPrimaryImage) for ftyp-only, got {other:?}"),
     }
     assert!(

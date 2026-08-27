@@ -291,7 +291,7 @@ pub(crate) fn decode_one_tile(
         // boundary, appending this frame (`.at()`) so the trace reads
         // decoder-origin → here → caller (#25).
         let _ = (width, height);
-        return crate::hevc::decode_with_config_stop_at(config, image_data, stop)
+        return crate::hevc::decode_with_config_stop(config, image_data, stop)
             .map_err(crate::error::hevc_at)
             .at();
     }
@@ -348,7 +348,7 @@ pub(crate) fn decode_one_tile(
         #[cfg(feature = "backend-rust")]
         if b == Backend::Rust {
             // Fast path even when Rust is mid-allowlist — bypass trait.
-            return crate::hevc::decode_with_config_stop_at(config, image_data, stop)
+            return crate::hevc::decode_with_config_stop(config, image_data, stop)
                 .map_err(crate::error::hevc_at)
                 .at();
         }

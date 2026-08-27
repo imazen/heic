@@ -992,7 +992,10 @@ fn random_garbage_probe_is_invalid_format() {
     }
     let err = ImageInfo::from_bytes(&junk).expect_err("garbage must not probe");
     assert!(
-        matches!(err, ProbeError::InvalidFormat | ProbeError::Corrupt(_)),
+        matches!(
+            err.error(),
+            ProbeError::InvalidFormat | ProbeError::Corrupt(_)
+        ),
         "expected InvalidFormat/Corrupt for non-ftyp junk, got {err:?}",
     );
 
@@ -1009,13 +1012,13 @@ fn tiny_input_probe_needs_more_data() {
     // Fewer than 12 bytes: probe can't even read the box header.
     let err = ImageInfo::from_bytes(&[0u8; 8]).expect_err("8 bytes is too few");
     assert!(
-        matches!(err, ProbeError::NeedMoreData),
+        matches!(err.error(), ProbeError::NeedMoreData),
         "expected NeedMoreData for an 8-byte buffer, got {err:?}",
     );
     // Empty input too.
     assert!(matches!(
         ImageInfo::from_bytes(&[]),
-        Err(ProbeError::NeedMoreData)
+        Err(e) if matches!(e.error(), ProbeError::NeedMoreData)
     ));
 }
 
@@ -1029,7 +1032,7 @@ fn lightning_mini_has_no_primary_image() {
     };
     let probe = ImageInfo::from_bytes(&data);
     assert!(
-        matches!(probe, Err(ProbeError::Corrupt(_))),
+        matches!(&probe, Err(e) if matches!(e.error(), ProbeError::Corrupt(_))),
         "lightning_mini must probe as Corrupt(NoPrimaryImage), got {probe:?}",
     );
     let cfg = DecoderConfig::new();

@@ -198,8 +198,8 @@ impl From<TryReserveError> for HeicError {
 
 /// Carry a located HEVC decoder error across the module boundary.
 ///
-/// The decoder's `*_at` entry points (`crate::hevc::decode_at`,
-/// `decode_with_config_stop_at`, …) return `At<HevcError>` whose trace starts
+/// The decoder's entry points (`crate::hevc::decode`,
+/// `decode_with_config_stop`, …) return `At<HevcError>` whose trace starts
 /// at the line inside the CABAC / residual / slice / parameter-set code that
 /// detected the problem (#25). `map_error` keeps that trace while converting
 /// the payload (`HevcError::Cancelled` still becomes `HeicError::Cancelled`).
@@ -373,7 +373,14 @@ impl From<TryReserveError> for HevcError {
     }
 }
 
-/// Errors from probing image headers
+/// Errors from probing image headers.
+///
+/// [`ImageInfo::from_bytes`](crate::ImageInfo::from_bytes) returns this
+/// wrapped in [`At`], so the trace of a [`Corrupt`](Self::Corrupt) probe
+/// starts at the container / parameter-set line that rejected the input
+/// (the same origin a full decode would report), followed by the probe
+/// boundary frame. The `Corrupt` payload is the bare [`HeicError`] — the
+/// location lives on the enclosing `At<ProbeError>`, not nested inside.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ProbeError {
@@ -382,7 +389,7 @@ pub enum ProbeError {
     /// Data is not a recognized HEIC/HEIF format
     InvalidFormat,
     /// Header is present but malformed
-    Corrupt(At<HeicError>),
+    Corrupt(HeicError),
 }
 
 impl fmt::Display for ProbeError {
@@ -568,8 +575,7 @@ impl zencodec::CategorizedError for ProbeError {
             // Magic bytes don't match — this isn't a HEIC/HEIF file at all.
             Self::InvalidFormat => C::Image(Img::Unsupported(UIK::Type)),
             // A present-but-malformed header: delegate to the wrapped
-            // located `HeicError` (the `At<E>` blanket impl forwards its
-            // category).
+            // `HeicError`.
             Self::Corrupt(e) => e.category(),
         }
     }
@@ -896,13 +902,13 @@ mod category_tests {
             ProbeError::InvalidFormat.category(),
             C::Image(Img::Unsupported(UIK::Type))
         );
-        // Corrupt delegates to the wrapped located HeicError.
+        // Corrupt delegates to the wrapped HeicError.
         assert_eq!(
-            ProbeError::Corrupt(at!(HeicError::InvalidData("x"))).category(),
+            ProbeError::Corrupt(HeicError::InvalidData("x")).category(),
             C::Image(Img::Malformed),
         );
         assert_eq!(
-            ProbeError::Corrupt(at!(HeicError::NoPrimaryImage)).category(),
+            ProbeError::Corrupt(HeicError::NoPrimaryImage).category(),
             C::Image(Img::Malformed),
         );
     }

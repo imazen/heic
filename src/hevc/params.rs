@@ -8,23 +8,7 @@ use super::refpic::{self, LongTermRefPicSps, ShortTermRefPicSet};
 use crate::error::HevcError;
 
 use super::Result;
-use super::strip_at;
 use whereat::at;
-
-/// Parse a VPS NAL payload.
-pub fn parse_vps(data: &[u8]) -> core::result::Result<Vps, HevcError> {
-    parse_vps_at(data).map_err(strip_at)
-}
-
-/// Parse an SPS NAL payload.
-pub fn parse_sps(data: &[u8]) -> core::result::Result<Sps, HevcError> {
-    parse_sps_at(data).map_err(strip_at)
-}
-
-/// Parse a PPS NAL payload.
-pub fn parse_pps(data: &[u8]) -> core::result::Result<Pps, HevcError> {
-    parse_pps_at(data).map_err(strip_at)
-}
 
 /// Upper bound for `pic_width_in_luma_samples` and
 /// `pic_height_in_luma_samples` enforced at SPS parse time.
@@ -485,8 +469,8 @@ pub struct ProfileTierLevel {
     pub general_level_idc: u8,
 }
 
-/// Parse Video Parameter Set
-pub(crate) fn parse_vps_at(data: &[u8]) -> Result<Vps> {
+/// Parse a VPS NAL payload.
+pub fn parse_vps(data: &[u8]) -> Result<Vps> {
     let mut reader = BitstreamReader::new(data);
 
     let vps_id = reader.read_bits(4)? as u8;
@@ -583,8 +567,8 @@ fn skip_hrd_parameters(
     Ok(())
 }
 
-/// Parse Sequence Parameter Set
-pub(crate) fn parse_sps_at(data: &[u8]) -> Result<Sps> {
+/// Parse an SPS NAL payload.
+pub fn parse_sps(data: &[u8]) -> Result<Sps> {
     let mut reader = BitstreamReader::new(data);
 
     let vps_id = reader.read_bits(4)? as u8;
@@ -1029,8 +1013,8 @@ pub(crate) fn parse_sps_at(data: &[u8]) -> Result<Sps> {
     })
 }
 
-/// Parse Picture Parameter Set
-pub(crate) fn parse_pps_at(data: &[u8]) -> Result<Pps> {
+/// Parse a PPS NAL payload.
+pub fn parse_pps(data: &[u8]) -> Result<Pps> {
     let mut reader = BitstreamReader::new(data);
 
     let pps_id = reader.read_ue()? as u8;

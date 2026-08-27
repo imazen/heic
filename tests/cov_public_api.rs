@@ -145,7 +145,7 @@ fn probe_synthetic_consistent_with_decode() {
 fn probe_empty_needs_more_data() {
     assert!(matches!(
         ImageInfo::from_bytes(&[]),
-        Err(ProbeError::NeedMoreData)
+        Err(e) if matches!(e.error(), ProbeError::NeedMoreData)
     ));
 }
 
@@ -155,7 +155,7 @@ fn probe_too_short_needs_more_data() {
     let data = [0u8; 8];
     assert!(matches!(
         ImageInfo::from_bytes(&data),
-        Err(ProbeError::NeedMoreData)
+        Err(e) if matches!(e.error(), ProbeError::NeedMoreData)
     ));
 }
 
@@ -169,7 +169,7 @@ fn probe_non_ftyp_invalid_format() {
     data[4..8].copy_from_slice(b"NOPE");
     assert!(matches!(
         ImageInfo::from_bytes(&data),
-        Err(ProbeError::InvalidFormat)
+        Err(e) if matches!(e.error(), ProbeError::InvalidFormat)
     ));
 }
 
@@ -187,8 +187,8 @@ fn probe_ftyp_then_garbage_is_corrupt() {
     let r = ImageInfo::from_bytes(&data);
     assert!(
         matches!(
-            r,
-            Err(ProbeError::Corrupt(_)) | Err(ProbeError::NeedMoreData)
+            &r,
+            Err(e) if matches!(e.error(), ProbeError::Corrupt(_) | ProbeError::NeedMoreData)
         ),
         "ftyp-without-meta should be Corrupt/NeedMoreData, got {r:?}"
     );

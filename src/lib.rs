@@ -66,8 +66,12 @@
 //! for easier debugging. Use `.error()` to inspect the inner [`HeicError`], or
 //! `.decompose()` to separate the error from its trace.
 //!
-//! For probing, [`ImageInfo::from_bytes`] returns a separate [`ProbeError`] enum
-//! that distinguishes "not enough data" from "not a HEIC file" from "corrupt header".
+//! For probing, [`ImageInfo::from_bytes`] returns `At<`[`ProbeError`]`>`, a separate
+//! enum that distinguishes "not enough data" from "not a HEIC file" from "corrupt
+//! header". The raw HEVC entry points in [`hevc`] (`decode`, `get_info`,
+//! `params::parse_sps`, [`VideoDecoder`], …) return `At<`[`HevcError`]`>`.
+//! Every error is located at the line that detected it — there are no
+//! location-less hops anywhere in the public surface.
 //!
 //! # Advanced: Raw YCbCr Access
 //!
@@ -231,6 +235,7 @@ pub fn cabac_bin_trace(limit: u32) {
 pub use enough::{Stop, StopReason, Unstoppable};
 
 // Re-export At for error location tracking
+use whereat::ResultAtExt;
 pub use whereat::{At, at};
 
 use alloc::borrow::Cow;
@@ -524,6 +529,16 @@ fn apply_transform_dimensions(
     (w, h)
 }
 
+/// Carry a located container / decoder error into the probe error space.
+///
+/// `map_error` keeps the origin trace (the parser line that rejected the
+/// input); call sites append the probe boundary frame with `.at()`
+/// (`#[track_caller]`). Deliberately not `#[track_caller]` itself — passed
+/// by name to `map_err` it would record `FnOnce::call_once`, not the caller.
+fn probe_corrupt(e: At<HeicError>) -> At<ProbeError> {
+    e.map_error(ProbeError::Corrupt)
+}
+
 impl ImageInfo {
     /// Minimum bytes needed to attempt header parsing.
     ///
@@ -541,23 +556,28 @@ impl ImageInfo {
     ///
     /// Returns [`ProbeError::NeedMoreData`] if the buffer is too small,
     /// [`ProbeError::InvalidFormat`] if this is not a HEIC/HEIF file,
-    /// or [`ProbeError::Corrupt`] if the header is malformed.
-    pub fn from_bytes(data: &[u8]) -> core::result::Result<Self, ProbeError> {
+    /// or [`ProbeError::Corrupt`] if the header is malformed. The error is
+    /// [`whereat`]-located: match on `err.error()` for the variant, and read
+    /// `err.full_trace()` for the container / parameter-set line that
+    /// rejected a corrupt header.
+    pub fn from_bytes(data: &[u8]) -> core::result::Result<Self, At<ProbeError>> {
         if data.len() < 12 {
-            return Err(ProbeError::NeedMoreData);
+            return Err(at!(ProbeError::NeedMoreData));
         }
 
         // Quick format check: HEIF files start with ftyp box
         let box_type = &data[4..8];
         if box_type != b"ftyp" {
-            return Err(ProbeError::InvalidFormat);
+            return Err(at!(ProbeError::InvalidFormat));
         }
 
-        let container = heif::parse(data, &Unstoppable).map_err(ProbeError::Corrupt)?;
+        let container = heif::parse(data, &Unstoppable)
+            .map_err(probe_corrupt)
+            .at()?;
 
         let primary_item = container
             .primary_item()
-            .ok_or_else(|| ProbeError::Corrupt(at!(HeicError::NoPrimaryImage)))?;
+            .ok_or_else(|| at!(ProbeError::Corrupt(HeicError::NoPrimaryImage)))?;
 
         // Check for alpha auxiliary image
         let has_alpha = !container
@@ -776,10 +796,12 @@ impl ImageInfo {
         // Fallback to reading image data
         let image_data = container
             .get_item_data(primary_item.id)
-            .map_err(ProbeError::Corrupt)?;
+            .map_err(probe_corrupt)
+            .at()?;
 
-        let hevc_info = hevc::get_info_at(&image_data)
-            .map_err(|e| ProbeError::Corrupt(crate::error::hevc_at(e).at()))?;
+        let hevc_info = hevc::get_info(&image_data)
+            .map_err(|e| probe_corrupt(crate::error::hevc_at(e)))
+            .at()?;
 
         let (width, height) =
             apply_transform_dimensions(hevc_info.width, hevc_info.height, &primary_item.transforms);

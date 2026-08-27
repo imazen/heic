@@ -128,7 +128,7 @@ fn decode_tiles_parallel(
             tile_data_list
                 .iter()
                 .map(|tile_data| {
-                    crate::hevc::decode_with_config_at(tile_config, tile_data)
+                    crate::hevc::decode_with_config(tile_config, tile_data)
                         .map_err(crate::error::hevc_at)
                         .at()
                 })
@@ -144,7 +144,7 @@ fn decode_tiles_parallel(
                 tile_data_list
                     .par_iter()
                     .map(|tile_data| {
-                        crate::hevc::decode_with_config_at(tile_config, tile_data)
+                        crate::hevc::decode_with_config(tile_config, tile_data)
                             .map_err(crate::error::hevc_at)
                             .at()
                     })
@@ -156,7 +156,7 @@ fn decode_tiles_parallel(
             tile_data_list
                 .par_iter()
                 .map(|tile_data| {
-                    crate::hevc::decode_with_config_at(tile_config, tile_data)
+                    crate::hevc::decode_with_config(tile_config, tile_data)
                         .map_err(crate::error::hevc_at)
                         .at()
                 })
@@ -295,7 +295,7 @@ fn decode_item(
                 // dispatcher trait can't be used (every native backend
                 // requires VPS/SPS/PPS through HvccParams.nal_units). Stay
                 // on the Rust path.
-                crate::hevc::decode_at(&image_data)
+                crate::hevc::decode(&image_data)
                     .map_err(crate::error::hevc_at)
                     .at()?
             } else {
@@ -1800,7 +1800,7 @@ pub(crate) fn try_decode_grid_to_sink(
             tile_data_list[row_start..row_end]
                 .iter()
                 .map(|tile_data| {
-                    crate::hevc::decode_with_config_at(tile_config, tile_data)
+                    crate::hevc::decode_with_config(tile_config, tile_data)
                         .map_err(crate::error::hevc_at)
                         .at()
                 })

@@ -308,7 +308,7 @@ fn mif3_brand_probes_without_format_error() {
         Ok(info) => {
             assert!(info.width > 0 && info.height > 0);
         }
-        Err(heic::ProbeError::InvalidFormat) => {
+        Err(e) if matches!(e.error(), heic::ProbeError::InvalidFormat) => {
             panic!("mif3 brand should be accepted, not rejected as InvalidFormat");
         }
         Err(_) => {

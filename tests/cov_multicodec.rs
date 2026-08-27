@@ -798,14 +798,14 @@ fn probe_malformed_variants() {
     // < 12 bytes → NeedMoreData
     assert!(matches!(
         ImageInfo::from_bytes(&[0u8; 8]),
-        Err(ProbeError::NeedMoreData)
+        Err(e) if matches!(e.error(), ProbeError::NeedMoreData)
     ));
     // 12+ bytes but not an ftyp box → InvalidFormat
     let mut not_ftyp = vec![0u8; 32];
     not_ftyp[4..8].copy_from_slice(b"moov");
     assert!(matches!(
         ImageInfo::from_bytes(&not_ftyp),
-        Err(ProbeError::InvalidFormat)
+        Err(e) if matches!(e.error(), ProbeError::InvalidFormat)
     ));
     // ftyp box header but garbage body → Corrupt (container parse fails) or
     // InvalidFormat; must be an Err, never panic.

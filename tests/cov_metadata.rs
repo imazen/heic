@@ -366,13 +366,13 @@ fn malformed_tiny_inputs_are_clean_errors() {
 
     // Probe distinguishes too-short from wrong-format.
     assert!(
-        matches!(ImageInfo::from_bytes(&[]), Err(ProbeError::NeedMoreData)),
+        matches!(ImageInfo::from_bytes(&[]), Err(e) if matches!(e.error(), ProbeError::NeedMoreData)),
         "empty probe → NeedMoreData"
     );
     assert!(
         matches!(
             ImageInfo::from_bytes(&[0u8; 8]),
-            Err(ProbeError::NeedMoreData)
+            Err(e) if matches!(e.error(), ProbeError::NeedMoreData)
         ),
         "8-byte probe → NeedMoreData"
     );
@@ -381,7 +381,7 @@ fn malformed_tiny_inputs_are_clean_errors() {
     assert!(
         matches!(
             ImageInfo::from_bytes(not_heif),
-            Err(ProbeError::InvalidFormat)
+            Err(e) if matches!(e.error(), ProbeError::InvalidFormat)
         ),
         "non-ftyp 12-byte probe → InvalidFormat"
     );
@@ -497,14 +497,17 @@ fn corrupt_ftyp_container_probes_as_corrupt() {
     // It must start with a valid ftyp so the format check passes.
     assert_eq!(&data[4..8], b"ftyp", "seed is a real ftyp container");
     match ImageInfo::from_bytes(&data) {
-        Err(ProbeError::Corrupt(inner)) => {
+        Err(e) => {
+            let ProbeError::Corrupt(inner) = e.error() else {
+                panic!("expected ProbeError::Corrupt for a broken ftyp, got {e:?}");
+            };
             // The wrapped HeicError must be a real decode/container error,
             // and Display must not panic.
-            let msg = format!("{}", inner.error());
+            let msg = format!("{inner}");
             assert!(!msg.is_empty(), "corrupt error has a message");
             assert!(
                 matches!(
-                    inner.error(),
+                    inner,
                     HeicError::NoPrimaryImage
                         | HeicError::InvalidContainer(_)
                         | HeicError::InvalidData(_)

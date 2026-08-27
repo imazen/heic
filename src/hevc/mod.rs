@@ -38,26 +38,21 @@ use whereat::{At, at};
 use dpb::{Dpb, DpbEntry};
 use inter::RefPicLists;
 
-/// Decoder-internal result: every `HevcError` is born located (`at!`) at the
-/// line that detected the problem, so the trace a caller sees starts inside
-/// the CABAC / residual / slice / parameter-set code, not at the module
-/// boundary (#25). The public entry points below strip the trace to keep
-/// their `HevcError` signatures; the crate-internal `*_at` variants keep it
-/// and `crate::error::hevc_at` carries it into `At<HeicError>`.
-pub(crate) type Result<T> = core::result::Result<T, At<HevcError>>;
-
-/// Drop the trace at a public `HevcError`-returning entry point.
-pub(crate) fn strip_at(e: At<HevcError>) -> HevcError {
-    e.decompose().0
-}
+/// Result of every HEVC decoder entry point: a [`whereat`]-located
+/// [`HevcError`].
+///
+/// Every `HevcError` is born located (`at!`) at the line that detected the
+/// problem, so the trace a caller sees starts inside the CABAC / residual /
+/// slice / parameter-set code, not at the module boundary (#25). The public
+/// entry points (`decode`, `decode_with_config[_stop]`, `get_info[_from_config]`,
+/// `params::parse_{vps,sps,pps}`, `VideoDecoder::{decode_nal,decode_annex_b}`)
+/// return it unchanged, and `crate::error::hevc_at` carries it into
+/// `At<HeicError>` at the container boundary. Inspect the origin with
+/// [`At::full_trace`] / [`At::error`]; `At::into_inner` drops the trace.
+pub type Result<T> = core::result::Result<T, At<HevcError>>;
 
 /// Decode HEVC bitstream to pixels (Annex B or raw format)
-pub fn decode(data: &[u8]) -> core::result::Result<DecodedFrame, HevcError> {
-    decode_at(data).map_err(strip_at)
-}
-
-/// [`decode`] with the decoder-origin error trace attached.
-pub(crate) fn decode_at(data: &[u8]) -> Result<DecodedFrame> {
+pub fn decode(data: &[u8]) -> Result<DecodedFrame> {
     // Parse NAL units
     let nal_units = bitstream::parse_nal_units(data)?;
     decode_nal_units(&nal_units, &enough::Unstoppable)
@@ -67,19 +62,8 @@ pub(crate) fn decode_at(data: &[u8]) -> Result<DecodedFrame> {
 ///
 /// This is the preferred method for HEIC files where parameter sets
 /// are stored separately in the hvcC box.
-pub fn decode_with_config(
-    config: &HevcDecoderConfig,
-    image_data: &[u8],
-) -> core::result::Result<DecodedFrame, HevcError> {
-    decode_with_config_stop_at(config, image_data, &enough::Unstoppable).map_err(strip_at)
-}
-
-/// [`decode_with_config`] with the decoder-origin error trace attached.
-pub(crate) fn decode_with_config_at(
-    config: &HevcDecoderConfig,
-    image_data: &[u8],
-) -> Result<DecodedFrame> {
-    decode_with_config_stop_at(config, image_data, &enough::Unstoppable)
+pub fn decode_with_config(config: &HevcDecoderConfig, image_data: &[u8]) -> Result<DecodedFrame> {
+    decode_with_config_stop(config, image_data, &enough::Unstoppable)
 }
 
 /// Same as [`decode_with_config`], but checks `stop` for cancellation.
@@ -90,15 +74,6 @@ pub(crate) fn decode_with_config_at(
 /// large intra frame (e.g. a 16384×16384 one-tile image) be cancelled
 /// mid-frame, instead of only between tiles of a grid.
 pub fn decode_with_config_stop(
-    config: &HevcDecoderConfig,
-    image_data: &[u8],
-    stop: &dyn enough::Stop,
-) -> core::result::Result<DecodedFrame, HevcError> {
-    decode_with_config_stop_at(config, image_data, stop).map_err(strip_at)
-}
-
-/// [`decode_with_config_stop`] with the decoder-origin error trace attached.
-pub(crate) fn decode_with_config_stop_at(
     config: &HevcDecoderConfig,
     image_data: &[u8],
     stop: &dyn enough::Stop,
@@ -124,19 +99,12 @@ pub(crate) fn decode_with_config_stop_at(
 }
 
 /// Get image info from HEIC config
-pub fn get_info_from_config(
-    config: &HevcDecoderConfig,
-) -> core::result::Result<ImageInfo, HevcError> {
-    get_info_from_config_at(config).map_err(strip_at)
-}
-
-/// [`get_info_from_config`] with the decoder-origin error trace attached.
-pub(crate) fn get_info_from_config_at(config: &HevcDecoderConfig) -> Result<ImageInfo> {
+pub fn get_info_from_config(config: &HevcDecoderConfig) -> Result<ImageInfo> {
     for nal_data in &config.nal_units {
         if let Ok(nal) = bitstream::parse_single_nal(nal_data)
             && nal.nal_type == bitstream::NalType::SpsNut
         {
-            let sps = params::parse_sps_at(&nal.payload)?;
+            let sps = params::parse_sps(&nal.payload)?;
             let (width, height) = get_cropped_dimensions(&sps);
             return Ok(ImageInfo { width, height });
         }
@@ -161,13 +129,13 @@ fn decode_nal_units(
     for nal in nal_units {
         match nal.nal_type {
             bitstream::NalType::VpsNut => {
-                _vps = Some(params::parse_vps_at(&nal.payload)?);
+                _vps = Some(params::parse_vps(&nal.payload)?);
             }
             bitstream::NalType::SpsNut => {
-                sps = Some(params::parse_sps_at(&nal.payload)?);
+                sps = Some(params::parse_sps(&nal.payload)?);
             }
             bitstream::NalType::PpsNut => {
-                pps = Some(params::parse_pps_at(&nal.payload)?);
+                pps = Some(params::parse_pps(&nal.payload)?);
             }
             _ => {}
         }
@@ -259,17 +227,12 @@ fn decode_nal_units(
 }
 
 /// Get image info without full decoding
-pub fn get_info(data: &[u8]) -> core::result::Result<ImageInfo, HevcError> {
-    get_info_at(data).map_err(strip_at)
-}
-
-/// [`get_info`] with the decoder-origin error trace attached.
-pub(crate) fn get_info_at(data: &[u8]) -> Result<ImageInfo> {
+pub fn get_info(data: &[u8]) -> Result<ImageInfo> {
     let nal_units = bitstream::parse_nal_units(data)?;
 
     for nal in &nal_units {
         if nal.nal_type == bitstream::NalType::SpsNut {
-            let sps = params::parse_sps_at(&nal.payload)?;
+            let sps = params::parse_sps(&nal.payload)?;
             let (width, height) = get_cropped_dimensions(&sps);
             return Ok(ImageInfo { width, height });
         }
@@ -434,29 +397,18 @@ impl VideoDecoder {
     /// Decode a single NAL unit. Returns a decoded frame if one is produced.
     ///
     /// Call this repeatedly with each NAL unit in decode order.
-    pub fn decode_nal(
-        &mut self,
-        nal: &bitstream::NalUnit<'_>,
-    ) -> core::result::Result<Option<DecodedFrame>, HevcError> {
-        self.decode_nal_at(nal).map_err(strip_at)
-    }
-
-    /// [`Self::decode_nal`] with the decoder-origin error trace attached.
-    pub(crate) fn decode_nal_at(
-        &mut self,
-        nal: &bitstream::NalUnit<'_>,
-    ) -> Result<Option<DecodedFrame>> {
+    pub fn decode_nal(&mut self, nal: &bitstream::NalUnit<'_>) -> Result<Option<DecodedFrame>> {
         match nal.nal_type {
             bitstream::NalType::VpsNut => {
-                let _vps = params::parse_vps_at(&nal.payload)?;
+                let _vps = params::parse_vps(&nal.payload)?;
                 Ok(None)
             }
             bitstream::NalType::SpsNut => {
-                self.sps = Some(params::parse_sps_at(&nal.payload)?);
+                self.sps = Some(params::parse_sps(&nal.payload)?);
                 Ok(None)
             }
             bitstream::NalType::PpsNut => {
-                self.pps = Some(params::parse_pps_at(&nal.payload)?);
+                self.pps = Some(params::parse_pps(&nal.payload)?);
                 Ok(None)
             }
             nt if nt.is_slice() && nal.nuh_layer_id == 0 => self.decode_slice_nal(nal),
@@ -827,19 +779,11 @@ impl VideoDecoder {
     /// Decode an entire Annex B bitstream, returning all decoded frames in **display order** (by POC).
     ///
     /// This is the simplest way to decode a raw H.265 bitstream with P/B slices.
-    pub fn decode_annex_b(
-        &mut self,
-        data: &[u8],
-    ) -> core::result::Result<Vec<DecodedFrame>, HevcError> {
-        self.decode_annex_b_at(data).map_err(strip_at)
-    }
-
-    /// [`Self::decode_annex_b`] with the decoder-origin error trace attached.
-    pub(crate) fn decode_annex_b_at(&mut self, data: &[u8]) -> Result<Vec<DecodedFrame>> {
+    pub fn decode_annex_b(&mut self, data: &[u8]) -> Result<Vec<DecodedFrame>> {
         let nal_units = bitstream::parse_nal_units(data)?;
         let mut frames: Vec<(i32, DecodedFrame)> = Vec::new();
         for nal in &nal_units {
-            if let Some(frame) = self.decode_nal_at(nal)? {
+            if let Some(frame) = self.decode_nal(nal)? {
                 frames.push((self.last_decoded_poc, frame));
             }
         }
@@ -1003,7 +947,7 @@ mod tests {
     fn truncated_sps_error_is_located_inside_the_parser() {
         // Annex-B start code + SPS NAL header (type 33) + a 1-byte payload.
         let data = [0, 0, 0, 1, 0x42, 0x01, 0x01];
-        let err = decode_at(&data).unwrap_err();
+        let err = decode(&data).unwrap_err();
         let file = origin_file(&err);
         assert!(
             file.contains("src/hevc/") && !file.ends_with("src/hevc/mod.rs"),
@@ -1017,7 +961,7 @@ mod tests {
     fn missing_sps_error_is_located_in_decode_nal_units() {
         // A lone slice NAL (type 1) with no parameter sets.
         let data = [0, 0, 0, 1, 0x02, 0x01, 0x00];
-        let err = decode_at(&data).unwrap_err();
+        let err = decode(&data).unwrap_err();
         assert!(
             matches!(err.error(), HevcError::MissingParameterSet("SPS")),
             "{err}"
@@ -1032,7 +976,7 @@ mod tests {
         let data = [0, 0, 0, 1, 0x02, 0x01, 0x00];
         assert!(matches!(
             decode(&data),
-            Err(HevcError::MissingParameterSet("SPS"))
+            Err(e) if matches!(e.error(), HevcError::MissingParameterSet("SPS"))
         ));
     }
 

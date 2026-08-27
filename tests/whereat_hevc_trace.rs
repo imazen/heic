@@ -94,6 +94,59 @@ fn corrupted_sps_trace_starts_in_the_parameter_set_parser() {
     assert_origin_inside_hevc("sps", &data);
 }
 
+/// The raw HEVC entry points return `At<HevcError>` directly: the trace
+/// starts in the parameter-set parser, with no location-less hop at the
+/// module boundary.
+#[test]
+fn public_hevc_get_info_trace_starts_in_the_parameter_set_parser() {
+    // Annex B start code + SPS NAL header (type 33) + garbage payload.
+    let mut data = vec![0, 0, 0, 1, 0x42, 0x01];
+    data.extend_from_slice(&[0xff; 40]);
+    let err = heic::hevc::get_info(&data).expect_err("garbage SPS must not parse");
+    let files: Vec<String> = err
+        .frames()
+        .filter_map(|f| f.location())
+        .map(|l| l.file().replace('\\', "/"))
+        .collect();
+    assert!(
+        files.first().is_some_and(|f| f.contains("src/hevc/")),
+        "hevc::get_info origin should be inside the decoder, got {files:?}"
+    );
+}
+
+/// `ImageInfo::from_bytes` returns `At<ProbeError>`: a `Corrupt` probe keeps
+/// the container parser's origin frame and records the probe boundary.
+#[test]
+fn corrupt_probe_trace_starts_in_the_container_parser() {
+    // A well-framed `ftyp` box with a non-HEIF brand ("qt  "): passes the
+    // 12-byte / `ftyp` format gate, then the container parser's brand check
+    // (`src/heif/parser.rs`) rejects it.
+    let mut data = Vec::new();
+    data.extend_from_slice(&20u32.to_be_bytes());
+    data.extend_from_slice(b"ftyp");
+    data.extend_from_slice(b"qt  ");
+    data.extend_from_slice(&0u32.to_be_bytes());
+    data.extend_from_slice(b"qt  ");
+    let err = heic::ImageInfo::from_bytes(&data).expect_err("foreign brand must not probe");
+    assert!(
+        matches!(err.error(), heic::ProbeError::Corrupt(_)),
+        "expected ProbeError::Corrupt, got {err}"
+    );
+    let files: Vec<String> = err
+        .frames()
+        .filter_map(|f| f.location())
+        .map(|l| l.file().replace('\\', "/"))
+        .collect();
+    assert!(
+        files.first().is_some_and(|f| f.contains("src/heif/")),
+        "probe origin should be inside the container parser, got {files:?}"
+    );
+    assert!(
+        files.iter().any(|f| f.ends_with("src/lib.rs")),
+        "probe trace should record the ImageInfo::from_bytes boundary, got {files:?}"
+    );
+}
+
 #[test]
 fn corrupted_slice_data_trace_starts_in_the_decoder() {
     let mut data = single_heic();
