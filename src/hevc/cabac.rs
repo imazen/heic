@@ -4,8 +4,50 @@
 //! with context models that adapt based on previously coded symbols.
 
 use crate::error::HevcError;
+use whereat::{At, at};
 
-type Result<T> = core::result::Result<T, HevcError>;
+/// Failure of the arithmetic decoder itself.
+///
+/// Kept as a 1-byte enum so the per-bin hot path returns a register-sized
+/// `Result<u8, CabacError>` — `At<HevcError>` is 40 bytes and returning it
+/// from every `decode_bin` measured +3-4 % on a whole decode. The
+/// `#[track_caller]` `From` impl below runs at the caller's `?`, so the
+/// located `HevcError` records the syntax element that was being decoded
+/// (`ctu.rs` / `residual.rs` / `slice.rs`), which is the more useful origin
+/// anyway (#25).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CabacError {
+    /// Slice data ended before the arithmetic decoder could be initialised.
+    DataTooShort,
+    /// `decode_egk_bypass` prefix exceeded the 32-bit limit.
+    EgkPrefixTooLong,
+    /// Renormalisation could not restore `range >= 256` (corrupt state).
+    RenormalizationDiverged,
+    /// Exp-Golomb value exceeded `u32`.
+    ExpGolombOverflow,
+}
+
+impl From<CabacError> for HevcError {
+    fn from(e: CabacError) -> Self {
+        match e {
+            CabacError::DataTooShort => HevcError::CabacError("data too short"),
+            CabacError::EgkPrefixTooLong => HevcError::InvalidBitstream("EGk prefix too long"),
+            CabacError::RenormalizationDiverged => {
+                HevcError::CabacError("renormalization diverged")
+            }
+            CabacError::ExpGolombOverflow => HevcError::CabacError("exp-golomb overflow"),
+        }
+    }
+}
+
+impl From<CabacError> for At<HevcError> {
+    #[track_caller]
+    fn from(e: CabacError) -> Self {
+        at!(HevcError::from(e))
+    }
+}
+
+type Result<T> = core::result::Result<T, CabacError>;
 
 /// CABAC state tables from H.265 spec Table 9-43
 static LPS_TABLE: [[u8; 4]; 64] = [
@@ -226,7 +268,7 @@ impl<'a> CabacDecoder<'a> {
     /// Create a new CABAC decoder
     pub fn new(data: &'a [u8]) -> Result<Self> {
         if data.len() < 2 {
-            return Err(HevcError::CabacError("data too short"));
+            return Err(CabacError::DataTooShort);
         }
 
         let mut decoder = Self {
@@ -424,12 +466,12 @@ impl<'a> CabacDecoder<'a> {
                 break;
             }
             if n >= 31 {
-                return Err(HevcError::InvalidBitstream("EGk prefix too long"));
+                return Err(CabacError::EgkPrefixTooLong);
             }
             base += 1 << n;
             n += 1;
             if n >= k + 32 {
-                return Err(HevcError::InvalidBitstream("EGk prefix too long"));
+                return Err(CabacError::EgkPrefixTooLong);
             }
         }
         let suffix = self.decode_bypass_bits(n)?;
@@ -457,7 +499,7 @@ impl<'a> CabacDecoder<'a> {
             self.read_bit()?;
             iters += 1;
             if iters > 16 {
-                return Err(HevcError::CabacError("renormalization diverged"));
+                return Err(CabacError::RenormalizationDiverged);
             }
         }
         Ok(())
@@ -470,7 +512,7 @@ impl<'a> CabacDecoder<'a> {
         while self.decode_bypass()? != 0 {
             n += 1;
             if n > 31 {
-                return Err(HevcError::CabacError("exp-golomb overflow"));
+                return Err(CabacError::ExpGolombOverflow);
             }
         }
 

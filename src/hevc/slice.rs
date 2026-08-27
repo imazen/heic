@@ -9,7 +9,8 @@ use super::refpic;
 use crate::error::HevcError;
 use alloc::vec::Vec;
 
-type Result<T> = core::result::Result<T, HevcError>;
+use super::Result;
+use whereat::at;
 
 /// Slice type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,7 +284,7 @@ impl SliceHeader {
 
         let pps_id = reader.read_ue()? as u8;
         if pps_id != pps.pps_id {
-            return Err(HevcError::InvalidBitstream("PPS ID mismatch"));
+            return Err(at!(HevcError::InvalidBitstream("PPS ID mismatch")));
         }
 
         let dependent_slice_segment_flag;
@@ -308,7 +309,7 @@ impl SliceHeader {
         // If dependent slice, we'd inherit from previous slice header
         // For simplicity in still images, we don't support dependent slices
         if dependent_slice_segment_flag {
-            return Err(HevcError::Unsupported("dependent slice segments"));
+            return Err(at!(HevcError::Unsupported("dependent slice segments")));
         }
 
         // Skip reserved bits
@@ -318,7 +319,7 @@ impl SliceHeader {
 
         let slice_type_val = reader.read_ue()? as u8;
         let slice_type = SliceType::from_u8(slice_type_val)
-            .ok_or(HevcError::InvalidBitstream("invalid slice type"))?;
+            .ok_or_else(|| at!(HevcError::InvalidBitstream("invalid slice type")))?;
 
         let pic_output_flag = if pps.output_flag_present_flag {
             reader.read_bit()? != 0
@@ -383,9 +384,9 @@ impl SliceHeader {
                     || num_long_term_pics > 16
                     || num_long_term_sps + num_long_term_pics > 16
                 {
-                    return Err(HevcError::InvalidBitstream(
+                    return Err(at!(HevcError::InvalidBitstream(
                         "long-term ref pic count exceeds DPB bound (16)",
-                    ));
+                    )));
                 }
 
                 let poc_bits = sps.log2_max_pic_order_cnt_lsb_minus4 + 4;
@@ -450,17 +451,17 @@ impl SliceHeader {
             if override_flag {
                 let v = reader.read_ue()?;
                 if v > 14 {
-                    return Err(HevcError::InvalidBitstream(
+                    return Err(at!(HevcError::InvalidBitstream(
                         "num_ref_idx_l0_active_minus1 exceeds 14",
-                    ));
+                    )));
                 }
                 num_ref_idx_l0_active = v as u8 + 1;
                 if slice_type == SliceType::B {
                     let v = reader.read_ue()?;
                     if v > 14 {
-                        return Err(HevcError::InvalidBitstream(
+                        return Err(at!(HevcError::InvalidBitstream(
                             "num_ref_idx_l1_active_minus1 exceeds 14",
-                        ));
+                        )));
                     }
                     num_ref_idx_l1_active = v as u8 + 1;
                 }
@@ -604,7 +605,9 @@ impl SliceHeader {
                 if n > 0 {
                     let offset_len_minus1 = reader.read_ue()?;
                     if offset_len_minus1 > 31 {
-                        return Err(HevcError::InvalidBitstream("offset_len_minus1 exceeds 31"));
+                        return Err(at!(HevcError::InvalidBitstream(
+                            "offset_len_minus1 exceeds 31"
+                        )));
                     }
                     let offset_len = offset_len_minus1 as u8 + 1;
                     for _ in 0..n {
@@ -716,9 +719,9 @@ fn count_curr_pics(sps: &Sps, rps_idx: u8, inline_rps: &Option<refpic::ShortTerm
 fn read_weight_delta(reader: &mut BitstreamReader<'_>) -> Result<i16> {
     let delta = reader.read_se()?;
     if !(-128..=127).contains(&delta) {
-        return Err(HevcError::InvalidBitstream(
+        return Err(at!(HevcError::InvalidBitstream(
             "delta_luma/chroma_weight out of range [-128, 127]",
-        ));
+        )));
     }
     Ok(delta as i16)
 }
@@ -735,15 +738,15 @@ fn parse_pred_weight_table(
     if num_ref_l0 as usize > super::inter::MAX_NUM_REF_PICS
         || num_ref_l1 as usize > super::inter::MAX_NUM_REF_PICS
     {
-        return Err(HevcError::InvalidBitstream(
+        return Err(at!(HevcError::InvalidBitstream(
             "num_ref_idx exceeds MAX_NUM_REF_PICS",
-        ));
+        )));
     }
     let luma_log2_weight_denom = reader.read_ue()?;
     if luma_log2_weight_denom > 7 {
-        return Err(HevcError::InvalidBitstream(
+        return Err(at!(HevcError::InvalidBitstream(
             "luma_log2_weight_denom exceeds 7",
-        ));
+        )));
     }
     let luma_log2_weight_denom = luma_log2_weight_denom as u8;
     let chroma_log2_weight_denom = if sps.chroma_array_type() != 0 {

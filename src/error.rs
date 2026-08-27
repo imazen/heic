@@ -196,6 +196,24 @@ impl From<TryReserveError> for HeicError {
     }
 }
 
+/// Carry a located HEVC decoder error across the module boundary.
+///
+/// The decoder's `*_at` entry points (`crate::hevc::decode_at`,
+/// `decode_with_config_stop_at`, …) return `At<HevcError>` whose trace starts
+/// at the line inside the CABAC / residual / slice / parameter-set code that
+/// detected the problem (#25). `map_error` keeps that trace while converting
+/// the payload (`HevcError::Cancelled` still becomes `HeicError::Cancelled`).
+///
+/// Call sites append the boundary frame themselves with
+/// `.map_err(crate::error::hevc_at).at()` (`whereat::ResultAtExt::at` is
+/// `#[track_caller]`). This function deliberately is NOT `#[track_caller]`:
+/// passed by name to `map_err` it is invoked through `FnOnce::call_once`, and
+/// a `#[track_caller]` location taken there points at
+/// `core/src/ops/function.rs`, not at the caller.
+pub(crate) fn hevc_at(e: At<HevcError>) -> At<HeicError> {
+    e.map_error(HeicError::from)
+}
+
 // Two-hop conversion for ? operator: HevcError → At<HeicError>
 impl From<HevcError> for At<HeicError> {
     #[track_caller]

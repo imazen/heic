@@ -16,7 +16,8 @@ macro_rules! rc_eprintln {
     };
 }
 
-type Result<T> = core::result::Result<T, HevcError>;
+use super::Result;
+use whereat::at;
 
 /// Scan order types for coefficient scanning
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,7 +284,9 @@ pub fn decode_residual(
     };
 
     if last_x >= size || last_y >= size {
-        return Err(HevcError::InvalidBitstream("invalid last coeff position"));
+        return Err(at!(HevcError::InvalidBitstream(
+            "invalid last coeff position"
+        )));
     }
 
     // Get scan tables

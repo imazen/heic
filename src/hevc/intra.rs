@@ -7,6 +7,7 @@
 
 use super::picture::{DecodedFrame, UNINIT_SAMPLE};
 use super::slice::IntraPredMode;
+use whereat::at;
 
 /// Maximum block size for intra prediction (HEVC max intra TU = 32)
 const MAX_INTRA_PRED_BLOCK_SIZE: usize = 32;
@@ -51,11 +52,11 @@ pub fn predict_intra(
     mode: IntraPredMode,
     c_idx: u8, // 0=Y, 1=Cb, 2=Cr
     strong_intra_smoothing_enabled: bool,
-) -> core::result::Result<(), crate::error::HevcError> {
+) -> super::Result<()> {
     if log2_size > 5 {
-        return Err(crate::error::HevcError::DecodingError(
+        return Err(at!(crate::error::HevcError::DecodingError(
             "log2_size > 5 in intra prediction",
-        ));
+        )));
     }
     let size = 1u32 << log2_size;
     let bit_depth = frame.bit_depth;
@@ -71,9 +72,9 @@ pub fn predict_intra(
             let last_row_end =
                 (y as usize + size as usize).saturating_sub(1) * s + x as usize + size as usize;
             if last_row_end > p.len() {
-                return Err(crate::error::HevcError::DecodingError(
+                return Err(at!(crate::error::HevcError::DecodingError(
                     "intra prediction block extends past plane allocation",
-                ));
+                )));
             }
         }
     }

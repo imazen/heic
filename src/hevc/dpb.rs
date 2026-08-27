@@ -6,7 +6,9 @@
 
 #![allow(dead_code)] // Phase 0: types used in subsequent phases
 
+use crate::error::HevcError;
 use alloc::vec::Vec;
+use whereat::at;
 
 use super::inter::{MAX_NUM_REF_PICS, PbMotion};
 use super::picture::DecodedFrame;
@@ -39,11 +41,7 @@ pub struct DpbEntry {
 
 impl DpbEntry {
     /// Create a new DPB entry from a decoded frame
-    pub fn new(
-        frame: DecodedFrame,
-        poc: i32,
-        min_pu_size: u32,
-    ) -> core::result::Result<Self, crate::error::HevcError> {
+    pub fn new(frame: DecodedFrame, poc: i32, min_pu_size: u32) -> super::Result<Self> {
         let pu_width = frame.width.div_ceil(min_pu_size);
         let pu_height = frame.height.div_ceil(min_pu_size);
         let pu_count = (pu_width * pu_height) as usize;
@@ -53,9 +51,11 @@ impl DpbEntry {
             poc,
             is_reference: true,
             is_output: false,
-            mv_info: try_vec![PbMotion::UNAVAILABLE; pu_count]?,
+            mv_info: try_vec![PbMotion::UNAVAILABLE; pu_count]
+                .map_err(|_| at!(HevcError::AllocationFailed))?,
             mv_stride: pu_width,
-            pred_mode_map: try_vec![PredMode::Intra; pu_count]?,
+            pred_mode_map: try_vec![PredMode::Intra; pu_count]
+                .map_err(|_| at!(HevcError::AllocationFailed))?,
             ref_poc: [[0i32; MAX_NUM_REF_PICS]; 2],
         })
     }

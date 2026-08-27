@@ -3,7 +3,9 @@
 //! Applied after deblocking to reduce banding and ringing artifacts.
 //! Two modes per CTB: Band Offset (BO) and Edge Offset (EO).
 
+use crate::error::HevcError;
 use alloc::vec::Vec;
+use whereat::at;
 
 use super::picture::DecodedFrame;
 
@@ -33,14 +35,12 @@ pub struct SaoMap {
 }
 
 impl SaoMap {
-    pub fn new(
-        width_ctbs: u32,
-        height_ctbs: u32,
-    ) -> core::result::Result<Self, crate::error::HevcError> {
+    pub fn new(width_ctbs: u32, height_ctbs: u32) -> super::Result<Self> {
         let size = (width_ctbs as usize)
             .checked_mul(height_ctbs as usize)
-            .ok_or(crate::error::HevcError::DimensionOverflow)?;
-        let data = try_vec![SaoInfo::default(); size]?;
+            .ok_or_else(|| at!(crate::error::HevcError::DimensionOverflow))?;
+        let data =
+            try_vec![SaoInfo::default(); size].map_err(|_| at!(HevcError::AllocationFailed))?;
         Ok(Self {
             data,
             width_ctbs,

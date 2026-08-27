@@ -42,7 +42,7 @@ use alloc::vec::Vec;
 
 use enough::Stop;
 use heic_core::{BackendError, DecodedFrame, HevcBackend, HvccParams};
-use whereat::at;
+use whereat::{ResultAtExt, at};
 
 use crate::Result;
 use crate::error::HeicError;
@@ -287,12 +287,13 @@ pub(crate) fn decode_one_tile(
     // HvccParams construction entirely.
     #[cfg(feature = "backend-rust")]
     if backends.len() == 1 && backends[0] == Backend::Rust {
-        // `?` triggers the existing From<HevcError> for At<HeicError> in
-        // error.rs — no further conversion needed.
+        // Convert the located decoder error to `At<HeicError>` at this
+        // boundary, appending this frame (`.at()`) so the trace reads
+        // decoder-origin → here → caller (#25).
         let _ = (width, height);
-        return Ok(crate::hevc::decode_with_config_stop(
-            config, image_data, stop,
-        )?);
+        return crate::hevc::decode_with_config_stop_at(config, image_data, stop)
+            .map_err(crate::error::hevc_at)
+            .at();
     }
 
     // Slow path: build the HvccParams view once and walk the allowlist.
@@ -347,9 +348,9 @@ pub(crate) fn decode_one_tile(
         #[cfg(feature = "backend-rust")]
         if b == Backend::Rust {
             // Fast path even when Rust is mid-allowlist — bypass trait.
-            return Ok(crate::hevc::decode_with_config_stop(
-                config, image_data, stop,
-            )?);
+            return crate::hevc::decode_with_config_stop_at(config, image_data, stop)
+                .map_err(crate::error::hevc_at)
+                .at();
         }
         let mut inst = b.instance();
         if !inst.is_available() {

@@ -13,7 +13,8 @@ use super::bitstream::BitstreamReader;
 use super::inter::{MAX_NUM_REF_PICS, RefPicLists};
 use crate::error::HevcError;
 
-type Result<T> = core::result::Result<T, HevcError>;
+use super::Result;
+use whereat::at;
 
 /// Maximum number of short-term reference picture sets in SPS
 pub const MAX_SHORT_TERM_RPS_COUNT: usize = 64;
@@ -90,14 +91,16 @@ pub fn parse_short_term_rps(
         let ref_rps_idx = u32::from(st_rps_idx)
             .checked_sub(delta_idx_minus1)
             .and_then(|v| v.checked_sub(1))
-            .ok_or(HevcError::InvalidBitstream(
-                "inter_ref_pic_set: ref index out of range",
-            ))?;
+            .ok_or_else(|| {
+                at!(HevcError::InvalidBitstream(
+                    "inter_ref_pic_set: ref index out of range",
+                ))
+            })?;
 
         if ref_rps_idx as usize >= prev_sets.len() {
-            return Err(HevcError::InvalidBitstream(
+            return Err(at!(HevcError::InvalidBitstream(
                 "inter_ref_pic_set: ref index beyond parsed sets",
-            ));
+            )));
         }
 
         let delta_rps_sign = reader.read_bit()?;
@@ -194,9 +197,9 @@ pub fn parse_short_term_rps(
         if num_negative_pics as usize > MAX_NUM_REF_PICS
             || num_positive_pics as usize > MAX_NUM_REF_PICS
         {
-            return Err(HevcError::InvalidBitstream(
+            return Err(at!(HevcError::InvalidBitstream(
                 "too many short-term reference pictures",
-            ));
+            )));
         }
 
         rps.num_negative_pics = num_negative_pics;

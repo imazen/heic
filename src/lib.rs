@@ -778,8 +778,8 @@ impl ImageInfo {
             .get_item_data(primary_item.id)
             .map_err(ProbeError::Corrupt)?;
 
-        let hevc_info = hevc::get_info(&image_data)
-            .map_err(|e| ProbeError::Corrupt(at!(HeicError::from(e))))?;
+        let hevc_info = hevc::get_info_at(&image_data)
+            .map_err(|e| ProbeError::Corrupt(crate::error::hevc_at(e).at()))?;
 
         let (width, height) =
             apply_transform_dimensions(hevc_info.width, hevc_info.height, &primary_item.transforms);

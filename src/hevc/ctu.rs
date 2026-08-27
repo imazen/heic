@@ -63,7 +63,8 @@ use super::transform_simd_neon::add_residual_block_neon;
 use crate::error::HevcError;
 use archmage::incant;
 
-type Result<T> = core::result::Result<T, HevcError>;
+use super::Result;
+use whereat::at;
 
 /// Global SE counter for syntax element tracing
 pub static SE_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -590,8 +591,9 @@ impl<'a> SliceContext<'a> {
         let ct_depth_map_height = sps.pic_height_in_luma_samples.div_ceil(min_cb_size);
         let ct_map_size = (ct_depth_map_stride as usize)
             .checked_mul(ct_depth_map_height as usize)
-            .ok_or(HevcError::DecodingError("ct_depth_map size overflow"))?;
-        let ct_depth_map = try_vec![0xFFu8; ct_map_size]?;
+            .ok_or_else(|| at!(HevcError::DecodingError("ct_depth_map size overflow")))?;
+        let ct_depth_map =
+            try_vec![0xFFu8; ct_map_size].map_err(|_| at!(HevcError::AllocationFailed))?;
 
         // Intra mode map at min_pu_size granularity (= min_cb_size / 2)
         // This supports NxN partition PU-level resolution
@@ -600,9 +602,11 @@ impl<'a> SliceContext<'a> {
         let intra_mode_map_height = sps.pic_height_in_luma_samples.div_ceil(min_pu_size);
         let pu_map_size = (intra_mode_map_stride as usize)
             .checked_mul(intra_mode_map_height as usize)
-            .ok_or(HevcError::DecodingError("pu_map size overflow"))?;
-        let intra_mode_map = try_vec![IntraPredMode::Dc.as_u8(); pu_map_size]?;
-        let intra_chroma_mode_map = try_vec![IntraPredMode::Dc.as_u8(); pu_map_size]?;
+            .ok_or_else(|| at!(HevcError::DecodingError("pu_map size overflow")))?;
+        let intra_mode_map = try_vec![IntraPredMode::Dc.as_u8(); pu_map_size]
+            .map_err(|_| at!(HevcError::AllocationFailed))?;
+        let intra_chroma_mode_map = try_vec![IntraPredMode::Dc.as_u8(); pu_map_size]
+            .map_err(|_| at!(HevcError::AllocationFailed))?;
 
         // QP map at min_tb_size granularity
         let min_tb_size = 1u32 << sps.log2_min_tb_size();
@@ -610,8 +614,9 @@ impl<'a> SliceContext<'a> {
         let qp_map_height = sps.pic_height_in_luma_samples.div_ceil(min_tb_size);
         let qp_map_size = (qp_map_stride as usize)
             .checked_mul(qp_map_height as usize)
-            .ok_or(HevcError::DecodingError("qp_map size overflow"))?;
-        let qp_map = try_vec![slice_qp as i8; qp_map_size]?;
+            .ok_or_else(|| at!(HevcError::DecodingError("qp_map size overflow")))?;
+        let qp_map =
+            try_vec![slice_qp as i8; qp_map_size].map_err(|_| at!(HevcError::AllocationFailed))?;
 
         Ok(Self {
             sps,
@@ -650,13 +655,15 @@ impl<'a> SliceContext<'a> {
             stat_coeff: [0u8; 4],
             ep_byte_positions: Vec::new(),
             mc_scratch: mc::McScratch::default(),
-            pred_mode_map: try_vec![PredMode::Intra; pu_map_size]?,
-            mv_info: try_vec![PbMotion::UNAVAILABLE; pu_map_size]?,
+            pred_mode_map: try_vec![PredMode::Intra; pu_map_size]
+                .map_err(|_| at!(HevcError::AllocationFailed))?,
+            mv_info: try_vec![PbMotion::UNAVAILABLE; pu_map_size]
+                .map_err(|_| at!(HevcError::AllocationFailed))?,
             cbf_map: {
                 let cbf_size = (sps.pic_width_in_luma_samples.div_ceil(4) as usize)
                     .checked_mul(sps.pic_height_in_luma_samples.div_ceil(4) as usize)
-                    .ok_or(HevcError::DecodingError("cbf_map size overflow"))?;
-                try_vec![false; cbf_size]?
+                    .ok_or_else(|| at!(HevcError::DecodingError("cbf_map size overflow")))?;
+                try_vec![false; cbf_size].map_err(|_| at!(HevcError::AllocationFailed))?
             },
             cbf_map_stride: sps.pic_width_in_luma_samples.div_ceil(4),
             curr_poc: 0,
@@ -781,9 +788,9 @@ impl<'a> SliceContext<'a> {
             .checked_mul(pic_height_in_ctbs)
             .unwrap_or(0);
         if total_ctus == 0 || start_addr >= total_ctus {
-            return Err(HevcError::InvalidBitstream(
+            return Err(at!(HevcError::InvalidBitstream(
                 "slice_segment_address out of range for picture CTB count",
-            ));
+            )));
         }
 
         self.ctb_y = start_addr / pic_width_in_ctbs;
@@ -812,16 +819,16 @@ impl<'a> SliceContext<'a> {
         // Build reverse mapping: given (ctb_x, ctb_y), what is the tile-scan index?
         let tile_scan_idx: Vec<u32> = if tiles {
             let map_size = (pic_width_in_ctbs * pic_height_in_ctbs) as usize;
-            let mut idx = try_vec![0u32; map_size]?;
+            let mut idx = try_vec![0u32; map_size].map_err(|_| at!(HevcError::AllocationFailed))?;
             for (ts, &(cx, cy)) in tile_scan.iter().enumerate() {
                 let i = (cy * pic_width_in_ctbs + cx) as usize;
                 if i >= map_size {
-                    return Err(HevcError::InvalidParameterSet {
+                    return Err(at!(HevcError::InvalidParameterSet {
                         kind: "PPS",
                         msg: alloc::format!(
                             "tile scan coordinate ({cx},{cy}) exceeds picture CTB dimensions"
                         ),
-                    });
+                    }));
                 }
                 idx[i] = ts as u32;
             }
@@ -899,7 +906,7 @@ impl<'a> SliceContext<'a> {
             // per CTU is negligible against a CTU's decode cost. Mirrors the
             // slice-entry check in `mod::decode_with_config_stop`.
             if ctu_count.is_multiple_of(STOP_CHECK_CTU_INTERVAL) && stop.should_stop() {
-                return Err(HevcError::Cancelled(enough::StopReason::Cancelled));
+                return Err(at!(HevcError::Cancelled(enough::StopReason::Cancelled)));
             }
 
             // Bail out of a truncated/over-declaring slice. A conformant slice
@@ -911,9 +918,9 @@ impl<'a> SliceContext<'a> {
             // for tens of seconds (fuzz #34). `seek_to`/`reinit` reset the
             // over-read budget so valid multi-tile / WPP substreams are unaffected.
             if self.cabac.overread_past_data() {
-                return Err(HevcError::InvalidBitstream(
+                return Err(at!(HevcError::InvalidBitstream(
                     "CABAC read past end of slice data (truncated or over-declared picture)",
-                ));
+                )));
             }
 
             // WPP: at start of each new row (ctb_x==0, ctb_y>0), restore saved context
@@ -1798,7 +1805,9 @@ impl<'a> SliceContext<'a> {
                     (luma_mode_0, chroma_mode)
                 }
                 _ => {
-                    return Err(HevcError::InvalidBitstream("invalid intra partition mode"));
+                    return Err(at!(HevcError::InvalidBitstream(
+                        "invalid intra partition mode"
+                    )));
                 }
             }
         } else {
@@ -2238,9 +2247,9 @@ impl<'a> SliceContext<'a> {
             let cu_qp_delta = (cu_qp_delta_abs as i64) * (1 - 2 * cu_qp_delta_sign as i64);
             let qp_bd_offset_y = 6 * (self.sps.bit_depth_y() as i64 - 8);
             if cu_qp_delta < -(26 + qp_bd_offset_y / 2) || cu_qp_delta > 25 + qp_bd_offset_y / 2 {
-                return Err(HevcError::InvalidBitstream(
+                return Err(at!(HevcError::InvalidBitstream(
                     "cu_qp_delta out of range [-(26+QpBdOffsetY/2), 25+QpBdOffsetY/2]",
-                ));
+                )));
             }
             self.cu_qp_delta = cu_qp_delta as i32;
             se_trace("cu_qp_delta", self.cu_qp_delta as i64, &self.cabac);
@@ -2394,9 +2403,11 @@ impl<'a> SliceContext<'a> {
             // u32::MAX - 1 for a crafted bitstream, so `suffix + 5` can
             // overflow u32 — reject rather than wrap/panic.
             let suffix = self.cabac.decode_egk_bypass(0)?;
-            suffix.checked_add(5).ok_or(HevcError::InvalidBitstream(
-                "cu_qp_delta_abs EGk suffix overflow",
-            ))
+            suffix.checked_add(5).ok_or_else(|| {
+                at!(HevcError::InvalidBitstream(
+                    "cu_qp_delta_abs EGk suffix overflow",
+                ))
+            })
         } else {
             Ok(prefix)
         }
@@ -2615,7 +2626,9 @@ impl<'a> SliceContext<'a> {
                 if log2_cb_size == self.sps.log2_min_cb_size() {
                     Ok(PartMode::PartNxN)
                 } else {
-                    Err(HevcError::InvalidBitstream("NxN not allowed at this size"))
+                    Err(at!(HevcError::InvalidBitstream(
+                        "NxN not allowed at this size"
+                    )))
                 }
             }
         } else {
@@ -2813,9 +2826,11 @@ impl<'a> SliceContext<'a> {
         // here, once, before the mode is stored.
         if chroma_array_type == 2 {
             let mapped = CHROMA_422_MODE_MAP[derived.as_u8() as usize];
-            return IntraPredMode::from_u8(mapped).ok_or(HevcError::DecodingError(
-                "Table 8-3 produced an invalid intra mode",
-            ));
+            return IntraPredMode::from_u8(mapped).ok_or_else(|| {
+                at!(HevcError::DecodingError(
+                    "Table 8-3 produced an invalid intra mode",
+                ))
+            });
         }
 
         Ok(derived)
@@ -3811,13 +3826,11 @@ impl<'a> SliceContext<'a> {
         log2_cb_size: u8,
         frame: &mut DecodedFrame,
     ) -> Result<()> {
-        let pcm = self
-            .sps
-            .pcm_params
-            .as_ref()
-            .ok_or(HevcError::InvalidBitstream(
+        let pcm = self.sps.pcm_params.as_ref().ok_or_else(|| {
+            at!(HevcError::InvalidBitstream(
                 "pcm_flag set but SPS has no PCM params",
-            ))?;
+            ))
+        })?;
         let pcm_bit_depth_luma = pcm.pcm_sample_bit_depth_luma_minus1 as u32 + 1;
         let pcm_bit_depth_chroma = pcm.pcm_sample_bit_depth_chroma_minus1 as u32 + 1;
 

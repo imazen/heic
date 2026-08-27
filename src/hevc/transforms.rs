@@ -10,9 +10,10 @@
 use alloc::vec::Vec;
 
 use super::DecodedFrame;
-use crate::error::HevcError;
 
-type Result<T> = core::result::Result<T, HevcError>;
+use super::Result;
+use crate::error::HevcError;
+use whereat::at;
 
 /// Spatial-transform methods (`mirror_*`, `rotate_*`) on a [`DecodedFrame`].
 ///
@@ -43,7 +44,8 @@ impl DecodedFrameTransformExt for DecodedFrame {
         let nh = ow;
 
         // Rotate luma: dst(dx, dy) = src(dy, oh-1-dx)
-        let mut y_plane = try_vec![0u16; (nw * nh) as usize]?;
+        let mut y_plane =
+            try_vec![0u16; (nw * nh) as usize].map_err(|_| at!(HevcError::AllocationFailed))?;
         for dy in 0..nh {
             for dx in 0..nw {
                 y_plane[(dy * nw + dx) as usize] = self.y_plane[((oh - 1 - dx) * ow + dy) as usize];
@@ -55,7 +57,8 @@ impl DecodedFrameTransformExt for DecodedFrame {
             .alpha_plane
             .as_ref()
             .map(|alpha| -> Result<Vec<u16>> {
-                let mut rotated = try_vec![0u16; (nw * nh) as usize]?;
+                let mut rotated = try_vec![0u16; (nw * nh) as usize]
+                    .map_err(|_| at!(HevcError::AllocationFailed))?;
                 for dy in 0..nh {
                     for dx in 0..nw {
                         rotated[(dy * nw + dx) as usize] =
@@ -72,8 +75,8 @@ impl DecodedFrameTransformExt for DecodedFrame {
             let ncw = och;
             let nch = ocw;
             let csz = (ncw * nch) as usize;
-            let mut cb = try_vec![0u16; csz]?;
-            let mut cr = try_vec![0u16; csz]?;
+            let mut cb = try_vec![0u16; csz].map_err(|_| at!(HevcError::AllocationFailed))?;
+            let mut cr = try_vec![0u16; csz].map_err(|_| at!(HevcError::AllocationFailed))?;
             for dy in 0..nch {
                 for dx in 0..ncw {
                     let si = (och - 1 - dx) as usize * ocw as usize + dy as usize;
@@ -120,7 +123,8 @@ impl DecodedFrameTransformExt for DecodedFrame {
         let h = self.height;
 
         // Rotate luma: dst(dx, dy) = src(w-1-dx, h-1-dy)
-        let mut y_plane = try_vec![0u16; (w * h) as usize]?;
+        let mut y_plane =
+            try_vec![0u16; (w * h) as usize].map_err(|_| at!(HevcError::AllocationFailed))?;
         for dy in 0..h {
             for dx in 0..w {
                 y_plane[(dy * w + dx) as usize] =
@@ -133,7 +137,8 @@ impl DecodedFrameTransformExt for DecodedFrame {
             .alpha_plane
             .as_ref()
             .map(|alpha| -> Result<Vec<u16>> {
-                let mut rotated = try_vec![0u16; (w * h) as usize]?;
+                let mut rotated = try_vec![0u16; (w * h) as usize]
+                    .map_err(|_| at!(HevcError::AllocationFailed))?;
                 for dy in 0..h {
                     for dx in 0..w {
                         rotated[(dy * w + dx) as usize] =
@@ -148,8 +153,8 @@ impl DecodedFrameTransformExt for DecodedFrame {
         let (cw, ch) = self.chroma_dims();
         let (cb_plane, cr_plane) = if cw > 0 && ch > 0 {
             let csz = (cw * ch) as usize;
-            let mut cb = try_vec![0u16; csz]?;
-            let mut cr = try_vec![0u16; csz]?;
+            let mut cb = try_vec![0u16; csz].map_err(|_| at!(HevcError::AllocationFailed))?;
+            let mut cr = try_vec![0u16; csz].map_err(|_| at!(HevcError::AllocationFailed))?;
             for dy in 0..ch {
                 for dx in 0..cw {
                     let si = (ch - 1 - dy) as usize * cw as usize + (cw - 1 - dx) as usize;
@@ -199,7 +204,8 @@ impl DecodedFrameTransformExt for DecodedFrame {
         let nh = ow;
 
         // Rotate luma: dst(dx, dy) = src(ow-1-dy, dx)
-        let mut y_plane = try_vec![0u16; (nw * nh) as usize]?;
+        let mut y_plane =
+            try_vec![0u16; (nw * nh) as usize].map_err(|_| at!(HevcError::AllocationFailed))?;
         for dy in 0..nh {
             for dx in 0..nw {
                 y_plane[(dy * nw + dx) as usize] = self.y_plane[(dx * ow + (ow - 1 - dy)) as usize];
@@ -211,7 +217,8 @@ impl DecodedFrameTransformExt for DecodedFrame {
             .alpha_plane
             .as_ref()
             .map(|alpha| -> Result<Vec<u16>> {
-                let mut rotated = try_vec![0u16; (nw * nh) as usize]?;
+                let mut rotated = try_vec![0u16; (nw * nh) as usize]
+                    .map_err(|_| at!(HevcError::AllocationFailed))?;
                 for dy in 0..nh {
                     for dx in 0..nw {
                         rotated[(dy * nw + dx) as usize] =
@@ -228,8 +235,8 @@ impl DecodedFrameTransformExt for DecodedFrame {
             let ncw = och;
             let nch = ocw;
             let csz = (ncw * nch) as usize;
-            let mut cb = try_vec![0u16; csz]?;
-            let mut cr = try_vec![0u16; csz]?;
+            let mut cb = try_vec![0u16; csz].map_err(|_| at!(HevcError::AllocationFailed))?;
+            let mut cr = try_vec![0u16; csz].map_err(|_| at!(HevcError::AllocationFailed))?;
             for dy in 0..nch {
                 for dx in 0..ncw {
                     let si = dx as usize * ocw as usize + (ocw - 1 - dy) as usize;
@@ -275,7 +282,8 @@ impl DecodedFrameTransformExt for DecodedFrame {
         let w = self.width;
         let h = self.height;
 
-        let mut y_plane = try_vec![0u16; (w * h) as usize]?;
+        let mut y_plane =
+            try_vec![0u16; (w * h) as usize].map_err(|_| at!(HevcError::AllocationFailed))?;
         for dy in 0..h {
             for dx in 0..w {
                 y_plane[(dy * w + dx) as usize] = self.y_plane[(dy * w + (w - 1 - dx)) as usize];
@@ -286,7 +294,8 @@ impl DecodedFrameTransformExt for DecodedFrame {
             .alpha_plane
             .as_ref()
             .map(|alpha| -> Result<Vec<u16>> {
-                let mut mirrored = try_vec![0u16; (w * h) as usize]?;
+                let mut mirrored = try_vec![0u16; (w * h) as usize]
+                    .map_err(|_| at!(HevcError::AllocationFailed))?;
                 for dy in 0..h {
                     for dx in 0..w {
                         mirrored[(dy * w + dx) as usize] = alpha[(dy * w + (w - 1 - dx)) as usize];
@@ -299,8 +308,8 @@ impl DecodedFrameTransformExt for DecodedFrame {
         let (cw, ch) = self.chroma_dims();
         let (cb_plane, cr_plane) = if cw > 0 && ch > 0 {
             let csz = (cw * ch) as usize;
-            let mut cb = try_vec![0u16; csz]?;
-            let mut cr = try_vec![0u16; csz]?;
+            let mut cb = try_vec![0u16; csz].map_err(|_| at!(HevcError::AllocationFailed))?;
+            let mut cr = try_vec![0u16; csz].map_err(|_| at!(HevcError::AllocationFailed))?;
             for dy in 0..ch {
                 for dx in 0..cw {
                     let si = dy as usize * cw as usize + (cw - 1 - dx) as usize;
@@ -346,7 +355,8 @@ impl DecodedFrameTransformExt for DecodedFrame {
         let w = self.width;
         let h = self.height;
 
-        let mut y_plane = try_vec![0u16; (w * h) as usize]?;
+        let mut y_plane =
+            try_vec![0u16; (w * h) as usize].map_err(|_| at!(HevcError::AllocationFailed))?;
         for dy in 0..h {
             for dx in 0..w {
                 y_plane[(dy * w + dx) as usize] = self.y_plane[((h - 1 - dy) * w + dx) as usize];
@@ -357,7 +367,8 @@ impl DecodedFrameTransformExt for DecodedFrame {
             .alpha_plane
             .as_ref()
             .map(|alpha| -> Result<Vec<u16>> {
-                let mut mirrored = try_vec![0u16; (w * h) as usize]?;
+                let mut mirrored = try_vec![0u16; (w * h) as usize]
+                    .map_err(|_| at!(HevcError::AllocationFailed))?;
                 for dy in 0..h {
                     for dx in 0..w {
                         mirrored[(dy * w + dx) as usize] = alpha[((h - 1 - dy) * w + dx) as usize];
@@ -370,8 +381,8 @@ impl DecodedFrameTransformExt for DecodedFrame {
         let (cw, ch) = self.chroma_dims();
         let (cb_plane, cr_plane) = if cw > 0 && ch > 0 {
             let csz = (cw * ch) as usize;
-            let mut cb = try_vec![0u16; csz]?;
-            let mut cr = try_vec![0u16; csz]?;
+            let mut cb = try_vec![0u16; csz].map_err(|_| at!(HevcError::AllocationFailed))?;
+            let mut cr = try_vec![0u16; csz].map_err(|_| at!(HevcError::AllocationFailed))?;
             for dy in 0..ch {
                 for dx in 0..cw {
                     let si = (ch - 1 - dy) as usize * cw as usize + dx as usize;

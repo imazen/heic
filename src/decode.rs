@@ -7,7 +7,7 @@ use core::cell::Cell;
 
 use enough::{Stop, Unstoppable};
 
-use whereat::at;
+use whereat::{ResultAtExt, at};
 
 use crate::error::check_stop;
 use crate::heif::{self, CleanAperture, ColorInfo, FourCC, ItemType, Transform};
@@ -128,7 +128,9 @@ fn decode_tiles_parallel(
             tile_data_list
                 .iter()
                 .map(|tile_data| {
-                    crate::hevc::decode_with_config(tile_config, tile_data).map_err(Into::into)
+                    crate::hevc::decode_with_config_at(tile_config, tile_data)
+                        .map_err(crate::error::hevc_at)
+                        .at()
                 })
                 .collect::<Result<_>>()
         }
@@ -142,7 +144,9 @@ fn decode_tiles_parallel(
                 tile_data_list
                     .par_iter()
                     .map(|tile_data| {
-                        crate::hevc::decode_with_config(tile_config, tile_data).map_err(Into::into)
+                        crate::hevc::decode_with_config_at(tile_config, tile_data)
+                            .map_err(crate::error::hevc_at)
+                            .at()
                     })
                     .collect::<Result<_>>()
             })
@@ -152,7 +156,9 @@ fn decode_tiles_parallel(
             tile_data_list
                 .par_iter()
                 .map(|tile_data| {
-                    crate::hevc::decode_with_config(tile_config, tile_data).map_err(Into::into)
+                    crate::hevc::decode_with_config_at(tile_config, tile_data)
+                        .map_err(crate::error::hevc_at)
+                        .at()
                 })
                 .collect::<Result<_>>()
         }
@@ -289,7 +295,9 @@ fn decode_item(
                 // dispatcher trait can't be used (every native backend
                 // requires VPS/SPS/PPS through HvccParams.nal_units). Stay
                 // on the Rust path.
-                crate::hevc::decode(&image_data)?
+                crate::hevc::decode_at(&image_data)
+                    .map_err(crate::error::hevc_at)
+                    .at()?
             } else {
                 return Err(at!(HeicError::UnsupportedCodec(
                     "unknown item type with no decoder config"
@@ -365,16 +373,22 @@ fn decode_item(
             }
             Transform::Mirror(mirror) if apply_orientation => {
                 frame = match mirror.axis {
-                    0 => frame.mirror_vertical()?,
-                    1 => frame.mirror_horizontal()?,
+                    0 => frame
+                        .mirror_vertical()
+                        .map_err(crate::error::hevc_at)
+                        .at()?,
+                    1 => frame
+                        .mirror_horizontal()
+                        .map_err(crate::error::hevc_at)
+                        .at()?,
                     _ => frame,
                 };
             }
             Transform::Rotation(rotation) if apply_orientation => {
                 frame = match rotation.angle {
-                    90 => frame.rotate_90_cw()?,
-                    180 => frame.rotate_180()?,
-                    270 => frame.rotate_270_cw()?,
+                    90 => frame.rotate_90_cw().map_err(crate::error::hevc_at).at()?,
+                    180 => frame.rotate_180().map_err(crate::error::hevc_at).at()?,
+                    270 => frame.rotate_270_cw().map_err(crate::error::hevc_at).at()?,
                     _ => frame,
                 };
             }
@@ -1753,7 +1767,9 @@ pub(crate) fn try_decode_grid_to_sink(
             tile_data_list[row_start..row_end]
                 .iter()
                 .map(|tile_data| {
-                    crate::hevc::decode_with_config(tile_config, tile_data).map_err(Into::into)
+                    crate::hevc::decode_with_config_at(tile_config, tile_data)
+                        .map_err(crate::error::hevc_at)
+                        .at()
                 })
                 .collect::<Result<_>>()?
         };
