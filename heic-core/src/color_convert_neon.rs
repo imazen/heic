@@ -306,7 +306,10 @@ pub(crate) fn convert_444_to_rgb_neon(
         );
         let g = vshlq_s32(
             vaddq_s32(
-                vaddq_s32(vaddq_s32(yv, vmulq_s32(cb_g_v, cb_adj)), vmulq_s32(cr_g_v, cr_adj)),
+                vaddq_s32(
+                    vaddq_s32(yv, vmulq_s32(cb_g_v, cb_adj)),
+                    vmulq_s32(cr_g_v, cr_adj),
+                ),
                 rnd_v,
             ),
             neg_shr,
@@ -377,8 +380,23 @@ pub(crate) fn convert_444_to_rgb_neon(
         // the exact same per-pixel reference the scalar tier uses.
         while x < x_end as usize {
             super::color_convert::scalar_pixel_444(
-                y_plane, cb_plane, cr_plane, y_row, c_row, x, shift, y_bias, y_scale, cr_r,
-                cb_g, cr_g, cb_b, rnd, shr, rgb, &mut out_idx,
+                y_plane,
+                cb_plane,
+                cr_plane,
+                y_row,
+                c_row,
+                x,
+                shift,
+                y_bias,
+                y_scale,
+                cr_r,
+                cb_g,
+                cr_g,
+                cb_b,
+                rnd,
+                shr,
+                rgb,
+                &mut out_idx,
             );
             x += 1;
         }
@@ -443,8 +461,20 @@ mod tests_444_neon {
                     let mut want = vec![0u8; n * 3];
 
                     convert_444_to_rgb_neon(
-                        token, &yp, &cbp, &crp, width, width, 0, height as u32, 0,
-                        width as u32, shift, full_range, mc, &mut got,
+                        token,
+                        &yp,
+                        &cbp,
+                        &crp,
+                        width,
+                        width,
+                        0,
+                        height as u32,
+                        0,
+                        width as u32,
+                        shift,
+                        full_range,
+                        mc,
+                        &mut got,
                     );
                     // The SCALAR tier explicitly — NOT `convert_444_to_rgb`,
                     // which now dispatches to NEON on aarch64 and would make
@@ -453,8 +483,19 @@ mod tests_444_neon {
                     // which is exactly what a vacuous gate looks like.
                     super::super::color_convert::convert_444_to_rgb_scalar(
                         ScalarToken,
-                        &yp, &cbp, &crp, width, width, 0, height as u32, 0, width as u32,
-                        shift, full_range, mc, &mut want,
+                        &yp,
+                        &cbp,
+                        &crp,
+                        width,
+                        width,
+                        0,
+                        height as u32,
+                        0,
+                        width as u32,
+                        shift,
+                        full_range,
+                        mc,
+                        &mut want,
                     );
 
                     assert_eq!(
@@ -466,6 +507,9 @@ mod tests_444_neon {
                 }
             }
         }
-        assert!(checked >= 400, "expected a wide sweep, only ran {checked} cases");
+        assert!(
+            checked >= 400,
+            "expected a wide sweep, only ran {checked} cases"
+        );
     }
 }

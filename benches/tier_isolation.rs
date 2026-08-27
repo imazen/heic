@@ -95,7 +95,10 @@ fn vectors(limit: usize) -> Vec<(String, Vec<u8>)> {
         };
         // Only keep files this build can actually decode, so the bench never
         // reports a number for a file that errored out.
-        if DecoderConfig::new().decode(&data, PixelLayout::Rgba8).is_err() {
+        if DecoderConfig::new()
+            .decode(&data, PixelLayout::Rgba8)
+            .is_err()
+        {
             continue;
         }
         let name = path
