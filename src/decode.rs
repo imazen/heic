@@ -726,6 +726,39 @@ fn decode_iovl(
     Ok(output)
 }
 
+/// AV1 arm of the alpha-plane codec dispatch in [`decode_alpha_plane`].
+///
+/// `None` when the item carries no av1C config (it isn't an AV1 item) or the
+/// decode fails — the same graceful give-up as every other `.ok()?` site in
+/// the alpha path.
+#[cfg(feature = "av1")]
+fn decode_av1_alpha(
+    item: &heif::Item,
+    image_data: &[u8],
+    limits: &Limits,
+    stop: &dyn Stop,
+) -> Option<crate::hevc::DecodedFrame> {
+    if item.av1_config.is_some() {
+        decode_av1_item(item, image_data, limits, stop).ok()
+    } else {
+        None
+    }
+}
+
+/// AV1 arm of the alpha-plane codec dispatch in [`decode_alpha_plane`].
+///
+/// Without the `av1` feature a non-HEVC alpha item simply yields no alpha
+/// plane, so this is always `None`.
+#[cfg(not(feature = "av1"))]
+fn decode_av1_alpha(
+    _item: &heif::Item,
+    _image_data: &[u8],
+    _limits: &Limits,
+    _stop: &dyn Stop,
+) -> Option<crate::hevc::DecodedFrame> {
+    None
+}
+
 /// Decode an AV1-coded image item using rav1d-safe.
 ///
 /// Prepends the av1C configOBUs to the image data, feeds the combined OBU
@@ -1965,23 +1998,14 @@ fn decode_alpha_plane(
 
     check_stop(stop).ok()?;
 
-    // Multi-codec dispatch: try HEVC first, then AV1
-    let alpha_frame = if let Some(ref config) = alpha_item.hevc_config {
-        let (w, h) = alpha_item.dimensions.unwrap_or((0, 0));
-        crate::backend::decode_one_tile(backends, config, &alpha_data, w, h, stop).ok()?
-    } else {
-        #[cfg(feature = "av1")]
-        {
-            if alpha_item.av1_config.is_some() {
-                decode_av1_item(&alpha_item, &alpha_data, limits, stop).ok()?
-            } else {
-                return None;
-            }
+    // Multi-codec dispatch: try HEVC first, then AV1 (`decode_av1_alpha` is
+    // `None` for a non-AV1 item, and always `None` without the `av1` feature).
+    let alpha_frame = match alpha_item.hevc_config.as_ref() {
+        Some(config) => {
+            let (w, h) = alpha_item.dimensions.unwrap_or((0, 0));
+            crate::backend::decode_one_tile(backends, config, &alpha_data, w, h, stop).ok()?
         }
-        #[cfg(not(feature = "av1"))]
-        {
-            return None;
-        }
+        None => decode_av1_alpha(&alpha_item, &alpha_data, limits, stop)?,
     };
 
     let primary_w = primary_frame.cropped_width();
