@@ -705,8 +705,8 @@ mod tests {
         let cr = vec![128u16; 1];
         let mut rgb = vec![0u8; 4 * 3];
         convert_420_to_rgb(&y, &cb, &cr, 2, 1, 0, 2, 0, 2, 0, false, 1, &mut rgb);
-        for px in rgb.chunks_exact(3) {
-            assert_eq!(px, [255, 255, 255]);
+        for px in rgb.as_chunks::<3>().0 {
+            assert_eq!(*px, [255, 255, 255]);
         }
     }
 
@@ -764,7 +764,7 @@ mod tests {
         let mut rgb = vec![0u8; 4 * 3];
         convert_420_to_rgb(&y, &cb, &cr, 2, 1, 0, 2, 0, 2, 0, false, 1, &mut rgb);
         // Allow ±2 channel-steps for fixed-point rounding noise.
-        for px in rgb.chunks_exact(3) {
+        for px in rgb.as_chunks::<3>().0 {
             assert!(
                 px[0] >= 250 && px[1] <= 5 && px[2] <= 5,
                 "expected red ~(255,0,0), got {:?}",
@@ -782,8 +782,8 @@ mod tests {
         let cr = vec![128u16; 1];
         let mut rgb = vec![0u8; 4 * 3];
         convert_420_to_rgb(&y, &cb, &cr, 2, 1, 0, 2, 0, 2, 0, true, 5, &mut rgb);
-        for px in rgb.chunks_exact(3) {
-            assert_eq!(px, [128, 128, 128]);
+        for px in rgb.as_chunks::<3>().0 {
+            assert_eq!(*px, [128, 128, 128]);
         }
     }
 }

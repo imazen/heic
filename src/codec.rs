@@ -1206,13 +1206,10 @@ impl HeicStreamDecoder {
                 );
                 let rgba_data = frame.to_rgba16().map_err(crate::error::at_core)?;
                 let pixels: alloc::vec::Vec<Rgba<u16>> = rgba_data
-                    .chunks_exact(4)
-                    .map(|c| Rgba {
-                        r: c[0],
-                        g: c[1],
-                        b: c[2],
-                        a: c[3],
-                    })
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|&[r, g, b, a]| Rgba { r, g, b, a })
                     .collect();
                 let w = frame.cropped_width();
                 let h = frame.cropped_height();

@@ -112,7 +112,13 @@ fn grid_rgb_vs_bgr_channel_order_differs() {
     assert_eq!(rgb.data.len(), bgr.data.len());
     // BGR is RGB with R and B swapped per pixel; G stays put.
     let mut swap_seen = false;
-    for (r, b) in rgb.data.chunks_exact(3).zip(bgr.data.chunks_exact(3)) {
+    for (r, b) in rgb
+        .data
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .zip(bgr.data.as_chunks::<3>().0)
+    {
         assert_eq!(r[1], b[1], "green channel must be identical RGB vs BGR");
         assert_eq!(r[0], b[2], "RGB.R must equal BGR.B");
         assert_eq!(r[2], b[0], "RGB.B must equal BGR.R");
@@ -126,7 +132,13 @@ fn grid_rgb_vs_bgr_channel_order_differs() {
     );
 
     // Same relationship in the 4-channel layouts, and alpha aligns.
-    for (rp, bp) in rgba.data.chunks_exact(4).zip(bgra.data.chunks_exact(4)) {
+    for (rp, bp) in rgba
+        .data
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(bgra.data.as_chunks::<4>().0)
+    {
         assert_eq!(rp[0], bp[2], "RGBA.R == BGRA.B");
         assert_eq!(rp[1], bp[1], "RGBA.G == BGRA.G");
         assert_eq!(rp[2], bp[0], "RGBA.B == BGRA.R");
@@ -134,7 +146,13 @@ fn grid_rgb_vs_bgr_channel_order_differs() {
     }
 
     // The RGB(A) data is the RGBA buffer with the alpha byte removed.
-    for (three, four) in rgb.data.chunks_exact(3).zip(rgba.data.chunks_exact(4)) {
+    for (three, four) in rgb
+        .data
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .zip(rgba.data.as_chunks::<4>().0)
+    {
         assert_eq!(three, &four[..3], "Rgb8 is Rgba8 minus alpha");
     }
 }
@@ -491,7 +509,7 @@ fn opaque_image_fills_alpha_with_255() {
 
     let out = cfg.decode(&data, PixelLayout::Rgba8).expect("rgba decode");
     assert!(
-        out.data.chunks_exact(4).all(|px| px[3] == 255),
+        out.data.as_chunks::<4>().0.iter().all(|px| px[3] == 255),
         "opaque image must have alpha == 255 everywhere",
     );
 }
@@ -546,7 +564,7 @@ fn uncompressed_heif_decodes_with_expected_dims() {
         // filled to 255 for every pixel (a real check on the alpha write,
         // verified true for every fixture in `UNCI_FILES`).
         assert!(
-            out.data.chunks_exact(4).all(|px| px[3] == 255),
+            out.data.as_chunks::<4>().0.iter().all(|px| px[3] == 255),
             "{rel}: opaque source must have alpha == 255 everywhere",
         );
         // The monochrome `_M` fixtures are a single flat gray by design; the
@@ -899,7 +917,7 @@ fn synthetic_single_image_decodes_all_qualities() {
         assert_eq!((out.width, out.height), (256, 256), "{rel}: dims");
         assert_eq!(out.data.len(), 256 * 256 * 4, "{rel}: buffer length");
         assert!(
-            out.data.chunks_exact(4).all(|px| px[3] == 255),
+            out.data.as_chunks::<4>().0.iter().all(|px| px[3] == 255),
             "{rel}: opaque alpha",
         );
         assert!(

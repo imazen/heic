@@ -56,8 +56,10 @@ fn load_i422(bytes: &[u8], w: u32, h: u32, depth: u8) -> Planes {
             "i422 16-bit size for {w}x{h}"
         );
         bytes
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&c| u16::from_le_bytes(c))
             .collect()
     };
     Planes {

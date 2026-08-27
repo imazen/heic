@@ -460,9 +460,7 @@ mod tests {
     #[test]
     fn test_mc_luma_vpel_constant() {
         let mut frame = DecodedFrame::with_params(16, 16, 8, 1).unwrap();
-        for p in &mut frame.y_plane {
-            *p = 100;
-        }
+        frame.y_plane.fill(100);
         let mut pred = vec![0i16; 4 * 4];
         let blk = McBlock {
             xp: 4,
@@ -538,9 +536,7 @@ mod tests {
     #[test]
     fn test_mc_luma_bipred_blend() {
         let mut frame = DecodedFrame::with_params(16, 16, 8, 1).unwrap();
-        for p in &mut frame.y_plane {
-            *p = 100;
-        }
+        frame.y_plane.fill(100);
         let mut pred0 = vec![0i16; 1];
         let mut pred1 = vec![0i16; 1];
         let blk = McBlock {

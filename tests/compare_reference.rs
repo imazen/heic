@@ -35,12 +35,7 @@ fn load_reference_decoder() -> heic_wasm_rs::HeicDecoder {
 
 /// Convert RGB bytes to ImgVec<[u8; 3]>
 fn rgb_to_imgvec(rgb: &[u8], width: u32, height: u32) -> ImgVec<[u8; 3]> {
-    let mut pixels = Vec::with_capacity((width * height) as usize);
-
-    for chunk in rgb.chunks_exact(3) {
-        pixels.push([chunk[0], chunk[1], chunk[2]]);
-    }
-
+    let pixels = rgb.as_chunks::<3>().0.to_vec();
     ImgVec::new(pixels, width as usize, height as usize)
 }
 

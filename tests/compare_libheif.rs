@@ -266,7 +266,7 @@ fn parse_ref_info(outdir: &Path) -> RefInfo {
 }
 
 fn rgb_to_imgvec(rgb: &[u8], width: u32, height: u32) -> ImgVec<[u8; 3]> {
-    let pixels: Vec<[u8; 3]> = rgb.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+    let pixels: Vec<[u8; 3]> = rgb.as_chunks::<3>().0.to_vec();
     ImgVec::new(pixels, width as usize, height as usize)
 }
 

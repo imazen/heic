@@ -297,7 +297,7 @@ fn adapter_decode_rgba_negotiation_adds_opaque_alpha() {
     // Every 4th byte (alpha) should be fully opaque for a no-alpha source.
     let row = pixels.row(10);
     assert!(
-        row.chunks_exact(4).all(|px| px[3] == 255),
+        row.as_chunks::<4>().0.iter().all(|px| px[3] == 255),
         "synthesized alpha must be opaque (255)"
     );
 }
@@ -944,8 +944,10 @@ fn gain_map_render_reconstruct_applies_gain_map() {
     let max = out
         .pixels()
         .contiguous_bytes()
-        .chunks_exact(4)
-        .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&c| f32::from_ne_bytes(c))
         .fold(0.0f32, f32::max);
     assert!(
         max > 1.0,
@@ -981,8 +983,10 @@ fn gain_map_render_reconstruct_honors_target_headroom() {
     let max = out
         .pixels()
         .contiguous_bytes()
-        .chunks_exact(4)
-        .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&c| f32::from_ne_bytes(c))
         .fold(0.0f32, f32::max);
     assert!(
         max <= 1.01,

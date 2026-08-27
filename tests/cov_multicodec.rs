@@ -65,7 +65,7 @@ fn unci_comp_rgb_decodes_exact() {
     assert_eq!(out.data.len(), 30 * 20 * 4, "RGBA8 buffer != w*h*4");
     // Alpha must be fully opaque (unci RGB carries no alpha plane → 255 fill).
     assert!(
-        out.data.chunks_exact(4).all(|p| p[3] == 255),
+        out.data.as_chunks::<4>().0.iter().all(|p| p[3] == 255),
         "RGB unci alpha channel must be opaque"
     );
     // Real content: the R channel carries more than one value.
@@ -154,7 +154,7 @@ fn unci_supported_8bit_variants_decode() {
         assert_eq!((out.width, out.height), (30, 20), "{rel}: wrong dims");
         assert_eq!(out.data.len(), 30 * 20 * 4, "{rel}: buffer length");
         assert!(
-            out.data.chunks_exact(4).all(|p| p[3] == 255)
+            out.data.as_chunks::<4>().0.iter().all(|p| p[3] == 255)
                 || rel.contains("R8G8B8A8")
                 || rel.contains("ABGR"),
             "{rel}: non-alpha source must be opaque"
@@ -174,7 +174,7 @@ fn unci_mono_decodes() {
     assert_eq!((out.width, out.height), (30, 20));
     assert_eq!(out.data.len(), 30 * 20 * 4);
     assert!(
-        out.data.chunks_exact(4).all(|p| p[3] == 255),
+        out.data.as_chunks::<4>().0.iter().all(|p| p[3] == 255),
         "mono alpha must be opaque"
     );
 }
@@ -479,17 +479,35 @@ fn unci_all_layouts_consistent() {
     assert_eq!(rgba.data.len(), 30 * 20 * 4);
     assert_eq!(rgb.data.len(), 30 * 20 * 3);
     // R↔B swap between RGBA and BGRA, alpha unchanged.
-    for (a, b) in rgba.data.chunks_exact(4).zip(bgra.data.chunks_exact(4)) {
+    for (a, b) in rgba
+        .data
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(bgra.data.as_chunks::<4>().0)
+    {
         assert_eq!(a[0], b[2], "R/B not swapped between RGBA and BGRA");
         assert_eq!(a[1], b[1], "G must be stable across RGBA/BGRA");
         assert_eq!(a[2], b[0], "B/R not swapped");
         assert_eq!(a[3], b[3], "alpha must be stable");
     }
     // RGB (3bpp) must match RGBA (4bpp) on the colour channels.
-    for (three, four) in rgb.data.chunks_exact(3).zip(rgba.data.chunks_exact(4)) {
+    for (three, four) in rgb
+        .data
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .zip(rgba.data.as_chunks::<4>().0)
+    {
         assert_eq!(three, &four[..3], "RGB must match RGBA colour channels");
     }
-    for (three, four) in bgr.data.chunks_exact(3).zip(bgra.data.chunks_exact(4)) {
+    for (three, four) in bgr
+        .data
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .zip(bgra.data.as_chunks::<4>().0)
+    {
         assert_eq!(three, &four[..3], "BGR must match BGRA colour channels");
     }
 }
