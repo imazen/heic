@@ -170,6 +170,9 @@ name = "bin_trace_emit"
 name = "dump_hevc"
 [[example]]
 name = "compare_yuv"
+[[example]]
+name = "annexb_vs_yuv"
+required-features = ["backend-rust", "std"]
 # batch_test and compare_support need API/dep fixes, excluded for now
 [[example]]
 name = "debug_edges"

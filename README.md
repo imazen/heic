@@ -65,7 +65,7 @@ Decodes most HEIC files from iPhones and cameras. 118/162 HEIF test files decode
 - Tile-parallel grid decoding via rayon (`parallel` feature)
 
 ### Known limitations
-- HEVC 4:2:2 chroma (`chroma_format_idc = 2`, e.g. Fujifilm `.HIF`) is not decoded by the pure-Rust backend — it returns `HevcError::Unsupported` up front instead of a mis-decoded frame (#48). 4:0:0, 4:2:0 and 4:4:4 decode.
+- HEVC range-extension (RExt) *coding tools* beyond the chroma formats and bit depths — e.g. the PPS `chroma_qp_offset_list` (`cu_chroma_qp_offset_flag`) — are not implemented; a stream using one fails with a CABAC desync error rather than decoding. 4:0:0 / 4:2:0 / 4:2:2 / 4:4:4 at 8 and 10 bit all decode (4:2:2 since #48).
 - HEVC I-slices only (sufficient for HEIC still images; no inter prediction for video)
 - JPEG and H.264/AVC codecs in HEIF: detected but not decoded
 - Brotli-compressed uncompressed HEIF: not yet supported (deflate/zlib only)

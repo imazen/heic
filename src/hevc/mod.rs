@@ -131,7 +131,6 @@ fn decode_nal_units(
 
     let sps = sps.ok_or(HevcError::MissingParameterSet("SPS"))?;
     let pps = pps.ok_or(HevcError::MissingParameterSet("PPS"))?;
-    check_chroma_format_supported(&sps)?;
 
     // Sanity-check dimensions before allocating (prevent OOM from malicious SPS)
     let w = sps.pic_width_in_luma_samples;
@@ -805,28 +804,8 @@ fn clone_frame_for_ref(f: &DecodedFrame) -> DecodedFrame {
     out
 }
 
-/// Reject chroma formats the CTU/transform path cannot decode correctly.
-///
-/// `chroma_format_idc == 2` (4:2:2) is the one HEVC chroma format this
-/// decoder has no dedicated path for: the transform tree falls through the
-/// 4:2:0 branch, which reads one `cbf_cb`/`cbf_cr` per depth where 7.3.8.8
-/// codes two for `ChromaArrayType == 2`, places chroma TBs at `y0 / 2`
-/// instead of `y0`, and skips the Table 8-3 intra chroma mode remap. Each
-/// missing bin desyncs CABAC, so the result is either an error a few CTBs in
-/// or — for 10-bit streams — an `Ok` frame with out-of-range chroma (#48).
-/// Fail up front instead of returning garbage pixels.
-fn check_chroma_format_supported(sps: &params::Sps) -> Result<()> {
-    if sps.chroma_format_idc == 2 {
-        return Err(HevcError::Unsupported(
-            "4:2:2 chroma (chroma_format_idc = 2) is not supported by the pure-Rust HEVC decoder",
-        ));
-    }
-    Ok(())
-}
-
 /// Create a frame from SPS parameters
 fn create_frame(sps: &params::Sps) -> Result<DecodedFrame> {
-    check_chroma_format_supported(sps)?;
     let mut frame = DecodedFrame::with_params(
         sps.pic_width_in_luma_samples,
         sps.pic_height_in_luma_samples,

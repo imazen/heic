@@ -450,6 +450,32 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 
 ## Known Bugs
 
+### FIXED 2026-08-27: 4:2:2 chroma decodes sample-exact (#48); RExt `chroma_qp_offset_list` still open
+
+4:2:2 (`chroma_format_idc = 2`) fell through the 4:2:0 branch of `src/hevc/ctu.rs`
+(one cbf_cb/cbf_cr per node instead of two, chroma TB at `y0/2` instead of `y0`, no
+Table 8-3 remap) → CABAC desync; 10-bit streams returned Ok with chroma ~17x out of
+range. Fixed: `ChromaCbf` two-bit cbf pairs, stacked chroma TBs (cb0, cb1, cr0, cr1),
+`CHROMA_422_MODE_MAP` (copied from libde265, which passes the official md5s), and
+`QpC = Min(qPi, 51)` for ChromaArrayType != 1 at the `cu_qp_delta` re-derivation and
+in `deblock.rs` (the slice-init site was already right). Layers passed: x265
+`--lossless` 8/10-bit raw 4:2:2 == source (bit-exact); heif-enc `chroma=422` HEICs ==
+dec265 (sample-exact, q=35 exercises the high-QP chroma table + deblock);
+`ADJUST_IPRED_ANGLE_A_RExt_Mitsubishi_2` (1080p 10-bit, all 35 chroma modes × all
+sizes) and `GENERAL_10b_422_RExt_Sony_1` seq 0 == dec265. Tests:
+`tests/chroma422.rs` (every fix mutation-verified); fixtures from
+`scripts/gen_422_fixtures.py`; tool: `examples/annexb_vs_yuv.rs`.
+
+STILL OPEN (not 4:2:2-specific): `Main_422_10_A/B_RExt_Sony_2` and GENERAL seq 1 fail
+with "cu_qp_delta out of range" because they set the PPS range-extension
+`chroma_qp_offset_list_enabled_flag` (`cu_chroma_qp_offset_flag/idx` bins in
+`transform_unit`, `cu_chroma_qp_offset_enabled_flag` in the slice header,
+`Log2MinCuChromaQpOffsetSize` reset in `coding_quadtree`, `CuQpOffsetCb/Cr` in 8.6.1).
+`params.rs` does not parse `pps_range_extension` at all. RExt vectors live under
+`https://www.itu.int/wftp3/av-arch/jctvc-site/bitstream_exchange/draft_conformance/RExt/`
+(not covered by `conformance/fetch.sh`); dec265 built from
+`https://github.com/strukturag/libde265` reproduces their md5s and is the reference.
+
 ### FIXED 2026-06-01: Lossless 4:4:4 transquant-bypass now decodes (bit-exact vs libheif)
 
 `testdata/features/lossless.heic` (10-bit 4:4:4 `cu_transquant_bypass` intra-NxN,
