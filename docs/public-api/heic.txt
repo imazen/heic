@@ -6,7 +6,7 @@
 # impls omitted; re-export duplicates annotated `[also: path]`.
 # DO NOT EDIT BY HAND — commit regenerated changes with the code.
 #
-# files: heic.txt 197 lines (supported surface) | heic.features.txt 30 added (features: av1,backend-d3d11va,backend-mediacodec,backend-mediafoundation,backend-rust,backend-vaapi,backend-videotoolbox,fallible-alloc,parallel,std,unci,zencodec) | heic.internal.txt 452 lines (709 hidden + 0 excluded-feature)
+# files: heic.txt 203 lines (supported surface) | heic.features.txt 36 added (features: av1,backend-d3d11va,backend-mediacodec,backend-mediafoundation,backend-rust,backend-vaapi,backend-videotoolbox,fallible-alloc,parallel,std,unci,zencodec) | heic.internal.txt 453 lines (710 hidden + 0 excluded-feature)
 
 ## summary
 #
@@ -15,17 +15,17 @@
 #   pub consts/statics                          4
 #   free functions                              1
 #   inherent methods                           38
-#   struct fields                              56
-#   enum variants                              47
+#   struct fields                              58
+#   enum variants                              51
 #   re-exports                                  8
 #   trait roster entries (type × trait)        66
 #   auto-trait-complete types                  15
 #   auto-trait exceptions                       3
 #
 # per-module pub lines:
-#   (root)                          175
+#   (root)                          181
 
-## items (175 lines)
+## items (181 lines)
 
 pub mod heic
 pub use At
@@ -62,7 +62,9 @@ pub fn DepthRepresentationType::from_code(u8) -> core::option::Option<Self>
 pub GainMapOrigin::AppleAuxItem
 pub GainMapOrigin::HeifTmap
 #[non_exhaustive] pub enum HeicError
-pub HeicError::AllBackendsFailed(alloc::string::String)
+pub HeicError::AllBackendsFailed
+pub HeicError::AllBackendsFailed::detail: alloc::string::String
+pub HeicError::AllBackendsFailed::rejected_bitstream: bool
 pub HeicError::BufferTooSmall
 pub HeicError::BufferTooSmall::actual: usize
 pub HeicError::BufferTooSmall::required: usize
@@ -70,17 +72,21 @@ pub HeicError::Cancelled(enough::reason::StopReason)
 pub HeicError::HevcDecode(HevcError)
 pub HeicError::InvalidContainer(&'static str)
 pub HeicError::InvalidData(&'static str)
+pub HeicError::InvalidRequest(&'static str)
 pub HeicError::LimitExceeded(&'static str)
 pub HeicError::NoBackendSelected
 pub HeicError::NoPrimaryImage
+pub HeicError::NotHeif(&'static str)
 pub HeicError::OutOfMemory
 pub HeicError::Sink(alloc::boxed::Box<(dyn core::error::Error + core::marker::Send + core::marker::Sync)>)
+pub HeicError::Truncated(&'static str)
 pub HeicError::Unsupported(&'static str)
 pub HeicError::UnsupportedCodec(&'static str)
 #[non_exhaustive] pub enum HevcError
 pub HevcError::AllocationFailed
 pub HevcError::CabacError(&'static str)
 pub HevcError::Cancelled(enough::reason::StopReason)
+pub HevcError::CoreUnclassified(alloc::string::String)
 pub HevcError::DecodingError(&'static str)
 pub HevcError::DimensionOverflow
 pub HevcError::InvalidBitstream(&'static str)
@@ -101,7 +107,7 @@ pub PixelLayout::Rgba8
 pub const fn PixelLayout::bytes_per_pixel(self) -> usize
 pub const fn PixelLayout::has_alpha(self) -> bool
 #[non_exhaustive] pub enum ProbeError
-pub ProbeError::Corrupt(whereat::at::At<HeicError>)
+pub ProbeError::Corrupt(HeicError)
 pub ProbeError::InvalidFormat
 pub ProbeError::NeedMoreData
 #[non_exhaustive] pub struct AuxiliaryImageDescriptor
@@ -185,7 +191,7 @@ pub ImageInfo::video_full_range: bool
 pub ImageInfo::width: u32
 pub ImageInfo::xmp: core::option::Option<alloc::vec::Vec<u8>>
 pub const ImageInfo::PROBE_BYTES: usize
-pub fn ImageInfo::from_bytes(&[u8]) -> core::result::Result<Self, ProbeError>
+pub fn ImageInfo::from_bytes(&[u8]) -> core::result::Result<Self, whereat::at::At<ProbeError>>
 pub fn ImageInfo::output_buffer_size(self, PixelLayout) -> core::option::Option<usize>
 #[non_exhaustive] pub struct Limits
 pub Limits::max_height: core::option::Option<u64>

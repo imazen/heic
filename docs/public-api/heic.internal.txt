@@ -1,5 +1,5 @@
 # heic public API — doc(hidden) items and excluded-feature surface
-# excluded features: (none)
+# excluded features: _dev
 # (regenerated on every `cargo test` by zenutils-apidoc; ZEN_API_DOC=check verifies, =off skips).
 # Encodings: crate-name prefix stripped; auto traits collapse to a
 # count + exceptions; trait impls collapse to one roster line per
@@ -10,7 +10,7 @@
 ## summary
 #
 #   pub modules                                 3
-#   pub types (struct/enum/trait/alias)        29
+#   pub types (struct/enum/trait/alias)        30
 #   pub consts/statics                         48
 #   free functions                             10
 #   inherent methods                           94
@@ -23,9 +23,9 @@
 # per-module pub lines:
 #   (root)                           11
 #   heif                            239
-#   hevc                            171
+#   hevc                            172
 
-## items (420 lines)
+## items (421 lines)
 
 #[non_exhaustive] pub enum heif::ItemType
 pub const heif::FourCC::AUXC: Self
@@ -141,16 +141,16 @@ pub fn heif::UncompressedConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> co
 pub fn heif::parse<'a>(&'a [u8], &dyn enough::Stop) -> Result<heif::HeifContainer<'a>>
 pub fn hevc::ImageInfo::clone(&self) -> hevc::ImageInfo
 pub fn hevc::ImageInfo::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub fn hevc::VideoDecoder::decode_annex_b(&mut self, &[u8]) -> core::result::Result<alloc::vec::Vec<heic_core::frame::DecodedFrame>, HevcError>
-pub fn hevc::VideoDecoder::decode_nal(&mut self, &hevc::bitstream::NalUnit<'_>) -> core::result::Result<core::option::Option<heic_core::frame::DecodedFrame>, HevcError>
+pub fn hevc::VideoDecoder::decode_annex_b(&mut self, &[u8]) -> hevc::Result<alloc::vec::Vec<heic_core::frame::DecodedFrame>>
+pub fn hevc::VideoDecoder::decode_nal(&mut self, &hevc::bitstream::NalUnit<'_>) -> hevc::Result<core::option::Option<heic_core::frame::DecodedFrame>>
 pub fn hevc::VideoDecoder::flush(&mut self)
 pub fn hevc::VideoDecoder::new(usize) -> Self
-pub fn hevc::decode(&[u8]) -> core::result::Result<heic_core::frame::DecodedFrame, HevcError>
-pub fn hevc::decode_with_config(&heif::HevcDecoderConfig, &[u8]) -> core::result::Result<heic_core::frame::DecodedFrame, HevcError>
-pub fn hevc::decode_with_config_stop(&heif::HevcDecoderConfig, &[u8], &dyn enough::Stop) -> core::result::Result<heic_core::frame::DecodedFrame, HevcError>
+pub fn hevc::decode(&[u8]) -> hevc::Result<heic_core::frame::DecodedFrame>
+pub fn hevc::decode_with_config(&heif::HevcDecoderConfig, &[u8]) -> hevc::Result<heic_core::frame::DecodedFrame>
+pub fn hevc::decode_with_config_stop(&heif::HevcDecoderConfig, &[u8], &dyn enough::Stop) -> hevc::Result<heic_core::frame::DecodedFrame>
 pub fn hevc::enable_deblock_trace()
-pub fn hevc::get_info(&[u8]) -> core::result::Result<hevc::ImageInfo, HevcError>
-pub fn hevc::get_info_from_config(&heif::HevcDecoderConfig) -> core::result::Result<hevc::ImageInfo, HevcError>
+pub fn hevc::get_info(&[u8]) -> hevc::Result<hevc::ImageInfo>
+pub fn hevc::get_info_from_config(&heif::HevcDecoderConfig) -> hevc::Result<hevc::ImageInfo>
 pub fn hevc::params::PcmParams::clone(&self) -> hevc::params::PcmParams
 pub fn hevc::params::PcmParams::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn hevc::params::Pps::clone(&self) -> hevc::params::Pps
@@ -180,9 +180,9 @@ pub fn hevc::params::TileInfo::clone(&self) -> hevc::params::TileInfo
 pub fn hevc::params::TileInfo::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn hevc::params::Vps::clone(&self) -> hevc::params::Vps
 pub fn hevc::params::Vps::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub fn hevc::params::parse_pps(&[u8]) -> core::result::Result<hevc::params::Pps, HevcError>
-pub fn hevc::params::parse_sps(&[u8]) -> core::result::Result<hevc::params::Sps, HevcError>
-pub fn hevc::params::parse_vps(&[u8]) -> core::result::Result<hevc::params::Vps, HevcError>
+pub fn hevc::params::parse_pps(&[u8]) -> hevc::Result<hevc::params::Pps>
+pub fn hevc::params::parse_sps(&[u8]) -> hevc::Result<hevc::params::Sps>
+pub fn hevc::params::parse_vps(&[u8]) -> hevc::Result<hevc::params::Vps>
 pub VideoDecoder::disable_loop_filters: bool
 pub VideoDecoder::mv_trace_next_inter: bool
 pub VideoDecoder::mv_trace_poc: i32
@@ -446,6 +446,7 @@ pub struct hevc::params::ScalingListData
 pub struct hevc::params::Sps
 pub struct hevc::params::TileInfo
 pub struct hevc::params::Vps
+pub type hevc::Result<T> = core::result::Result<T, whereat::at::At<HevcError>>
 pub use hevc::DecodedFrame
 
 ## trait impls (31 types)

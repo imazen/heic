@@ -13,17 +13,19 @@
 #   free functions                              2
 #   inherent methods                            5
 #   struct fields                               8
-#   enum variants                               1
-#   trait roster entries (type × trait)         9
+#   enum variants                               3
+#   trait roster entries (type × trait)        13
 #   auto-trait-complete types                   2
 #   auto-trait exceptions                       3
 #
 # per-module pub lines:
-#   (root)                           21
+#   (root)                           23
 
-## items (21 lines)
+## items (23 lines)
 
-pub Backend::Vaapi
+pub Backend::VideoToolbox
+pub HeicError::ResourceLimit(zencodec::limits::LimitExceeded)
+pub HeicError::UnsupportedOperation(zencodec::capabilities::UnsupportedOperation)
 pub struct HeicAuxiliaryInfo
 pub HeicAuxiliaryInfo::auxiliary_types: alloc::vec::Vec<AuxiliaryImageType>
 pub HeicAuxiliaryInfo::has_depth: bool
@@ -45,13 +47,17 @@ pub struct HeicZenDecoder<'a>
 pub fn cabac_bin_trace(u32)
 pub fn enable_deblock_trace()
 
-## trait impls (5 types)
+## trait impls (9 types)
 
 HeicAuxiliaryInfo: Clone, Debug
 HeicDecodeJob: zencodec::traits::decoding::DecodeJob<'a>
 HeicDecoderConfig: Clone, Debug, Default, zencodec::traits::decoding::DecoderConfig
+HeicError: zencodec::error::CategorizedError
 HeicStreamDecoder: zencodec::traits::decoder::StreamingDecode
 HeicZenDecoder<'_>: zencodec::traits::decoder::Decode
+HevcError: zencodec::error::CategorizedError
+ProbeError: zencodec::error::CategorizedError
+whereat::at::At<zencodec::error::CodecError>: From<HeicError>
 
 ## auto traits
 
