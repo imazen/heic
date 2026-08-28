@@ -106,6 +106,20 @@ fn main() {
     let mut limits = Limits::default();
     limits.max_pixels = Some(64_000_000);
     limits.max_memory_bytes = Some(512 * 1024 * 1024);
+    // HEIC_MAX_PIXELS / HEIC_MAX_MEMORY (bytes) override the demo caps — e.g.
+    // a 200 MP Samsung capture needs ~1.4 GB by `DecoderConfig::estimate_memory`.
+    if let Some(v) = std::env::var("HEIC_MAX_PIXELS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        limits.max_pixels = Some(v);
+    }
+    if let Some(v) = std::env::var("HEIC_MAX_MEMORY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        limits.max_memory_bytes = Some(v);
+    }
 
     // Decode
     let layout = PixelLayout::Rgb8;
