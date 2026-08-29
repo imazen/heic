@@ -867,6 +867,88 @@ fn cancellation_aborts_single_image_decode() {
 /// Letting exactly one check through therefore makes the CTU loop the only
 /// thing that can produce a `Cancelled`, and deleting that poll turns this
 /// test's `expect_err` into a successful decode.
+/// Under the `parallel` feature, grid tiles must decode with the caller's
+/// `Stop`, not `Unstoppable`.
+///
+/// `decode_tiles_parallel` used to call `hevc::decode_with_config` for every
+/// tile in all three of its arms — the token was never even a parameter. So on
+/// a `parallel` build a grid decode had *no* cancellation checkpoint anywhere
+/// inside HEVC: not per tile, not per CTU. That is the same defect #22 reports
+/// for a single frame, and it hit the shape most HEIC files actually are. The
+/// non-`parallel` tile loops were unaffected — they `check_stop` between tiles
+/// and hand `stop` to `backend::decode_one_tile`.
+///
+/// `features/grid.heic` (96x96, four 48x48 tiles) is the fixture that reaches
+/// `decode_tiles_parallel`; `with_max_threads(1)` selects its sequential arm so
+/// the poll order is deterministic. Measured on this fixture: the container
+/// phase performs 39 polls, and each tile then adds exactly two — the
+/// slice-entry `should_stop()` in `hevc::decode_with_config_stop` plus the
+/// CTU-0 poll (one 48x48 tile is a single CTB block, so the
+/// `STOP_CHECK_CTU_INTERVAL` counter fires once). Before the fix the whole
+/// decode consumed 39; now it consumes 47.
+///
+/// Budgeting exactly the container phase therefore separates the two states:
+/// with tiles polling it must cancel, and without them it would finish. Both
+/// bounds are asserted so the per-tile poll count is pinned from above and
+/// below. If the container phase itself is ever restructured these numbers
+/// move — re-measure by sweeping the budget until the decode succeeds.
+#[cfg(feature = "parallel")]
+#[test]
+fn parallel_grid_tiles_decode_under_the_callers_stop() {
+    /// Polls performed before the first tile's HEVC decode begins (measured).
+    const CONTAINER_PHASE_POLLS: u32 = 39;
+    /// `features/grid.heic` is a 2x2 grid.
+    const TILES: u32 = 4;
+    /// Slice-entry `should_stop()` + the CTU-0 poll, per tile.
+    const PER_TILE_POLLS: u32 = 2;
+
+    let Some(data) = read_fixture("features/grid.heic") else {
+        return;
+    };
+
+    let decode_with = |stop: &dyn Stop| {
+        DecoderConfig::new()
+            .decode_request(&data)
+            .with_output_layout(PixelLayout::Rgba8)
+            .with_max_threads(1)
+            .with_stop(stop)
+            .decode()
+    };
+
+    // Exactly the container-phase budget: the tiles' own polls must exhaust it.
+    // With tile decoding running under `Unstoppable` this budget was enough to
+    // finish the whole image, so this `expect_err` is the load-bearing line.
+    let stop = StopAfter::new(CONTAINER_PHASE_POLLS);
+    match decode_with(&stop) {
+        // Don't `expect_err` here: `DecodeOutput` is `Debug` over the whole
+        // pixel buffer, so the failure message would be tens of KB of bytes.
+        Ok(out) => panic!(
+            "a budget of only the {CONTAINER_PHASE_POLLS} container-phase polls decoded the whole \
+             {}x{} grid, so the tiles were decoded without the caller's Stop",
+            out.width, out.height,
+        ),
+        Err(err) => assert!(
+            matches!(err.error(), HeicError::Cancelled(_)),
+            "expected Cancelled once the tile budget ran out, got {:?}",
+            err.error(),
+        ),
+    }
+
+    // ...and exactly two more polls per tile is enough, which pins the per-tile
+    // cost from the other side: if a tile polled only once, or three times,
+    // this arm would flip.
+    let total = CONTAINER_PHASE_POLLS + TILES * PER_TILE_POLLS;
+    let stop = StopAfter::new(total);
+    let out = decode_with(&stop).expect("the full budget must decode the grid");
+    assert_eq!((out.width, out.height), (96, 96), "grid dimensions");
+    assert_eq!(
+        stop.seen(),
+        total,
+        "expected exactly {CONTAINER_PHASE_POLLS} container polls + {TILES}x{PER_TILE_POLLS} tile \
+         polls; re-measure by sweeping the budget if the container phase changed",
+    );
+}
+
 #[test]
 fn hevc_ctu_loop_polls_stop_mid_frame() {
     let Some(data) = read_fixture("synthetic/synth_8bit_q50.heic") else {

@@ -116,22 +116,33 @@ use rayon::prelude::*;
 /// When `parallel` is enabled and `max_threads != Some(1)`, uses rayon
 /// parallelism scoped to the requested thread count. Otherwise falls back
 /// to sequential iteration.
+///
+/// `stop` is forwarded into each tile's HEVC decode, so cancellation is
+/// observed at tile entry *and* inside the per-CTU loop
+/// ([`crate::hevc::decode_with_config_stop`]) exactly as it is on the
+/// non-`parallel` tile loops, which check between tiles and hand `stop` to
+/// `backend::decode_one_tile`. `enough::Stop` is `Send + Sync`, so the shared
+/// `&dyn Stop` crosses into the rayon closures unchanged. Rayon's
+/// `collect::<Result<_>>()` stops feeding new tiles once one returns `Err`, so
+/// a cancellation aborts the remaining tiles rather than only the current one.
 #[cfg(feature = "parallel")]
 fn decode_tiles_parallel(
     tile_data_list: &[Cow<'_, [u8]>],
     tile_config: &crate::heif::HevcDecoderConfig,
     max_threads: Option<usize>,
+    stop: &dyn Stop,
 ) -> Result<Vec<crate::hevc::DecodedFrame>> {
+    let decode_tile = |tile_data: &Cow<'_, [u8]>| {
+        crate::hevc::decode_with_config_stop(tile_config, tile_data, stop)
+            .map_err(crate::error::hevc_at)
+            .at()
+    };
     match max_threads {
         Some(1) => {
             // Forced single-threaded
             tile_data_list
                 .iter()
-                .map(|tile_data| {
-                    crate::hevc::decode_with_config(tile_config, tile_data)
-                        .map_err(crate::error::hevc_at)
-                        .at()
-                })
+                .map(decode_tile)
                 .collect::<Result<_>>()
         }
         Some(n) if n > 1 => {
@@ -143,11 +154,7 @@ fn decode_tiles_parallel(
             pool.install(|| {
                 tile_data_list
                     .par_iter()
-                    .map(|tile_data| {
-                        crate::hevc::decode_with_config(tile_config, tile_data)
-                            .map_err(crate::error::hevc_at)
-                            .at()
-                    })
+                    .map(decode_tile)
                     .collect::<Result<_>>()
             })
         }
@@ -155,11 +162,7 @@ fn decode_tiles_parallel(
             // Unlimited: use global rayon pool
             tile_data_list
                 .par_iter()
-                .map(|tile_data| {
-                    crate::hevc::decode_with_config(tile_config, tile_data)
-                        .map_err(crate::error::hevc_at)
-                        .at()
-                })
+                .map(decode_tile)
                 .collect::<Result<_>>()
         }
     }
@@ -1256,7 +1259,7 @@ fn decode_grid(
     {
         if let Some(tile_config) = hevc_tile_config {
             // Parallel HEVC: decode tiles concurrently (respecting max_threads), then blit.
-            let all_tiles = decode_tiles_parallel(&tile_data_list, tile_config, max_threads)?;
+            let all_tiles = decode_tiles_parallel(&tile_data_list, tile_config, max_threads, stop)?;
 
             for (tile_idx, tile_frame) in all_tiles.iter().enumerate() {
                 if tile_idx == 0 {
@@ -1576,6 +1579,7 @@ pub(crate) fn try_decode_grid_streaming(
                 &tile_data_list[row_start..row_end],
                 tile_config,
                 max_threads,
+                stop,
             )?;
 
             for (col, mut tile_frame) in row_tiles.into_iter().enumerate() {
@@ -1792,6 +1796,7 @@ pub(crate) fn try_decode_grid_to_sink(
             &tile_data_list[row_start..row_end],
             tile_config,
             max_threads,
+            stop,
         )?;
 
         #[cfg(not(feature = "parallel"))]
