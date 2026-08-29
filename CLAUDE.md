@@ -447,6 +447,20 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
   untested here) — re-measure before adding a NEON 444 path. Bit-exact vs scalar
   on both arches (`convert_444_matches_scalar_reference`).
 - Dependent slice segments: not supported (2 vectors fail)
+- **Cancellation reaches the primary-image decode only; the auxiliary decodes
+  are uncancellable** (found 2026-08-29 while closing #22). `decode_gain_map`,
+  `decode_thumbnail` and the depth-map path hardcode `&Unstoppable` at their
+  `decode_item` calls (`src/decode.rs` ~2189, ~2359, ~2496) — these are full
+  HEVC decodes of a real image, so a hostile or merely large auxiliary runs to
+  completion no matter what the caller does. Unlike the grid-tile hole fixed in
+  the same pass, this one **cannot** be fixed without a public API change:
+  `decode_gain_map` / `decode_thumbnail` hang off `DecoderConfig`, not
+  `DecodeRequest`, so there is no `with_stop` on the call at all. Same shape as
+  the metadata/probe paths (`extract_exif` / `extract_xmp` / `extract_icc` /
+  `ImageInfo::from_bytes`), which the 2026-05-31 audit already flagged as
+  uncancellable via the `stsc` resolver. Fixing it means either moving these
+  onto `DecodeRequest` or adding `*_with_stop` siblings — an additive but real
+  API decision, so it needs the user's sign-off before anyone builds it.
 
 ## Known Bugs
 
