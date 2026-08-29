@@ -116,8 +116,8 @@ magetypes = { version = "0.9.16", default-features = false }
 safe_unaligned_simd = "0.2.5"
 memchr = { version = "2.8.0", default-features = false }
 rayon = { version = "1.11.0", optional = true }
-zencodec = { version = "0.1.26", optional = true }
-zenpixels = { version = "0.2.11", default-features = false, features = ["rgb", "imgref"], optional = true }
+zencodec = { version = ">=0.1.26, <0.3.0", optional = true }
+zenpixels = { version = ">=0.2.11, <0.4.0", default-features = false, features = ["rgb", "imgref"], optional = true }
 rgb = { version = "0.8.53", default-features = false, features = ["as-bytes"], optional = true }
 bytemuck = { version = "1.21", default-features = false, features = ["extern_crate_alloc"], optional = true }
 imgref = { version = "1.12.0", optional = true }
@@ -144,12 +144,18 @@ zensim-regress = { version = "0.4.0", git = "https://github.com/imazen/zensim", 
 # Uncomment + RUSTFLAGS='--cfg heic_reference' cargo test to enable
 # heic-wasm-rs = { path = "../../heic/heic-wasm-rs" }
 png = "0.18.1"
-# zencodec conformance harness (crates.io; its published manifest declares
-# `zencodec ^0.1.26`, so it unifies with the `zencodec` dep above on a single
-# registry crate instance — no [patch.crates-io] needed). Provides
+# zencodec conformance harness (crates.io). Provides
 # `check_decode_truncation_series` (a truncated input must categorize as an
 # incomplete-input ErrorCategory, never panic, never silently decode).
-zencodec-testkit = "0.1.0"
+#
+# Unification caveat: the *published* `zencodec-testkit 0.1.0` manifest declares
+# `zencodec ^0.1.26` = `>=0.1.26, <0.2.0`. That intersects the `zencodec` dep
+# above on a single registry instance today, so no [patch.crates-io] is needed.
+# But once `zencodec 0.2.0` publishes, testkit 0.1.0's caret will NOT admit it
+# and this dev-dep graph would carry TWO zencodec copies. `zencodec-testkit`
+# must republish with the widened `>=0.1.26, <0.3.0` requirement (already in its
+# manifest, zencodec repo `4391021`) BEFORE zencodec 0.2.0 ships.
+zencodec-testkit = ">=0.1.0, <0.3.0"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(heic_reference)', 'cfg(fuzzing)'] }
