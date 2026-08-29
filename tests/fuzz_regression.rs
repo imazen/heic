@@ -63,10 +63,15 @@ fn strict_limits() -> Limits {
 
 /// Replay every regression seed through every fuzz entry point.
 ///
-/// The five targets below cover all seven `fuzz/fuzz_targets/*` binaries:
-/// `fuzz_decode_av1` and `fuzz_decode_unci` have bodies byte-identical to
-/// `fuzz_decode_limits` (they differ only in which cargo features the fuzz
-/// build enables), so `decode_limits` stands for all three.
+/// The five targets below cover all seven `fuzz/fuzz_targets/*` binaries.
+/// `fuzz_decode_av1`, `fuzz_decode_unci` and `fuzz_decode_limits` drive the
+/// same entry point with the same four caps — their sources differ only by a
+/// trailing comment and an intermediate `let result =` binding that is
+/// immediately discarded, and `fuzz/Cargo.toml` builds every binary from one
+/// `heic` with `backend-rust,av1,unci`, so they are not distinguished by
+/// features either. They exist as separate binaries so libFuzzer keeps a
+/// separate corpus per input class; one `decode_limits` replay covers all
+/// three.
 #[test]
 fn fuzz_regression() {
     let report = RegressionSuite::new(regression_dir())
@@ -76,8 +81,9 @@ fn fuzz_regression() {
         .target("decode_default", |data| {
             let _ = DecoderConfig::new().decode(data, PixelLayout::Rgba8);
         })
-        // Mirrors fuzz_targets/fuzz_decode_limits.rs — and, byte for byte,
-        // fuzz_decode_av1.rs and fuzz_decode_unci.rs.
+        // Mirrors fuzz_targets/fuzz_decode_limits.rs — and, to the same four
+        // caps and the same call chain, fuzz_decode_av1.rs and
+        // fuzz_decode_unci.rs.
         .target("decode_limits", |data| {
             let limits = strict_limits();
             let _ = DecoderConfig::new()
