@@ -23,5 +23,10 @@ safe_unaligned_simd = "0.2.5"
 
 [lints.rust]
 unsafe_code = "forbid"
-missing_docs = "warn"
+# `deny`, not `warn`: CI's clippy jobs check the root `heic` package, and
+# `-D warnings` there does not reach a dependency's own compilation, so a
+# `warn` here was never actually enforced for anyone. `[lints]` applies to this
+# package however it is built -- including as a dependency of the backend
+# crates -- so `deny` is the only level that gates the public surface. (#22)
+missing_docs = "deny"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }

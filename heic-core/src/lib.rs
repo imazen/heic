@@ -28,7 +28,10 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
-#![warn(missing_docs)]
+// Must match `[lints.rust] missing_docs` in Cargo.toml: a source-level lint
+// attribute overrides the command-line level Cargo passes, so leaving this at
+// `warn` would silently downgrade the manifest's `deny`.
+#![deny(missing_docs)]
 
 extern crate alloc;
 
