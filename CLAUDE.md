@@ -464,6 +464,32 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 
 ## Known Bugs
 
+### OPEN 2026-08-29: `conformance::merge_a_deblock_debug` panics (not skips) without ffmpeg
+
+`tests/conformance.rs` reaches for `ffprobe` in `get_dimensions()` /
+`count_frame_types()`. On a box with no ffmpeg installed, `Command::output()`
+fails, `.ok()?` yields `None`, and line 648's
+
+```rust
+let (width, height) = get_dimensions(&bitstream).unwrap();
+```
+
+panics. Its two siblings in the same function guard the same class of missing
+input (`ensure_vector` → `SKIP`, `ensure_reference_yuv` → `SKIP: no ref`), so
+the test reads as skip-capable and then hard-fails on the one dependency nobody
+guarded. Observed on aarch64-macOS, 48/49 `conformance` tests passing.
+
+**Not a decoder defect** and not visible in CI — the coverage job explicitly
+excludes the `conformance.rs` target ("it downloads ITU vectors at runtime"), so
+no CI leg runs it. The vector itself is fine (`conformance/vectors/MERGE_A_TI_3/
+MERGE_A_TI_3/MERGE_A_TI_3.bit`, 16,374 B).
+
+The fix is **not** to add another silent skip — per the workspace rule against
+graceful skips, the ffmpeg requirement should be a caller-visible switch (env
+var or feature threaded through justfile → test invocation), the way
+`HEIC_SKIP_WIN_HOST_TESTS` already gates the WSL→Windows bridge. Until then,
+install ffmpeg to run this target locally.
+
 ### FIXED 2026-08-27: 4:2:2 chroma decodes sample-exact (#48); RExt `chroma_qp_offset_list` still open
 
 4:2:2 (`chroma_format_idc = 2`) fell through the 4:2:0 branch of `src/hevc/ctu.rs`
