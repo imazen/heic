@@ -288,12 +288,16 @@ impl PixelLayout {
 ///
 /// # Server safety
 ///
-/// `Limits::default()` is **all-`None` (uncapped)** — passing
-/// `Some(Limits::default())` to a decode therefore *removes* protection rather
-/// than adding it. (Passing `None`/omitting limits is different: the decoder
-/// then applies generous built-in default caps.) For untrusted input, start
-/// from [`Limits::server_defaults`] (16 384² / 256 MP / 1 GiB) and tighten from
-/// there, rather than `default()`:
+/// `Limits::default()` is **capped, not uncapped**: it returns exactly
+/// [`Limits::server_defaults`] (16 384² / 256 MP / 1 GiB), which is also the
+/// fallback the decoder applies internally when a caller omits limits
+/// altogether. So neither `Limits::default()` nor passing no limits at all
+/// leaves a decode unbounded, and `Some(Limits::default())` never *weakens*
+/// the protection of passing `None`. The only way to lift a cap is to set that
+/// field to `None` explicitly.
+///
+/// For untrusted input, prefer naming the intent at the call site so the caps
+/// are visible in review, then tighten to the deployment's memory budget:
 ///
 /// ```
 /// use heic::Limits;
@@ -1700,6 +1704,25 @@ mod limits_default_tests {
 
         // A dimension within the caps is accepted.
         assert!(d.check_dimensions(1280, 854).is_ok());
+    }
+
+    /// The [`Limits`] doc promises `Limits::default()` is *also* the fallback
+    /// the decoder applies internally when a caller omits limits altogether —
+    /// i.e. `Some(Limits::default())` can never be weaker than `None`. Those
+    /// are two separately-written constants (`Limits::server_defaults` here,
+    /// `crate::decode::DEFAULT_LIMITS` there); pin them together so the
+    /// documented guarantee cannot drift when either one is retuned.
+    #[test]
+    fn default_matches_the_omitted_limits_decode_fallback() {
+        let d = Limits::default();
+        let fallback = &crate::decode::DEFAULT_LIMITS;
+        assert_eq!(d.max_width, fallback.max_width, "max_width");
+        assert_eq!(d.max_height, fallback.max_height, "max_height");
+        assert_eq!(d.max_pixels, fallback.max_pixels, "max_pixels");
+        assert_eq!(
+            d.max_memory_bytes, fallback.max_memory_bytes,
+            "max_memory_bytes"
+        );
     }
 
     /// Contrast: an explicitly all-`None` `Limits` imposes no cap, so the same
