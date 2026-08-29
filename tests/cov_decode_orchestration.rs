@@ -764,6 +764,40 @@ impl Stop for AlwaysStop {
     }
 }
 
+/// A `Stop` that lets the first `pass` checks through and cancels from the
+/// `pass + 1`-th onward, counting every call.
+///
+/// `AlwaysStop` cannot tell you *which* checkpoint aborted a decode — it fires
+/// at the first one reached. Skipping a known number of leading checks is what
+/// makes a specific downstream checkpoint the only possible cause.
+struct StopAfter {
+    pass: u32,
+    seen: std::sync::atomic::AtomicU32,
+}
+
+impl StopAfter {
+    fn new(pass: u32) -> Self {
+        Self {
+            pass,
+            seen: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    fn seen(&self) -> u32 {
+        self.seen.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Stop for StopAfter {
+    fn check(&self) -> Result<(), StopReason> {
+        if self.seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < self.pass {
+            Ok(())
+        } else {
+            Err(StopReason::Cancelled)
+        }
+    }
+}
+
 #[test]
 fn cancellation_token_aborts_decode() {
     let Some(data) = read_fixture(GRID) else {
@@ -813,6 +847,62 @@ fn cancellation_aborts_single_image_decode() {
         matches!(err.error(), HeicError::Cancelled(_)),
         "expected Cancelled for single-image decode, got {:?}",
         err.error(),
+    );
+}
+
+/// The per-CTU poll — not just the slice-entry check — is what actually
+/// cancels a single frame mid-decode.
+///
+/// The test above cannot show that: `AlwaysStop` fires at the very first
+/// checkpoint reached, which is the container-level `check_stop` long before
+/// any HEVC work starts, so it would still pass if `SliceContext::decode_slice`
+/// polled nothing at all. That is exactly the "passes without exercising the
+/// thing it claims to test" shape this project treats as its highest-severity
+/// bug, so pin the in-loop poll directly.
+///
+/// Dropping to the raw HEVC entry point removes the container checkpoints:
+/// `hevc::decode_with_config_stop` has exactly two kinds of stop checkpoint —
+/// the slice-entry `should_stop()` at its top, and the per-CTU poll inside
+/// `SliceContext::decode_slice` (`ctu_count % STOP_CHECK_CTU_INTERVAL == 0`).
+/// Letting exactly one check through therefore makes the CTU loop the only
+/// thing that can produce a `Cancelled`, and deleting that poll turns this
+/// test's `expect_err` into a successful decode.
+#[test]
+fn hevc_ctu_loop_polls_stop_mid_frame() {
+    let Some(data) = read_fixture("synthetic/synth_8bit_q50.heic") else {
+        return;
+    };
+
+    let container = heic::heif::parse(&data, &heic::Unstoppable).expect("parse synthetic HEIF");
+    let item = container
+        .primary_item()
+        .expect("synthetic file has a primary item");
+    let config = item
+        .hevc_config
+        .as_ref()
+        .expect("synthetic single image carries an hvcC config");
+    let image_data = container
+        .get_item_data(item.id)
+        .expect("primary item payload");
+
+    // Control: without cancellation this exact call decodes, so a later
+    // `Err` is attributable to the stop token and not to the bitstream.
+    heic::hevc::decode_with_config_stop(config, &image_data, &heic::Unstoppable)
+        .expect("control decode of the synthetic image must succeed");
+
+    // Let the slice-entry check through; cancel from the next one onward.
+    let stop = StopAfter::new(1);
+    let err = heic::hevc::decode_with_config_stop(config, &image_data, &stop)
+        .expect_err("a token that cancels after the entry check must abort inside the CTU loop");
+    assert!(
+        matches!(err.error(), heic::HevcError::Cancelled(_)),
+        "expected Cancelled from the CTU loop, got {:?}",
+        err.error(),
+    );
+    assert!(
+        stop.seen() > 1,
+        "only the slice-entry checkpoint ran ({} check(s)); the CTU loop never polled",
+        stop.seen(),
     );
 }
 
