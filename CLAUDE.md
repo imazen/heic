@@ -464,6 +464,19 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 
 ## Known Bugs
 
+### FIXED 2026-09-06: SIMD residual addition wrapped before clamping
+
+`transform_simd::{add_residual_block_v3, add_residual_block_wasm128}` and
+`transform_simd_neon::add_residual_block_neon` added signed 16-bit lanes with
+wrapping arithmetic. Prediction 2 plus residual 32766 produced 0 instead of
+255 in the 8-bit NEON path; unsigned predictions above 32767 were also
+misinterpreted. Biasing the unsigned prediction into the signed domain,
+saturating the addition, then unbiasing and applying an unsigned maximum
+clamp preserves widened scalar arithmetic through 16-bit predictions.
+The `_dev` residual-range regression checks every prediction value at five
+bit depths, seven residual extremes, five block sizes and padded strides.
+
+
 ### OPEN 2026-08-29: `conformance::merge_a_deblock_debug` panics (not skips) without ffmpeg
 
 `tests/conformance.rs` reaches for `ffprobe` in `get_dimensions()` /

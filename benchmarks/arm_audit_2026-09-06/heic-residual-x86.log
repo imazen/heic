@@ -1,0 +1,120 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling libm v0.2.16
+   Compiling autocfg v1.5.1
+   Compiling num-traits v0.2.19
+   Compiling safe_unaligned_simd v0.2.5
+   Compiling rustversion v1.0.23
+   Compiling imgref v1.12.3
+   Compiling crossbeam-utils v0.8.22
+   Compiling whereat v0.1.5
+   Compiling syn v3.0.4
+   Compiling syn v2.0.119
+   Compiling bytemuck_derive v1.12.0
+   Compiling archmage-macros v0.9.28
+   Compiling thiserror v2.0.20
+   Compiling thiserror-impl v2.0.20
+   Compiling bytemuck v1.25.2
+   Compiling archmage v0.9.28
+   Compiling enough v0.4.4
+   Compiling crossbeam-epoch v0.9.20
+   Compiling serde_core v1.0.229
+   Compiling rgb v0.8.53
+   Compiling cfg-if v1.0.4
+   Compiling zenpixels v0.2.16
+   Compiling magetypes v0.9.28
+   Compiling crossbeam-deque v0.8.7
+   Compiling libc v0.2.189
+   Compiling zerocopy v0.8.56
+   Compiling paste v1.0.15
+   Compiling either v1.18.0
+   Compiling num-integer v0.1.47
+   Compiling linear-srgb v0.6.12
+   Compiling zerocopy-derive v0.8.56
+   Compiling rayon-core v1.13.0
+   Compiling find-msvc-tools v0.1.11
+   Compiling shlex v2.0.1
+   Compiling zmij v1.0.23
+   Compiling simd-adler32 v0.3.10
+   Compiling memchr v2.8.3
+   Compiling serde v1.0.229
+   Compiling cc v1.4.4
+   Compiling num-bigint v0.4.8
+   Compiling safe_arch v1.2.0
+   Compiling almost-enough v0.4.4
+   Compiling serde_derive v1.0.229
+   Compiling serde_json v1.0.151
+   Compiling adler2 v2.0.1
+   Compiling crc32fast v1.5.1
+   Compiling wide v1.7.0
+   Compiling zencodec v0.1.26
+   Compiling half v2.7.1
+   Compiling garb v0.2.8
+   Compiling num-rational v0.4.2
+   Compiling alloca v0.4.0
+   Compiling num-derive v0.4.2
+   Compiling itoa v1.0.18
+   Compiling zenresize v0.3.1
+   Compiling lz4_flex v0.13.1
+   Compiling regex-syntax v0.8.11
+   Compiling plotters-backend v0.3.7
+   Compiling bytes v1.12.1
+   Compiling once_cell v1.21.4
+   Compiling byte-slice-cast v1.2.3
+   Compiling lz4_flex v0.11.6
+   Compiling clap_lex v1.1.0
+   Compiling yuvxyb-math v0.1.1
+   Compiling ciborium-io v0.2.2
+   Compiling anstyle v1.0.14
+   Compiling clap_builder v4.6.6
+   Compiling ciborium-ll v0.2.2
+   Compiling zenpredict v0.2.1 (https://github.com/imazen/zenanalyze?rev=9a9be8200f26f643b45338711426cacae820f3a1#9a9be820)
+   Compiling regex-automata v0.4.18
+   Compiling fast-ssim2 v0.8.2
+   Compiling av-data v0.4.4
+   Compiling zenpixels-convert v0.2.16
+   Compiling plotters-svg v0.3.7
+   Compiling rayon v1.12.0
+   Compiling miniz_oxide v0.9.1
+   Compiling zenblend v0.1.3
+   Compiling itertools v0.13.0
+   Compiling v_frame v0.5.2
+   Compiling zenflate v0.3.6
+   Compiling cast v0.3.0
+   Compiling log v0.4.34
+   Compiling same-file v1.0.6
+   Compiling yuvxyb v0.5.0
+   Compiling walkdir v2.5.0
+   Compiling zensim v0.3.0 (https://github.com/imazen/zensim?rev=493c91cdd7af#493c91cd)
+   Compiling criterion-plot v0.8.2
+   Compiling zenpng v0.1.4
+   Compiling flate2 v1.1.10
+   Compiling tinytemplate v1.2.1
+   Compiling plotters v0.3.7
+   Compiling clap v4.6.6
+   Compiling regex v1.13.1
+   Compiling ciborium v0.2.2
+   Compiling miniz_oxide v0.8.9
+   Compiling fs2 v0.4.3
+   Compiling page_size v0.6.0
+   Compiling fdeflate v0.3.7
+   Compiling seahash v4.1.0
+   Compiling oorandom v11.1.5
+   Compiling bitflags v2.13.1
+   Compiling base64 v0.22.1
+   Compiling anes v0.1.6
+   Compiling png v0.18.1
+   Compiling zensim-regress v0.4.0 (https://github.com/imazen/zensim?rev=493c91cdd7af#493c91cd)
+   Compiling criterion v0.8.2
+   Compiling zencodec-testkit v0.1.0
+   Compiling heic-core v0.2.0 (/Users/lilith/work/zen/heic/heic-core)
+   Compiling heic v0.2.0 (/Users/lilith/work/zen/heic)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.12s
+     Running unittests src/lib.rs (target/x86_64-apple-darwin/debug/deps/heic-2ce624388ad52fa0)
+
+running 1 test
+test hevc::transform_simd::residual_range_tests::residual_add_matches_widened_scalar_at_every_prediction_value ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 82 filtered out; finished in 0.90s
+

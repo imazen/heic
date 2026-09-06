@@ -1,0 +1,9 @@
+   Compiling heic v0.2.0 (/Users/lilith/work/zen/heic)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.45s
+     Running unittests src/lib.rs (target/debug/deps/heic-e100dd87b3623c61)
+
+running 1 test
+test hevc::transform_simd::residual_range_tests::residual_add_matches_widened_scalar_at_every_prediction_value ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 81 filtered out; finished in 3.52s
+
