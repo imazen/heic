@@ -42,6 +42,11 @@ jobs:
       - name: Test (backend-rust + std)
         run: cargo test --lib --features "backend-rust,std"
 
+      - name: Residual arithmetic across runtime SIMD tiers
+        run: >-
+          cargo test --lib --features "backend-rust,std,_dev"
+          residual_add_matches_widened_scalar_at_every_prediction_value -- --nocapture
+
       - name: Test (backend-rust + parallel)
         run: cargo test --lib --features "backend-rust,parallel"
 
