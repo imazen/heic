@@ -1,0 +1,90 @@
+   Compiling heic v0.2.0 (/Users/lilith/work/zen/heic)
+    Finished `bench` profile [optimized] target(s) in 3.44s
+     Running benches/tier_isolation.rs (target/release/deps/tier_isolation-614ba8951e9c7e1f)
+/Users/lilith/work/codec-artifacts/heic-arm-audit/example.heic: 1280x854 exact tier pixels
+/Users/lilith/work/codec-artifacts/heic-arm-audit/C002.heic: 1280x720 exact tier pixels
+/Users/lilith/work/codec-artifacts/heic-arm-audit/image4.heic: 700x476 exact tier pixels
+[zenbench] calibration: int=0.27ns/iter mem_bw=117.2GiB/s mem_lat=7.4ns
+[zenbench] timer resolution: 41ns, loop overhead: 0.22ns/iter, TSC: 1.000 ticks/ns (invariant)
+[zenbench] results → /Users/lilith/tmp/zenbench/zenbench-1788734362-174f3.txt
+
+═══════════════════════════════════════════════════════════════
+  zenbench  1788734362-174f3
+  git: e65ef601610f714c4f52ff4ffb96aa3697d7eef8
+═══════════════════════════════════════════════════════════════
+
+  decode/example.heic  110 rounds × 1 calls
+             mean ±mad ms  95% CI vs base   ops/s
+  ├─ native   45.2 ±2.1ms  [44.9–45.5]ms    24.2M
+  ╰─ scalar   45.9 ±2.3ms  [+0.1%–+2.7%]    23.8M [1]
+
+  native  ██████████████████████████████████████████████████████████ 24.2 Mops/s
+  scalar  █████████████████████████████████████████████████████████ 23.8 Mops/s
+  [1] CI crosses zero
+
+  decode/C002.heic  200 rounds × 1 calls
+             mean ±mad ms  95% CI vs base   ops/s
+  ├─ native   24.5 ±1.0ms  [24.3–24.8]ms    37.5M
+  ╰─ scalar   24.8 ±2.7ms  [-1.0%–+3.3%]    37.1M [1]
+
+  native  ██████████████████████████████████████████████████████████ 37.5 Mops/s
+  scalar  █████████████████████████████████████████████████████████ 37.1 Mops/s
+  [1] CI crosses zero
+
+  decode/image4.heic  200 rounds × 1 calls
+             mean ±mad ms  95% CI vs base   ops/s
+  ├─ native   10.4 ±1.1ms  [10.3–10.5]ms    32.0M
+  ╰─ scalar   10.5 ±1.2ms  [-1.2%–+3.4%]    31.7M [1]
+
+  native  ██████████████████████████████████████████████████████████ 32.0 Mops/s
+  scalar  █████████████████████████████████████████████████████████ 31.7 Mops/s
+  [1] CI crosses zero
+
+  color444/17x17  200 rounds × 6K calls
+             mean ±mad ns  95% CI vs base   ops/s
+  ├─ native   529 ±54ns  [515–543]ns      546M
+  ╰─ scalar   533 ±65ns  [-1.1%–+2.1%]    542M [1] [2]
+
+  native  ███████████████████████████████████████████████████████████ 546 Mops/s
+  scalar  ███████████████████████████████████████████████████████████ 542 Mops/s
+  [1] CI crosses zero
+  [2] CV=20%
+
+  color444/64x64  30 rounds × 414 calls
+             mean ±mad µs  95% CI vs base       ops/s
+  ├─ native   4.1 ±0.4µs  [3.8–4.4]µs          988M
+  ╰─ scalar   8.5 ±0.9µs  [+100.0%–+114.1%]    480M [1]
+
+  native  ███████████████████████████████████████████████████████████ 988 Mops/s
+  scalar  █████████████████████████████ 480 Mops/s
+  [1] CV=22%
+
+  color444/256x256  150 rounds × 42 calls
+              mean ±mad µs  95% CI vs base     ops/s
+  ├─ native   65.8 ±8.5µs  [63.4–68.0]µs      996M [1]
+  ╰─ scalar   78.5 ±9.6µs  [+17.5%–+20.3%]    835M [2]
+
+  native  ███████████████████████████████████████████████████████████ 996 Mops/s
+  scalar  █████████████████████████████████████████████████ 835 Mops/s
+  [1] CV=22%
+  [2] CV=23%
+
+  color444/1024x1024  200 rounds × 13 calls
+                mean ±mad µs  95% CI vs base      ops/s
+  ├─ native   636.3 ±81.5µs  [623.8–648.4]µs     1.65G
+  ╰─ scalar   695.8 ±89.1µs  [+7.0%–+11.7%]      1.51G
+
+  native  ██████████████████████████████████████████████████████████ 1.65 Gops/s
+  scalar  █████████████████████████████████████████████████████ 1.51 Gops/s
+
+  color444/4096x4096  200 rounds × 1 calls
+             mean ±mad ms  95% CI vs base   ops/s
+  ├─ native   8.7 ±1.0ms  [8.6–8.9]ms      1.92G
+  ╰─ scalar   9.4 ±1.0ms  [+4.9%–+9.1%]    1.79G
+
+  native  ██████████████████████████████████████████████████████████ 1.92 Gops/s
+  scalar  ██████████████████████████████████████████████████████ 1.79 Gops/s
+
+  total: 172.4s  (7 noisy rounds)
+═══════════════════════════════════════════════════════════════
+  filter: cargo bench -- --group=NAME  format: --format=llm|csv|md|json

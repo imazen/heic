@@ -165,3 +165,11 @@ heaptrack-decode *ARGS:
     cargo build --release --example heaptrack_decode --features backend-rust,std
     rm -f /tmp/heic-ht.zst
     heaptrack --output /tmp/heic-ht ./target/release/examples/heaptrack_decode {{ARGS}}
+
+# Exact residual arithmetic across native runtime tiers.
+arm-residual-check:
+    CARGO_BUILD_JOBS=4 RAYON_NUM_THREADS=4 OMP_NUM_THREADS=4 TMPDIR="$HOME/tmp" nice -n 19 cargo test -p heic --features backend-rust,std,_dev --lib residual_add_matches_widened_scalar_at_every_prediction_value -- --nocapture
+
+# Requires caller-provided HEIC_BENCH_INPUTS (colon-separated fixture paths).
+arm-tier-audit:
+    CARGO_BUILD_JOBS=4 RAYON_NUM_THREADS=4 OMP_NUM_THREADS=4 TMPDIR="$HOME/tmp" nice -n 19 cargo bench --bench tier_isolation --features backend-rust,std,_dev

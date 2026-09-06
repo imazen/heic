@@ -31,6 +31,42 @@ cargo test -p heic --target x86_64-apple-darwin --features backend-rust,std,_dev
 RUSTFLAGS='-C target-feature=+simd128' cargo test -p heic --target wasm32-wasip1 --features backend-rust,std,_dev --lib residual_add_matches_widened_scalar_at_every_prediction_value -- --nocapture
 ```
 
-Whole-decoder timing and parity are still to be measured. Source inspection
+Source inspection
 finds that NEON IDCT16 and IDCT32 currently call the scalar implementations;
 this report does not count those dispatch labels as vectorized kernels.
+
+## Paired tiers
+
+`benches/tier_isolation.rs` now uses zenbench 0.1.9, explicit fixture paths,
+fail-loud decode checks and untimed token mutation. All three whole-decode
+fixtures have identical RGBA8 bytes across scalar and NEON.
+
+| Fixture | Dimensions | Native ms | Scalar ms |
+|---|---|---:|---:|
+| libheif example.heic | 1280×854 | 45.2 | 45.9 |
+| Nokia C002.heic | 1280×720 | 24.5 | 24.8 |
+| dsoprea image4.heic | 700×476 | 10.4 | 10.5 |
+
+The harness flagged all three comparisons as inconclusive; no reliable
+whole-decode gain is claimed. The example row's printed interval is +0.1%
+to +2.7% despite that flag; the raw output is retained without silently
+reinterpreting the harness verdict.
+
+Strided limited-range BT.709 8-bit 4:4:4 conversion, native/scalar means:
+17² 529/533 ns (tie), 64² 4.1/8.5 us, 256² 65.8/78.5 us,
+1024² 636.3/695.8 us, 4096² 8.7/9.4 ms. The four larger paired intervals
+favor NEON. CV exceeds 20% in several smaller cells; see the full log.
+Allocation happens outside timing for color cells; whole decode includes it.
+Every color output byte matches, including the 17-wide vector-tail case.
+These are existing-kernel results after the residual correctness fix, not
+before/after residual speed measurements.
+
+Fixtures are preserved outside git under
+`/Users/lilith/work/codec-artifacts/heic-arm-audit/`:
+
+- example.heic: SHA256 `7f8b363e4936c0666a25f64f3a92fda10bd8e5453be4592530b65a55dd98f3f2`
+- C002.heic: SHA256 `2b836102e528f7b465b295724b6928c5725a5ac3fe326c6bb54e5e8a18fc180f`
+- image4.heic: SHA256 `676b0a76dcaa7fe9ffc41110b7791bef6cf0bfdb32455b03e149b0f8bfdb0856`
+
+Run `HEIC_BENCH_INPUTS=<colon-separated paths> just arm-tier-audit`.
+Strict bench clippy passed. Full measurement took 172.4 seconds.

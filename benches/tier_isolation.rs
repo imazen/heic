@@ -1,26 +1,7 @@
-//! SIMD-tier isolation: the native top tier vs the same decoder forced to scalar.
-//!
-//! `decode.rs` measures absolute decode time and `compare.rs` measures this
-//! crate against libheif. Neither can tell you whether the SIMD paths are
-//! earning their keep — a kernel slower than its own scalar fallback is
-//! invisible in both. This bench decodes the same files twice, once with the
-//! native SIMD token disabled. (The same gap in linear-srgb was hiding a real
-//! regression.)
-//!
-//! Unlike `decode.rs`, this does NOT hardcode a Linux home path: it discovers
-//! files from the shared `codec-corpus` HEIC conformance set, honouring
-//! `HEIC_CORPUS_DIR`, and skips cleanly when the corpus is absent rather than
-//! failing or silently benchmarking nothing.
-//!
-//! Run: `cargo bench --bench tier_isolation --features backend-rust,_dev`
-//! Do NOT build with `-C target-cpu=native`: that pins the tier at compile
-//! time, after which it cannot be disabled and this bench skips rather than
-//! silently reporting the SIMD path under both labels.
-
-use std::path::PathBuf;
-
-use criterion::{Criterion, criterion_group, criterion_main};
+//! Interleaved runtime-tier measurements with untimed exact pixel checks.
+//! HEIC_BENCH_INPUTS supplies a colon-separated fixture list; every file must decode.
 use heic::{DecoderConfig, PixelLayout};
+use zenbench::prelude::*;
 
 #[cfg(target_arch = "aarch64")]
 type TierToken = archmage::NeonToken;
@@ -28,185 +9,120 @@ type TierToken = archmage::NeonToken;
 type TierToken = archmage::X64V3Token;
 
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-const TIER_NAME: &str = if cfg!(target_arch = "aarch64") {
-    "neon"
-} else {
-    "v3(avx2)"
-};
-
-#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-fn set_simd(enabled: bool) -> bool {
-    use archmage::SimdToken;
-    TierToken::dangerously_disable_token_process_wide(!enabled).is_ok()
+fn set_simd(enabled: bool) {
+    TierToken::dangerously_disable_token_process_wide(!enabled)
+        .expect("runtime tier must be toggleable; omit target-cpu=native");
 }
 
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-fn set_simd(_enabled: bool) -> bool {
-    false
+fn set_simd(_enabled: bool) {
+    panic!("tier isolation requires native ARM or x86_64");
 }
 
-/// Root of the shared HEIC conformance corpus. Repo-relative by default so the
-/// bench survives being run from another machine; override with
-/// `HEIC_CORPUS_DIR`.
-fn corpus_dir() -> PathBuf {
-    if let Ok(d) = std::env::var("HEIC_CORPUS_DIR") {
-        return PathBuf::from(d);
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("codec-corpus")
-        .join("heic-conformance")
-        .join("valid")
-}
-
-/// Decodable files, largest first, capped — larger files spend proportionally
-/// more time in pixel kernels and less in container parsing, which is what this
-/// bench is trying to isolate.
-fn vectors(limit: usize) -> Vec<(String, Vec<u8>)> {
-    let dir = corpus_dir();
-    if !dir.exists() {
-        return Vec::new();
-    }
-    let mut found: Vec<(PathBuf, u64)> = Vec::new();
-    let mut stack = vec![dir.clone()];
-    while let Some(d) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&d) else {
-            continue;
-        };
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                stack.push(p);
-            } else if p.extension().is_some_and(|x| x == "heic") {
-                let len = e.metadata().map(|m| m.len()).unwrap_or(0);
-                found.push((p, len));
-            }
-        }
-    }
-    found.sort_by_key(|(_, len)| std::cmp::Reverse(*len));
-
-    let mut out = Vec::new();
-    for (path, _) in found {
-        if out.len() >= limit {
-            break;
-        }
-        let Ok(data) = std::fs::read(&path) else {
-            continue;
-        };
-        // Only keep files this build can actually decode, so the bench never
-        // reports a number for a file that errored out.
-        if DecoderConfig::new()
-            .decode(&data, PixelLayout::Rgba8)
-            .is_err()
-        {
-            continue;
-        }
-        let name = path
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        out.push((name, data));
-    }
-    out
-}
-
-fn bench_tiers(c: &mut Criterion) {
-    if !set_simd(true) || !set_simd(false) {
-        eprintln!(
-            "[tier_isolation] no toggleable SIMD tier on this target, or the tier is \
-             compile-time guaranteed (drop -C target-cpu=native, build with --features _dev). \
-             Skipping."
-        );
-        return;
-    }
-    set_simd(true);
-
-    let vecs = vectors(3);
-    if vecs.is_empty() {
-        eprintln!(
-            "[tier_isolation] no decodable .heic found under {}. Set HEIC_CORPUS_DIR. Skipping.",
-            corpus_dir().display()
-        );
-        return;
-    }
-    eprintln!("[tier_isolation] comparing {TIER_NAME} vs forced scalar");
-
-    for (name, data) in &vecs {
-        let mut group = c.benchmark_group(format!("decode/{name}"));
-        for (arm, simd) in [(TIER_NAME, true), ("scalar", false)] {
-            group.bench_function(arm, |b| {
-                set_simd(simd);
-                b.iter(|| {
-                    DecoderConfig::new()
-                        .decode(std::hint::black_box(data), PixelLayout::Rgba8)
-                        .unwrap()
-                })
-            });
-        }
+fn bench_decode(suite: &mut Suite) {
+    let paths = std::env::var_os("HEIC_BENCH_INPUTS").expect("set HEIC_BENCH_INPUTS explicitly");
+    for path in std::env::split_paths(&paths) {
+        let data: &'static [u8] =
+            Box::leak(std::fs::read(&path).expect("fixture").into_boxed_slice());
+        set_simd(false);
+        let scalar = DecoderConfig::new()
+            .decode(data, PixelLayout::Rgba8)
+            .expect("scalar decode");
         set_simd(true);
-        group.finish();
+        let simd = DecoderConfig::new()
+            .decode(data, PixelLayout::Rgba8)
+            .expect("SIMD decode");
+        assert_eq!((scalar.width, scalar.height), (simd.width, simd.height));
+        assert_eq!(scalar.data, simd.data, "{}", path.display());
+        let pixels = u64::from(simd.width) * u64::from(simd.height);
+        eprintln!(
+            "{}: {}x{} exact tier pixels",
+            path.display(),
+            simd.width,
+            simd.height
+        );
+        suite.compare(
+            format!("decode/{}", path.file_name().unwrap().to_string_lossy()),
+            move |g| {
+                g.throughput(Throughput::Elements(pixels));
+                for (name, enabled) in [("native", true), ("scalar", false)] {
+                    g.bench(name, move |b| {
+                        b.with_input(move || set_simd(enabled)).run(move |_| {
+                            DecoderConfig::new()
+                                .decode(data, PixelLayout::Rgba8)
+                                .unwrap()
+                        })
+                    });
+                }
+            },
+        );
     }
     set_simd(true);
 }
 
-/// The 4:4:4 colour-conversion kernel, isolated.
-///
-/// Added 2026-08-01 alongside its NEON arm. `convert_444_to_rgb` dispatched
-/// `[v3, scalar]` — an AVX2 arm but no NEON arm — so every aarch64 4:4:4
-/// decode ran the scalar per-pixel loop. The whole-decode bench above cannot
-/// surface that: heic decode is CABAC-bound (it measures ~1.00x overall), so
-/// colour conversion is a small enough fraction that a fully-scalar kernel
-/// disappears into the noise. That is exactly why this one is measured on its
-/// own.
-fn bench_color_444(c: &mut Criterion) {
-    if !set_simd(true) || !set_simd(false) {
-        eprintln!("[color_444] SIMD tier not toggleable here. Skipping.");
-        return;
-    }
-    set_simd(true);
-
-    // 1920x1080 4:4:4, the shape this path exists for.
-    const W: usize = 1920;
-    const H: usize = 1080;
-    let mut s = 0x9e37_79b9u32;
-    let mut plane = || -> Vec<u16> {
-        (0..W * H)
-            .map(|_| {
-                s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                ((s >> 16) & 0xFF) as u16
-            })
-            .collect()
-    };
-    let (y, cb, cr) = (plane(), plane(), plane());
-    let mut rgb = vec![0u8; W * H * 3];
-
-    let mut group = c.benchmark_group("convert_444_to_rgb");
-    group.throughput(criterion::Throughput::Elements((W * H) as u64));
-    for (arm, simd) in [(TIER_NAME, true), ("scalar", false)] {
-        group.bench_function(arm, |b| {
-            set_simd(simd);
-            b.iter(|| {
-                heic_core::color_convert::convert_444_to_rgb(
-                    std::hint::black_box(&y),
-                    &cb,
-                    &cr,
-                    W,
-                    W,
-                    0,
-                    H as u32,
-                    0,
-                    W as u32,
-                    0,
-                    false,
-                    1,
-                    &mut rgb,
-                )
-            })
+fn bench_color(suite: &mut Suite) {
+    for width in [17usize, 64, 256, 1024, 4096] {
+        let height = width;
+        // Padding exercises native strided inputs; output is tightly packed.
+        let stride = width + 3;
+        let y: &'static [u16] = Box::leak(
+            (0..stride * height)
+                .map(|i| ((i * 17 + 16) & 255) as u16)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        let cb: &'static [u16] = Box::leak(
+            (0..stride * height)
+                .map(|i| ((i * 29 + 31) & 255) as u16)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        let cr: &'static [u16] = Box::leak(
+            (0..stride * height)
+                .map(|i| ((i * 43 + 97) & 255) as u16)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        let convert = move |out: &mut [u8]| {
+            heic_core::color_convert::convert_444_to_rgb(
+                y,
+                cb,
+                cr,
+                stride,
+                stride,
+                0,
+                height as u32,
+                0,
+                width as u32,
+                0,
+                false,
+                1,
+                out,
+            );
+        };
+        let mut scalar = vec![0; width * height * 3];
+        let mut simd = scalar.clone();
+        set_simd(false);
+        convert(&mut scalar);
+        set_simd(true);
+        convert(&mut simd);
+        assert_eq!(scalar, simd);
+        suite.compare(format!("color444/{width}x{height}"), move |g| {
+            g.throughput(Throughput::Elements((width * height) as u64));
+            for (name, enabled) in [("native", true), ("scalar", false)] {
+                g.bench(name, move |b| {
+                    b.with_input(move || {
+                        set_simd(enabled);
+                        vec![0; width * height * 3]
+                    })
+                    .run(move |mut out| {
+                        convert(&mut out);
+                        out
+                    })
+                });
+            }
         });
     }
     set_simd(true);
-    group.finish();
 }
-
-criterion_group!(benches, bench_tiers, bench_color_444);
-criterion_main!(benches);
+zenbench::main!(bench_decode, bench_color);
