@@ -4,6 +4,13 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 ## [Unreleased]
 
+### Changed
+
+- The zencodec adapter uses UltraHDR 0.6 and enables its `f16` feature, keeping
+  gain-map parameters and pixel buffers compatible with the coordinated
+  zenpixels 0.3 release. Rust 1.93 is the tested workspace minimum, including
+  the pinned development tools. Dependency pins are portable git revisions.
+
 ### QUEUED BREAKING CHANGES
 <!-- Breaking changes that will ship together in the next major (or minor for 0.x) release.
      Add items here as you discover them. Do NOT ship these piecemeal — batch them. -->

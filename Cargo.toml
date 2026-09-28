@@ -20,7 +20,7 @@ resolver = "3"
 # needs ONE version bump. See RELEASING.md for the full flow.
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.93"
 license = "AGPL-3.0-only OR LicenseRef-Imazen-Commercial"
 repository = "https://github.com/imazen/heic"
 authors = ["Imazen LLC"]
@@ -124,7 +124,7 @@ imgref = { version = "1.12.0", optional = true }
 garb = { version = "0.2.5", default-features = false, optional = true }
 rav1d-safe = { version = "0.5.3", optional = true, default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
 zenflate = { version = "0.3.4", optional = true, default-features = false }
-ultrahdr-core = { version = "0.5.0", optional = true, default-features = false }
+ultrahdr-core = { version = "0.6.0", optional = true, default-features = false, features = ["f16"] }
 
 [dev-dependencies]
 zenbench = "0.1.9"
@@ -134,13 +134,11 @@ imgref = "1.12.0"
 # Perceptual cross-backend RGBA comparison for the dispatcher integration
 # tests — zensim does multi-scale XYB similarity scoring; zensim-regress
 # wraps it with structured tolerance / report semantics for diff testing.
-# Pinned to the imazen/zensim `main` rev that removed the legacy linear
-# PreviewV0_1/PreviewV0_2 profiles (A-only): published zensim 0.2.7 predates
-# `ZensimProfile::A`, so the diff harness (which now scores with `A`) needs
-# the unreleased 0.3.x. Drop the git pins for plain versions once zensim
-# 0.3.x + zensim-regress 0.4.x publish to crates.io.
-zensim = { version = "0.3.0", git = "https://github.com/imazen/zensim", rev = "493c91cdd7af" }
-zensim-regress = { version = "0.4.0", git = "https://github.com/imazen/zensim", rev = "493c91cdd7af" }
+# The coordinated media series uses a frozen Profile-A judge with only the
+# PNG dependency range widened (zensim#63); its scoring implementation is
+# unchanged from 8462c. This pin also admits the shared zenpixels 0.3 types.
+zensim = { version = "0.3.0", git = "https://github.com/imazen/zensim", rev = "8557758809156baba7364bd8cfe32889a61da4e8" }
+zensim-regress = { version = "0.4.0", git = "https://github.com/imazen/zensim", rev = "8557758809156baba7364bd8cfe32889a61da4e8" }
 # heic-wasm-rs: reference decoder for comparison tests
 # Uncomment + RUSTFLAGS='--cfg heic_reference' cargo test to enable
 # heic-wasm-rs = { path = "../../heic/heic-wasm-rs" }
@@ -228,14 +226,17 @@ harness = false
 
 
 
-# ultrahdr-core 0.5.0 on crates.io predates the Apple MakerNote HDR-headroom
-# parser (parse_exif_for_apple_hdr / from_apple_headroom) that ReconstructHdr
-# needs. Patch to the imazen/ultrahdr rev that carries it until the next
-# ultrahdr-core release; remove this section and bump the version req then.
-# A git (not path) patch keeps CI and fresh clones working with no sibling
-# checkouts.
+# Coordinated, unpublished codec/pixel release candidates. Immutable git pins
+# make a fresh clone compile without sibling checkouts. UltraHDR 0.6 shares
+# zencodec's GainMapParams and zenpixels 0.3 buffer types; f16 is explicit.
 [patch.crates-io]
-ultrahdr-core = { git = "https://github.com/imazen/ultrahdr", rev = "3ac20f99d45e985e09f274fc07181b238385e703" }
+zencodec = { git = "https://github.com/imazen/zencodec", rev = "2031094449ad1177ff96461d7c4d586c7ed384e6" }
+zencodec-testkit = { git = "https://github.com/imazen/zencodec", rev = "2031094449ad1177ff96461d7c4d586c7ed384e6" }
+zenpixels = { git = "https://github.com/imazen/zenpixels", rev = "3ece79f38aa306311c94324ae8c0c2310a2b2f82" }
+zenpixels-convert = { git = "https://github.com/imazen/zenpixels", rev = "3ece79f38aa306311c94324ae8c0c2310a2b2f82" }
+zenresize = { git = "https://github.com/imazen/zenresize", rev = "e3975fb9d6d6b7baa96038a0eb8e27febb37c012" }
+zenpng = { git = "https://github.com/imazen/zenpng", rev = "27393eef995aea329cfbc1df5cac5e3f7346b4cb" }
+ultrahdr-core = { git = "https://github.com/imazen/ultrahdr", rev = "633f71e9d0c8fc82cc29b58ffaa92d367d82f9f9" }
 
 [[example]]
 name = "gm20_probe"
