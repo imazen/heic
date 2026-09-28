@@ -78,6 +78,8 @@ pub fn compare_backends_via_zensim(
     use zensim::{RgbaSlice, Zensim, ZensimProfile};
     use zensim_regress::testing::check_regression;
 
+    // Existing backend parity thresholds are calibrated to Profile A.
+    #[allow(deprecated)]
     let zensim = Zensim::new(ZensimProfile::A);
     let mut report = DiffReport::default();
 
