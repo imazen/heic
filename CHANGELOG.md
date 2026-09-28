@@ -4,6 +4,15 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 ## [Unreleased]
 
+### Gain-map metadata retention
+
+- Component extraction now errors on a failed gain-map decode, missing/invalid
+  rendering parameters or an invalid pixel buffer, instead of silently omitting
+  the map or fabricating default parameters.
+- Present ISO 21496-1 metadata is authoritative: invalid ISO no longer falls back
+  to an Apple MakerNote curve. Legacy Apple files retain their established path.
+- Use ultrahdr-core 0.6 with the explicit f16 feature and hardened Apple parsing.
+
 ### QUEUED BREAKING CHANGES
 <!-- Breaking changes that will ship together in the next major (or minor for 0.x) release.
      Add items here as you discover them. Do NOT ship these piecemeal — batch them. -->
