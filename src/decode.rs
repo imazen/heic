@@ -819,7 +819,7 @@ fn decode_av1_item(
         settings.frame_size_limit = max_pixels.min(u32::MAX as u64) as u32;
     }
     let mut decoder = Decoder::with_settings(settings).map_err(|e| {
-        at!(HeicError::InvalidData(match e {
+        at!(HeicError::InvalidData(match e.error() {
             rav1d_safe::src::managed::Error::OutOfMemory => "AV1 decoder init: out of memory",
             _ => "AV1 decoder initialization failed",
         }))

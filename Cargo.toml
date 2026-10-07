@@ -122,8 +122,8 @@ rgb = { version = "0.8.53", default-features = false, features = ["as-bytes"], o
 bytemuck = { version = "1.25.2", default-features = false, features = ["extern_crate_alloc"], optional = true }
 imgref = { version = "1.12.3", optional = true }
 garb = { version = "0.2.8", default-features = false, optional = true }
-rav1d-safe = { version = "0.5.7", optional = true, default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
-zenflate = { version = "0.3.6", optional = true, default-features = false }
+rav1d-safe = { version = "0.6.0", optional = true, default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
+zenflate = { version = "0.4.0", optional = true, default-features = false }
 ultrahdr-core = { version = "0.5.0", optional = true, default-features = false }
 
 [dev-dependencies]
