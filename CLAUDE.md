@@ -226,27 +226,27 @@ cargo test --test compare_reference write_comparison_images -- --nocapture --ign
 
 ## Test Files
 
-- `/home/lilith/work/heic/libheif/examples/example.heic` (1280x854)
-- `/home/lilith/work/heic/test-images/classic-car-iphone12pro.heic` (3024x4032)
+- `~/work/heic/libheif/examples/example.heic` (1280x854)
+- `~/work/heic/test-images/classic-car-iphone12pro.heic` (3024x4032)
 
 ## Reference Implementations
 
-- libde265 (C++): `/home/lilith/work/heic/libde265-src/`
-- OpenHEVC (C): `/home/lilith/work/heic/openhevc-src/`
+- libde265 (C++): `~/work/heic/libde265-src/`
+- OpenHEVC (C): `~/work/heic/openhevc-src/`
 
 ## HEVC Specification
 
 **ITU-T H.265 (08/2021)** organized by decoder component:
-- `/home/lilith/work/heic/spec/sections/README.md` - Index
-- `/home/lilith/work/heic/spec/sections/09-decoding/03-slice-decoding.md` - Slice/CTU/CU decoding
-- `/home/lilith/work/heic/spec/sections/10-parsing/cabac/` - CABAC context derivation
+- `~/work/heic/spec/sections/README.md` - Index
+- `~/work/heic/spec/sections/09-decoding/03-slice-decoding.md` - Slice/CTU/CU decoding
+- `~/work/heic/spec/sections/10-parsing/cabac/` - CABAC context derivation
 - Key sections for coefficient decode: 9.3.4.2.5 (sig_coeff_flag ctx), 9.3.4.2.6 (greater1_flag ctx)
 
 Do NOT use web searches for HEVC spec details - read the spec sections or reference implementations directly.
 
 ## API Design
 
-Follows the zen codec three-layer pattern from `/home/lilith/work/codec-design/README.md`:
+Follows the zen codec three-layer pattern from [codec-design](https://github.com/imazen/codec-design) (canonical traits: zencodec):
 
 ```rust
 // Simple one-shot
@@ -847,7 +847,7 @@ src/
 
 ## FEEDBACK.md
 
-See `/home/lilith/.claude/CLAUDE.md` for global instructions including feedback logging.
+See `~/.claude/CLAUDE.md` for global instructions including feedback logging.
 
 ## aarch64 / NEON: decode is NOT SIMD-bound (measured 2026-07-28)
 
