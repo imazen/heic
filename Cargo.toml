@@ -27,7 +27,7 @@ authors = ["Imazen LLC"]
 
 [workspace.dependencies]
 heic-core = { version = "0.2.0", path = "heic-core" }
-enough = "0.4.3"
+enough = "0.4.4"
 whereat = "0.1.5"
 
 [package]
@@ -109,28 +109,28 @@ heic-backend-videotoolbox = { version = "0.2.0", path = "heic-backend-videotoolb
 heic-backend-mediacodec = { version = "0.2.0", path = "heic-backend-mediacodec", optional = true }
 heic-backend-vaapi = { version = "0.2.0", path = "heic-backend-vaapi", optional = true }
 heic-backend-d3d11va = { version = "0.2.0", path = "heic-backend-d3d11va", optional = true }
-enough = "0.4.3"
+enough = "0.4.4"
 whereat = { version = "0.1.5"}
-archmage = { version = "0.9.16", default-features = false, features = ["macros"] }
-magetypes = { version = "0.9.16", default-features = false }
+archmage = { version = "0.9.29", default-features = false, features = ["macros"] }
+magetypes = { version = "0.9.29", default-features = false }
 safe_unaligned_simd = "0.2.5"
-memchr = { version = "2.8.0", default-features = false }
-rayon = { version = "1.11.0", optional = true }
+memchr = { version = "2.8.3", default-features = false }
+rayon = { version = "1.12.0", optional = true }
 zencodec = { version = ">=0.1.26, <0.3.0", optional = true }
 zenpixels = { version = ">=0.2.11, <0.4.0", default-features = false, features = ["rgb", "imgref"], optional = true }
 rgb = { version = "0.8.53", default-features = false, features = ["as-bytes"], optional = true }
-bytemuck = { version = "1.21", default-features = false, features = ["extern_crate_alloc"], optional = true }
-imgref = { version = "1.12.0", optional = true }
-garb = { version = "0.2.5", default-features = false, optional = true }
-rav1d-safe = { version = "0.5.3", optional = true, default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
-zenflate = { version = "0.3.4", optional = true, default-features = false }
+bytemuck = { version = "1.25.2", default-features = false, features = ["extern_crate_alloc"], optional = true }
+imgref = { version = "1.12.3", optional = true }
+garb = { version = "0.2.8", default-features = false, optional = true }
+rav1d-safe = { version = "0.5.7", optional = true, default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
+zenflate = { version = "0.3.6", optional = true, default-features = false }
 ultrahdr-core = { version = "0.5.0", optional = true, default-features = false }
 
 [dev-dependencies]
-zenbench = "0.1.9"
+zenbench = "0.1.10"
 criterion = { version = "0.8.2", default-features = false, features = ["plotters", "cargo_bench_support"] }
-fast-ssim2 = { version = "0.8.0", features = ["imgref"] }
-imgref = "1.12.0"
+fast-ssim2 = { version = "0.8.2", features = ["imgref"] }
+imgref = "1.12.3"
 # Perceptual cross-backend RGBA comparison for the dispatcher integration
 # tests — zensim does multi-scale XYB similarity scoring; zensim-regress
 # wraps it with structured tolerance / report semantics for diff testing.

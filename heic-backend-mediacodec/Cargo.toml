@@ -22,7 +22,7 @@ enough = { workspace = true }
 # the latest published versions are 0.6 (ndk-sys) / 0.9 (ndk).
 [target.'cfg(target_os = "android")'.dependencies]
 ndk-sys = "0.6"
-ndk = { version = "0.9", features = ["media"] }
+ndk = { version = "0.9.0", features = ["media"] }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

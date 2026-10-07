@@ -17,8 +17,8 @@ fallible-alloc = []
 [dependencies]
 enough = { workspace = true }
 whereat = { workspace = true }
-archmage = { version = "0.9.16", default-features = false, features = ["macros"] }
-magetypes = { version = "0.9.16", default-features = false }
+archmage = { version = "0.9.29", default-features = false, features = ["macros"] }
+magetypes = { version = "0.9.29", default-features = false }
 safe_unaligned_simd = "0.2.5"
 
 [lints.rust]
