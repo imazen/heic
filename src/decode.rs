@@ -23,7 +23,7 @@ use crate::{
 /// is depth 2 — so a tight cap is appropriate. This kills the
 /// `(tiles_per_level)^N` blow-up an attacker can otherwise drive through
 /// crafted dimg references.
-const MAX_DERIVED_DEPTH: u32 = 3;
+pub(crate) const MAX_DERIVED_DEPTH: u32 = 3;
 
 /// Maximum total number of `decode_item` calls within a single decode
 /// request, summed across all recursion paths. Even with a tight depth

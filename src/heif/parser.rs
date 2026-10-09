@@ -735,6 +735,28 @@ fn parse_iloc(iloc: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop
     Ok(())
 }
 
+/// The item locations one `iloc` box declares, parsed exactly as [`parse`]
+/// parses them (same truncation and limit behaviour). Used by the structural
+/// inventory, which places each extent without re-implementing `iloc`.
+pub(crate) fn iloc_entries(iloc: &Box<'_>, stop: &dyn Stop) -> Result<Vec<ItemLocation>> {
+    let mut scratch = HeifContainer {
+        data: &[],
+        brand: FourCC(*b"    "),
+        compatible_brands: Vec::new(),
+        primary_item_id: 0,
+        item_locations: Vec::new(),
+        item_infos: Vec::new(),
+        properties: Vec::new(),
+        property_associations: Vec::new(),
+        item_references: Vec::new(),
+        idat_data: None,
+        mdat_offset: None,
+        mdat_length: None,
+    };
+    parse_iloc(iloc, &mut scratch, stop)?;
+    Ok(scratch.item_locations)
+}
+
 fn read_sized_int(data: &[u8], pos: &mut usize, size: usize) -> u64 {
     if size == 0 || *pos + size > data.len() {
         return 0;
@@ -812,7 +834,7 @@ fn parse_iinf(iinf: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop
     Ok(())
 }
 
-fn parse_infe(infe: &Box<'_>) -> Result<ItemInfo> {
+pub(crate) fn parse_infe(infe: &Box<'_>) -> Result<ItemInfo> {
     let content = infe.content;
 
     let version = *content
@@ -921,97 +943,104 @@ fn parse_ipco(ipco: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop
                 "property count exceeds limit"
             )));
         }
-        let prop = match child.box_type() {
-            FourCC::ISPE => {
-                if let Ok(ext) = parse_ispe(&child) {
-                    ItemProperty::ImageExtents(ext)
-                } else {
-                    ItemProperty::Unknown
-                }
-            }
-            FourCC::HVCC => {
-                if let Ok(config) = parse_hvcc(&child) {
-                    ItemProperty::HevcConfig(config)
-                } else {
-                    ItemProperty::Unknown
-                }
-            }
-            FourCC::COLR => {
-                if let Ok(color) = parse_colr(&child) {
-                    ItemProperty::ColorInfo(color)
-                } else {
-                    ItemProperty::Unknown
-                }
-            }
-            FourCC::CLAP => {
-                if let Ok(clap) = parse_clap(&child) {
-                    ItemProperty::CleanAperture(clap)
-                } else {
-                    ItemProperty::Unknown
-                }
-            }
-            FourCC::IROT => {
-                if let Ok(rot) = parse_irot(&child) {
-                    ItemProperty::Rotation(rot)
-                } else {
-                    ItemProperty::Unknown
-                }
-            }
-            FourCC::IMIR => {
-                if let Ok(mirror) = parse_imir(&child) {
-                    ItemProperty::Mirror(mirror)
-                } else {
-                    ItemProperty::Unknown
-                }
-            }
-            FourCC::AUXC => {
-                if let Ok(aux_type) = parse_auxc(&child) {
-                    ItemProperty::AuxiliaryType(aux_type)
-                } else {
-                    ItemProperty::Unknown
-                }
-            }
-            FourCC::CLLI => {
-                if let Ok(clli) = parse_clli(&child) {
-                    ItemProperty::ContentLightLevel(clli)
-                } else {
-                    ItemProperty::Unknown
-                }
-            }
-            FourCC::MDCV => {
-                if let Ok(mdcv) = parse_mdcv(&child) {
-                    ItemProperty::MasteringDisplay(mdcv)
-                } else {
-                    ItemProperty::Unknown
-                }
-            }
-            FourCC::AV1C => {
-                if let Ok(config) = parse_av1c(&child) {
-                    ItemProperty::Av1Config(config)
-                } else {
-                    ItemProperty::Unknown
-                }
-            }
-            FourCC::UNCC => {
-                if let Ok(config) = parse_uncc(&child) {
-                    ItemProperty::UncompressedConfig(config)
-                } else {
-                    ItemProperty::Unknown
-                }
-            }
-            FourCC::CMPC => {
-                if let Ok(config) = parse_cmpc(&child) {
-                    ItemProperty::CompressionConfig(config)
-                } else {
-                    ItemProperty::Unknown
-                }
-            }
-            _ => ItemProperty::Unknown,
-        };
+        let prop = parse_property(&child);
         container.properties.push(prop);
     }
 
     Ok(())
+}
+
+/// Interpret one `ipco` child, exactly as [`parse`] does: a property heic
+/// does not recognise, or one its parser rejects, becomes
+/// [`ItemProperty::Unknown`].
+pub(crate) fn parse_property(child: &Box<'_>) -> ItemProperty {
+    match child.box_type() {
+        FourCC::ISPE => {
+            if let Ok(ext) = parse_ispe(child) {
+                ItemProperty::ImageExtents(ext)
+            } else {
+                ItemProperty::Unknown
+            }
+        }
+        FourCC::HVCC => {
+            if let Ok(config) = parse_hvcc(child) {
+                ItemProperty::HevcConfig(config)
+            } else {
+                ItemProperty::Unknown
+            }
+        }
+        FourCC::COLR => {
+            if let Ok(color) = parse_colr(child) {
+                ItemProperty::ColorInfo(color)
+            } else {
+                ItemProperty::Unknown
+            }
+        }
+        FourCC::CLAP => {
+            if let Ok(clap) = parse_clap(child) {
+                ItemProperty::CleanAperture(clap)
+            } else {
+                ItemProperty::Unknown
+            }
+        }
+        FourCC::IROT => {
+            if let Ok(rot) = parse_irot(child) {
+                ItemProperty::Rotation(rot)
+            } else {
+                ItemProperty::Unknown
+            }
+        }
+        FourCC::IMIR => {
+            if let Ok(mirror) = parse_imir(child) {
+                ItemProperty::Mirror(mirror)
+            } else {
+                ItemProperty::Unknown
+            }
+        }
+        FourCC::AUXC => {
+            if let Ok(aux_type) = parse_auxc(child) {
+                ItemProperty::AuxiliaryType(aux_type)
+            } else {
+                ItemProperty::Unknown
+            }
+        }
+        FourCC::CLLI => {
+            if let Ok(clli) = parse_clli(child) {
+                ItemProperty::ContentLightLevel(clli)
+            } else {
+                ItemProperty::Unknown
+            }
+        }
+        FourCC::MDCV => {
+            if let Ok(mdcv) = parse_mdcv(child) {
+                ItemProperty::MasteringDisplay(mdcv)
+            } else {
+                ItemProperty::Unknown
+            }
+        }
+        FourCC::AV1C => {
+            if let Ok(config) = parse_av1c(child) {
+                ItemProperty::Av1Config(config)
+            } else {
+                ItemProperty::Unknown
+            }
+        }
+        FourCC::UNCC => {
+            if let Ok(config) = parse_uncc(child) {
+                ItemProperty::UncompressedConfig(config)
+            } else {
+                ItemProperty::Unknown
+            }
+        }
+        FourCC::CMPC => {
+            if let Ok(config) = parse_cmpc(child) {
+                ItemProperty::CompressionConfig(config)
+            } else {
+                ItemProperty::Unknown
+            }
+        }
+        _ => ItemProperty::Unknown,
+    }
 }
 
 fn parse_clap(clap: &Box<'_>) -> Result<CleanAperture> {
