@@ -201,6 +201,8 @@ pub use backend::{Backend, recommended_backends};
 
 #[cfg(feature = "zencodec")]
 mod codec;
+#[cfg(feature = "zencodec")]
+mod inventory;
 
 #[cfg(feature = "zencodec")]
 pub use codec::{

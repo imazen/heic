@@ -14,3 +14,9 @@ pub use boxes::{
     UncompressedConfig,
 };
 pub use parser::{HeifContainer, Item, ItemType, parse};
+
+// Crate-internal access for the structural inventory (`crate::inventory`).
+#[cfg(feature = "zencodec")]
+pub(crate) use boxes::{Box as BmffBox, BoxHeader, ItemInfo, ItemLocation};
+#[cfg(feature = "zencodec")]
+pub(crate) use parser::{iloc_entries, parse_infe, parse_property};

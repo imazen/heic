@@ -91,6 +91,7 @@ static HEIC_DECODE_CAPS: DecodeCapabilities = DecodeCapabilities::new()
     .with_enforces_max_input_bytes(true)
     .with_gain_map(true)
     .with_reconstructs_hdr(true)
+    .with_inventory(true)
     .with_threads_supported_range(1, if cfg!(feature = "parallel") { 256 } else { 1 });
 
 // ── Supported descriptors ──────────────────────────────────────────────────
@@ -374,6 +375,37 @@ impl HeicDecodeJob {
         ))
     }
 
+    fn inventory_inner(
+        &self,
+        data: &[u8],
+    ) -> Result<zencodec::inventory::Inventory, At<HeicError>> {
+        use crate::inventory::{GainMapUse, Options};
+        self.limits
+            .check_input_size(data.len() as u64)
+            .map_err(|e| at!(HeicError::ResourceLimit(e)))?;
+        let stop_ref: &dyn enough::Stop = match self.stop {
+            Some(ref s) => s,
+            None => &enough::Unstoppable,
+        };
+        // Mirrors `HeicDecoder::decode_inner`: ReconstructHdr applies the gain
+        // map; Components or `extract_gain_map` decode and attach it.
+        let gain_map = match self.gain_map_render {
+            zencodec::GainMapRender::ReconstructHdr { .. } => GainMapUse::Reconstruct,
+            zencodec::GainMapRender::Components => GainMapUse::Surface,
+            _ if self.extract_gain_map => GainMapUse::Surface,
+            _ => GainMapUse::Describe,
+        };
+        let policy = self.policy.as_ref();
+        let opts = Options {
+            gain_map,
+            decode_depth: self.extract_depth,
+            keep_icc: policy.is_none_or(|p| p.resolve_icc(true)),
+            keep_exif: policy.is_none_or(|p| p.resolve_exif(true)),
+            keep_xmp: policy.is_none_or(|p| p.resolve_xmp(true)),
+        };
+        crate::inventory::inventory(data, &opts, stop_ref)
+    }
+
     fn output_info_inner(&self, data: &[u8]) -> Result<OutputInfo, At<HeicError>> {
         self.limits
             .check_input_size(data.len() as u64)
@@ -653,6 +685,18 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
 
     fn output_info(&self, data: &[u8]) -> Result<OutputInfo, At<zencodec::CodecError>> {
         self.output_info_inner(data)
+            .map_err(zencodec::CodecError::of)
+    }
+
+    /// Every box, item, item extent and property, with what this job's
+    /// decode does with it. Follows the job's gain-map, depth and
+    /// [`DecodePolicy`] settings. See `src/inventory.rs`.
+    fn inventory(
+        &self,
+        data: &[u8],
+    ) -> Result<Option<zencodec::inventory::Inventory>, At<zencodec::CodecError>> {
+        self.inventory_inner(data)
+            .map(Some)
             .map_err(zencodec::CodecError::of)
     }
 
@@ -1901,7 +1945,7 @@ fn extract_xmp_from_container(
 /// XMP — the MakerNote HDR headroom is their canonical parameter source
 /// (validated against real iPhone captures). Returns `None` when the EXIF
 /// or headroom is absent.
-fn apple_gain_map_params(
+pub(crate) fn apple_gain_map_params(
     container: &crate::heif::HeifContainer<'_>,
 ) -> Option<zencodec::GainMapParams> {
     let exif = extract_exif_from_container(container)?;
