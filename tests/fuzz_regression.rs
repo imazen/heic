@@ -63,7 +63,9 @@ fn strict_limits() -> Limits {
 
 /// Replay every regression seed through every fuzz entry point.
 ///
-/// The five targets below cover all seven `fuzz/fuzz_targets/*` binaries.
+/// The six targets below cover all eight `fuzz/fuzz_targets/*` binaries (the
+/// `inventory` one only when the `zencodec` feature is on, as in CI's
+/// `--all-features` fuzz-regression job).
 /// `fuzz_decode_av1`, `fuzz_decode_unci` and `fuzz_decode_limits` drive the
 /// same entry point with the same four caps — their sources differ only by a
 /// trailing comment and an intermediate `let result =` binding that is
@@ -74,7 +76,7 @@ fn strict_limits() -> Limits {
 /// three.
 #[test]
 fn fuzz_regression() {
-    let report = RegressionSuite::new(regression_dir())
+    let suite = RegressionSuite::new(regression_dir())
         .min_seeds(TRACKED_SEEDS)
         // Mirrors fuzz_targets/fuzz_target_1.rs (the `fuzz_decode` binary):
         // the full pipeline at the decoder's own fallback caps.
@@ -107,8 +109,11 @@ fn fuzz_regression() {
         // Mirrors fuzz_targets/fuzz_color_transform.rs: the seed bytes steer
         // frame geometry and colour signalling, then drive every YCbCr->RGB
         // conversion path (scalar + SIMD) exactly as the fuzz target does.
-        .target("color_transform", replay_color_transform)
-        .run();
+        .target("color_transform", replay_color_transform);
+    // Mirrors fuzz_targets/fuzz_inventory.rs (the `inventory` binary).
+    #[cfg(feature = "zencodec")]
+    let suite = suite.target("inventory", replay_inventory);
+    let report = suite.run();
 
     println!("{report}");
     assert_eq!(
@@ -117,6 +122,23 @@ fn fuzz_regression() {
         "seed count drifted from the pinned value; update TRACKED_SEEDS in the \
          same commit that adds or removes a seed"
     );
+}
+
+/// Body of `fuzz/fuzz_targets/fuzz_inventory.rs`: the structural inventory
+/// must not panic and must validate.
+#[cfg(feature = "zencodec")]
+fn replay_inventory(data: &[u8]) {
+    use zencodec::decode::{DecodeJob, DecoderConfig};
+    let flags = data.first().copied().unwrap_or(0);
+    let config = heic::HeicDecoderConfig::new()
+        .with_extract_gain_map(flags & 1 != 0)
+        .with_extract_depth(flags & 2 != 0);
+    if let Ok(Some(inv)) = config.job().inventory(data) {
+        assert_eq!(inv.input_len(), data.len() as u64);
+        if let Err(e) = inv.validate() {
+            panic!("invalid inventory: {e}\n{inv}");
+        }
+    }
 }
 
 /// Body of `fuzz/fuzz_targets/fuzz_color_transform.rs`, transcribed so a
