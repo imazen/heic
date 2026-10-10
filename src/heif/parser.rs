@@ -1862,32 +1862,9 @@ fn parse_moov<'a>(
     container: &mut HeifContainer<'a>,
     stop: &dyn Stop,
 ) -> Result<()> {
-    let mut tracks: Vec<TrackInfo> = Vec::new();
+    let (tracks, _) = parse_moov_tracks(moov, false, stop)?;
 
-    for child in BoxIterator::new(moov.content) {
-        check_stop(stop)?;
-        if child.box_type() == FourCC::TRAK {
-            // Cap the number of accepted tracks: each track holds
-            // independent sample / chunk / stsc tables individually
-            // bounded by `MAX_SAMPLES` etc., but the total parser cost
-            // is the *product* of per-track caps and the track count.
-            if tracks.len() >= MAX_TRACKS {
-                break;
-            }
-            if let Ok(track) = parse_trak(&child, stop) {
-                tracks.push(track);
-            }
-        }
-    }
-
-    // Find the first track with handler_type = "pict" (image sequence)
-    // If none, try "vide" as fallback
-    let primary_track = tracks
-        .iter()
-        .find(|t| t.handler_type == FourCC(*b"pict"))
-        .or_else(|| tracks.iter().find(|t| t.handler_type == FourCC(*b"vide")));
-
-    let Some(track) = primary_track else {
+    let Some(track) = primary_track(&tracks).map(|i| &tracks[i]) else {
         return Ok(()); // No suitable track found
     };
 
@@ -1986,48 +1963,12 @@ fn parse_moov<'a>(
     });
 
     // Check for thumbnail track: second pict track with tref, or smaller dimensions
-    for other_track in &tracks {
-        if other_track.track_id == track.track_id {
-            continue;
-        }
-        if other_track.handler_type != FourCC(*b"pict") {
-            continue;
-        }
-        // Smaller track is likely a thumbnail
-        if other_track.width < track.width || other_track.height < track.height {
+    if let Some((other, thumb_offset, thumb_size)) =
+        thumbnail_track(&tracks, track, file_data.len() as u64, stop)
+    {
+        let other_track = &tracks[other];
+        {
             let thumb_id: u32 = synth_id + 1;
-
-            let thumb_sync = if other_track.sync_samples.is_empty() {
-                1u32
-            } else {
-                match other_track.sync_samples.first() {
-                    Some(&s) if s > 0 && s <= other_track.sample_count => s,
-                    _ => continue,
-                }
-            };
-
-            let thumb_size = if other_track.uniform_sample_size > 0 {
-                other_track.uniform_sample_size
-            } else {
-                let idx = (thumb_sync - 1) as usize;
-                if idx >= other_track.sample_sizes.len() {
-                    continue;
-                }
-                other_track.sample_sizes[idx]
-            };
-
-            let Ok(thumb_offset) =
-                resolve_sample_offset(other_track, thumb_sync, file_data.len() as u64, stop)
-            else {
-                continue;
-            };
-
-            let Some(thumb_end) = thumb_offset.checked_add(thumb_size as u64) else {
-                continue;
-            };
-            if thumb_end > file_data.len() as u64 {
-                continue;
-            }
 
             container.item_infos.push(ItemInfo {
                 item_id: thumb_id,
@@ -2077,12 +2018,153 @@ fn parse_moov<'a>(
                 from_item_id: thumb_id,
                 to_item_ids: alloc::vec![synth_id],
             });
-
-            break; // Only first thumbnail track
         }
     }
 
     Ok(())
+}
+
+/// What [`parse_moov`] makes of one `trak` child of a `moov`.
+#[cfg_attr(not(feature = "zencodec"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TrackRole {
+    /// Its first sync sample is the primary image.
+    Primary,
+    /// Its first sync sample is the thumbnail (item 2).
+    Thumbnail,
+    /// Parsed; nothing of it is used.
+    Parsed,
+    /// `parse_trak` rejects it.
+    Rejected,
+    /// After [`MAX_TRACKS`] accepted tracks: never parsed.
+    NotRead,
+}
+
+/// The role of each `trak` child of `moov`, in order, as [`parse_moov`]
+/// assigns them (the structural inventory uses this).
+#[cfg(feature = "zencodec")]
+pub(crate) fn moov_track_roles(
+    moov: &Box<'_>,
+    file_len: u64,
+    stop: &dyn Stop,
+) -> Result<Vec<TrackRole>> {
+    let (tracks, mut roles) = parse_moov_tracks(moov, true, stop)?;
+    // `roles` holds `Parsed` for every accepted track, in order.
+    let accepted: Vec<usize> = roles
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| **r == TrackRole::Parsed)
+        .map(|(i, _)| i)
+        .collect();
+    if let Some(p) = primary_track(&tracks) {
+        roles[accepted[p]] = TrackRole::Primary;
+        if let Some((t, _, _)) = thumbnail_track(&tracks, &tracks[p], file_len, stop) {
+            roles[accepted[t]] = TrackRole::Thumbnail;
+        }
+    }
+    Ok(roles)
+}
+
+/// The tracks [`parse_moov`] accepts, and the fate of every `trak` child
+/// (`Parsed` for an accepted one). `list_all`: go on listing the `trak`
+/// children after the cap as `NotRead` (the decode path stops there).
+fn parse_moov_tracks(
+    moov: &Box<'_>,
+    list_all: bool,
+    stop: &dyn Stop,
+) -> Result<(Vec<TrackInfo>, Vec<TrackRole>)> {
+    let mut tracks: Vec<TrackInfo> = Vec::new();
+    let mut roles = Vec::new();
+
+    for child in BoxIterator::new(moov.content) {
+        check_stop(stop)?;
+        if child.box_type() == FourCC::TRAK {
+            // Cap the number of accepted tracks: each track holds
+            // independent sample / chunk / stsc tables individually
+            // bounded by `MAX_SAMPLES` etc., but the total parser cost
+            // is the *product* of per-track caps and the track count.
+            if tracks.len() >= MAX_TRACKS {
+                if !list_all {
+                    break;
+                }
+                roles.push(TrackRole::NotRead);
+                continue;
+            }
+            if let Ok(track) = parse_trak(&child, stop) {
+                tracks.push(track);
+                roles.push(TrackRole::Parsed);
+            } else {
+                roles.push(TrackRole::Rejected);
+            }
+        }
+    }
+    Ok((tracks, roles))
+}
+
+/// The first track with handler_type = "pict" (image sequence); if none,
+/// the first "vide" track.
+fn primary_track(tracks: &[TrackInfo]) -> Option<usize> {
+    tracks
+        .iter()
+        .position(|t| t.handler_type == FourCC(*b"pict"))
+        .or_else(|| {
+            tracks
+                .iter()
+                .position(|t| t.handler_type == FourCC(*b"vide"))
+        })
+}
+
+/// The first other `pict` track smaller than `track` whose first sync
+/// sample resolves inside the file: `(index, offset, size)`.
+fn thumbnail_track(
+    tracks: &[TrackInfo],
+    track: &TrackInfo,
+    file_len: u64,
+    stop: &dyn Stop,
+) -> Option<(usize, u64, u32)> {
+    for (i, other_track) in tracks.iter().enumerate() {
+        if other_track.track_id == track.track_id {
+            continue;
+        }
+        if other_track.handler_type != FourCC(*b"pict") {
+            continue;
+        }
+        // Smaller track is likely a thumbnail
+        if other_track.width < track.width || other_track.height < track.height {
+            let thumb_sync = if other_track.sync_samples.is_empty() {
+                1u32
+            } else {
+                match other_track.sync_samples.first() {
+                    Some(&s) if s > 0 && s <= other_track.sample_count => s,
+                    _ => continue,
+                }
+            };
+
+            let thumb_size = if other_track.uniform_sample_size > 0 {
+                other_track.uniform_sample_size
+            } else {
+                let idx = (thumb_sync - 1) as usize;
+                if idx >= other_track.sample_sizes.len() {
+                    continue;
+                }
+                other_track.sample_sizes[idx]
+            };
+
+            let Ok(thumb_offset) = resolve_sample_offset(other_track, thumb_sync, file_len, stop)
+            else {
+                continue;
+            };
+
+            let Some(thumb_end) = thumb_offset.checked_add(thumb_size as u64) else {
+                continue;
+            };
+            if thumb_end > file_len {
+                continue;
+            }
+            return Some((i, thumb_offset, thumb_size));
+        }
+    }
+    None
 }
 
 /// Parse a trak box into a TrackInfo
