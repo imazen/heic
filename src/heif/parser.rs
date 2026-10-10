@@ -447,6 +447,34 @@ impl<'a> HeifContainer<'a> {
 
 /// Parse a HEIF container
 pub fn parse<'a>(data: &'a [u8], stop: &dyn Stop) -> Result<HeifContainer<'a>> {
+    parse_traced(data, stop, &mut None)
+}
+
+/// File range of a box `parse` read: `b.content` borrows from `file`.
+fn box_span(file: &[u8], b: &Box<'_>) -> core::ops::Range<usize> {
+    let content = (b.content.as_ptr() as usize).wrapping_sub(file.as_ptr() as usize);
+    let header = usize::try_from(b.header.size)
+        .unwrap_or(usize::MAX)
+        .saturating_sub(b.content.len());
+    content.saturating_sub(header)..content.saturating_add(b.content.len())
+}
+
+/// Record the box whose parser failed, unless a deeper one already is.
+fn mark_failed(failed: &mut Option<core::ops::Range<usize>>, file: &[u8], b: &Box<'_>) {
+    if failed.is_none() {
+        *failed = Some(box_span(file, b));
+    }
+}
+
+/// [`parse`], reporting in `failed` the file range of the box whose parser
+/// rejected the file when parsing stops partway through the top-level boxes:
+/// a top-level `ftyp` or `meta`, a `meta` child, or an `iprp` child. heic
+/// reads nothing after that box. The structural inventory uses this.
+pub(crate) fn parse_traced<'a>(
+    data: &'a [u8],
+    stop: &dyn Stop,
+    failed: &mut Option<core::ops::Range<usize>>,
+) -> Result<HeifContainer<'a>> {
     let mut container = HeifContainer {
         data,
         brand: FourCC(*b"    "),
@@ -470,9 +498,11 @@ pub fn parse<'a>(data: &'a [u8], stop: &dyn Stop) -> Result<HeifContainer<'a>> {
     for top_box in BoxIterator::new(data) {
         check_stop(stop)?;
         match top_box.box_type() {
-            FourCC::FTYP => parse_ftyp(&top_box, &mut container)?,
+            FourCC::FTYP => parse_ftyp(&top_box, &mut container)
+                .inspect_err(|_| mark_failed(failed, data, &top_box))?,
             FourCC::META => {
-                parse_meta(&top_box, &mut container, stop)?;
+                parse_meta(&top_box, &mut container, stop, failed)
+                    .inspect_err(|_| mark_failed(failed, data, &top_box))?;
                 has_meta = true;
             }
             FourCC::MOOV => {
@@ -554,6 +584,7 @@ fn parse_meta<'a>(
     meta: &Box<'a>,
     container: &mut HeifContainer<'a>,
     stop: &dyn Stop,
+    failed: &mut Option<core::ops::Range<usize>>,
 ) -> Result<()> {
     // Meta is a full box - skip version/flags
     if meta.content.len() < 4 {
@@ -561,22 +592,23 @@ fn parse_meta<'a>(
     }
 
     let content = &meta.content[4..];
+    let file = container.data;
 
     for child in BoxIterator::new(content) {
         check_stop(stop)?;
-        match child.box_type() {
-            FourCC::PITM => parse_pitm(&child, container)?,
-            FourCC::ILOC => {
-                parse_iloc(&child, container, stop)?;
-            }
-            FourCC::IINF => parse_iinf(&child, container, stop)?,
-            FourCC::IPRP => parse_iprp(&child, container, stop)?,
-            FourCC::IREF => parse_iref(&child, container, stop)?,
+        let result = match child.box_type() {
+            FourCC::PITM => parse_pitm(&child, container),
+            FourCC::ILOC => parse_iloc(&child, container, stop).map(|_| ()),
+            FourCC::IINF => parse_iinf(&child, container, stop),
+            FourCC::IPRP => parse_iprp(&child, container, stop, failed),
+            FourCC::IREF => parse_iref(&child, container, stop),
             FourCC::IDAT => {
                 container.idat_data = Some(child.content);
+                Ok(())
             }
-            _ => {} // hdlr, etc.
-        }
+            _ => Ok(()), // hdlr, etc.
+        };
+        result.inspect_err(|_| mark_failed(failed, file, &child))?;
     }
 
     Ok(())
@@ -953,14 +985,21 @@ pub(crate) fn parse_infe(infe: &Box<'_>) -> Result<ItemInfo> {
     })
 }
 
-fn parse_iprp(iprp: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop) -> Result<()> {
+fn parse_iprp(
+    iprp: &Box<'_>,
+    container: &mut HeifContainer<'_>,
+    stop: &dyn Stop,
+    failed: &mut Option<core::ops::Range<usize>>,
+) -> Result<()> {
+    let file = container.data;
     for child in BoxIterator::new(iprp.content) {
         check_stop(stop)?;
-        match child.box_type() {
-            FourCC::IPCO => parse_ipco(&child, container, stop)?,
-            FourCC::IPMA => parse_ipma(&child, container, stop)?,
-            _ => {}
-        }
+        let result = match child.box_type() {
+            FourCC::IPCO => parse_ipco(&child, container, stop),
+            FourCC::IPMA => parse_ipma(&child, container, stop),
+            _ => Ok(()),
+        };
+        result.inspect_err(|_| mark_failed(failed, file, &child))?;
     }
     Ok(())
 }

@@ -115,7 +115,10 @@ pub(crate) fn inventory(
     let mut w = Walker::new(data, stop)?;
     w.walk(None, 0, data.len() as u64, Ctx::Top, 0)?;
 
-    let parsed = match heif::parse(data, stop) {
+    // heic's own parse, which also reports the box where it stops when it
+    // rejects the file partway through.
+    let mut failed = None;
+    let parsed = match heif::parse_traced(data, stop, &mut failed) {
         Ok(c) => Ok(c),
         Err(e) if matches!(e.error(), HeicError::Cancelled(_)) => return Err(e),
         Err(e) => Err(e.error().to_string()),
@@ -135,6 +138,9 @@ pub(crate) fn inventory(
                 .or(if w.nodes.is_empty() { None } else { Some(0) });
             if let Some(t) = target {
                 w.note(t, why);
+            }
+            if let Some(f) = failed {
+                w.unread_after(f.start as u64..f.end as u64);
             }
             w.resolve(None)?;
         }
@@ -974,6 +980,34 @@ impl<'a> Walker<'a> {
             self.walk_counted(Some(id), b.start, b.end, child_ctx, depth + 1, iinf)?;
         }
         Ok(())
+    }
+
+    /// heic rejected the file at the box `failed` (parser.rs `parse` and
+    /// `parse_meta`/`parse_iprp` return at the first child-parser error):
+    /// nothing after it is read, so no part after it is consumed.
+    fn unread_after(&mut self, failed: Range<u64>) {
+        let at = self
+            .nodes
+            .iter()
+            .position(|n| n.range == failed && n.kind != PartKind::Gap);
+        if let Some(i) = at {
+            self.note(
+                i,
+                "heic's parser rejects this box and stops reading the file here",
+            );
+        }
+        let tag = at.map_or_else(|| "a box".to_string(), |i| self.nodes[i].tag.to_string());
+        for i in 0..self.nodes.len() {
+            if self.nodes[i].range.start >= failed.end && self.nodes[i].disp.is_consumed() {
+                self.nodes[i].disp = Disposition::Skipped;
+                self.note_with(i, || {
+                    format!(
+                        "after {tag} at {}, where heic rejects the file; heic never reads it",
+                        failed.start
+                    )
+                });
+            }
+        }
     }
 
     /// heic's treatment of a box type in a context:

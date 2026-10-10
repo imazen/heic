@@ -1515,3 +1515,60 @@ fn many_extents_inventory() {
         t.elapsed()
     );
 }
+
+/// Round 2 (N1, from the round-2 review): parser.rs `parse_meta` returns at
+/// the first child-parser error, so when `parse_iloc` rejects the file (1,025
+/// extents on one item, one past heic's cap) the `iinf`, `iprp`, `ipco` and
+/// `ipma` after the `iloc` are never read. Overwriting the `ipma` payload
+/// leaves decode and probe unchanged (both still reject), so nothing after
+/// the `iloc` may be reported consumed.
+#[test]
+fn r2_boxes_after_a_rejecting_iloc_are_not_read() {
+    let orig = fixture("features/single.heic");
+    let chain = path(&orig, &[(b"meta", 0), (b"iloc", 0)]);
+    let p = chain[1].start + chain[1].hdr;
+    let v = orig[p];
+    let idx_size = if v >= 1 {
+        (orig[p + 5] & 15) as usize
+    } else {
+        0
+    };
+    let e = iloc_exts(&orig).into_iter().find(|e| e.item == 1).unwrap();
+    let entry = idx_size + e.off_size + e.len_size;
+    let mut d = orig.clone();
+    wr(&mut d, e.off_pos - idx_size - 2, 2, 1025);
+    let d = insert(&d, &chain, e.len_pos + e.len_size, &vec![0u8; entry * 1024]);
+    let ipma = path(&d, &[(b"meta", 0), (b"iprp", 0), (b"ipma", 0)])[2];
+    let mut m = d.clone();
+    let body = ipma.start + ipma.hdr..ipma.start + ipma.size;
+    let secret = b"IPMA-SECRET-PII-0123456789";
+    for (i, b) in m[body.clone()].iter_mut().enumerate() {
+        *b = secret[i % secret.len()];
+    }
+    let err = |x: &[u8]| pixels(HeicDecoderConfig::new(), x).unwrap_err();
+    assert_eq!(err(&d), err(&m), "decode unchanged");
+    let probe = |x: &[u8]| {
+        HeicDecoderConfig::new()
+            .job()
+            .probe_full(x)
+            .map(|i| format!("{i:?}"))
+            .map_err(|e| e.to_string())
+    };
+    assert_eq!(probe(&d), probe(&m), "probe_full unchanged");
+    let inv = inv_of(HeicDecoderConfig::new(), &m);
+    let r = body.start as u64..body.end as u64;
+    assert_unconsumed(&inv, r, "ipma payload heic never reads");
+    // Every part after the iloc is unconsumed; the iloc itself is where
+    // heic stops.
+    let iloc_end = path(&m, &[(b"meta", 0), (b"iloc", 0)])[1];
+    let iloc_end = (iloc_end.start + iloc_end.size) as u64;
+    for p in inv.parts() {
+        if p.range.start >= iloc_end {
+            assert!(
+                !p.disposition.is_consumed(),
+                "part after the rejecting iloc reported {}: {p:?}\n{inv}",
+                p.disposition
+            );
+        }
+    }
+}
