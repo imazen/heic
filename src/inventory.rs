@@ -659,7 +659,7 @@ impl<'a> Walker<'a> {
         iinf_left: &mut Option<(u32, u32)>,
     ) -> Result<(), At<HeicError>> {
         let range = pos..h.end;
-        let (disp, mut layout, child_ctx, why) = self.classify(ctx, &h.typ, pos, parent);
+        let (mut disp, mut layout, child_ctx, why) = self.classify(ctx, &h.typ, pos, parent);
         let mut kind = match ctx {
             Ctx::Ipco => PartKind::Property,
             _ => PartKind::Box,
@@ -676,6 +676,12 @@ impl<'a> Walker<'a> {
         if depth >= MAX_DEPTH && layout != Layout::Leaf {
             layout = Layout::Leaf;
             notes.push(format!("nested deeper than {MAX_DEPTH} boxes; not walked"));
+            // Work budget spent: what lies inside is unverified, so it is
+            // not claimed as read (zencodec docs/inventory.md).
+            if disp.is_consumed() {
+                disp = Disposition::Unknown;
+                notes.push("the decoder may read part of it".to_string());
+            }
         }
 
         let content = pos + h.base_header..h.end;
