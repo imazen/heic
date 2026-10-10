@@ -152,6 +152,10 @@ struct Node {
     dropped_notes: usize,
     /// For `mdat`/`idat`: the disposition of body bytes no extent covers.
     gap_fill: Option<Disposition>,
+    /// Sub-ranges the decoder does not read (a tail after the fields its
+    /// parser reads, NAL units it ignores), added as child parts when the
+    /// part ends up consumed.
+    inner: Vec<(Range<u64>, Disposition, String)>,
 }
 
 /// Where a box sits, which decides how heic treats it.
@@ -452,6 +456,7 @@ impl<'a> Walker<'a> {
             notes: Vec::new(),
             dropped_notes: 0,
             gap_fill: None,
+            inner: Vec::new(),
         }
     }
 
@@ -711,6 +716,19 @@ impl<'a> Walker<'a> {
         node.label = label;
         node.notes = notes;
         node.body = body.clone();
+        if layout == Layout::Leaf {
+            let iref_version = parent
+                .and_then(|p| self.nodes.get(p))
+                .and_then(|p| slice(self.data, p.range.clone()).get(8).copied())
+                .unwrap_or(0);
+            node.inner = inner_parts(
+                ctx,
+                &h.typ,
+                content.clone(),
+                slice(self.data, content.clone()),
+                iref_version,
+            );
+        }
         if layout == Layout::Data && body.is_some() {
             node.gap_fill = Some(Disposition::Unreferenced);
         }
@@ -736,6 +754,17 @@ impl<'a> Walker<'a> {
                     }
                 });
                 check_stop(self.stop)?;
+                let entries = entries.map(|(v, read)| {
+                    let read_end = content.start.saturating_add(read as u64);
+                    if read_end < content.end {
+                        self.nodes[id].inner.push((
+                            read_end..content.end,
+                            Disposition::Dropped,
+                            "after the last entry heic's iloc parser reads".to_string(),
+                        ));
+                    }
+                    v
+                });
                 self.ilocs.push(IlocRec { node: id, entries });
             }
             (Ctx::Meta, b"idat") => self.idats.push((id, true)),
@@ -1012,6 +1041,263 @@ fn is_audio_sample_entry(typ: &[u8; 4]) -> bool {
             | b"mhm1"
             | b"enca"
     )
+}
+
+fn be32(c: &[u8], at: usize) -> Option<u64> {
+    let b = c.get(at..at.checked_add(4)?)?;
+    Some(u64::from(u32::from_be_bytes([b[0], b[1], b[2], b[3]])))
+}
+
+/// Bytes of a leaf box's payload that heic never reads, as child parts to add
+/// when the box is consumed. `content` is the payload heic's parsers see
+/// (after the 8- or 16-byte header). Read lengths mirror parser.rs.
+fn inner_parts(
+    ctx: Ctx,
+    typ: &[u8; 4],
+    content: Range<u64>,
+    c: &[u8],
+    iref_version: u8,
+) -> Vec<(Range<u64>, Disposition, String)> {
+    let mut out = Vec::new();
+    let len = c.len();
+    let tail = |out: &mut Vec<(Range<u64>, Disposition, String)>, read: usize, why: &str| {
+        if read < len {
+            out.push((
+                content.start + read as u64..content.end,
+                Disposition::Dropped,
+                why.to_string(),
+            ));
+        }
+    };
+    let moov_used = ctx == Ctx::Moov { used: true };
+    match (ctx, typ) {
+        // `parse_ftyp`: brands in whole 4-byte units, at most 256.
+        (Ctx::Top, b"ftyp") => {
+            let read = 8 + (len.saturating_sub(8) / 4).min(256) * 4;
+            tail(
+                &mut out,
+                read,
+                "not a whole brand, or past the 256 brands heic reads",
+            );
+        }
+        (Ctx::Meta, b"pitm") => {
+            let read = if c.first() == Some(&0) { 6 } else { 8 };
+            tail(&mut out, read, "after the item ID heic's pitm parser reads");
+        }
+        (Ctx::Iprp, b"ipma") => {
+            if let Some(read) = ipma_read_len(c) {
+                tail(
+                    &mut out,
+                    read,
+                    "after the last association heic's ipma parser reads",
+                );
+            }
+        }
+        (Ctx::Iinf, b"infe") => {
+            if let Some(read) = infe_read_len(c) {
+                tail(
+                    &mut out,
+                    read,
+                    "after the name and content type heic reads (content encoding, extensions)",
+                );
+            }
+        }
+        (Ctx::Iref, _) => {
+            let read = iref_entry_read_len(c, iref_version);
+            tail(
+                &mut out,
+                read,
+                "after the last whole reference entry heic parses",
+            );
+        }
+        (Ctx::Ipco, b"ispe") => tail(&mut out, 12, "after the width and height heic reads"),
+        (Ctx::Ipco, b"clap") => tail(&mut out, 32, "after the 8 clap fields heic reads"),
+        (Ctx::Ipco, b"irot" | b"imir") => tail(&mut out, 1, "after the one byte heic reads"),
+        (Ctx::Ipco, b"clli") => tail(&mut out, 4, "after the two light levels heic reads"),
+        (Ctx::Ipco, b"mdcv") => tail(&mut out, 24, "after the 24 bytes heic reads"),
+        (Ctx::Ipco, b"colr") | (Ctx::SampleEntry { used: true }, b"colr") => match c.get(..4) {
+            Some(b"nclx") => tail(&mut out, 11, "after the nclx fields heic reads"),
+            Some(b"prof" | b"ricc") => {
+                // The profile's own header declares its size.
+                if let Some(declared) = be32(c, 4) {
+                    let end = 4u64.saturating_add(declared);
+                    if end < len as u64 {
+                        out.push((
+                            content.start + end..content.end,
+                            Disposition::Unreferenced,
+                            format!(
+                                "after the ICC profile's declared {declared} bytes; heic copies them into ImageInfo with the profile"
+                            ),
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        },
+        (Ctx::Ipco, b"hvcC") | (Ctx::SampleEntry { used: true }, b"hvcC") => {
+            let (read, ignored) = hvcc_layout(c);
+            for (r, nal_type) in ignored {
+                out.push((
+                    content.start + r.start as u64..content.start + r.end as u64,
+                    Disposition::Dropped,
+                    format!(
+                        "NAL unit type {nal_type} in hvcC; heic decodes only VPS/SPS/PPS from it (hevc/mod.rs decode_nal_units)"
+                    ),
+                ));
+            }
+            tail(
+                &mut out,
+                read,
+                "after the NAL arrays heic's hvcC parser reads",
+            );
+        }
+        (Ctx::Moov { .. }, b"tkhd") if moov_used => {
+            let read = if c.first() == Some(&0) { 84 } else { 96 };
+            tail(&mut out, read, "after the fields heic's tkhd parser reads");
+        }
+        (Ctx::Moov { .. }, b"hdlr") if moov_used => {
+            tail(
+                &mut out,
+                12,
+                "reserved fields and handler name: heic reads only the handler type",
+            );
+        }
+        (Ctx::Moov { .. }, b"stsz") if moov_used => {
+            let read = match (be32(c, 4), be32(c, 8)) {
+                (Some(0), Some(n)) => n.saturating_mul(4).saturating_add(12),
+                _ => 12,
+            };
+            tail(
+                &mut out,
+                usize::try_from(read).unwrap_or(usize::MAX),
+                "after the sample sizes heic reads",
+            );
+        }
+        (Ctx::Moov { .. }, b"stco" | b"co64" | b"stsc" | b"stss") if moov_used => {
+            let per: u64 = match typ {
+                b"co64" => 8,
+                b"stsc" => 12,
+                _ => 4,
+            };
+            if let Some(n) = be32(c, 4) {
+                let read = n.saturating_mul(per).saturating_add(8);
+                tail(
+                    &mut out,
+                    usize::try_from(read).unwrap_or(usize::MAX),
+                    "after the entries heic reads",
+                );
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// parser.rs `parse_ipma`: the bytes its entry loop reads.
+fn ipma_read_len(c: &[u8]) -> Option<usize> {
+    let version = *c.first()?;
+    let wide = c.get(3)? & 1 != 0;
+    let count = be32(c, 4)?;
+    let mut pos = 8usize;
+    let id = if version < 1 { 2 } else { 4 };
+    for _ in 0..count {
+        if pos + id > c.len() {
+            break;
+        }
+        pos += id;
+        if pos >= c.len() {
+            break;
+        }
+        let n = c[pos];
+        pos += 1;
+        for _ in 0..n {
+            let w = if wide { 2 } else { 1 };
+            if pos + w > c.len() {
+                break;
+            }
+            pos += w;
+        }
+    }
+    Some(pos)
+}
+
+/// parser.rs `parse_infe`: version/flags, ID, protection index, type, then
+/// the item name and content type up to their NULs.
+fn infe_read_len(c: &[u8]) -> Option<usize> {
+    let version = *c.first()?;
+    let mut pos = match version {
+        0..=1 => 8,
+        2 => 12,
+        _ => 14,
+    };
+    if pos >= c.len() {
+        return Some(pos.min(c.len()));
+    }
+    let name_end = c[pos..].iter().position(|&b| b == 0).unwrap_or(0);
+    pos += name_end + 1;
+    if pos < c.len() {
+        match c[pos..].iter().position(|&b| b == 0) {
+            Some(e) => pos += e + 1,
+            None => pos = c.len(),
+        }
+    }
+    Some(pos.min(c.len()))
+}
+
+/// parser.rs `parse_iref`: one reference box's entries.
+fn iref_entry_read_len(c: &[u8], version: u8) -> usize {
+    let id = if version == 0 { 2 } else { 4 };
+    let mut pos = 0usize;
+    while pos < c.len() {
+        if pos + id > c.len() {
+            break;
+        }
+        pos += id;
+        if pos + 2 > c.len() {
+            break;
+        }
+        let n = u16::from_be_bytes([c[pos], c[pos + 1]]);
+        pos += 2;
+        for _ in 0..n {
+            if pos + id > c.len() {
+                break;
+            }
+            pos += id;
+        }
+    }
+    pos
+}
+
+/// parser.rs `parse_hvcc`: the bytes its array loop reads, and the NAL units
+/// (length prefix included) whose type heic's decoder ignores.
+fn hvcc_layout(c: &[u8]) -> (usize, Vec<(Range<usize>, u8)>) {
+    let mut ignored = Vec::new();
+    let Some(&num_arrays) = c.get(22) else {
+        return (c.len(), ignored);
+    };
+    let mut pos = 23usize;
+    for _ in 0..num_arrays {
+        if pos + 3 > c.len() {
+            break;
+        }
+        let nal_type = c[pos] & 0x3F;
+        let n = u16::from_be_bytes([c[pos + 1], c[pos + 2]]);
+        pos += 3;
+        for _ in 0..n {
+            if pos + 2 > c.len() {
+                break;
+            }
+            let l = usize::from(u16::from_be_bytes([c[pos], c[pos + 1]]));
+            if pos + 2 + l > c.len() {
+                break;
+            }
+            if !matches!(nal_type, 32..=34) && ignored.len() < MAX_NOTES {
+                ignored.push((pos..pos + 2 + l, nal_type));
+            }
+            pos += 2 + l;
+        }
+    }
+    (pos, ignored)
 }
 
 /// `"VPS×1, SPS×1, PPS×1, SEI(prefix)×1"` for an `hvcC` payload.
@@ -1299,7 +1585,11 @@ impl Model {
             m.set_item(id, d, why);
         }
         // Exif items `extract_exif_from_container` cannot use.
-        for info in c.item_infos.iter().filter(|i| i.item_type == FourCC(*b"Exif")) {
+        for info in c
+            .item_infos
+            .iter()
+            .filter(|i| i.item_type == FourCC(*b"Exif"))
+        {
             if !exif_usable(c, info.item_id) {
                 m.set_item(
                     info.item_id,
@@ -2115,9 +2405,23 @@ impl Walker<'_> {
                 node.label = cand.label;
                 node.notes.push(format!("extent {}/{}", cand.k, cand.n));
                 node.notes.push(cand.why);
+                if cand.disp == Disposition::ImageData {
+                    node.notes.push(
+                        "coded-unit framing inside is not walked yet: bytes after the last NAL/OBU unit are not distinguished"
+                            .to_string(),
+                    );
+                }
                 self.add(node)?;
             }
         }
+
+        let tmap_ids: BTreeSet<u32> = declared
+            .iter()
+            .filter(|(_, (_, info))| info.item_type == FourCC(*b"tmap"))
+            .map(|(&id, _)| id)
+            .collect();
+        self.split_metadata_extents(&tmap_ids);
+        self.add_inner_parts()?;
 
         if !self.moovs.is_empty() {
             for m in self.mdats.clone() {
@@ -2131,6 +2435,99 @@ impl Walker<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Child parts for bytes inside consumed leaves that heic never reads.
+    fn add_inner_parts(&mut self) -> Result<(), At<HeicError>> {
+        let mut has_child = vec![false; self.nodes.len()];
+        for n in &self.nodes {
+            if let Some(p) = n.parent {
+                has_child[p] = true;
+            }
+        }
+        for (i, &has_children) in has_child.iter().enumerate() {
+            // A part with a body gets inner parts only when they tile it
+            // (the EXIF split); other containers are never split here.
+            if self.nodes[i].inner.is_empty() || !self.nodes[i].disp.is_consumed() || has_children {
+                continue;
+            }
+            let inner = core::mem::take(&mut self.nodes[i].inner);
+            for (r, d, why) in inner {
+                let mut n = Self::leaf(Some(i), PartKind::Gap, PartTag::None, r, d);
+                n.notes.push(why);
+                self.add(n)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Split metadata extents at their internal ends: the EXIF offset field
+    /// and the bytes it skips, the XMP packet trailer, the ISO 21496-1 payload
+    /// length. Only single-extent items are split.
+    fn split_metadata_extents(&mut self, tmap_ids: &BTreeSet<u32>) {
+        for i in 0..self.nodes.len() {
+            let n = &self.nodes[i];
+            if n.kind != PartKind::Extent || n.notes.first().is_none_or(|e| e != "extent 1/1") {
+                continue;
+            }
+            let r = n.range.clone();
+            let d = slice(self.data, r.clone());
+            let mut parts: Vec<(Range<u64>, Disposition, String)> = Vec::new();
+            match n.disp {
+                // codec.rs `extract_exif_from_container`: reports the bytes
+                // from 4 + offset on.
+                Disposition::Metadata(MetadataKind::Exif) => {
+                    let Some(off) = be32(d, 0) else { continue };
+                    let tiff = 4u64.saturating_add(off);
+                    if tiff >= d.len() as u64 {
+                        continue;
+                    }
+                    parts.push((
+                        r.start..r.start + 4,
+                        Disposition::Structure,
+                        "exif_tiff_header_offset".to_string(),
+                    ));
+                    if off > 0 {
+                        parts.push((
+                            r.start + 4..r.start + tiff,
+                            Disposition::Dropped,
+                            "bytes the TIFF-header offset skips".to_string(),
+                        ));
+                    }
+                    parts.push((
+                        r.start + tiff..r.end,
+                        Disposition::Metadata(MetadataKind::Exif),
+                        "TIFF data, reported in ImageInfo".to_string(),
+                    ));
+                    self.nodes[i].body = Some(r.clone());
+                }
+                Disposition::Metadata(MetadataKind::Xmp) => {
+                    if let Some(end) = xmp_packet_end(d)
+                        && (end as u64) < d.len() as u64
+                    {
+                        parts.push((
+                            r.start + end as u64..r.end,
+                            Disposition::Unreferenced,
+                            "after the XMP packet trailer; reported with the packet".to_string(),
+                        ));
+                    }
+                }
+                Disposition::Metadata(MetadataKind::GainMap) => {
+                    if matches!(&self.nodes[i].tag, PartTag::Code(id) if tmap_ids.contains(id))
+                        && let Some(end) = iso21496_avif_len(d)
+                        && end < d.len()
+                    {
+                        parts.push((
+                            r.start + end as u64..r.end,
+                            Disposition::Dropped,
+                            "after the ISO 21496-1 gain-map metadata".to_string(),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+            self.nodes[i].inner.extend(parts);
+        }
     }
 
     fn emit(self) -> Result<Inventory, At<HeicError>> {
@@ -2169,4 +2566,27 @@ impl Walker<'_> {
         inv.fill_gaps(None, Disposition::Trailing).map_err(cap)?;
         Ok(inv)
     }
+}
+
+/// End of an XMP packet: just past `?>` of the `<?xpacket end=…?>` trailer.
+fn xmp_packet_end(d: &[u8]) -> Option<usize> {
+    let marker = b"<?xpacket end=";
+    let at = d.windows(marker.len()).rposition(|w| w == marker)?;
+    let close = d[at..].windows(2).position(|w| w == b"?>")?;
+    Some(at + close + 2)
+}
+
+/// Length of an ISO 21496-1 payload in the AVIF `tmap` form (version byte
+/// first), as zencodec's `parse_iso21496_fmt(.., AvifTmap)` reads it.
+fn iso21496_avif_len(d: &[u8]) -> Option<usize> {
+    // version(1) minimum_version(2) writer_version(2) flags(1)
+    let flags = *d.get(5)?;
+    let channels = if flags & 0x80 != 0 { 3 } else { 1 };
+    let common_denominator = flags & 0x08 != 0;
+    let body = if common_denominator {
+        4 + 8 + 20 * channels
+    } else {
+        16 + 40 * channels
+    };
+    Some(6 + body)
 }

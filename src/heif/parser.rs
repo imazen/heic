@@ -566,7 +566,9 @@ fn parse_meta<'a>(
         check_stop(stop)?;
         match child.box_type() {
             FourCC::PITM => parse_pitm(&child, container)?,
-            FourCC::ILOC => parse_iloc(&child, container, stop)?,
+            FourCC::ILOC => {
+                parse_iloc(&child, container, stop)?;
+            }
             FourCC::IINF => parse_iinf(&child, container, stop)?,
             FourCC::IPRP => parse_iprp(&child, container, stop)?,
             FourCC::IREF => parse_iref(&child, container, stop)?,
@@ -603,7 +605,8 @@ fn parse_pitm(pitm: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
     Ok(())
 }
 
-fn parse_iloc(iloc: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop) -> Result<()> {
+/// Returns how many content bytes the parse read.
+fn parse_iloc(iloc: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop) -> Result<usize> {
     let content = iloc.content;
     if content.len() < 8 {
         return Err(at!(HeicError::InvalidContainer("iloc too short")));
@@ -732,13 +735,14 @@ fn parse_iloc(iloc: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop
         });
     }
 
-    Ok(())
+    Ok(pos)
 }
 
 /// The item locations one `iloc` box declares, parsed exactly as [`parse`]
-/// parses them (same truncation and limit behaviour). Used by the structural
+/// parses them (same truncation and limit behaviour), and how many content
+/// bytes that parse read. Used by the structural
 /// inventory, which places each extent without re-implementing `iloc`.
-pub(crate) fn iloc_entries(iloc: &Box<'_>, stop: &dyn Stop) -> Result<Vec<ItemLocation>> {
+pub(crate) fn iloc_entries(iloc: &Box<'_>, stop: &dyn Stop) -> Result<(Vec<ItemLocation>, usize)> {
     let mut scratch = HeifContainer {
         data: &[],
         brand: FourCC(*b"    "),
@@ -753,8 +757,8 @@ pub(crate) fn iloc_entries(iloc: &Box<'_>, stop: &dyn Stop) -> Result<Vec<ItemLo
         mdat_offset: None,
         mdat_length: None,
     };
-    parse_iloc(iloc, &mut scratch, stop)?;
-    Ok(scratch.item_locations)
+    let read = parse_iloc(iloc, &mut scratch, stop)?;
+    Ok((scratch.item_locations, read))
 }
 
 fn read_sized_int(data: &[u8], pos: &mut usize, size: usize) -> u64 {

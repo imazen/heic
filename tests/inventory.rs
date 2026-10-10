@@ -168,10 +168,23 @@ fn reported_metadata_matches_probe_full() {
             continue;
         };
         let inv = inventory_of(HeicDecoderConfig::new(), &data);
+        // EXIF: the leaf (a split extent's TIFF child is what is reported).
+        // XMP and ICC: the whole extent or property, trailer included.
+        let mut has_child = vec![false; inv.parts().len()];
+        for p in inv.parts() {
+            if let Some(q) = p.parent {
+                has_child[q.index()] = true;
+            }
+        }
         let of_kind = |k: MetadataKind| -> Vec<&Part> {
             inv.parts()
                 .iter()
-                .filter(|p| p.disposition == Disposition::Metadata(k))
+                .enumerate()
+                .filter(|(i, p)| {
+                    p.disposition == Disposition::Metadata(k)
+                        && (k != MetadataKind::Exif || !has_child[*i])
+                })
+                .map(|(_, p)| p)
                 .collect()
         };
         let name = path.display();
@@ -179,10 +192,13 @@ fn reported_metadata_matches_probe_full() {
         let exif = of_kind(MetadataKind::Exif);
         match &info.embedded_metadata.exif {
             Some(want) => {
-                assert_eq!(exif.len(), 1, "{name}: one EXIF extent expected\n{inv}");
-                let got = bytes(&data, exif[0]);
-                let off = u32::from_be_bytes([got[0], got[1], got[2], got[3]]) as usize;
-                assert_eq!(&got[4 + off..], &want[..], "{name}: EXIF bytes differ");
+                assert_eq!(exif.len(), 1, "{name}: one EXIF part expected\n{inv}");
+                // The TIFF child of a split extent is exactly what is reported.
+                assert_eq!(
+                    bytes(&data, exif[0]),
+                    &want[..],
+                    "{name}: EXIF bytes differ\n{inv}"
+                );
                 checked[0] += 1;
             }
             None => assert!(
@@ -351,12 +367,14 @@ fn synthetic_heic() -> Vec<u8> {
             iref_entry(b"zRef", 5, &[1]),
         ]),
     );
-    // hvcC: 23 fixed bytes, lengthSizeMinusOne = 3, one empty PPS array.
+    // hvcC: 23 fixed bytes, lengthSizeMinusOne = 3, an empty PPS array and a
+    // prefix-SEI array (heic ignores SEI) holding one 4-byte NAL unit.
     let mut hvcc = vec![
         1u8, 1, 0x60, 0, 0, 0, 0x90, 0, 0, 0, 0, 0, 60, 0xF0, 0, 0xFC, 0xFD, 0xF8, 0xF8, 0, 0,
-        0x0F, 1,
+        0x0F, 2,
     ];
     hvcc.extend_from_slice(&[0x22, 0, 0]);
+    hvcc.extend_from_slice(&[0x27, 0, 1, 0, 4, 0x4E, 0x01, 0x05, 0x80]);
     let ipco = bx(
         b"ipco",
         &cat(&[
@@ -365,7 +383,11 @@ fn synthetic_heic() -> Vec<u8> {
                 b"ispe",
                 0,
                 0,
-                &cat(&[64u32.to_be_bytes().to_vec(), 64u32.to_be_bytes().to_vec()]),
+                &cat(&[
+                    64u32.to_be_bytes().to_vec(),
+                    64u32.to_be_bytes().to_vec(),
+                    b"xyz".to_vec(), // 3 bytes heic never reads
+                ]),
             ), // 2
             bx(b"colr", b"nclx\0\x01\0\x0d\0\x06\x80"), // 3
             bx(b"colr", b"rICCfake-icc-profile"), // 4
@@ -380,16 +402,27 @@ fn synthetic_heic() -> Vec<u8> {
                 0,
                 &cat(&[16u32.to_be_bytes().to_vec(), 16u32.to_be_bytes().to_vec()]),
             ), // 10
+            // 11: an ICC profile declaring 20 bytes, followed by 5 more.
+            bx(
+                b"colr",
+                &cat(&[
+                    b"prof".to_vec(),
+                    20u32.to_be_bytes().to_vec(),
+                    b"sixteen-icc-body".to_vec(),
+                    b"after".to_vec(),
+                ]),
+            ),
         ]),
     );
-    // item 1: hvcC, ispe, colr nclx, colr rICC, irot, pixi, clli; item 7: hvcC, ispe 16.
+    // item 1: hvcC, ispe, colr nclx, colr rICC, irot, pixi, clli, colr prof
+    // (the later colr supersedes the nclx); item 7: hvcC, ispe 16.
     let ipma = full(
         b"ipma",
         0,
         0,
         &cat(&[
             2u32.to_be_bytes().to_vec(),
-            vec![0, 1, 7, 0x81, 2, 3, 4, 0x85, 6, 8],
+            vec![0, 1, 8, 0x81, 2, 3, 4, 0x85, 6, 8, 11],
             vec![0, 7, 2, 0x81, 10],
         ]),
     );
@@ -420,8 +453,10 @@ fn synthetic_heic() -> Vec<u8> {
     // mdat payload.
     let primary = b"PRIMARY-HEVC-SLICE-DATA".to_vec();
     let slack = b"slack".to_vec();
-    let exif = b"\0\0\0\0MM\0*\0\0\0\x08\0\0".to_vec();
-    let xmp = b"<x:xmpmeta>synthetic</x:xmpmeta>".to_vec();
+    // EXIF with a 2-byte gap before its TIFF header; XMP with bytes after
+    // its packet trailer.
+    let exif = b"\0\0\0\x02PPMM\0*\0\0\0\x08\0\0".to_vec();
+    let xmp = b"<?xpacket begin?><x:xmpmeta/><?xpacket end=\"w\"?>TAIL".to_vec();
     let notes = b"free text!".to_vec();
     let private = b"PRIVATE!".to_vec();
     let thumb = b"THUMB-HEVC".to_vec();
@@ -531,7 +566,7 @@ fn synthetic_fixture_part_list_is_pinned() {
 
 const EXPECTED_SYNTHETIC: &str = "
 box ftyp 0..24 structure \"heic\"
-box meta 24..878 structure
+box meta 24..928 structure
   box hdlr 36..69 skipped \"pict\"
   box dinf 69..105 skipped
     box dref 77..105 skipped
@@ -550,36 +585,44 @@ box meta 24..878 structure
     box cdsc 494..508 dropped
     box thmb 508..522 dropped
     box zRef 522..536 dropped
-  box iprp 536..797 structure
-    box ipco 544..766 structure
-      property hvcC 552..586 structure
-      property ispe 586..606 structure
-      property colr 606..625 metadata(cicp) \"nclx\"
-      property colr 625..653 unknown \"rICC\"
-      property irot 653..662 metadata(orientation)
-      property pixi 662..678 unknown
-      property zPrv 678..702 unknown
-      property clli 702..714 metadata(hdr-static)
-      property uuid 714..746 unknown \"30313233-3435-3637-3839-616263646566\"
-      property ispe 746..766 skipped
-    box ipma 766..797 structure
-  box idat 797..816 structure
-    extent 0x6 805..813 skipped \"grid\"
-    gap - 813..816 unreferenced
-  box grpl 816..852 skipped
-    box altr 824..852 skipped
-  box zMet 852..878 unknown
-box free 878..903 padding
-box uuid 903..942 unknown \"be7acfcb-97a9-42e8-9c71-999491e3afac\"
-box mdat 942..1052 structure
-  extent 0x1 950..973 image-data \"Primary\"
-  gap - 973..978 unreferenced
-  extent 0x2 978..992 metadata(exif) \"Exif\"
-  extent 0x3 992..1024 metadata(xmp) \"XMP\"
-  extent 0x4 1024..1034 skipped \"notes\"
-  extent 0x5 1034..1042 unknown \"private\"
-  extent 0x7 1042..1052 skipped \"Thumb\"
-gap - 1052..1059 trailing
+  box iprp 536..847 structure
+    box ipco 544..815 structure
+      property hvcC 552..595 structure
+        gap - 589..595 dropped
+      property ispe 595..618 structure
+        gap - 615..618 dropped
+      property colr 618..637 dropped \"nclx\"
+      property colr 637..665 unknown \"rICC\"
+      property irot 665..674 metadata(orientation)
+      property pixi 674..690 unknown
+      property zPrv 690..714 unknown
+      property clli 714..726 metadata(hdr-static)
+      property uuid 726..758 unknown \"30313233-3435-3637-3839-616263646566\"
+      property ispe 758..778 skipped
+      property colr 778..815 metadata(icc) \"prof\"
+        gap - 810..815 unreferenced
+    box ipma 815..847 structure
+  box idat 847..866 structure
+    extent 0x6 855..863 skipped \"grid\"
+    gap - 863..866 unreferenced
+  box grpl 866..902 skipped
+    box altr 874..902 skipped
+  box zMet 902..928 unknown
+box free 928..953 padding
+box uuid 953..992 unknown \"be7acfcb-97a9-42e8-9c71-999491e3afac\"
+box mdat 992..1124 structure
+  extent 0x1 1000..1023 image-data \"Primary\"
+  gap - 1023..1028 unreferenced
+  extent 0x2 1028..1044 metadata(exif) \"Exif\"
+    gap - 1028..1032 structure
+    gap - 1032..1034 dropped
+    gap - 1034..1044 metadata(exif)
+  extent 0x3 1044..1096 metadata(xmp) \"XMP\"
+    gap - 1092..1096 unreferenced
+  extent 0x4 1096..1106 skipped \"notes\"
+  extent 0x5 1106..1114 unknown \"private\"
+  extent 0x7 1114..1124 skipped \"Thumb\"
+gap - 1124..1131 trailing
 ";
 
 // ── Caller-gated corpus and oracle runs ─────────────────────────────────────

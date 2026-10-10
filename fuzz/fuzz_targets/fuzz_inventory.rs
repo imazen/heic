@@ -4,10 +4,10 @@ use heic::HeicDecoderConfig;
 use libfuzzer_sys::fuzz_target;
 use zencodec::decode::{DecodeJob, DecoderConfig};
 
-/// Structural inventory fuzzer: `DecodeJob::inventory` must never panic, and
-/// every inventory it returns must cover the input exactly and pass
-/// `Inventory::validate`. The first byte also toggles the job options that
-/// change dispositions (gain-map and depth extraction).
+// Structural inventory fuzzer: `DecodeJob::inventory` must never panic, and
+// every inventory it returns must cover the input exactly and pass
+// `Inventory::validate`. The first byte also toggles the job options that
+// change dispositions (gain-map and depth extraction).
 fuzz_target!(|data: &[u8]| {
     let flags = data.first().copied().unwrap_or(0);
     let config = HeicDecoderConfig::new()
