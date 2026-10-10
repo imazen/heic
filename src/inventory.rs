@@ -144,24 +144,76 @@ pub(crate) fn inventory(
 
 // ── Box walk ─────────────────────────────────────────────────────────────
 
-/// One part, before it is pushed into the [`Inventory`].
+/// One part, before it is pushed into the [`Inventory`]. Kept small (a
+/// file of tiny boxes holds up to zencodec's part cap of them while the
+/// `Inventory` is built): the fields few parts use live in [`Extra`].
 struct Node {
-    parent: Option<usize>,
+    /// Parent node, or [`NO_PARENT`].
+    parent: u32,
     kind: PartKind,
-    tag: PartTag,
-    label: Option<String>,
-    range: Range<u64>,
-    body: Option<Range<u64>>,
     disp: Disposition,
-    notes: Vec<String>,
-    dropped_notes: usize,
     /// For `mdat`/`idat`: the disposition of body bytes no extent covers.
     gap_fill: Option<Disposition>,
+    tag: PartTag,
+    range: Range<u64>,
+    x: Option<alloc::boxed::Box<Extra>>,
+}
+
+const NO_PARENT: u32 = u32::MAX;
+
+#[derive(Default)]
+struct Extra {
+    label: Option<String>,
+    body: Option<Range<u64>>,
+    notes: Vec<String>,
+    dropped_notes: usize,
     /// Sub-ranges past an internal end (a tail after the fields its parser
     /// reads, bytes past a declared size), added as child parts when the
     /// part ends up consumed. `None`: the bytes still reach the caller with
     /// the part, so the child takes the part's disposition.
     inner: Vec<Inner>,
+}
+
+impl Node {
+    fn parent(&self) -> Option<usize> {
+        (self.parent != NO_PARENT).then_some(self.parent as usize)
+    }
+
+    fn x(&mut self) -> &mut Extra {
+        self.x.get_or_insert_with(Default::default)
+    }
+
+    fn label(&self) -> Option<&String> {
+        self.x.as_ref()?.label.as_ref()
+    }
+
+    fn set_label(&mut self, label: Option<String>) {
+        if label.is_some() || self.x.is_some() {
+            self.x().label = label;
+        }
+    }
+
+    fn body(&self) -> Option<&Range<u64>> {
+        self.x.as_ref()?.body.as_ref()
+    }
+
+    fn has_inner(&self) -> bool {
+        self.x.as_ref().is_some_and(|x| !x.inner.is_empty())
+    }
+
+    fn take_inner(&mut self) -> Vec<Inner> {
+        self.x
+            .as_mut()
+            .map(|x| core::mem::take(&mut x.inner))
+            .unwrap_or_default()
+    }
+
+    /// Drop the remark `text`, wherever it is.
+    fn unnote(&mut self, text: &str) {
+        if let Some(x) = self.x.as_mut() {
+            x.notes.retain(|n| n != text);
+        }
+    }
 }
 
 /// A child range of a consumed leaf: `(range, disposition, remark)`, with
@@ -497,10 +549,11 @@ impl<'a> Walker<'a> {
 
     fn note(&mut self, node: usize, note: impl Into<String>) {
         if let Some(n) = self.nodes.get_mut(node) {
-            if n.notes.len() < MAX_NOTES {
-                n.notes.push(note.into());
+            let x = n.x();
+            if x.notes.len() < MAX_NOTES {
+                x.notes.push(note.into());
             } else {
-                n.dropped_notes += 1;
+                x.dropped_notes += 1;
             }
         }
     }
@@ -513,17 +566,13 @@ impl<'a> Walker<'a> {
         disp: Disposition,
     ) -> Node {
         Node {
-            parent,
+            parent: parent.map_or(NO_PARENT, |p| p as u32),
             kind,
-            tag,
-            label: None,
-            range,
-            body: None,
             disp,
-            notes: Vec::new(),
-            dropped_notes: 0,
             gap_fill: None,
-            inner: Vec::new(),
+            tag,
+            range,
+            x: None,
         }
     }
 
@@ -540,7 +589,7 @@ impl<'a> Walker<'a> {
             PartKind::Box
         };
         let mut n = Self::leaf(parent, kind, tag, range, Disposition::Malformed);
-        n.notes.push(why);
+        n.x().notes.push(why);
         self.add(n)?;
         Ok(())
     }
@@ -611,12 +660,12 @@ impl<'a> Walker<'a> {
                         pos..end,
                         Disposition::Malformed,
                     );
-                    n.notes.push(format!(
+                    n.x().notes.push(format!(
                         "declares {declared} bytes, the file has {} left; heic stops reading boxes here, but reads item extents inside it (the body is clipped to the end of the file)",
                         end - pos
                     ));
                     if pos + header <= end {
-                        n.body = Some(pos + header..end);
+                        n.x().body = Some(pos + header..end);
                         n.gap_fill = Some(Disposition::Unreferenced);
                     }
                     let id = self.add(n)?;
@@ -815,9 +864,13 @@ impl<'a> Walker<'a> {
         };
 
         let mut node = Self::leaf(parent, kind, tag, range, disp);
-        node.label = label;
-        node.notes = notes;
-        node.body = body.clone();
+        node.set_label(label);
+        if !notes.is_empty() {
+            node.x().notes = notes;
+        }
+        if let Some(b) = body.clone() {
+            node.x().body = Some(b);
+        }
         // The `iref` version byte follows the parent's box header (8 or 16
         // bytes); it sets the item ID width of every reference entry.
         let iref_version = match (ctx, parent.and_then(|p| self.nodes.get(p))) {
@@ -831,13 +884,16 @@ impl<'a> Walker<'a> {
             _ => 0,
         };
         if layout == Layout::Leaf {
-            node.inner = inner_parts(
+            let inner = inner_parts(
                 ctx,
                 &h.typ,
                 content.clone(),
                 slice(self.data, content.clone()),
                 iref_version,
             );
+            if !inner.is_empty() {
+                node.x().inner = inner;
+            }
         }
         if layout == Layout::Data && body.is_some() {
             node.gap_fill = Some(Disposition::Unreferenced);
@@ -878,12 +934,12 @@ impl<'a> Walker<'a> {
                     })
                     .flatten();
                 if let Some(ct) = colour_type {
-                    self.nodes[id].label = Some(fourcc_str(&ct));
+                    self.nodes[id].set_label(Some(fourcc_str(&ct)));
                 }
                 if typ == b"auxC"
                     && let ItemProperty::AuxiliaryType(a) = &prop
                 {
-                    self.nodes[id].label = label_from(a.aux_type.as_bytes());
+                    self.nodes[id].set_label(label_from(a.aux_type.as_bytes()));
                 }
                 if typ == b"hvcC" {
                     let nals = hvcc_nal_summary(slice(self.data, content.clone()));
@@ -2447,7 +2503,7 @@ impl Kids {
         let mut start = vec![0u32; n + 1];
         let mut top = Vec::new();
         for (i, node) in nodes.iter().enumerate() {
-            match node.parent {
+            match node.parent() {
                 Some(p) => start[p + 1] += 1,
                 None => top.push(i as u32),
             }
@@ -2458,7 +2514,7 @@ impl Kids {
         let mut cursor = start.clone();
         let mut list = vec![0u32; start[n] as usize];
         for (i, node) in nodes.iter().enumerate() {
-            if let Some(p) = node.parent {
+            if let Some(p) = node.parent() {
                 list[cursor[p] as usize] = i as u32;
                 cursor[p] += 1;
             }
@@ -2603,10 +2659,11 @@ impl Walker<'_> {
     /// A remark built only when the part has room for it.
     fn note_with(&mut self, node: usize, f: impl FnOnce() -> String) {
         if let Some(n) = self.nodes.get_mut(node) {
-            if n.notes.len() < MAX_NOTES {
-                n.notes.push(f());
+            let x = n.x();
+            if x.notes.len() < MAX_NOTES {
+                x.notes.push(f());
             } else {
-                n.dropped_notes += 1;
+                x.dropped_notes += 1;
             }
         }
     }
@@ -2640,14 +2697,14 @@ impl Walker<'_> {
                 Some(n) if r.end <= self.nodes[n].range.end => {
                     let node = &self.nodes[n];
                     if node.gap_fill.is_some() {
-                        let body = node.body.as_ref()?;
+                        let body = node.body()?;
                         let allowed = method == 0 || Some(n) == active_idat;
                         return (allowed && body.start <= r.start && r.end <= body.end)
                             .then_some(Host::Node(n));
                     }
                     let ks = kids.of(n);
                     if ks.is_empty() {
-                        return node.body.is_none().then_some(Host::Node(n));
+                        return node.body().is_none().then_some(Host::Node(n));
                     }
                     level = ks;
                     host = Host::Node(n);
@@ -2663,7 +2720,7 @@ impl Walker<'_> {
                     }
                     return match host {
                         Host::Top => Some(Host::Top),
-                        Host::Node(h) => self.nodes[h].body.is_none().then_some(Host::Node(h)),
+                        Host::Node(h) => self.nodes[h].body().is_none().then_some(Host::Node(h)),
                     };
                 }
             }
@@ -2707,7 +2764,7 @@ impl Walker<'_> {
             } else if let alloc::collections::btree_map::Entry::Vacant(slot) =
                 declared.entry(info.item_id)
             {
-                slot.insert((self.nodes[rec.node].label.clone(), info.clone()));
+                slot.insert((self.nodes[rec.node].label().cloned(), info.clone()));
                 let u = item_use(info.item_id, Some(info));
                 if u.disp.is_consumed() {
                     (Disposition::Structure, u.why)
@@ -2923,7 +2980,7 @@ impl Walker<'_> {
                                 Disposition::Dropped,
                                 "auxC subtype: heic matches only the URN".to_string(),
                             ));
-                        self.nodes[rec.node].inner.push((
+                        self.nodes[rec.node].x().inner.push((
                             content.start + urn_end..content.end,
                             Some(d),
                             why,
@@ -3014,7 +3071,7 @@ impl Walker<'_> {
                 self.note(n, "superseded: heic reads only the last idat");
             }
         }
-        let active_idat_body = active_idat.and_then(|n| self.nodes[n].body.clone());
+        let active_idat_body = active_idat.and_then(|n| self.nodes[n].body().cloned());
 
         // Extents.
         let file_len = self.data.len() as u64;
@@ -3049,7 +3106,7 @@ impl Walker<'_> {
                 Ok((locs, read)) => {
                     let read_end = rec.content.start.saturating_add(read as u64);
                     if read_end < rec.content.end {
-                        self.nodes[rec.node].inner.push((
+                        self.nodes[rec.node].x().inner.push((
                             read_end..rec.content.end,
                             Some(Disposition::Dropped),
                             "after the last entry heic's iloc parser reads".to_string(),
@@ -3269,28 +3326,28 @@ impl Walker<'_> {
                     r.clone(),
                     cand.disp,
                 );
-                node.label = cand.label.clone();
-                node.notes.push(format!("extent {}/{}", cand.k, cand.n));
+                node.set_label(cand.label.clone());
+                node.x().notes.push(format!("extent {}/{}", cand.k, cand.n));
                 if !whole {
-                    node.notes.push(format!(
+                    node.x().notes.push(format!(
                         "bytes {}..{} of this extent at {}..{}: it overlaps another extent, and the bytes they share are listed once, under the higher-ranked use",
                         r.start, r.end, cand.range.start, cand.range.end
                     ));
                 }
-                node.notes.push(cand.why.clone());
+                node.x().notes.push(cand.why.clone());
                 match outside {
-                    Some(h) => node.notes.push(format!(
+                    Some(h) => node.x().notes.push(format!(
                         "outside every mdat/idat, inside {} at {}; heic reads item data at absolute offsets (parser.rs get_item_data)",
                         self.nodes[h].tag, self.nodes[h].range.start
                     )),
-                    None if parent.is_none() => node.notes.push(
+                    None if parent.is_none() => node.x().notes.push(
                         "between top-level boxes, outside every mdat/idat; heic reads item data at absolute offsets (parser.rs get_item_data)"
                             .to_string(),
                     ),
                     None => {}
                 }
                 if whole && cand.disp == Disposition::ImageData {
-                    node.notes.push(NOT_WALKED.to_string());
+                    node.x().notes.push(NOT_WALKED.to_string());
                 }
                 let at = self.add(node)?;
                 if whole && cand.first_entry && cand.disp.is_consumed() {
@@ -3331,7 +3388,7 @@ impl Walker<'_> {
 
         if !self.moovs.is_empty() {
             for m in self.mdats.clone() {
-                if self.nodes[m].body.is_some() {
+                if self.nodes[m].body().is_some() {
                     self.nodes[m].gap_fill = Some(Disposition::Skipped);
                     self.note(
                         m,
@@ -3347,18 +3404,18 @@ impl Walker<'_> {
     fn add_inner_parts(&mut self) -> Result<(), At<HeicError>> {
         let mut has_child = vec![false; self.nodes.len()];
         for n in &self.nodes {
-            if let Some(p) = n.parent {
+            if let Some(p) = n.parent() {
                 has_child[p] = true;
             }
         }
         for (i, &has_children) in has_child.iter().enumerate() {
             // A part with a body gets inner parts only when they tile it
             // (the EXIF split); other containers are never split here.
-            if self.nodes[i].inner.is_empty() || !self.nodes[i].disp.is_consumed() || has_children {
+            if !self.nodes[i].has_inner() || !self.nodes[i].disp.is_consumed() || has_children {
                 continue;
             }
             let parent_disp = self.nodes[i].disp;
-            let inner = core::mem::take(&mut self.nodes[i].inner);
+            let inner = self.nodes[i].take_inner();
             for (r, d, why) in inner {
                 let mut n = Self::leaf(
                     Some(i),
@@ -3367,7 +3424,7 @@ impl Walker<'_> {
                     r,
                     d.unwrap_or(parent_disp),
                 );
-                n.notes.push(why);
+                n.x().notes.push(why);
                 self.add(n)?;
             }
         }
@@ -3501,7 +3558,7 @@ impl Walker<'_> {
                     let (a, b) = (r.start.max(at), r.end.min(e));
                     if a < b {
                         let file = self.nodes[n].range.start;
-                        self.nodes[n].inner.push((
+                        self.nodes[n].x().inner.push((
                             file + (a - at)..file + (b - at),
                             d,
                             why.clone(),
@@ -3511,7 +3568,7 @@ impl Walker<'_> {
             }
             if tile {
                 for &(n, _) in &spans {
-                    self.nodes[n].body = Some(self.nodes[n].range.clone());
+                    self.nodes[n].x().body = Some(self.nodes[n].range.clone());
                 }
             }
         }
@@ -3554,7 +3611,7 @@ impl Walker<'_> {
                 };
                 let unwalked = |w: &mut Self, why: &str| {
                     for &n in &nodes {
-                        w.nodes[n].notes.retain(|x| x != NOT_WALKED);
+                        w.nodes[n].unnote(NOT_WALKED);
                         w.note(n, why);
                     }
                 };
@@ -3613,7 +3670,7 @@ impl Walker<'_> {
                     }
                     _ => {
                         for &n in &nodes {
-                            self.nodes[n].notes.retain(|x| x != NOT_WALKED);
+                            self.nodes[n].unnote(NOT_WALKED);
                         }
                         continue;
                     }
@@ -3635,8 +3692,8 @@ impl Walker<'_> {
                     let r = self.nodes[n].range.clone();
                     spans.push((n, at, r.start));
                     at += (r.end - r.start) as usize;
-                    self.nodes[n].body = Some(r);
-                    self.nodes[n].notes.retain(|x| x != NOT_WALKED);
+                    self.nodes[n].x().body = Some(r);
+                    self.nodes[n].unnote(NOT_WALKED);
                     let how =
                         format!("{length_size}-byte NAL unit lengths (hvcC lengthSizeMinusOne)");
                     self.note(n, how);
@@ -3667,7 +3724,7 @@ impl Walker<'_> {
                             r,
                             Disposition::Unreferenced,
                         );
-                        g.notes.push(format!(
+                        g.x().notes.push(format!(
                             "after the last NAL unit: fewer bytes than a {length_size}-byte length, which heic does not read"
                         ));
                         self.add(g)?;
@@ -3794,10 +3851,10 @@ impl Walker<'_> {
                 r.clone(),
                 disp,
             );
-            n.label = label.clone();
-            n.notes.push(format!("{size}{layer}; {why}"));
+            n.set_label(label.clone());
+            n.x().notes.push(format!("{size}{layer}; {why}"));
             if split {
-                n.notes.push(format!(
+                n.x().notes.push(format!(
                     "piece {}/{} of a NAL unit that spans item extents",
                     k + 1,
                     pieces.len()
@@ -3842,11 +3899,12 @@ impl Walker<'_> {
                     r,
                     d,
                 );
-                n.label = msg
-                    .label
-                    .or_else(|| name.map(str::to_string))
-                    .or_else(|| Some(format!("sei_payload_{}", msg.payload_type)));
-                n.notes.push(what);
+                n.set_label(
+                    msg.label
+                        .or_else(|| name.map(str::to_string))
+                        .or_else(|| Some(format!("sei_payload_{}", msg.payload_type))),
+                );
+                n.x().notes.push(what);
                 self.add(n)?;
             }
         }
@@ -3866,22 +3924,26 @@ impl Walker<'_> {
         // are freed) instead of being copied: the walk never holds two full
         // copies of the part list.
         for n in self.nodes {
+            let parent = n.parent().map(|p| ids[p]);
             let mut part = Part::new(n.kind, n.tag, n.range, n.disp);
-            if let Some(l) = n.label {
-                part = part.with_label(l);
-            }
-            let has_body = n.body.is_some();
-            if let Some(b) = n.body {
-                part = part.with_body(b);
-            }
-            if !n.notes.is_empty() || n.dropped_notes > 0 {
-                let mut d = n.notes.join("; ");
-                if n.dropped_notes > 0 {
-                    d.push_str(&format!("; {} more remarks", n.dropped_notes));
+            let mut has_body = false;
+            if let Some(x) = n.x {
+                let x = *x;
+                if let Some(l) = x.label {
+                    part = part.with_label(l);
                 }
-                part = part.with_detail(d);
+                if let Some(b) = x.body {
+                    part = part.with_body(b);
+                    has_body = true;
+                }
+                if !x.notes.is_empty() || x.dropped_notes > 0 {
+                    let mut d = x.notes.join("; ");
+                    if x.dropped_notes > 0 {
+                        d.push_str(&format!("; {} more remarks", x.dropped_notes));
+                    }
+                    part = part.with_detail(d);
+                }
             }
-            let parent = n.parent.map(|p| ids[p]);
             let id = inv.push(parent, part).map_err(cap)?;
             ids.push(id);
             if let Some(d) = n.gap_fill
