@@ -190,6 +190,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
+name = "garb"
+version = "0.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b968bb36272be4662f264fd123e96915e7dd51c8ca529c2d35f621817ff4207"
+dependencies = [
+ "archmage",
+ "bytemuck",
+]
+
+[[package]]
 name = "generator"
 version = "0.8.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -237,15 +247,21 @@ name = "heic"
 version = "0.2.0"
 dependencies = [
  "archmage",
+ "bytemuck",
  "enough",
+ "garb",
  "heic-core",
+ "imgref",
  "magetypes",
  "memchr",
  "rav1d-safe",
+ "rgb",
  "safe_unaligned_simd",
  "ultrahdr-core",
  "whereat",
+ "zencodec",
  "zenflate",
+ "zenpixels",
 ]
 
 [[package]]
@@ -265,7 +281,14 @@ version = "0.0.0"
 dependencies = [
  "heic",
  "libfuzzer-sys",
+ "zencodec",
 ]
+
+[[package]]
+name = "imgref"
+version = "1.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e44b0a4eaa4c82f441d50a963f2d5f05a787240aeee097597033e72accfd22f"
 
 [[package]]
 name = "jobserver"
@@ -539,6 +562,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "rgb"
+version = "0.8.53"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
 name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -734,8 +766,7 @@ dependencies = [
 [[package]]
 name = "ultrahdr-core"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d65bd22a90785bb7360076b599ffbc201aef2c5817d2e5f37f37357829d476e"
+source = "git+https://github.com/imazen/ultrahdr?rev=3ac20f99d45e985e09f274fc07181b238385e703#3ac20f99d45e985e09f274fc07181b238385e703"
 dependencies = [
  "archmage",
  "bytemuck",
@@ -810,9 +841,8 @@ dependencies = [
 
 [[package]]
 name = "zencodec"
-version = "0.1.26"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be4b0d4108a8f062c85090bf8d0e6dd00fea976ffacc0e4f3cb6b03284a75531"
+version = "0.1.27"
+source = "git+https://github.com/imazen/zencodec?branch=feat%2Finventory#413fc6e8c1ee62502b67943d379aa439bfb07ddf"
 dependencies = [
  "almost-enough",
  "enough",
@@ -836,6 +866,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5851fd39b312749a3c367a0cd3522bd95d43276cfa613e9c18df748447cef3a8"
 dependencies = [
  "bytemuck",
+ "imgref",
+ "rgb",
  "whereat",
 ]
 

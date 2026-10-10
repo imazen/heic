@@ -210,6 +210,9 @@ required-features = ["backend-rust", "std"]
 [[example]]
 name = "gain_map_info"
 required-features = ["backend-rust", "zencodec", "std"]
+[[example]]
+name = "inventory"
+required-features = ["backend-rust", "zencodec"]
 # compare_support requires heic-wasm-rs (uncomment dep + add [[example]] to use)
 
 [[bench]]
@@ -236,6 +239,11 @@ harness = false
 # checkouts.
 [patch.crates-io]
 ultrahdr-core = { git = "https://github.com/imazen/ultrahdr", rev = "3ac20f99d45e985e09f274fc07181b238385e703" }
+# Structural inventory API (imazen/zencodec#133, branch `feat/inventory`).
+# TEMPORARY: swap both entries for the released zencodec / zencodec-testkit
+# versions before this lands on main.
+zencodec = { git = "https://github.com/imazen/zencodec", branch = "feat/inventory" }
+zencodec-testkit = { git = "https://github.com/imazen/zencodec", branch = "feat/inventory" }
 
 [[example]]
 name = "gm20_probe"

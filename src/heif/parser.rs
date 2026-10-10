@@ -447,6 +447,34 @@ impl<'a> HeifContainer<'a> {
 
 /// Parse a HEIF container
 pub fn parse<'a>(data: &'a [u8], stop: &dyn Stop) -> Result<HeifContainer<'a>> {
+    parse_traced(data, stop, &mut None)
+}
+
+/// File range of a box `parse` read: `b.content` borrows from `file`.
+fn box_span(file: &[u8], b: &Box<'_>) -> core::ops::Range<usize> {
+    let content = (b.content.as_ptr() as usize).wrapping_sub(file.as_ptr() as usize);
+    let header = usize::try_from(b.header.size)
+        .unwrap_or(usize::MAX)
+        .saturating_sub(b.content.len());
+    content.saturating_sub(header)..content.saturating_add(b.content.len())
+}
+
+/// Record the box whose parser failed, unless a deeper one already is.
+fn mark_failed(failed: &mut Option<core::ops::Range<usize>>, file: &[u8], b: &Box<'_>) {
+    if failed.is_none() {
+        *failed = Some(box_span(file, b));
+    }
+}
+
+/// [`parse`], reporting in `failed` the file range of the box whose parser
+/// rejected the file when parsing stops partway through the top-level boxes:
+/// a top-level `ftyp` or `meta`, a `meta` child, or an `iprp` child. heic
+/// reads nothing after that box. The structural inventory uses this.
+pub(crate) fn parse_traced<'a>(
+    data: &'a [u8],
+    stop: &dyn Stop,
+    failed: &mut Option<core::ops::Range<usize>>,
+) -> Result<HeifContainer<'a>> {
     let mut container = HeifContainer {
         data,
         brand: FourCC(*b"    "),
@@ -470,9 +498,11 @@ pub fn parse<'a>(data: &'a [u8], stop: &dyn Stop) -> Result<HeifContainer<'a>> {
     for top_box in BoxIterator::new(data) {
         check_stop(stop)?;
         match top_box.box_type() {
-            FourCC::FTYP => parse_ftyp(&top_box, &mut container)?,
+            FourCC::FTYP => parse_ftyp(&top_box, &mut container)
+                .inspect_err(|_| mark_failed(failed, data, &top_box))?,
             FourCC::META => {
-                parse_meta(&top_box, &mut container, stop)?;
+                parse_meta(&top_box, &mut container, stop, failed)
+                    .inspect_err(|_| mark_failed(failed, data, &top_box))?;
                 has_meta = true;
             }
             FourCC::MOOV => {
@@ -554,6 +584,7 @@ fn parse_meta<'a>(
     meta: &Box<'a>,
     container: &mut HeifContainer<'a>,
     stop: &dyn Stop,
+    failed: &mut Option<core::ops::Range<usize>>,
 ) -> Result<()> {
     // Meta is a full box - skip version/flags
     if meta.content.len() < 4 {
@@ -561,20 +592,23 @@ fn parse_meta<'a>(
     }
 
     let content = &meta.content[4..];
+    let file = container.data;
 
     for child in BoxIterator::new(content) {
         check_stop(stop)?;
-        match child.box_type() {
-            FourCC::PITM => parse_pitm(&child, container)?,
-            FourCC::ILOC => parse_iloc(&child, container, stop)?,
-            FourCC::IINF => parse_iinf(&child, container, stop)?,
-            FourCC::IPRP => parse_iprp(&child, container, stop)?,
-            FourCC::IREF => parse_iref(&child, container, stop)?,
+        let result = match child.box_type() {
+            FourCC::PITM => parse_pitm(&child, container),
+            FourCC::ILOC => parse_iloc(&child, container, stop).map(|_| ()),
+            FourCC::IINF => parse_iinf(&child, container, stop),
+            FourCC::IPRP => parse_iprp(&child, container, stop, failed),
+            FourCC::IREF => parse_iref(&child, container, stop),
             FourCC::IDAT => {
                 container.idat_data = Some(child.content);
+                Ok(())
             }
-            _ => {} // hdlr, etc.
-        }
+            _ => Ok(()), // hdlr, etc.
+        };
+        result.inspect_err(|_| mark_failed(failed, file, &child))?;
     }
 
     Ok(())
@@ -603,7 +637,25 @@ fn parse_pitm(pitm: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
     Ok(())
 }
 
-fn parse_iloc(iloc: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop) -> Result<()> {
+/// Returns how many content bytes the parse read.
+fn parse_iloc(iloc: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop) -> Result<usize> {
+    parse_iloc_inner(iloc, Some(container), stop).map(|(_, read)| read)
+}
+
+/// How many item locations one `iloc` box yields and how many content bytes
+/// [`parse_iloc`] reads, without storing anything (the same loop, so the
+/// two cannot disagree). Used by the structural inventory.
+pub(crate) fn iloc_layout(iloc: &Box<'_>, stop: &dyn Stop) -> Result<(usize, usize)> {
+    parse_iloc_inner(iloc, None, stop)
+}
+
+/// The `iloc` parse. With `container`, locations are stored in it; without,
+/// they are only counted. Returns `(locations, content bytes read)`.
+fn parse_iloc_inner(
+    iloc: &Box<'_>,
+    mut container: Option<&mut HeifContainer<'_>>,
+    stop: &dyn Stop,
+) -> Result<(usize, usize)> {
     let content = iloc.content;
     if content.len() < 8 {
         return Err(at!(HeicError::InvalidContainer("iloc too short")));
@@ -648,10 +700,13 @@ fn parse_iloc(iloc: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop
         )));
     }
 
-    container
-        .item_locations
-        .try_reserve(item_count as usize)
-        .map_err(|_| at!(HeicError::OutOfMemory))?;
+    let store = container.is_some();
+    let mut locations = 0usize;
+    if let Some(c) = container.as_deref_mut() {
+        c.item_locations
+            .try_reserve(item_count as usize)
+            .map_err(|_| at!(HeicError::OutOfMemory))?;
+    }
 
     for _ in 0..item_count {
         check_stop(stop)?;
@@ -707,9 +762,11 @@ fn parse_iloc(iloc: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop
         }
 
         let mut extents = Vec::new();
-        extents
-            .try_reserve(extent_count as usize)
-            .map_err(|_| at!(HeicError::OutOfMemory))?;
+        if store {
+            extents
+                .try_reserve(extent_count as usize)
+                .map_err(|_| at!(HeicError::OutOfMemory))?;
+        }
         for _ in 0..extent_count {
             if version >= 1 && index_size > 0 {
                 // Extent index - skip
@@ -721,18 +778,46 @@ fn parse_iloc(iloc: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop
 
             let extent_offset = read_sized_int(content, &mut pos, offset_size as usize);
             let extent_length = read_sized_int(content, &mut pos, length_size as usize);
-            extents.push((extent_offset, extent_length));
+            if store {
+                extents.push((extent_offset, extent_length));
+            }
         }
 
-        container.item_locations.push(ItemLocation {
-            item_id,
-            construction_method,
-            base_offset,
-            extents,
-        });
+        if let Some(c) = container.as_deref_mut() {
+            c.item_locations.push(ItemLocation {
+                item_id,
+                construction_method,
+                base_offset,
+                extents,
+            });
+        }
+        locations += 1;
     }
 
-    Ok(())
+    Ok((locations, pos))
+}
+
+/// The item locations one `iloc` box declares, parsed exactly as [`parse`]
+/// parses them (same truncation and limit behaviour), and how many content
+/// bytes that parse read. Used by the structural
+/// inventory, which places each extent without re-implementing `iloc`.
+pub(crate) fn iloc_entries(iloc: &Box<'_>, stop: &dyn Stop) -> Result<(Vec<ItemLocation>, usize)> {
+    let mut scratch = HeifContainer {
+        data: &[],
+        brand: FourCC(*b"    "),
+        compatible_brands: Vec::new(),
+        primary_item_id: 0,
+        item_locations: Vec::new(),
+        item_infos: Vec::new(),
+        properties: Vec::new(),
+        property_associations: Vec::new(),
+        item_references: Vec::new(),
+        idat_data: None,
+        mdat_offset: None,
+        mdat_length: None,
+    };
+    let read = parse_iloc(iloc, &mut scratch, stop)?;
+    Ok((scratch.item_locations, read))
 }
 
 fn read_sized_int(data: &[u8], pos: &mut usize, size: usize) -> u64 {
@@ -812,7 +897,7 @@ fn parse_iinf(iinf: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop
     Ok(())
 }
 
-fn parse_infe(infe: &Box<'_>) -> Result<ItemInfo> {
+pub(crate) fn parse_infe(infe: &Box<'_>) -> Result<ItemInfo> {
     let content = infe.content;
 
     let version = *content
@@ -900,14 +985,21 @@ fn parse_infe(infe: &Box<'_>) -> Result<ItemInfo> {
     })
 }
 
-fn parse_iprp(iprp: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop) -> Result<()> {
+fn parse_iprp(
+    iprp: &Box<'_>,
+    container: &mut HeifContainer<'_>,
+    stop: &dyn Stop,
+    failed: &mut Option<core::ops::Range<usize>>,
+) -> Result<()> {
+    let file = container.data;
     for child in BoxIterator::new(iprp.content) {
         check_stop(stop)?;
-        match child.box_type() {
-            FourCC::IPCO => parse_ipco(&child, container, stop)?,
-            FourCC::IPMA => parse_ipma(&child, container, stop)?,
-            _ => {}
-        }
+        let result = match child.box_type() {
+            FourCC::IPCO => parse_ipco(&child, container, stop),
+            FourCC::IPMA => parse_ipma(&child, container, stop),
+            _ => Ok(()),
+        };
+        result.inspect_err(|_| mark_failed(failed, file, &child))?;
     }
     Ok(())
 }
@@ -921,97 +1013,104 @@ fn parse_ipco(ipco: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop
                 "property count exceeds limit"
             )));
         }
-        let prop = match child.box_type() {
-            FourCC::ISPE => {
-                if let Ok(ext) = parse_ispe(&child) {
-                    ItemProperty::ImageExtents(ext)
-                } else {
-                    ItemProperty::Unknown
-                }
-            }
-            FourCC::HVCC => {
-                if let Ok(config) = parse_hvcc(&child) {
-                    ItemProperty::HevcConfig(config)
-                } else {
-                    ItemProperty::Unknown
-                }
-            }
-            FourCC::COLR => {
-                if let Ok(color) = parse_colr(&child) {
-                    ItemProperty::ColorInfo(color)
-                } else {
-                    ItemProperty::Unknown
-                }
-            }
-            FourCC::CLAP => {
-                if let Ok(clap) = parse_clap(&child) {
-                    ItemProperty::CleanAperture(clap)
-                } else {
-                    ItemProperty::Unknown
-                }
-            }
-            FourCC::IROT => {
-                if let Ok(rot) = parse_irot(&child) {
-                    ItemProperty::Rotation(rot)
-                } else {
-                    ItemProperty::Unknown
-                }
-            }
-            FourCC::IMIR => {
-                if let Ok(mirror) = parse_imir(&child) {
-                    ItemProperty::Mirror(mirror)
-                } else {
-                    ItemProperty::Unknown
-                }
-            }
-            FourCC::AUXC => {
-                if let Ok(aux_type) = parse_auxc(&child) {
-                    ItemProperty::AuxiliaryType(aux_type)
-                } else {
-                    ItemProperty::Unknown
-                }
-            }
-            FourCC::CLLI => {
-                if let Ok(clli) = parse_clli(&child) {
-                    ItemProperty::ContentLightLevel(clli)
-                } else {
-                    ItemProperty::Unknown
-                }
-            }
-            FourCC::MDCV => {
-                if let Ok(mdcv) = parse_mdcv(&child) {
-                    ItemProperty::MasteringDisplay(mdcv)
-                } else {
-                    ItemProperty::Unknown
-                }
-            }
-            FourCC::AV1C => {
-                if let Ok(config) = parse_av1c(&child) {
-                    ItemProperty::Av1Config(config)
-                } else {
-                    ItemProperty::Unknown
-                }
-            }
-            FourCC::UNCC => {
-                if let Ok(config) = parse_uncc(&child) {
-                    ItemProperty::UncompressedConfig(config)
-                } else {
-                    ItemProperty::Unknown
-                }
-            }
-            FourCC::CMPC => {
-                if let Ok(config) = parse_cmpc(&child) {
-                    ItemProperty::CompressionConfig(config)
-                } else {
-                    ItemProperty::Unknown
-                }
-            }
-            _ => ItemProperty::Unknown,
-        };
+        let prop = parse_property(&child);
         container.properties.push(prop);
     }
 
     Ok(())
+}
+
+/// Interpret one `ipco` child, exactly as [`parse`] does: a property heic
+/// does not recognise, or one its parser rejects, becomes
+/// [`ItemProperty::Unknown`].
+pub(crate) fn parse_property(child: &Box<'_>) -> ItemProperty {
+    match child.box_type() {
+        FourCC::ISPE => {
+            if let Ok(ext) = parse_ispe(child) {
+                ItemProperty::ImageExtents(ext)
+            } else {
+                ItemProperty::Unknown
+            }
+        }
+        FourCC::HVCC => {
+            if let Ok(config) = parse_hvcc(child) {
+                ItemProperty::HevcConfig(config)
+            } else {
+                ItemProperty::Unknown
+            }
+        }
+        FourCC::COLR => {
+            if let Ok(color) = parse_colr(child) {
+                ItemProperty::ColorInfo(color)
+            } else {
+                ItemProperty::Unknown
+            }
+        }
+        FourCC::CLAP => {
+            if let Ok(clap) = parse_clap(child) {
+                ItemProperty::CleanAperture(clap)
+            } else {
+                ItemProperty::Unknown
+            }
+        }
+        FourCC::IROT => {
+            if let Ok(rot) = parse_irot(child) {
+                ItemProperty::Rotation(rot)
+            } else {
+                ItemProperty::Unknown
+            }
+        }
+        FourCC::IMIR => {
+            if let Ok(mirror) = parse_imir(child) {
+                ItemProperty::Mirror(mirror)
+            } else {
+                ItemProperty::Unknown
+            }
+        }
+        FourCC::AUXC => {
+            if let Ok(aux_type) = parse_auxc(child) {
+                ItemProperty::AuxiliaryType(aux_type)
+            } else {
+                ItemProperty::Unknown
+            }
+        }
+        FourCC::CLLI => {
+            if let Ok(clli) = parse_clli(child) {
+                ItemProperty::ContentLightLevel(clli)
+            } else {
+                ItemProperty::Unknown
+            }
+        }
+        FourCC::MDCV => {
+            if let Ok(mdcv) = parse_mdcv(child) {
+                ItemProperty::MasteringDisplay(mdcv)
+            } else {
+                ItemProperty::Unknown
+            }
+        }
+        FourCC::AV1C => {
+            if let Ok(config) = parse_av1c(child) {
+                ItemProperty::Av1Config(config)
+            } else {
+                ItemProperty::Unknown
+            }
+        }
+        FourCC::UNCC => {
+            if let Ok(config) = parse_uncc(child) {
+                ItemProperty::UncompressedConfig(config)
+            } else {
+                ItemProperty::Unknown
+            }
+        }
+        FourCC::CMPC => {
+            if let Ok(config) = parse_cmpc(child) {
+                ItemProperty::CompressionConfig(config)
+            } else {
+                ItemProperty::Unknown
+            }
+        }
+        _ => ItemProperty::Unknown,
+    }
 }
 
 fn parse_clap(clap: &Box<'_>) -> Result<CleanAperture> {
@@ -1802,32 +1901,9 @@ fn parse_moov<'a>(
     container: &mut HeifContainer<'a>,
     stop: &dyn Stop,
 ) -> Result<()> {
-    let mut tracks: Vec<TrackInfo> = Vec::new();
+    let (tracks, _) = parse_moov_tracks(moov, false, stop)?;
 
-    for child in BoxIterator::new(moov.content) {
-        check_stop(stop)?;
-        if child.box_type() == FourCC::TRAK {
-            // Cap the number of accepted tracks: each track holds
-            // independent sample / chunk / stsc tables individually
-            // bounded by `MAX_SAMPLES` etc., but the total parser cost
-            // is the *product* of per-track caps and the track count.
-            if tracks.len() >= MAX_TRACKS {
-                break;
-            }
-            if let Ok(track) = parse_trak(&child, stop) {
-                tracks.push(track);
-            }
-        }
-    }
-
-    // Find the first track with handler_type = "pict" (image sequence)
-    // If none, try "vide" as fallback
-    let primary_track = tracks
-        .iter()
-        .find(|t| t.handler_type == FourCC(*b"pict"))
-        .or_else(|| tracks.iter().find(|t| t.handler_type == FourCC(*b"vide")));
-
-    let Some(track) = primary_track else {
+    let Some(track) = primary_track(&tracks).map(|i| &tracks[i]) else {
         return Ok(()); // No suitable track found
     };
 
@@ -1926,48 +2002,12 @@ fn parse_moov<'a>(
     });
 
     // Check for thumbnail track: second pict track with tref, or smaller dimensions
-    for other_track in &tracks {
-        if other_track.track_id == track.track_id {
-            continue;
-        }
-        if other_track.handler_type != FourCC(*b"pict") {
-            continue;
-        }
-        // Smaller track is likely a thumbnail
-        if other_track.width < track.width || other_track.height < track.height {
+    if let Some((other, thumb_offset, thumb_size)) =
+        thumbnail_track(&tracks, track, file_data.len() as u64, stop)
+    {
+        let other_track = &tracks[other];
+        {
             let thumb_id: u32 = synth_id + 1;
-
-            let thumb_sync = if other_track.sync_samples.is_empty() {
-                1u32
-            } else {
-                match other_track.sync_samples.first() {
-                    Some(&s) if s > 0 && s <= other_track.sample_count => s,
-                    _ => continue,
-                }
-            };
-
-            let thumb_size = if other_track.uniform_sample_size > 0 {
-                other_track.uniform_sample_size
-            } else {
-                let idx = (thumb_sync - 1) as usize;
-                if idx >= other_track.sample_sizes.len() {
-                    continue;
-                }
-                other_track.sample_sizes[idx]
-            };
-
-            let Ok(thumb_offset) =
-                resolve_sample_offset(other_track, thumb_sync, file_data.len() as u64, stop)
-            else {
-                continue;
-            };
-
-            let Some(thumb_end) = thumb_offset.checked_add(thumb_size as u64) else {
-                continue;
-            };
-            if thumb_end > file_data.len() as u64 {
-                continue;
-            }
 
             container.item_infos.push(ItemInfo {
                 item_id: thumb_id,
@@ -2017,12 +2057,153 @@ fn parse_moov<'a>(
                 from_item_id: thumb_id,
                 to_item_ids: alloc::vec![synth_id],
             });
-
-            break; // Only first thumbnail track
         }
     }
 
     Ok(())
+}
+
+/// What [`parse_moov`] makes of one `trak` child of a `moov`.
+#[cfg_attr(not(feature = "zencodec"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TrackRole {
+    /// Its first sync sample is the primary image.
+    Primary,
+    /// Its first sync sample is the thumbnail (item 2).
+    Thumbnail,
+    /// Parsed; nothing of it is used.
+    Parsed,
+    /// `parse_trak` rejects it.
+    Rejected,
+    /// After [`MAX_TRACKS`] accepted tracks: never parsed.
+    NotRead,
+}
+
+/// The role of each `trak` child of `moov`, in order, as [`parse_moov`]
+/// assigns them (the structural inventory uses this).
+#[cfg(feature = "zencodec")]
+pub(crate) fn moov_track_roles(
+    moov: &Box<'_>,
+    file_len: u64,
+    stop: &dyn Stop,
+) -> Result<Vec<TrackRole>> {
+    let (tracks, mut roles) = parse_moov_tracks(moov, true, stop)?;
+    // `roles` holds `Parsed` for every accepted track, in order.
+    let accepted: Vec<usize> = roles
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| **r == TrackRole::Parsed)
+        .map(|(i, _)| i)
+        .collect();
+    if let Some(p) = primary_track(&tracks) {
+        roles[accepted[p]] = TrackRole::Primary;
+        if let Some((t, _, _)) = thumbnail_track(&tracks, &tracks[p], file_len, stop) {
+            roles[accepted[t]] = TrackRole::Thumbnail;
+        }
+    }
+    Ok(roles)
+}
+
+/// The tracks [`parse_moov`] accepts, and the fate of every `trak` child
+/// (`Parsed` for an accepted one). `list_all`: go on listing the `trak`
+/// children after the cap as `NotRead` (the decode path stops there).
+fn parse_moov_tracks(
+    moov: &Box<'_>,
+    list_all: bool,
+    stop: &dyn Stop,
+) -> Result<(Vec<TrackInfo>, Vec<TrackRole>)> {
+    let mut tracks: Vec<TrackInfo> = Vec::new();
+    let mut roles = Vec::new();
+
+    for child in BoxIterator::new(moov.content) {
+        check_stop(stop)?;
+        if child.box_type() == FourCC::TRAK {
+            // Cap the number of accepted tracks: each track holds
+            // independent sample / chunk / stsc tables individually
+            // bounded by `MAX_SAMPLES` etc., but the total parser cost
+            // is the *product* of per-track caps and the track count.
+            if tracks.len() >= MAX_TRACKS {
+                if !list_all {
+                    break;
+                }
+                roles.push(TrackRole::NotRead);
+                continue;
+            }
+            if let Ok(track) = parse_trak(&child, stop) {
+                tracks.push(track);
+                roles.push(TrackRole::Parsed);
+            } else {
+                roles.push(TrackRole::Rejected);
+            }
+        }
+    }
+    Ok((tracks, roles))
+}
+
+/// The first track with handler_type = "pict" (image sequence); if none,
+/// the first "vide" track.
+fn primary_track(tracks: &[TrackInfo]) -> Option<usize> {
+    tracks
+        .iter()
+        .position(|t| t.handler_type == FourCC(*b"pict"))
+        .or_else(|| {
+            tracks
+                .iter()
+                .position(|t| t.handler_type == FourCC(*b"vide"))
+        })
+}
+
+/// The first other `pict` track smaller than `track` whose first sync
+/// sample resolves inside the file: `(index, offset, size)`.
+fn thumbnail_track(
+    tracks: &[TrackInfo],
+    track: &TrackInfo,
+    file_len: u64,
+    stop: &dyn Stop,
+) -> Option<(usize, u64, u32)> {
+    for (i, other_track) in tracks.iter().enumerate() {
+        if other_track.track_id == track.track_id {
+            continue;
+        }
+        if other_track.handler_type != FourCC(*b"pict") {
+            continue;
+        }
+        // Smaller track is likely a thumbnail
+        if other_track.width < track.width || other_track.height < track.height {
+            let thumb_sync = if other_track.sync_samples.is_empty() {
+                1u32
+            } else {
+                match other_track.sync_samples.first() {
+                    Some(&s) if s > 0 && s <= other_track.sample_count => s,
+                    _ => continue,
+                }
+            };
+
+            let thumb_size = if other_track.uniform_sample_size > 0 {
+                other_track.uniform_sample_size
+            } else {
+                let idx = (thumb_sync - 1) as usize;
+                if idx >= other_track.sample_sizes.len() {
+                    continue;
+                }
+                other_track.sample_sizes[idx]
+            };
+
+            let Ok(thumb_offset) = resolve_sample_offset(other_track, thumb_sync, file_len, stop)
+            else {
+                continue;
+            };
+
+            let Some(thumb_end) = thumb_offset.checked_add(thumb_size as u64) else {
+                continue;
+            };
+            if thumb_end > file_len {
+                continue;
+            }
+            return Some((i, thumb_offset, thumb_size));
+        }
+    }
+    None
 }
 
 /// Parse a trak box into a TrackInfo

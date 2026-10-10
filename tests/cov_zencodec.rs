@@ -1138,7 +1138,7 @@ fn estimate_decode_resources_models_peak_and_time() {
     use zencodec::estimate::{ComputeEnvironment, ImageCharacteristics};
 
     let cfg = HeicDecoderConfig::new();
-    let compute = ComputeEnvironment::new().with_cores(4);
+    let compute = ComputeEnvironment::conservative().with_cores(4);
 
     let small = ImageCharacteristics::new(256, 256, PixelDescriptor::RGB8_SRGB);
     let large = ImageCharacteristics::new(4096, 4096, PixelDescriptor::RGBA8_SRGB);

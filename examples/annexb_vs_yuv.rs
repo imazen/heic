@@ -1,7 +1,7 @@
 //! Decode a raw Annex-B HEVC bitstream with `heic::VideoDecoder` and compare
 //! every frame, plane by plane, against a reference planar YUV file (as
 //! written by libde265's `dec265 -o`): native bit depth (8-bit = 1 byte,
-//! >8-bit = little-endian u16), conformance-window cropped, chroma planes
+//! deeper = little-endian u16), conformance-window cropped, chroma planes
 //! sized per `chroma_format` (4:0:0 none, 4:2:0 w/2 x h/2, 4:2:2 w/2 x h,
 //! 4:4:4 w x h).
 //!
@@ -24,6 +24,9 @@ fn plane_dims(chroma_format: u8, w: u32, h: u32) -> (u32, u32) {
         _ => (w, h),
     }
 }
+
+/// `(name, samples, stride, crop_left, crop_top, width, height)` of one plane.
+type PlaneView<'a> = (&'a str, &'a [u16], usize, u32, u32, u32, u32);
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -67,7 +70,7 @@ fn main() {
             f.chroma_format, f.bit_depth
         );
 
-        let planes: [(&str, &[u16], usize, u32, u32, u32, u32); 3] = [
+        let planes: [PlaneView<'_>; 3] = [
             ("Y", &f.y_plane, f.y_stride(), f.crop_left, f.crop_top, w, h),
             (
                 "Cb",

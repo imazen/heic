@@ -25,7 +25,19 @@ path = ".."
 # `backend-rust` satisfies the HEVC-backend `compile_error!` gate in
 # `heic::lib`. `av1` enables the AVIF/AV1 fuzz target; `unci` enables
 # the uncompressed-codec target.
-features = ["backend-rust", "av1", "unci"]
+features = ["backend-rust", "av1", "unci", "zencodec"]
+
+# The `inventory` target drives the zencodec trait.
+[dependencies.zencodec]
+version = ">=0.1.27, <0.3.0"
+
+# This crate is its own workspace, so the parent's patches do not apply.
+# TEMPORARY: the zencodec entry follows imazen/zencodec#133 (branch
+# `feat/inventory`); swap for the released version before merge.
+# ultrahdr-core mirrors the parent's rev pin (needed by the `zencodec` feature).
+[patch.crates-io]
+zencodec = { git = "https://github.com/imazen/zencodec", branch = "feat/inventory" }
+ultrahdr-core = { git = "https://github.com/imazen/ultrahdr", rev = "3ac20f99d45e985e09f274fc07181b238385e703" }
 
 [[bin]]
 name = "fuzz_decode"
@@ -72,6 +84,13 @@ bench = false
 [[bin]]
 name = "fuzz_color_transform"
 path = "fuzz_targets/fuzz_color_transform.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "inventory"
+path = "fuzz_targets/fuzz_inventory.rs"
 test = false
 doc = false
 bench = false

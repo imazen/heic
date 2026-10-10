@@ -183,3 +183,33 @@ arm-sample-decode fixture output:
 arm-capture-rgba fixture output:
     CARGO_BUILD_JOBS=4 TMPDIR="$HOME/tmp" nice -n19 cargo build --release --example heaptrack_decode --features backend-rust,std
     HEIC_PROFILE_RGBA_OUT="{{output}}" RAYON_NUM_THREADS=4 OMP_NUM_THREADS=4 TMPDIR="$HOME/tmp" nice -n19 ./target/release/examples/heaptrack_decode "{{fixture}}" 1
+
+# ── Structural inventory (DecodeJob::inventory) ──────────────────────────
+# Unit + fixture tests (committed testdata, synthetic fixture, pinned part list)
+inventory-test:
+    cargo test --features "backend-rust,std,zencodec,av1,unci" --test inventory -- --nocapture
+
+# check_inventory over the codec-corpus HEIF conformance set
+inventory-corpus corpus=env_var_or_default("CODEC_CORPUS", "../../codec-corpus"):
+    HEIC_INVENTORY_CORPUS={{corpus}}/heic-conformance cargo test --features "backend-rust,std,zencodec,av1,unci" --test inventory corpus_inventories_conform -- --nocapture
+
+# Cross-check every box exiftool -v3 lists against the inventory
+inventory-oracle exiftool="exiftool" corpus=env_var_or_default("CODEC_CORPUS", "../../codec-corpus"):
+    INVENTORY_ORACLE_EXIFTOOL="$(command -v {{exiftool}})" HEIC_INVENTORY_CORPUS={{corpus}}/heic-conformance cargo test --features "backend-rust,std,zencodec,av1,unci" --test inventory exiftool_oracle_agrees -- --nocapture
+
+# Cross-check every NAL unit ffmpeg demuxes (ffprobe packets, Annex B output,
+# trace_headers) against the coded-unit parts
+inventory-oracle-ffmpeg ffmpeg="ffmpeg" corpus=env_var_or_default("CODEC_CORPUS", "../../codec-corpus"):
+    INVENTORY_ORACLE_FFMPEG="$(command -v {{ffmpeg}})" HEIC_INVENTORY_CORPUS={{corpus}}/heic-conformance cargo test --release --features "backend-rust,std,zencodec,av1,unci" --test inventory ffmpeg_oracle_agrees -- --nocapture
+
+# Peak memory of the inventory on many tiny boxes (default: the review's
+# 900,000 free boxes), release build, under /usr/bin/time -v
+inventory-memory boxes="900000":
+    cargo test --release --features "backend-rust,std,zencodec,av1,unci" --test inventory_review --no-run
+    HEIC_INVENTORY_MEM_BOXES={{boxes}} /usr/bin/time -v $(ls -t target/release/deps/inventory_review-* | grep -v '\.d$' | head -1) many_boxes_inventory --exact --nocapture
+
+# Time the inventory on the review's many-extents input (160,000 extents
+# outside every mdat, 160,000 boxes), release build, under /usr/bin/time -v
+inventory-extents n="160000":
+    cargo test --release --features "backend-rust,std,zencodec,av1,unci" --test inventory_review --no-run
+    HEIC_INVENTORY_EXTENTS={{n}} /usr/bin/time -v $(ls -t target/release/deps/inventory_review-* | grep -v '\.d$' | head -1) many_extents_inventory --exact --nocapture
