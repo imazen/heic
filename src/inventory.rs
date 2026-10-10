@@ -66,23 +66,17 @@ const DEPTH_URNS: [&str; 2] = [
     "urn:mpeg:mpegB:cicp:systems:auxiliary:depth",
 ];
 
-/// How the job uses the gain map (`HeicDecodeJob::extract_gain_map` and
-/// `GainMapRender`, codec.rs `decode_inner`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum GainMapUse {
-    /// Parameters and dimensions only (`GainMapPresence`).
-    Describe,
-    /// The gain-map image is decoded and attached to the output
-    /// (`extract_gain_map`, `GainMapRender::Components`).
-    Surface,
-    /// The gain map is applied to the base (`GainMapRender::ReconstructHdr`).
-    Reconstruct,
-}
-
 /// The parts of the job's configuration that change what the decode reads.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Options {
-    pub(crate) gain_map: GainMapUse,
+    /// `GainMapRender::ReconstructHdr`: the gain map is decoded and applied
+    /// to the base (codec.rs `reconstruct_hdr_base`).
+    pub(crate) apply_gain_map: bool,
+    /// `extract_gain_map` or `GainMapRender::Components`: the decoded gain
+    /// map is attached to the output as `HdrGainMap`, with its XMP and the
+    /// whole `tmap` payload (codec.rs `decode_inner`). Independent of
+    /// `apply_gain_map`: both can hold at once.
+    pub(crate) attach_gain_map: bool,
     /// `HeicDecodeJob::extract_depth`.
     pub(crate) decode_depth: bool,
     /// `DecodePolicy` keeps these (codec.rs `apply_policy`).
@@ -91,10 +85,18 @@ pub(crate) struct Options {
     pub(crate) keep_xmp: bool,
 }
 
+impl Options {
+    /// The gain-map image is decoded (applied, attached or both).
+    fn decode_gain_map(&self) -> bool {
+        self.apply_gain_map || self.attach_gain_map
+    }
+}
+
 impl Default for Options {
     fn default() -> Self {
         Self {
-            gain_map: GainMapUse::Describe,
+            apply_gain_map: false,
+            attach_gain_map: false,
             decode_depth: false,
             keep_icc: true,
             keep_exif: true,
@@ -110,7 +112,7 @@ pub(crate) fn inventory(
     opts: &Options,
     stop: &dyn Stop,
 ) -> Result<Inventory, At<HeicError>> {
-    let mut w = Walker::new(data, stop);
+    let mut w = Walker::new(data, stop)?;
     w.walk(None, 0, data.len() as u64, Ctx::Top, 0)?;
 
     let parsed = match heif::parse(data, stop) {
@@ -155,11 +157,16 @@ struct Node {
     dropped_notes: usize,
     /// For `mdat`/`idat`: the disposition of body bytes no extent covers.
     gap_fill: Option<Disposition>,
-    /// Sub-ranges the decoder does not read (a tail after the fields its
-    /// parser reads, NAL units it ignores), added as child parts when the
-    /// part ends up consumed.
-    inner: Vec<(Range<u64>, Disposition, String)>,
+    /// Sub-ranges past an internal end (a tail after the fields its parser
+    /// reads, bytes past a declared size), added as child parts when the
+    /// part ends up consumed. `None`: the bytes still reach the caller with
+    /// the part, so the child takes the part's disposition.
+    inner: Vec<Inner>,
 }
+
+/// A child range of a consumed leaf: `(range, disposition, remark)`, with
+/// `None` for "the part's own disposition".
+type Inner = (Range<u64>, Option<Disposition>, String);
 
 /// Where a box sits, which decides how heic treats it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -172,10 +179,9 @@ enum Ctx {
     Iprp,
     Ipco,
     Iref,
-    /// A `moov` subtree. `used`: the file has no top-level `meta`, so heic
-    /// decodes the first sync sample of a track (parser.rs `parse_moov`).
+    /// A `moov` subtree (parser.rs `parse_moov`).
     Moov {
-        used: bool,
+        track: MoovUse,
     },
     Stsd {
         used: bool,
@@ -184,6 +190,21 @@ enum Ctx {
         used: bool,
     },
     /// A subtree heic never reads.
+    Unread,
+}
+
+/// What heic does with the boxes of a `moov` subtree. heic reads only the
+/// last top-level `moov`, and only when the file has no top-level `meta`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MoovUse {
+    /// Directly inside the `moov` heic reads: only `trak` children are read.
+    Top,
+    /// Inside the track whose first sync sample heic decodes.
+    Primary,
+    /// Inside a track `parse_trak` reads, but nothing of it reaches the
+    /// caller (another track, the thumbnail track, or one it rejects).
+    Parsed,
+    /// Never read.
     Unread,
 }
 
@@ -383,27 +404,61 @@ struct Walker<'a> {
     infes: Vec<InfeRec>,
     ilocs: Vec<IlocRec>,
     props: Vec<PropRec>,
-    irefs: Vec<(usize, [u8; 4])>,
+    /// `iref` children: node, reference type, the `iref` version.
+    irefs: Vec<(usize, [u8; 4], u8)>,
+    /// `ipma` boxes `heif::parse` reads, in file order.
+    ipmas: Vec<usize>,
     /// The first `hvc1`/`hev1` entry of an `stsd` (parser.rs
     /// `parse_stsd_track` uses only that one).
     stsd_hevc_taken: bool,
+    /// Start of the top-level `moov` heic reads: the last one, when the
+    /// file has no top-level `meta` (parser.rs `parse`).
+    used_moov_at: Option<u64>,
+    /// parser.rs `parse_moov`'s verdict on each `trak` of that `moov`.
+    track_roles: Vec<heif::TrackRole>,
+    traks_seen: usize,
+    /// `hvcC` and `colr` boxes of the decoded sample entry, in order.
+    entry_hvcc: Vec<usize>,
+    entry_colr: Vec<usize>,
+    /// Leaves that hold an item extent as a child.
+    hosted: BTreeSet<usize>,
 }
 
 impl<'a> Walker<'a> {
-    fn new(data: &'a [u8], stop: &'a dyn Stop) -> Self {
+    fn new(data: &'a [u8], stop: &'a dyn Stop) -> Result<Self, At<HeicError>> {
         // parser.rs `parse`: `moov` is read only when no top-level `meta`
-        // exists, so look ahead for one.
+        // exists, and then the last one; look ahead for both.
         let mut has_top_meta = false;
+        let mut last_moov: Option<(u64, Hdr)> = None;
         let mut pos = 0u64;
         let len = data.len() as u64;
         while let HdrOutcome::Ok(h) = read_header(data, pos, len) {
+            check_stop(stop)?;
             if &h.typ == b"meta" {
                 has_top_meta = true;
-                break;
             }
-            pos = h.end;
+            let end = h.end;
+            if &h.typ == b"moov" {
+                last_moov = Some((pos, h));
+            }
+            pos = end;
         }
-        Self {
+        let mut used_moov_at = None;
+        let mut track_roles = Vec::new();
+        if !has_top_meta && let Some((at, h)) = last_moov {
+            let content = at + h.base_header..h.end;
+            let bmff = BmffBox {
+                header: BoxHeader {
+                    box_type: FourCC(h.typ),
+                    size: h.end - at,
+                    content_offset: usize::try_from(content.start).unwrap_or(usize::MAX),
+                },
+                content: slice(data, content),
+            };
+            used_moov_at = Some(at);
+            track_roles = heif::moov_track_roles(&bmff, len, stop)?;
+        }
+        Ok(Self {
             data,
             stop,
             nodes: Vec::new(),
@@ -419,8 +474,15 @@ impl<'a> Walker<'a> {
             ilocs: Vec::new(),
             props: Vec::new(),
             irefs: Vec::new(),
+            ipmas: Vec::new(),
             stsd_hevc_taken: false,
-        }
+            used_moov_at,
+            track_roles,
+            traks_seen: 0,
+            entry_hvcc: Vec::new(),
+            entry_colr: Vec::new(),
+            hosted: BTreeSet::new(),
+        })
     }
 
     fn add(&mut self, node: Node) -> Result<usize, At<HeicError>> {
@@ -532,6 +594,35 @@ impl<'a> Walker<'a> {
                     )?;
                     return Ok(());
                 }
+                HdrOutcome::Overrun { typ, declared } if ctx == Ctx::Top && &typ == b"mdat" => {
+                    // heic stops reading boxes here, but reads item extents
+                    // at absolute offsets wherever they lie (parser.rs
+                    // `get_item_data`): clip the body to the end of the file
+                    // so the extents inside are still listed.
+                    let header = if be_u32(self.data, pos) == Some(1) {
+                        16
+                    } else {
+                        8
+                    };
+                    let mut n = Self::leaf(
+                        parent,
+                        PartKind::Box,
+                        PartTag::FourCc(typ),
+                        pos..end,
+                        Disposition::Malformed,
+                    );
+                    n.notes.push(format!(
+                        "declares {declared} bytes, the file has {} left; heic stops reading boxes here, but reads item extents inside it (the body is clipped to the end of the file)",
+                        end - pos
+                    ));
+                    if pos + header <= end {
+                        n.body = Some(pos + header..end);
+                        n.gap_fill = Some(Disposition::Unreferenced);
+                    }
+                    let id = self.add(n)?;
+                    self.mdats.push(id);
+                    return Ok(());
+                }
                 HdrOutcome::Overrun { typ, declared } => {
                     let room = if ctx == Ctx::Top {
                         "the file"
@@ -568,7 +659,7 @@ impl<'a> Walker<'a> {
         iinf_left: &mut Option<(u32, u32)>,
     ) -> Result<(), At<HeicError>> {
         let range = pos..h.end;
-        let (disp, mut layout, child_ctx, why) = self.classify(ctx, &h.typ);
+        let (disp, mut layout, child_ctx, why) = self.classify(ctx, &h.typ, pos, parent);
         let mut kind = match ctx {
             Ctx::Ipco => PartKind::Property,
             _ => PartKind::Box,
@@ -721,11 +812,19 @@ impl<'a> Walker<'a> {
         node.label = label;
         node.notes = notes;
         node.body = body.clone();
+        // The `iref` version byte follows the parent's box header (8 or 16
+        // bytes); it sets the item ID width of every reference entry.
+        let iref_version = match (ctx, parent.and_then(|p| self.nodes.get(p))) {
+            (Ctx::Iref, Some(p)) => match read_header(self.data, p.range.start, p.range.end) {
+                HdrOutcome::Ok(ph) => slice(self.data, p.range.clone())
+                    .get(usize::try_from(ph.base_header).unwrap_or(usize::MAX))
+                    .copied()
+                    .unwrap_or(0),
+                _ => 0,
+            },
+            _ => 0,
+        };
         if layout == Layout::Leaf {
-            let iref_version = parent
-                .and_then(|p| self.nodes.get(p))
-                .and_then(|p| slice(self.data, p.range.clone()).get(8).copied())
-                .unwrap_or(0);
             node.inner = inner_parts(
                 ctx,
                 &h.typ,
@@ -759,7 +858,10 @@ impl<'a> Walker<'a> {
             }),
             (Ctx::Meta, b"idat") => self.idats.push((id, true)),
             (_, b"idat") => self.idats.push((id, false)),
-            (Ctx::Iref, typ) => self.irefs.push((id, *typ)),
+            (Ctx::Iref, typ) => self.irefs.push((id, *typ, iref_version)),
+            (Ctx::Iprp, b"ipma") => self.ipmas.push(id),
+            (Ctx::SampleEntry { used: true }, b"hvcC") => self.entry_hvcc.push(id),
+            (Ctx::SampleEntry { used: true }, b"colr") => self.entry_colr.push(id),
             (Ctx::Ipco, typ) => {
                 let index = self.props.len();
                 let prop = heif::parse_property(&bmff);
@@ -818,6 +920,8 @@ impl<'a> Walker<'a> {
         &mut self,
         ctx: Ctx,
         typ: &[u8; 4],
+        pos: u64,
+        parent: Option<usize>,
     ) -> (Disposition, Layout, Ctx, Option<&'static str>) {
         use Disposition as D;
         match ctx {
@@ -828,13 +932,25 @@ impl<'a> Walker<'a> {
                 b"moov" if self.has_top_meta => (
                     D::Skipped,
                     Layout::Plain,
-                    Ctx::Moov { used: false },
+                    Ctx::Moov {
+                        track: MoovUse::Unread,
+                    },
                     Some("heic reads moov only when the file has no top-level meta"),
+                ),
+                b"moov" if self.used_moov_at != Some(pos) => (
+                    D::Skipped,
+                    Layout::Plain,
+                    Ctx::Moov {
+                        track: MoovUse::Unread,
+                    },
+                    Some("a later top-level moov replaces it (parser.rs parse keeps the last)"),
                 ),
                 b"moov" => (
                     D::Structure,
                     Layout::Plain,
-                    Ctx::Moov { used: true },
+                    Ctx::Moov {
+                        track: MoovUse::Top,
+                    },
                     Some(
                         "no top-level meta: heic decodes the first sync sample of a pict/vide track",
                     ),
@@ -907,35 +1023,101 @@ impl<'a> Walker<'a> {
             // parser.rs `parse_iref` parses every reference type; the
             // second pass decides which ones the decode consults.
             Ctx::Iref => (D::Dropped, Layout::Leaf, ctx, None),
-            Ctx::Moov { used } => {
+            Ctx::Moov { track } => {
                 let layout = generic_layout(typ);
-                let child = match typ {
-                    b"stsd" => Ctx::Stsd { used },
-                    b"meta" => Ctx::Unread,
-                    _ => ctx,
+                let unread = Ctx::Moov {
+                    track: MoovUse::Unread,
                 };
-                // parser.rs `parse_moov`/`parse_trak`/`parse_mdia`/
-                // `parse_minf`/`parse_stbl`.
-                let read = matches!(
-                    typ,
-                    b"trak"
-                        | b"tkhd"
-                        | b"mdia"
-                        | b"hdlr"
-                        | b"minf"
-                        | b"stbl"
-                        | b"stsd"
-                        | b"stsz"
-                        | b"stco"
-                        | b"co64"
-                        | b"stsc"
-                        | b"stss"
-                );
-                let child = if typ == b"meta" { Ctx::Unread } else { child };
                 match typ {
-                    b"free" | b"skip" => (D::Padding, Layout::Leaf, ctx, None),
-                    b"uuid" => (D::Unknown, Layout::Leaf, ctx, None),
-                    _ if used && read => (D::Structure, layout, child, None),
+                    b"free" | b"skip" => return (D::Padding, Layout::Leaf, ctx, None),
+                    b"uuid" => return (D::Unknown, Layout::Leaf, ctx, None),
+                    _ => {}
+                }
+                if track == MoovUse::Top {
+                    // parser.rs `parse_moov` reads only `trak` children.
+                    if typ != b"trak" {
+                        return (
+                            D::Skipped,
+                            layout,
+                            unread,
+                            Some("parse_moov reads only trak boxes"),
+                        );
+                    }
+                    let role = self.track_roles.get(self.traks_seen).copied();
+                    self.traks_seen += 1;
+                    let parsed = Ctx::Moov {
+                        track: MoovUse::Parsed,
+                    };
+                    return match role {
+                        Some(heif::TrackRole::Primary) => (
+                            D::Structure,
+                            layout,
+                            Ctx::Moov {
+                                track: MoovUse::Primary,
+                            },
+                            Some(
+                                "heic decodes this track's first sync sample (parser.rs parse_moov)",
+                            ),
+                        ),
+                        Some(heif::TrackRole::Thumbnail) => (
+                            D::Dropped,
+                            layout,
+                            parsed,
+                            Some(
+                                "thumbnail track: parsed into item 2, which only the native decode_thumbnail reads",
+                            ),
+                        ),
+                        Some(heif::TrackRole::Parsed) => (
+                            D::Dropped,
+                            layout,
+                            parsed,
+                            Some("parsed; heic decodes another track"),
+                        ),
+                        Some(heif::TrackRole::Rejected) => (
+                            D::Dropped,
+                            layout,
+                            parsed,
+                            Some("parse_trak rejects this track"),
+                        ),
+                        Some(heif::TrackRole::NotRead) | None => (
+                            D::Skipped,
+                            layout,
+                            unread,
+                            Some("after the 16 tracks heic reads (parser.rs MAX_TRACKS)"),
+                        ),
+                    };
+                }
+                // parser.rs `parse_trak`/`parse_mdia`/`parse_minf`/
+                // `parse_stbl`: each reads these children only.
+                let parent_typ = parent.and_then(|p| match self.nodes.get(p)?.tag {
+                    PartTag::FourCc(t) => Some(t),
+                    _ => None,
+                });
+                let read = matches!(
+                    (parent_typ.as_ref(), typ),
+                    (Some(b"trak"), b"tkhd" | b"mdia")
+                        | (Some(b"mdia"), b"hdlr" | b"minf")
+                        | (Some(b"minf"), b"stbl")
+                        | (
+                            Some(b"stbl"),
+                            b"stsd" | b"stsz" | b"stco" | b"co64" | b"stsc" | b"stss"
+                        )
+                );
+                let child = match typ {
+                    b"stsd" => Ctx::Stsd {
+                        used: track == MoovUse::Primary,
+                    },
+                    _ if read => ctx,
+                    _ => unread,
+                };
+                match track {
+                    MoovUse::Primary if read => (D::Structure, layout, child, None),
+                    MoovUse::Parsed if read => (
+                        D::Dropped,
+                        layout,
+                        child,
+                        Some("parsed; nothing of this track reaches the caller"),
+                    ),
                     _ => (D::Skipped, layout, child, None),
                 }
             }
@@ -1047,19 +1229,22 @@ fn inner_parts(
     content: Range<u64>,
     c: &[u8],
     iref_version: u8,
-) -> Vec<(Range<u64>, Disposition, String)> {
+) -> Vec<Inner> {
     let mut out = Vec::new();
     let len = c.len();
-    let tail = |out: &mut Vec<(Range<u64>, Disposition, String)>, read: usize, why: &str| {
+    let tail = |out: &mut Vec<Inner>, read: usize, why: &str| {
         if read < len {
             out.push((
                 content.start + read as u64..content.end,
-                Disposition::Dropped,
+                Some(Disposition::Dropped),
                 why.to_string(),
             ));
         }
     };
-    let moov_used = ctx == Ctx::Moov { used: true };
+    let moov_used = ctx
+        == Ctx::Moov {
+            track: MoovUse::Primary,
+        };
     match (ctx, typ) {
         // `parse_ftyp`: brands in whole 4-byte units, at most 256.
         (Ctx::Top, b"ftyp") => {
@@ -1112,11 +1297,14 @@ fn inner_parts(
                 if let Some(declared) = be32(c, 4) {
                     let end = 4u64.saturating_add(declared);
                     if end < len as u64 {
+                        // parser.rs `parse_colr` keeps everything after the
+                        // colour type, so these bytes reach the caller with
+                        // the profile.
                         out.push((
                             content.start + end..content.end,
-                            Disposition::Unreferenced,
+                            None,
                             format!(
-                                "after the ICC profile's declared {declared} bytes; heic copies them into ImageInfo with the profile"
+                                "after the ICC profile's declared {declared} bytes, but heic hands them to the caller with the profile (parser.rs parse_colr keeps the whole payload)"
                             ),
                         ));
                     }
@@ -1217,15 +1405,21 @@ fn infe_read_len(c: &[u8]) -> Option<usize> {
     if pos >= c.len() {
         return Some(pos.min(c.len()));
     }
+    // `parse_infe`: a string without a NUL reads as empty (`unwrap_or(0)`),
+    // so its bytes are not read; the name still advances the cursor by one.
     let name_end = c[pos..].iter().position(|&b| b == 0).unwrap_or(0);
+    let mut read = pos;
     pos += name_end + 1;
-    if pos < c.len() {
-        match c[pos..].iter().position(|&b| b == 0) {
-            Some(e) => pos += e + 1,
-            None => pos = c.len(),
-        }
+    if name_end > 0 || c.get(pos - 1) == Some(&0) {
+        read = pos;
     }
-    Some(pos.min(c.len()))
+    if pos < c.len()
+        && let Some(e) = c[pos..].iter().position(|&b| b == 0)
+    {
+        pos += e + 1;
+        read = pos;
+    }
+    Some(read.min(c.len()))
 }
 
 /// parser.rs `parse_iref`: one reference box's entries.
@@ -1317,7 +1511,11 @@ enum Role {
     /// reported (codec.rs `build_image_info_full`).
     Primary,
     /// An item decoded as part of another image (derived-image input).
-    Component,
+    /// `nclx`: its nclx reaches the decoded frame. A deriving item's own
+    /// nclx overwrites all four fields after the inputs decode
+    /// (decode.rs `decode_item`), and grids and overlays keep only the
+    /// first input's range and matrix (`decode_grid`, `decode_iovl`).
+    Component { nclx: bool },
     /// A tile of an HEVC grid: only the first tile's `hvcC` and `ispe` are
     /// consulted (decode.rs `decode_grid`).
     HevcGridTile { first: bool },
@@ -1346,15 +1544,45 @@ enum Slot {
     Mdcv,
 }
 
+/// How the decode reads an item's data, when that differs from the item's
+/// own disposition (a descriptor read only up to its fields, an item whose
+/// data is never read).
+#[derive(Clone, Debug)]
+struct DataUse {
+    disp: Disposition,
+    why: String,
+    /// Only the first this many bytes of the item's data are read; the rest
+    /// is `Dropped`. `None`: all of it.
+    prefix: Option<u64>,
+}
+
 #[derive(Default)]
 struct Model {
     opts: Options,
+    /// The item's declaration (`infe`), and its data unless `data` says
+    /// otherwise.
     items: BTreeMap<u32, Use>,
+    data: BTreeMap<u32, DataUse>,
     props: BTreeMap<usize, Use>,
+    /// `auxC` bytes after the URN's NUL (the subtype), per property.
+    auxc_tail: BTreeMap<usize, Use>,
     visited: BTreeSet<(u32, u8)>,
     /// HEVC grid tile → the tile whose `hvcC` decodes it (decode.rs
     /// `decode_grid` uses the first tile's configuration for all of them).
     hevc_cfg: BTreeMap<u32, u32>,
+    /// Items whose `dimg` references the decode follows.
+    dimg_from: BTreeSet<u32>,
+    /// The primary item: `auxl` references to it are consulted
+    /// (`find_all_auxiliary_items`).
+    primary: Option<u32>,
+    /// `cdsc` references to this item are consulted for the gain map's XMP
+    /// (`find_xmp_for_item`); `true` when that XMP reaches the caller.
+    cdsc_target: Option<(u32, bool)>,
+    /// The `tmap` payload is attached whole (`HdrGainMap::iso21496`).
+    tmap_attached: Option<u32>,
+    /// The first usable EXIF item feeds Apple gain-map parameters
+    /// (codec.rs `apple_gain_map_params`).
+    exif_feeds_gain_map: bool,
 }
 
 impl Model {
@@ -1366,6 +1594,35 @@ impl Model {
         set(&mut self.props, idx, disp, why);
     }
 
+    /// Record how the decode reads `id`'s data. The highest-ranked use wins;
+    /// at equal rank, reading more wins.
+    fn set_data(
+        &mut self,
+        id: u32,
+        disp: Disposition,
+        why: impl Into<String>,
+        prefix: Option<u64>,
+    ) {
+        let new = DataUse {
+            disp,
+            why: why.into(),
+            prefix,
+        };
+        match self.data.get(&id) {
+            Some(old) if rank(old.disp) > rank(disp) => {}
+            Some(old)
+                if rank(old.disp) == rank(disp)
+                    && match (old.prefix, prefix) {
+                        (None, _) => true,
+                        (Some(_), None) => false,
+                        (Some(a), Some(b)) => a >= b,
+                    } => {}
+            _ => {
+                self.data.insert(id, new);
+            }
+        }
+    }
+
     fn build(c: &HeifContainer<'_>, opts: &Options) -> Self {
         let mut m = Self {
             opts: *opts,
@@ -1375,12 +1632,14 @@ impl Model {
             return m;
         };
         let pid = primary.id;
+        m.primary = Some(pid);
         // decode.rs `decode_to_frame` → `decode_item(primary)`.
         m.visit_image(
             c,
             pid,
             0,
             Role::Primary,
+            false,
             Disposition::ImageData,
             "primary image",
         );
@@ -1422,12 +1681,18 @@ impl Model {
         if has_gain_map {
             let tmap = crate::decode::find_tmap_gain_map(c);
             let gm_dims = |id: u32| c.get_item(id).and_then(|i| i.dimensions).is_some();
-            if let Some((tmap_id, gm_id, iso)) = &tmap
-                && zencodec::gainmap::parse_iso21496_fmt(
+            let iso_ok = tmap.as_ref().is_some_and(|(_, _, iso)| {
+                zencodec::gainmap::parse_iso21496_fmt(
                     iso,
                     zencodec::gainmap::Iso21496Format::AvifTmap,
                 )
                 .is_ok()
+            });
+            let apple_params = crate::codec::apple_gain_map_params(c).is_some();
+            // codec.rs `extract_gain_map_info` (every probe and decode).
+            let mut exif_feeds = false;
+            if let Some((tmap_id, gm_id, _)) = &tmap
+                && iso_ok
                 && gm_dims(*gm_id)
             {
                 m.set_item(
@@ -1436,49 +1701,95 @@ impl Model {
                     "ISO 21496-1 gain-map parameters, reported in ImageInfo::gain_map",
                 );
                 m.props_of(c, *gm_id, Role::GainMapDims);
-            } else if let Some(&gm) = apple.first()
-                && gm_dims(gm)
-                && crate::codec::apple_gain_map_params(c).is_some()
-            {
-                m.props_of(c, gm, Role::GainMapDims);
+            } else {
+                if let Some(&gm) = apple.first()
+                    && gm_dims(gm)
+                    && apple_params
+                {
+                    m.props_of(c, gm, Role::GainMapDims);
+                    exif_feeds = true;
+                }
+                if let Some((tmap_id, _, _)) = &tmap {
+                    m.set_item(
+                        *tmap_id,
+                        Disposition::Dropped,
+                        "read by find_tmap_gain_map; parse_iso21496_fmt rejects it or the gain-map item has no ispe, so no gain map is reported from it",
+                    );
+                }
             }
             let chosen = tmap
                 .as_ref()
                 .map(|(t, g, _)| (Some(*t), *g))
                 .or_else(|| apple.first().map(|&g| (None, g)));
             if let Some((tmap_id, gm)) = chosen {
-                match opts.gain_map {
-                    GainMapUse::Describe => m.set_item(
-                        gm,
-                        Disposition::Skipped,
-                        "gain-map image: decoded only with extract_gain_map or GainMapRender::Components/ReconstructHdr",
-                    ),
-                    GainMapUse::Surface | GainMapUse::Reconstruct => {
-                        let data_disp = if opts.gain_map == GainMapUse::Reconstruct {
-                            Disposition::ImageData
-                        } else {
-                            Disposition::Metadata(MetadataKind::GainMap)
-                        };
-                        if let Some(t) = tmap_id {
+                if opts.decode_gain_map() {
+                    // codec.rs `gain_map_params_from`: the tmap payload's
+                    // parameters, else the Apple MakerNote headroom.
+                    if !(tmap_id.is_some() && iso_ok) && apple_params {
+                        exif_feeds = true;
+                    }
+                    let data_disp = if opts.apply_gain_map {
+                        Disposition::ImageData
+                    } else {
+                        Disposition::Metadata(MetadataKind::GainMap)
+                    };
+                    if let Some(t) = tmap_id {
+                        if opts.attach_gain_map {
                             m.set_item(
                                 t,
                                 Disposition::Metadata(MetadataKind::GainMap),
-                                "ISO 21496-1 gain-map parameters",
+                                "ISO 21496-1 gain-map metadata, attached whole as HdrGainMap::iso21496",
+                            );
+                            m.tmap_attached = Some(t);
+                        } else if iso_ok {
+                            m.set_item(
+                                t,
+                                Disposition::Metadata(MetadataKind::GainMap),
+                                "ISO 21496-1 gain-map parameters, applied by ReconstructHdr",
                             );
                         }
-                        m.visit_image(c, gm, 0, Role::GainMapDecoded, data_disp, "gain-map image");
-                        if opts.gain_map == GainMapUse::Surface
-                            && let Some(x) = xmp_item_for(c, tmap_id.unwrap_or(gm))
-                        {
+                        m.set_data(
+                            t,
+                            Disposition::Metadata(MetadataKind::GainMap),
+                            "the tmap payload (decode.rs find_tmap_gain_map reads the whole item)",
+                            None,
+                        );
+                    }
+                    m.visit_image(
+                        c,
+                        gm,
+                        0,
+                        Role::GainMapDecoded,
+                        false,
+                        data_disp,
+                        "gain-map image",
+                    );
+                    let xmp_of = tmap_id.unwrap_or(gm);
+                    m.cdsc_target = Some((xmp_of, opts.attach_gain_map));
+                    if let Some(x) = xmp_item_for(c, xmp_of) {
+                        if opts.attach_gain_map {
                             m.set_item(
                                 x,
                                 Disposition::Metadata(MetadataKind::GainMap),
                                 "gain-map XMP, attached as HdrGainMap::xmp",
                             );
+                        } else {
+                            m.set_item(
+                                x,
+                                Disposition::Dropped,
+                                "gain-map XMP: decode_gain_map reads it, ReconstructHdr discards it",
+                            );
                         }
                     }
+                } else {
+                    m.set_item(
+                        gm,
+                        Disposition::Skipped,
+                        "gain-map image: decoded only with extract_gain_map or GainMapRender::Components/ReconstructHdr",
+                    );
                 }
             }
+            m.exif_feeds_gain_map = exif_feeds;
         }
 
         // Depth: decode.rs `decode_depth`, codec.rs `decode_inner`.
@@ -1492,6 +1803,7 @@ impl Model {
                     d,
                     0,
                     Role::DepthDecoded,
+                    false,
                     Disposition::Metadata(MetadataKind::Supplement),
                     "depth map",
                 );
@@ -1529,15 +1841,24 @@ impl Model {
         // codec.rs `extract_exif_from_container`: the first usable Exif item,
         // whatever it describes.
         if let Some(id) = exif_item(c) {
-            let (d, why) = if opts.keep_exif {
-                (
+            if opts.keep_exif {
+                m.set_item(
+                    id,
                     Disposition::Metadata(MetadataKind::Exif),
                     "EXIF, reported in ImageInfo (first usable Exif item; no cdsc check)",
-                )
+                );
+            } else if m.exif_feeds_gain_map {
+                // codec.rs `apple_gain_map_params` reads the MakerNote
+                // whatever the policy; `apply_policy` clears only
+                // `embedded_metadata.exif`.
+                m.set_item(
+                    id,
+                    Disposition::Metadata(MetadataKind::GainMap),
+                    "EXIF removed by the DecodePolicy, but its Apple MakerNote HDR headroom gives the reported gain-map parameters (codec.rs apple_gain_map_params)",
+                );
             } else {
-                (Disposition::Dropped, "EXIF removed by the DecodePolicy")
-            };
-            m.set_item(id, d, why);
+                m.set_item(id, Disposition::Dropped, "EXIF removed by the DecodePolicy");
+            }
         }
         // Exif items `extract_exif_from_container` cannot use.
         for info in c
@@ -1569,12 +1890,16 @@ impl Model {
     }
 
     /// decode.rs `decode_item`: an image item and the items it derives from.
+    /// `overridden`: an item deriving from this one carries an nclx, which
+    /// replaces this one's colour fields in the decoded frame.
+    #[allow(clippy::too_many_arguments)]
     fn visit_image(
         &mut self,
         c: &HeifContainer<'_>,
         id: u32,
         depth: u32,
         role: Role,
+        overridden: bool,
         data_disp: Disposition,
         why: &str,
     ) {
@@ -1590,7 +1915,8 @@ impl Model {
             Role::Primary => 0,
             Role::GainMapDecoded => 1,
             Role::DepthDecoded => 2,
-            _ => 3,
+            Role::Component { nclx: true } => 3,
+            _ => 4,
         };
         if !self.visited.insert((id, role_key)) {
             return;
@@ -1598,16 +1924,28 @@ impl Model {
         let Some(item) = c.get_item(id) else {
             return;
         };
-        let sub = |r: Role| if depth == 0 { r } else { Role::Component };
         let dimg = FourCC(*b"dimg");
+        // This item's nclx replaces its inputs' colour fields.
+        let has_nclx = matches!(item.color_info, Some(ColorInfo::Nclx { .. }));
+        let below = overridden || has_nclx;
         match item.item_type {
             ItemType::Grid => {
-                self.set_item(
+                self.set_item(id, Disposition::Structure, format!("grid ({why})"));
+                // decode.rs `decode_grid` (and codec.rs's streaming grid
+                // path): 8 descriptor bytes, 12 with 32-bit output sizes.
+                let read = c
+                    .get_item_data(id)
+                    .ok()
+                    .and_then(|d| d.get(1).copied())
+                    .map_or(8, |flags| if flags & 1 != 0 { 12 } else { 8 });
+                self.set_data(
                     id,
                     Disposition::Structure,
-                    format!("grid descriptor ({why})"),
+                    format!("grid descriptor ({why}); decode_grid reads {read} bytes"),
+                    Some(read),
                 );
-                self.props_of(c, id, sub(role));
+                self.props_of(c, id, role);
+                self.dimg_from.insert(id);
                 let tiles = c.get_item_references(id, dimg);
                 let hevc = tiles
                     .first()
@@ -1621,7 +1959,17 @@ impl Model {
                         self.props_of(c, t, Role::HevcGridTile { first: i == 0 });
                         self.hevc_cfg.entry(t).or_insert(tiles[0]);
                     } else {
-                        self.visit_image(c, t, depth + 1, Role::Component, data_disp, "grid tile");
+                        self.visit_image(
+                            c,
+                            t,
+                            depth + 1,
+                            Role::Component {
+                                nclx: i == 0 && !below,
+                            },
+                            below || i > 0,
+                            data_disp,
+                            "grid tile",
+                        );
                     }
                 }
             }
@@ -1631,24 +1979,53 @@ impl Model {
                     Disposition::Structure,
                     format!("identity-derived image ({why})"),
                 );
-                self.props_of(c, id, sub(role));
-                if let Some(&src) = c.get_item_references(id, dimg).first() {
-                    self.visit_image(c, src, depth + 1, Role::Component, data_disp, "iden source");
-                }
-            }
-            ItemType::Iovl => {
-                self.set_item(
+                self.set_data(
                     id,
-                    Disposition::Structure,
-                    format!("overlay descriptor ({why})"),
+                    Disposition::Dropped,
+                    "decode.rs decode_iden follows dimg and never reads the iden item's own data",
+                    None,
                 );
-                self.props_of(c, id, sub(role));
-                for src in c.get_item_references(id, dimg) {
+                self.props_of(c, id, role);
+                self.dimg_from.insert(id);
+                if let Some(&src) = c.get_item_references(id, dimg).first() {
                     self.visit_image(
                         c,
                         src,
                         depth + 1,
-                        Role::Component,
+                        Role::Component { nclx: !below },
+                        below,
+                        data_disp,
+                        "iden source",
+                    );
+                }
+            }
+            ItemType::Iovl => {
+                self.set_item(id, Disposition::Structure, format!("overlay ({why})"));
+                let inputs = c.get_item_references(id, dimg);
+                // decode.rs `decode_iovl`: version/flags, four fill values,
+                // the canvas size and one offset pair per input.
+                let read = c.get_item_data(id).ok().and_then(|d| {
+                    let off: u64 = if d.get(1)? & 1 != 0 { 4 } else { 2 };
+                    let n = inputs.len() as u64;
+                    Some(2 + 8 + 2 * off + n.saturating_mul(2 * off))
+                });
+                self.set_data(
+                    id,
+                    Disposition::Structure,
+                    format!("overlay descriptor ({why}); decode_iovl reads its fields"),
+                    read,
+                );
+                self.props_of(c, id, role);
+                self.dimg_from.insert(id);
+                for (i, src) in inputs.into_iter().enumerate() {
+                    self.visit_image(
+                        c,
+                        src,
+                        depth + 1,
+                        Role::Component {
+                            nclx: i == 0 && !below,
+                        },
+                        below || i > 0,
                         data_disp,
                         "overlay input",
                     );
@@ -1660,15 +2037,30 @@ impl Model {
                     Disposition::Structure,
                     format!("tone-map derived image, decoded as its base ({why})"),
                 );
-                self.props_of(c, id, sub(role));
+                self.set_data(
+                    id,
+                    Disposition::Dropped,
+                    "decode.rs decode_tmap decodes the base image; the tmap payload is read only for the gain map",
+                    None,
+                );
+                self.props_of(c, id, role);
+                self.dimg_from.insert(id);
                 if let Some(&base) = c.get_item_references(id, dimg).first() {
-                    self.visit_image(c, base, depth + 1, Role::Component, data_disp, "tmap base");
+                    self.visit_image(
+                        c,
+                        base,
+                        depth + 1,
+                        Role::Component { nclx: !below },
+                        below,
+                        data_disp,
+                        "tmap base",
+                    );
                 }
             }
             ItemType::Hvc1 | ItemType::Unknown(_) => {
                 if item.hevc_config.is_some() || item.item_type == ItemType::Hvc1 {
                     self.set_item(id, data_disp, why);
-                    self.props_of(c, id, sub(role));
+                    self.props_of(c, id, role);
                 } else {
                     self.set_item(
                         id,
@@ -1680,7 +2072,7 @@ impl Model {
             ItemType::Av01 => {
                 if cfg!(feature = "av1") {
                     self.set_item(id, data_disp, why);
-                    self.props_of(c, id, sub(role));
+                    self.props_of(c, id, role);
                 } else {
                     self.set_item(
                         id,
@@ -1692,7 +2084,7 @@ impl Model {
             ItemType::Unci => {
                 if cfg!(feature = "unci") {
                     self.set_item(id, data_disp, why);
-                    self.props_of(c, id, sub(role));
+                    self.props_of(c, id, role);
                 } else {
                     self.set_item(
                         id,
@@ -1784,6 +2176,20 @@ impl Model {
                 if let Some((d, why)) = prop_use(slot, role, &c.properties[i], &self.opts) {
                     self.set_prop(i, d, format!("item {id}: {why}"));
                 }
+                if slot == Slot::AuxC {
+                    let (d, why) = if role == Role::DepthDecoded {
+                        (
+                            Disposition::Metadata(MetadataKind::Supplement),
+                            "depth representation info, parsed into DepthMap::depth_info (decode.rs decode_depth)",
+                        )
+                    } else {
+                        (
+                            Disposition::Dropped,
+                            "auxC subtype: heic matches only the URN for this item",
+                        )
+                    };
+                    set(&mut self.auxc_tail, i, d, format!("item {id}: {why}"));
+                }
             }
         }
     }
@@ -1809,6 +2215,13 @@ fn prop_use(
     use Disposition as D;
     use MetadataKind as K;
     let icc = matches!(prop, ItemProperty::ColorInfo(ColorInfo::IccProfile(_)));
+    // parser.rs `find_auxiliary_items` reads auxC only for items that
+    // `auxl`-reference the primary; nothing reads it for an image's own
+    // decode.
+    const AUXC_UNREAD: (Disposition, &str) = (
+        D::Dropped,
+        "auxC parsed into the item; heic reads it only for auxiliary items of the primary",
+    );
     match role {
         // codec.rs `build_image_info_full` and decode.rs `decode_item`.
         Role::Primary => Some(match slot {
@@ -1827,13 +2240,13 @@ fn prop_use(
                 D::Metadata(K::Orientation),
                 "orientation, reported in ImageInfo (applied under OrientationHint::Correct)",
             ),
-            Slot::AuxC => (D::Structure, "auxiliary type"),
+            Slot::AuxC => AUXC_UNREAD,
             Slot::Clli | Slot::Mdcv => (
                 D::Metadata(K::HdrStatic),
                 "HDR static metadata, reported in SourceColor",
             ),
         }),
-        Role::Component | Role::GainMapDecoded | Role::DepthDecoded => Some(match slot {
+        Role::Component { .. } | Role::GainMapDecoded | Role::DepthDecoded => Some(match slot {
             Slot::Ispe if role == Role::GainMapDecoded => {
                 (D::Metadata(K::GainMap), "gain-map dimensions")
             }
@@ -1843,15 +2256,21 @@ fn prop_use(
                 D::Dropped,
                 "ICC profile of a non-primary item is not reported",
             ),
+            Slot::Colr if role == Role::Component { nclx: false } => (
+                D::Dropped,
+                "nclx of a derived-image input that the deriving image's nclx replaces, or of an input after the first (decode_grid/decode_iovl keep the first input's range and matrix)",
+            ),
             Slot::Colr => (D::Structure, "nclx colour: this item's YCbCr conversion"),
             Slot::Clap | Slot::Irot | Slot::Imir => {
                 (D::Structure, "transform applied to this item's pixels")
             }
-            Slot::AuxC if role == Role::DepthDecoded => (
-                D::Metadata(K::Supplement),
-                "depth representation info, reported in DepthMap",
-            ),
-            Slot::AuxC => (D::Structure, "auxiliary type"),
+            Slot::AuxC if role == Role::DepthDecoded => {
+                (D::Structure, "identifies the depth map (URN)")
+            }
+            Slot::AuxC if role == Role::GainMapDecoded => {
+                (D::Structure, "identifies the gain map (URN)")
+            }
+            Slot::AuxC => AUXC_UNREAD,
             Slot::Clli | Slot::Mdcv => (
                 D::Dropped,
                 "HDR metadata of a non-primary item is not reported",
@@ -1872,7 +2291,7 @@ fn prop_use(
         Role::Alpha => Some(match slot {
             Slot::Ispe => (D::Structure, "alpha plane extents"),
             Slot::Codec => (D::Structure, "alpha plane decoder configuration"),
-            Slot::AuxC => (D::Structure, "identifies the alpha plane"),
+            Slot::AuxC => (D::Structure, "identifies the alpha plane (URN)"),
             _ => (D::Dropped, "not applied to the alpha plane"),
         }),
         // codec.rs `extract_gain_map_info`.
@@ -1881,14 +2300,14 @@ fn prop_use(
                 D::Metadata(K::GainMap),
                 "gain-map dimensions, reported in ImageInfo::gain_map",
             )),
-            Slot::AuxC => Some((D::Structure, "identifies the gain map")),
+            Slot::AuxC => Some((D::Structure, "identifies the gain map (URN)")),
             _ => None,
         },
         // codec.rs `decode_inner` → `HeicAuxiliaryInfo::auxiliary_types`.
         Role::AuxInfo => match slot {
             Slot::AuxC => Some((
                 D::Structure,
-                "auxiliary type, reported in HeicAuxiliaryInfo",
+                "auxiliary type (URN), reported in HeicAuxiliaryInfo",
             )),
             _ => None,
         },
@@ -1990,21 +2409,259 @@ struct Cand {
     k: usize,
     n: usize,
     range: Range<u64>,
+    /// Offset of the extent's first byte in the item's data.
+    at: u64,
     method: u8,
     disp: Disposition,
     why: String,
     label: Option<String>,
     note_to: usize,
+    /// From the item's first `iloc` entry, the one heic reads.
+    first_entry: bool,
+}
+
+/// Where an extent is listed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Host {
+    /// Between top-level boxes.
+    Top,
+    Node(usize),
+}
+
+/// The children of every node at the end of the box walk, in file order.
+struct Kids {
+    top: Vec<u32>,
+    start: Vec<u32>,
+    list: Vec<u32>,
+}
+
+impl Kids {
+    fn new(nodes: &[Node]) -> Self {
+        let n = nodes.len();
+        let mut start = vec![0u32; n + 1];
+        let mut top = Vec::new();
+        for (i, node) in nodes.iter().enumerate() {
+            match node.parent {
+                Some(p) => start[p + 1] += 1,
+                None => top.push(i as u32),
+            }
+        }
+        for i in 0..n {
+            start[i + 1] += start[i];
+        }
+        let mut cursor = start.clone();
+        let mut list = vec![0u32; start[n] as usize];
+        for (i, node) in nodes.iter().enumerate() {
+            if let Some(p) = node.parent {
+                list[cursor[p] as usize] = i as u32;
+                cursor[p] += 1;
+            }
+        }
+        Self { top, start, list }
+    }
+
+    fn of(&self, i: usize) -> &[u32] {
+        &self.list[self.start[i] as usize..self.start[i + 1] as usize]
+    }
+}
+
+/// Extents that share bytes: every byte goes to the highest-ranked extent
+/// covering it (the earliest-starting one on a tie), so bytes the decoder
+/// reads are never listed as unreferenced. `list` is sorted by start;
+/// returns `(index into list, range)` in file order.
+fn sweep(list: &[Cand]) -> Vec<(usize, Range<u64>)> {
+    use alloc::collections::BinaryHeap;
+    use core::cmp::Reverse;
+    let mut bounds: Vec<u64> = Vec::with_capacity(list.len().saturating_mul(2));
+    for c in list {
+        bounds.push(c.range.start);
+        bounds.push(c.range.end);
+    }
+    bounds.sort_unstable();
+    bounds.dedup();
+    let mut heap: BinaryHeap<(u8, Reverse<usize>)> = BinaryHeap::new();
+    let mut next = 0usize;
+    let mut out: Vec<(usize, Range<u64>)> = Vec::with_capacity(list.len());
+    for w in bounds.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        while next < list.len() && list[next].range.start <= a {
+            heap.push((rank(list[next].disp), Reverse(next)));
+            next += 1;
+        }
+        while let Some(&(_, Reverse(i))) = heap.peek() {
+            if list[i].range.end <= a {
+                heap.pop();
+            } else {
+                break;
+            }
+        }
+        if let Some(&(_, Reverse(i))) = heap.peek() {
+            match out.last_mut() {
+                Some((j, r)) if *j == i && r.end == a => r.end = b,
+                _ => out.push((i, a..b)),
+            }
+        }
+    }
+    out
+}
+
+/// parser.rs `parse_iref` over one reference box's payload: calls `f` with
+/// each entry's from-ID and to-IDs. Returns how many entries `f` accepted,
+/// out of how many.
+fn iref_entries(c: &[u8], version: u8, mut f: impl FnMut(u32, &[u32]) -> bool) -> (usize, usize) {
+    let id = if version == 0 { 2 } else { 4 };
+    let read_id = |at: usize| -> u32 {
+        if id == 2 {
+            u32::from(u16::from_be_bytes([c[at], c[at + 1]]))
+        } else {
+            u32::from_be_bytes([c[at], c[at + 1], c[at + 2], c[at + 3]])
+        }
+    };
+    let (mut yes, mut all) = (0usize, 0usize);
+    let mut to: Vec<u32> = Vec::new();
+    let mut pos = 0usize;
+    while pos < c.len() {
+        if pos + id > c.len() {
+            break;
+        }
+        let from = read_id(pos);
+        pos += id;
+        if pos + 2 > c.len() {
+            break;
+        }
+        let n = u16::from_be_bytes([c[pos], c[pos + 1]]);
+        pos += 2;
+        to.clear();
+        for _ in 0..n {
+            if pos + id > c.len() {
+                break;
+            }
+            to.push(read_id(pos));
+            pos += id;
+        }
+        all += 1;
+        if f(from, &to) {
+            yes += 1;
+        }
+    }
+    (yes, all)
+}
+
+/// parser.rs `parse_ipma`: the item ID of every entry it records.
+fn ipma_items(c: &[u8], mut f: impl FnMut(u32)) {
+    let (Some(&version), Some(&flags), Some(count)) = (c.first(), c.get(3), be32(c, 4)) else {
+        return;
+    };
+    let wide = flags & 1 != 0;
+    let id = if version < 1 { 2 } else { 4 };
+    let mut pos = 8usize;
+    for _ in 0..count {
+        if pos + id > c.len() {
+            break;
+        }
+        let item = if id == 2 {
+            u32::from(u16::from_be_bytes([c[pos], c[pos + 1]]))
+        } else {
+            u32::from_be_bytes([c[pos], c[pos + 1], c[pos + 2], c[pos + 3]])
+        };
+        pos += id;
+        if pos >= c.len() {
+            break;
+        }
+        let n = c[pos];
+        pos += 1;
+        for _ in 0..n {
+            let w = if wide { 2 } else { 1 };
+            if pos >= c.len() || pos + w > c.len() {
+                break;
+            }
+            pos += w;
+        }
+        f(item);
+    }
+}
+
+/// The winning `hvcC` of an item: the last `HevcConfig` of its first `ipma`
+/// entry (parser.rs `get_item`), as a property index.
+fn hvcc_prop(c: &HeifContainer<'_>, item: u32) -> Option<usize> {
+    let assoc = c.property_associations.iter().find(|a| a.item_id == item)?;
+    assoc
+        .properties
+        .iter()
+        .filter(|(p, _)| *p > 0)
+        .map(|(p, _)| usize::from(*p) - 1)
+        .rfind(|&i| matches!(c.properties.get(i), Some(ItemProperty::HevcConfig(_))))
 }
 
 impl Walker<'_> {
-    /// The top-level box holding `at`, for remarks.
-    fn top_box_at(&self, at: u64) -> String {
-        self.nodes
-            .iter()
-            .find(|n| n.parent.is_none() && n.range.start <= at && at < n.range.end)
-            .map(|n| format!("{} at {}", n.tag, n.range.start))
-            .unwrap_or_else(|| "no box".to_string())
+    /// A remark built only when the part has room for it.
+    fn note_with(&mut self, node: usize, f: impl FnOnce() -> String) {
+        if let Some(n) = self.nodes.get_mut(node) {
+            if n.notes.len() < MAX_NOTES {
+                n.notes.push(f());
+            } else {
+                n.dropped_notes += 1;
+            }
+        }
+    }
+
+    /// Payload range of a box part, after its header.
+    fn content_of(&self, node: usize) -> Option<Range<u64>> {
+        let r = self.nodes.get(node)?.range.clone();
+        match read_header(self.data, r.start, r.end) {
+            HdrOutcome::Ok(h) => Some(r.start + h.base_header..r.end),
+            _ => None,
+        }
+    }
+
+    /// The part an extent is listed under: the `mdat`/`idat` holding it,
+    /// else (parser.rs `get_item_data` reads absolute file offsets wherever
+    /// they lie) the deepest leaf holding it, or the top level when it lies
+    /// between top-level boxes. `None` when it straddles parts or lies in a
+    /// container's header.
+    fn host_of(
+        &self,
+        kids: &Kids,
+        r: &Range<u64>,
+        method: u8,
+        active_idat: Option<usize>,
+    ) -> Option<Host> {
+        let mut level: &[u32] = &kids.top;
+        let mut host = Host::Top;
+        loop {
+            let i = level.partition_point(|&n| self.nodes[n as usize].range.start <= r.start);
+            match i.checked_sub(1).map(|j| level[j] as usize) {
+                Some(n) if r.end <= self.nodes[n].range.end => {
+                    let node = &self.nodes[n];
+                    if node.gap_fill.is_some() {
+                        let body = node.body.as_ref()?;
+                        let allowed = method == 0 || Some(n) == active_idat;
+                        return (allowed && body.start <= r.start && r.end <= body.end)
+                            .then_some(Host::Node(n));
+                    }
+                    let ks = kids.of(n);
+                    if ks.is_empty() {
+                        return node.body.is_none().then_some(Host::Node(n));
+                    }
+                    level = ks;
+                    host = Host::Node(n);
+                }
+                Some(n) if r.start < self.nodes[n].range.end => return None,
+                _ => {
+                    // In a gap at this level: the next part must not overlap.
+                    if level
+                        .get(i)
+                        .is_some_and(|&n| self.nodes[n as usize].range.start < r.end)
+                    {
+                        return None;
+                    }
+                    return match host {
+                        Host::Top => Some(Host::Top),
+                        Host::Node(h) => self.nodes[h].body.is_none().then_some(Host::Node(h)),
+                    };
+                }
+            }
+        }
     }
 
     /// Second pass: dispositions that depend on the whole file.
@@ -2060,6 +2717,7 @@ impl Walker<'_> {
             self.nodes[rec.node].disp = disp;
             self.note(rec.node, why);
         }
+        drop(infes);
 
         // pitm: the last one wins (parser.rs `parse_pitm`).
         if let Some((_, earlier)) = self.pitms.clone().split_last() {
@@ -2069,40 +2727,111 @@ impl Walker<'_> {
             }
         }
 
-        // iref children (parser.rs `parse_iref` parses every type).
-        // decode.rs `decode_gain_map` → `find_xmp_for_item` is the only
-        // reader of `cdsc`, and only when the gain map is decoded and attached.
-        let gm_xmp = parsed.is_some_and(|(_, m)| m.opts.gain_map == GainMapUse::Surface);
-        for (node, typ) in self.irefs.clone() {
-            let (disp, why) = match &typ {
-                _ if parsed.is_none() => (Disposition::Dropped, "heic rejects the file"),
-                b"dimg" | b"auxl" => (
-                    Disposition::Structure,
-                    "consulted for derived images and auxiliary items",
-                ),
-                b"cdsc" if gm_xmp => (
-                    Disposition::Structure,
-                    "consulted to find the decoded gain map's XMP",
-                ),
-                b"cdsc" => (
-                    Disposition::Dropped,
-                    "parsed; the zencodec path picks EXIF/XMP without consulting cdsc",
-                ),
-                b"thmb" => (
-                    Disposition::Dropped,
-                    "parsed; thumbnails are not reported through zencodec",
-                ),
-                _ => (
-                    Disposition::Dropped,
-                    "parsed; heic never consults this reference type",
-                ),
+        // iref children (parser.rs `parse_iref` parses every type). An
+        // entry is consulted when the decode follows it: `dimg` from a
+        // decoded derived image, `auxl` to the primary
+        // (`find_all_auxiliary_items`), `cdsc` to the attached gain map
+        // (`find_xmp_for_item`).
+        for (node, typ, version) in core::mem::take(&mut self.irefs) {
+            let Some(content) = self.content_of(node) else {
+                continue;
+            };
+            let c = slice(self.data, content);
+            let (disp, why, counts): (Disposition, &str, Option<(usize, usize)>) = match parsed {
+                None => (Disposition::Dropped, "heic rejects the file", None),
+                Some((_, m)) => {
+                    let (yes, all) = iref_entries(c, version, |from, to| match &typ {
+                        b"dimg" => m.dimg_from.contains(&from),
+                        b"auxl" => m.primary.is_some_and(|p| to.contains(&p)),
+                        b"cdsc" => m
+                            .cdsc_target
+                            .is_some_and(|(t, attached)| attached && to.contains(&t)),
+                        _ => false,
+                    });
+                    let (d, why) = match &typ {
+                        b"dimg" if yes > 0 => (
+                            Disposition::Structure,
+                            "the decode follows these derived-image references",
+                        ),
+                        b"dimg" => (
+                            Disposition::Dropped,
+                            "parsed; no image the decode reads derives from the items it lists",
+                        ),
+                        b"auxl" if yes > 0 => (
+                            Disposition::Structure,
+                            "auxiliary images of the primary (find_auxiliary_items)",
+                        ),
+                        b"auxl" => (
+                            Disposition::Dropped,
+                            "parsed; it does not point at the primary item, so no auxiliary lookup matches it",
+                        ),
+                        b"cdsc" if yes > 0 => (
+                            Disposition::Structure,
+                            "consulted to find the attached gain map's XMP",
+                        ),
+                        b"cdsc" => (
+                            Disposition::Dropped,
+                            "parsed; the zencodec path picks EXIF/XMP without consulting cdsc",
+                        ),
+                        b"thmb" => (
+                            Disposition::Dropped,
+                            "parsed; thumbnails are not reported through zencodec",
+                        ),
+                        _ => (
+                            Disposition::Dropped,
+                            "parsed; heic never consults this reference type",
+                        ),
+                    };
+                    (d, why, Some((yes, all)))
+                }
             };
             self.nodes[node].disp = disp;
             self.note(node, why);
+            if let Some((yes, all)) = counts
+                && yes > 0
+                && yes < all
+            {
+                self.note_with(node, || {
+                    format!(
+                        "{yes} of its {all} entries are consulted; the rest are parsed and unused"
+                    )
+                });
+            }
+        }
+
+        // ipma: only an item's first entry counts (parser.rs `get_item`).
+        if let Some((c, _)) = parsed {
+            let mut seen: BTreeSet<u32> = BTreeSet::new();
+            for node in core::mem::take(&mut self.ipmas) {
+                check_stop(self.stop)?;
+                let Some(content) = self.content_of(node) else {
+                    continue;
+                };
+                let (mut entries, mut repeats) = (0usize, 0usize);
+                ipma_items(slice(self.data, content), |item| {
+                    entries += 1;
+                    if !seen.insert(item) {
+                        repeats += 1;
+                    }
+                });
+                if entries > 0 && repeats == entries {
+                    self.nodes[node].disp = Disposition::Dropped;
+                    self.note(
+                        node,
+                        "every entry repeats an item an earlier ipma entry covers; heic uses the first",
+                    );
+                } else if repeats > 0 {
+                    self.note_with(node, || {
+                        format!("{repeats} of {entries} entries repeat an item an earlier entry covers; heic uses the first")
+                    });
+                }
+            }
+            debug_assert!(seen.len() <= c.property_associations.len());
         }
 
         // Properties (parser.rs `parse_property`, `HeifContainer::get_item`).
         let props = core::mem::take(&mut self.props);
+        let prop_nodes: Vec<usize> = props.iter().map(|r| r.node).collect();
         let associated: BTreeSet<usize> = parsed
             .map(|(c, _)| {
                 c.property_associations
@@ -2171,6 +2900,98 @@ impl Walker<'_> {
             };
             self.nodes[rec.node].disp = disp;
             self.note(rec.node, why);
+            // auxC: version/flags, the URN up to its NUL, then subtype bytes
+            // (parser.rs `parse_auxc`).
+            if &rec.typ == b"auxC"
+                && disp.is_consumed()
+                && let Some(content) = self.content_of(rec.node)
+            {
+                let c = slice(self.data, content.clone());
+                if let Some(nul) = c.get(4..).and_then(|u| u.iter().position(|&b| b == 0)) {
+                    let urn_end = 4 + nul as u64 + 1;
+                    if content.start + urn_end < content.end {
+                        let (d, why) = parsed
+                            .and_then(|(_, m)| m.auxc_tail.get(&rec.index))
+                            .map(|u| (u.disp, u.why.clone()))
+                            .unwrap_or((
+                                Disposition::Dropped,
+                                "auxC subtype: heic matches only the URN".to_string(),
+                            ));
+                        self.nodes[rec.node].inner.push((
+                            content.start + urn_end..content.end,
+                            Some(d),
+                            why,
+                        ));
+                    }
+                }
+            }
+        }
+        drop(props);
+
+        // The decoded sample entry of an image sequence (parser.rs
+        // `parse_visual_sample_entry`): the last `hvcC` and the last `colr`
+        // heic can parse win; that `colr` is the primary item's colour.
+        if parsed.is_some() {
+            if let Some((_, earlier)) = self.entry_hvcc.clone().split_last() {
+                for &n in earlier {
+                    self.nodes[n].disp = Disposition::Dropped;
+                    self.note(
+                        n,
+                        "replaced by a later hvcC in the sample entry (parse_visual_sample_entry keeps the last)",
+                    );
+                }
+            }
+            let colrs = core::mem::take(&mut self.entry_colr);
+            let mut winner: Option<(usize, ItemProperty)> = None;
+            for &n in &colrs {
+                let Some(content) = self.content_of(n) else {
+                    continue;
+                };
+                let bmff = BmffBox {
+                    header: BoxHeader {
+                        box_type: FourCC(*b"colr"),
+                        size: self.nodes[n].range.end - self.nodes[n].range.start,
+                        content_offset: usize::try_from(content.start).unwrap_or(usize::MAX),
+                    },
+                    content: slice(self.data, content),
+                };
+                match heif::parse_property(&bmff) {
+                    p @ ItemProperty::ColorInfo(_) => {
+                        if let Some((old, _)) = winner.replace((n, p)) {
+                            self.nodes[old].disp = Disposition::Dropped;
+                            self.note(
+                                old,
+                                "replaced by a later colr in the sample entry (parse_visual_sample_entry keeps the last)",
+                            );
+                        }
+                    }
+                    _ => {
+                        self.nodes[n].disp = Disposition::Unknown;
+                        self.note(
+                            n,
+                            "heic's colr parser rejects it, so parse_visual_sample_entry skips it",
+                        );
+                    }
+                }
+            }
+            if let (Some((n, p)), Some((_, m))) = (winner, parsed) {
+                let (d, why) = match p {
+                    ItemProperty::ColorInfo(ColorInfo::IccProfile(_)) if m.opts.keep_icc => (
+                        Disposition::Metadata(MetadataKind::Icc),
+                        "ICC profile of the decoded track, reported in SourceColor",
+                    ),
+                    ItemProperty::ColorInfo(ColorInfo::IccProfile(_)) => (
+                        Disposition::Dropped,
+                        "ICC profile removed by the DecodePolicy",
+                    ),
+                    _ => (
+                        Disposition::Metadata(MetadataKind::Cicp),
+                        "nclx colour of the decoded track: YCbCr conversion and the reported CICP",
+                    ),
+                };
+                self.nodes[n].disp = d;
+                self.note(n, why);
+            }
         }
 
         // idat: heic keeps the last one of the top-level meta boxes
@@ -2196,7 +3017,7 @@ impl Walker<'_> {
         // box order); `iloc_layout` counts them without storing anything.
         // Otherwise parse each box on its own, after heic's parse has freed
         // its copy.
-        let mut sources: Vec<(usize, Cow<'_, [ItemLocation]>)> = Vec::new();
+        let mut sources: Vec<(usize, bool, Cow<'_, [ItemLocation]>)> = Vec::new();
         let mut next = 0usize;
         for rec in core::mem::take(&mut self.ilocs) {
             check_stop(self.stop)?;
@@ -2224,11 +3045,11 @@ impl Walker<'_> {
                     if read_end < rec.content.end {
                         self.nodes[rec.node].inner.push((
                             read_end..rec.content.end,
-                            Disposition::Dropped,
+                            Some(Disposition::Dropped),
                             "after the last entry heic's iloc parser reads".to_string(),
                         ));
                     }
-                    sources.push((rec.node, locs));
+                    sources.push((rec.node, true, locs));
                 }
                 Err(e) if matches!(e.error(), HeicError::Cancelled(_)) => return Err(e),
                 Err(e) => self.note(
@@ -2239,36 +3060,50 @@ impl Walker<'_> {
         }
         if !self.has_top_meta
             && let Some((c, _)) = parsed
-            && let Some(&moov) = self.moovs.first()
+            && let Some(&moov) = self
+                .moovs
+                .iter()
+                .find(|&&n| Some(self.nodes[n].range.start) == self.used_moov_at)
         {
             // parser.rs `parse_moov`: synthetic items for the decoded sample.
-            sources.push((moov, Cow::Borrowed(&c.item_locations[..])));
+            sources.push((moov, false, Cow::Borrowed(&c.item_locations[..])));
         }
         let mut cands: Vec<Cand> = Vec::new();
         let mut located: BTreeSet<u32> = BTreeSet::new();
-        // Items with an extent that is not listed as a part: their coded
-        // units cannot be placed.
+        // Items with an extent that is not listed whole as a part: their
+        // data cannot be walked.
         let mut incomplete: BTreeSet<u32> = BTreeSet::new();
-        // Consumed items' extents: (k, node).
-        let mut item_exts: BTreeMap<u32, Vec<(usize, usize)>> = BTreeMap::new();
-        for (note_to, locs) in sources {
+        // Items whose data the decode reads only in part: bytes read.
+        let mut prefixes: BTreeMap<u32, u64> = BTreeMap::new();
+        for (note_to, is_iloc, locs) in sources {
             let n_ext: usize = locs.iter().map(|l| l.extents.len()).sum();
             self.note(
                 note_to,
                 format!("{} item locations, {n_ext} extents", locs.len()),
             );
+            let mut repeats = 0usize;
             for loc in locs.iter() {
                 check_stop(self.stop)?;
                 let id = loc.item_id;
                 let info = declared.get(&id);
-                let u = if located.insert(id) {
-                    item_use(id, info.map(|(_, i)| i))
-                } else {
+                let first_entry = located.insert(id);
+                let u = if !first_entry {
+                    repeats += 1;
                     Use {
                         disp: Disposition::Dropped,
                         why: "repeats an earlier iloc entry for this item; heic reads the first"
                             .to_string(),
                     }
+                } else if let Some(d) = parsed.and_then(|(_, m)| m.data.get(&id)) {
+                    if let Some(p) = d.prefix {
+                        prefixes.insert(id, p);
+                    }
+                    Use {
+                        disp: d.disp,
+                        why: d.why.clone(),
+                    }
+                } else {
+                    item_use(id, info.map(|(_, i)| i))
                 };
                 let label = info.and_then(|(l, _)| l.clone()).or_else(|| {
                     parsed.and_then(|(c, _)| {
@@ -2282,28 +3117,28 @@ impl Walker<'_> {
                     0 => Some(0..file_len),
                     1 => active_idat_body.clone(),
                     m => {
-                        self.note(
-                            note_to,
-                            format!("item {id}: construction method {m} is not supported by heic; extents not placed"),
-                        );
+                        self.note_with(note_to, || {
+                            format!("item {id}: construction method {m} is not supported by heic; extents not placed")
+                        });
                         continue;
                     }
                 };
                 let Some(src) = src else {
-                    self.note(
-                        note_to,
-                        format!("item {id}: construction method 1 but no idat for heic to read"),
-                    );
+                    self.note_with(note_to, || {
+                        format!("item {id}: construction method 1 but no idat for heic to read")
+                    });
                     continue;
                 };
                 let n = loc.extents.len();
+                let mut at = 0u64;
                 for (k, &(off, len)) in loc.extents.iter().enumerate() {
                     let k = k + 1;
+                    let here = at;
+                    at = at.saturating_add(len);
                     if len == 0 {
-                        self.note(
-                            note_to,
-                            format!("item {id} extent {k}/{n} has length 0: heic reads nothing (ISO 14496-12 reads to the end of the source)"),
-                        );
+                        self.note_with(note_to, || {
+                            format!("item {id} extent {k}/{n} has length 0: heic reads nothing (ISO 14496-12 reads to the end of the source)")
+                        });
                         continue;
                     }
                     let start = src
@@ -2312,127 +3147,181 @@ impl Walker<'_> {
                         .and_then(|v| v.checked_add(off));
                     let end = start.and_then(|s| s.checked_add(len));
                     let (Some(start), Some(end)) = (start, end) else {
-                        incomplete.insert(id);
-                        self.note(
-                            note_to,
-                            format!("item {id} extent {k}/{n}: offset overflows"),
-                        );
+                        if first_entry {
+                            incomplete.insert(id);
+                        }
+                        self.note_with(note_to, || {
+                            format!("item {id} extent {k}/{n}: offset overflows")
+                        });
                         continue;
                     };
                     if end > src.end {
-                        incomplete.insert(id);
+                        if first_entry {
+                            incomplete.insert(id);
+                        }
                         let what = if loc.construction_method == 1 {
                             "idat"
                         } else {
                             "file"
                         };
-                        self.note(
-                            note_to,
-                            format!("item {id} extent {k}/{n} at {start}..{end} runs past the end of the {what} ({})", src.end),
-                        );
+                        self.note_with(note_to, || {
+                            format!("item {id} extent {k}/{n} at {start}..{end} runs past the end of the {what} ({})", src.end)
+                        });
                         continue;
                     }
                     // Every candidate becomes a part: refuse before the list
                     // outgrows the part cap (heic accepts up to 65,536 items
                     // of 1,024 extents each).
                     if cands.len() >= self.max_nodes {
-                        return Err(at!(HeicError::LimitExceeded(
-                            "inventory exceeds the zencodec part cap"
-                        )));
+                        return Err(Self::cap());
                     }
                     cands.push(Cand {
                         item: id,
                         k,
                         n,
                         range: start..end,
+                        at: here,
                         method: loc.construction_method,
                         disp: u.disp,
                         why: u.why.clone(),
                         label: label.clone(),
                         note_to,
+                        first_entry,
+                    });
+                }
+            }
+            if is_iloc && parsed.is_some() && repeats > 0 {
+                if repeats == locs.len() {
+                    self.nodes[note_to].disp = Disposition::Dropped;
+                    self.note(
+                        note_to,
+                        "every entry repeats an item an earlier iloc entry locates; heic reads the first",
+                    );
+                } else {
+                    self.note_with(note_to, || {
+                        format!("{repeats} of {} entries repeat an item an earlier entry locates; heic reads the first", locs.len())
                     });
                 }
             }
         }
 
-        // Place each extent in the mdat/idat body that holds it.
-        let mut holders: Vec<usize> = self.mdats.clone();
-        holders.extend(self.idats.iter().map(|&(n, _)| n));
-        holders.retain(|&h| self.nodes[h].body.is_some());
-        let mut placed: BTreeMap<usize, Vec<Cand>> = BTreeMap::new();
-        for cand in cands {
-            let holder = holders.iter().copied().find(|&h| {
-                let b = self.nodes[h].body.clone().unwrap_or(0..0);
-                let allowed = cand.method == 0 || Some(h) == active_idat;
-                allowed && b.start <= cand.range.start && cand.range.end <= b.end
-            });
-            match holder {
-                Some(h) => placed.entry(h).or_default().push(cand),
-                None => {
-                    incomplete.insert(cand.item);
-                    let place = self.top_box_at(cand.range.start);
-                    self.note(
-                        cand.note_to,
-                        format!(
-                            "item {} extent {}/{} at {}..{} lies outside every mdat/idat ({place})",
-                            cand.item, cand.k, cand.n, cand.range.start, cand.range.end
-                        ),
-                    );
-                }
-            }
-        }
-        for (holder, mut list) in placed {
-            list.sort_by(|a, b| {
-                a.range
-                    .start
-                    .cmp(&b.range.start)
-                    .then(rank(b.disp).cmp(&rank(a.disp)))
-            });
-            let mut last: Option<(u64, u32)> = None;
-            for cand in list {
-                if let Some((end, other)) = last
-                    && cand.range.start < end
-                {
-                    incomplete.insert(cand.item);
-                    self.note(
-                        cand.note_to,
-                        format!(
-                            "item {} extent {}/{} at {}..{} overlaps an extent of item {other}; not listed as a part",
-                            cand.item, cand.k, cand.n, cand.range.start, cand.range.end
-                        ),
-                    );
-                    continue;
-                }
-                last = Some((cand.range.end, cand.item));
-                let mut node = Self::leaf(
-                    Some(holder),
-                    PartKind::Extent,
-                    PartTag::Code(cand.item),
-                    cand.range,
-                    cand.disp,
-                );
-                node.label = cand.label;
-                node.notes.push(format!("extent {}/{}", cand.k, cand.n));
-                node.notes.push(cand.why);
-                if cand.disp == Disposition::ImageData {
-                    node.notes.push(NOT_WALKED.to_string());
-                }
-                let (item, k, consumed) = (cand.item, cand.k, cand.disp.is_consumed());
-                let at = self.add(node)?;
-                if consumed {
-                    item_exts.entry(item).or_default().push((k, at));
+        // Place each extent: binary search down the part tree.
+        let mut by_host: BTreeMap<Host, Vec<Cand>> = BTreeMap::new();
+        {
+            let kids = Kids::new(&self.nodes);
+            for cand in cands {
+                check_stop(self.stop)?;
+                match self.host_of(&kids, &cand.range, cand.method, active_idat) {
+                    Some(h) => by_host.entry(h).or_default().push(cand),
+                    None => {
+                        if cand.first_entry {
+                            incomplete.insert(cand.item);
+                        }
+                        self.note_with(cand.note_to, || {
+                            format!(
+                                "item {} extent {}/{} at {}..{} crosses part boundaries outside every mdat/idat; not listed as a part",
+                                cand.item, cand.k, cand.n, cand.range.start, cand.range.end
+                            )
+                        });
+                    }
                 }
             }
         }
 
-        let tmap_ids: BTreeSet<u32> = declared
-            .iter()
-            .filter(|(_, (_, info))| info.item_type == FourCC(*b"tmap"))
-            .map(|(&id, _)| id)
-            .collect();
-        self.split_metadata_extents(&tmap_ids);
+        // Consumed items' whole extents: item → (k, node, offset in the
+        // item's data).
+        let mut item_exts: BTreeMap<u32, Vec<(usize, usize, u64)>> = BTreeMap::new();
+        for (host, mut list) in by_host {
+            check_stop(self.stop)?;
+            list.sort_by_key(|c| c.range.start);
+            let pieces = sweep(&list);
+            let mut count = vec![0u32; list.len()];
+            for (i, _) in &pieces {
+                count[*i] += 1;
+            }
+            let mut whole: Vec<bool> = count.iter().map(|&c| c == 1).collect();
+            for (i, r) in &pieces {
+                if *r != list[*i].range {
+                    whole[*i] = false;
+                }
+            }
+            let parent = match host {
+                Host::Top => None,
+                Host::Node(h) => Some(h),
+            };
+            let outside = parent.filter(|&h| self.nodes[h].gap_fill.is_none());
+            if let Some(h) = outside {
+                self.hosted.insert(h);
+            }
+            for (i, r) in &pieces {
+                let cand = &list[*i];
+                let whole = whole[*i];
+                let mut node = Self::leaf(
+                    parent,
+                    PartKind::Extent,
+                    PartTag::Code(cand.item),
+                    r.clone(),
+                    cand.disp,
+                );
+                node.label = cand.label.clone();
+                node.notes.push(format!("extent {}/{}", cand.k, cand.n));
+                if !whole {
+                    node.notes.push(format!(
+                        "bytes {}..{} of this extent at {}..{}: it overlaps another extent, and the bytes they share are listed once, under the higher-ranked use",
+                        r.start, r.end, cand.range.start, cand.range.end
+                    ));
+                }
+                node.notes.push(cand.why.clone());
+                match outside {
+                    Some(h) => node.notes.push(format!(
+                        "outside every mdat/idat, inside {} at {}; heic reads item data at absolute offsets (parser.rs get_item_data)",
+                        self.nodes[h].tag, self.nodes[h].range.start
+                    )),
+                    None if parent.is_none() => node.notes.push(
+                        "between top-level boxes, outside every mdat/idat; heic reads item data at absolute offsets (parser.rs get_item_data)"
+                            .to_string(),
+                    ),
+                    None => {}
+                }
+                if whole && cand.disp == Disposition::ImageData {
+                    node.notes.push(NOT_WALKED.to_string());
+                }
+                let at = self.add(node)?;
+                if whole && cand.first_entry && cand.disp.is_consumed() {
+                    item_exts
+                        .entry(cand.item)
+                        .or_default()
+                        .push((cand.k, at, cand.at));
+                }
+            }
+            // Extents not listed whole: note where their bytes went.
+            for (i, cand) in list.iter().enumerate() {
+                if whole[i] {
+                    continue;
+                }
+                if cand.first_entry {
+                    incomplete.insert(cand.item);
+                }
+                // The piece holding this extent's first byte.
+                let k = pieces.partition_point(|(_, r)| r.end <= cand.range.start);
+                let owner = pieces.get(k).map(|(j, _)| list[*j].item);
+                self.note_with(cand.note_to, || {
+                    format!(
+                        "item {} extent {}/{} at {}..{} overlaps another extent (item {}); the shared bytes are listed once, under the higher-ranked use",
+                        cand.item,
+                        cand.k,
+                        cand.n,
+                        cand.range.start,
+                        cand.range.end,
+                        owner.map_or_else(|| "?".to_string(), |o| o.to_string())
+                    )
+                });
+            }
+        }
+
+        self.split_item_data(parsed, &declared, &item_exts, &incomplete, &prefixes)?;
         self.add_inner_parts()?;
-        self.add_coded_units(parsed, &item_exts, &incomplete)?;
+        self.add_coded_units(parsed, &item_exts, &incomplete, &prop_nodes)?;
 
         if !self.moovs.is_empty() {
             for m in self.mdats.clone() {
@@ -2462,9 +3351,16 @@ impl Walker<'_> {
             if self.nodes[i].inner.is_empty() || !self.nodes[i].disp.is_consumed() || has_children {
                 continue;
             }
+            let parent_disp = self.nodes[i].disp;
             let inner = core::mem::take(&mut self.nodes[i].inner);
             for (r, d, why) in inner {
-                let mut n = Self::leaf(Some(i), PartKind::Gap, PartTag::None, r, d);
+                let mut n = Self::leaf(
+                    Some(i),
+                    PartKind::Gap,
+                    PartTag::None,
+                    r,
+                    d.unwrap_or(parent_disp),
+                );
                 n.notes.push(why);
                 self.add(n)?;
             }
@@ -2472,73 +3368,148 @@ impl Walker<'_> {
         Ok(())
     }
 
-    /// Split metadata extents at their internal ends: the EXIF offset field
-    /// and the bytes it skips, the XMP packet trailer, the ISO 21496-1 payload
-    /// length. Only single-extent items are split.
-    fn split_metadata_extents(&mut self, tmap_ids: &BTreeSet<u32>) {
-        for i in 0..self.nodes.len() {
-            let n = &self.nodes[i];
-            if n.kind != PartKind::Extent || n.notes.first().is_none_or(|e| e != "extent 1/1") {
+    /// The bytes of an item's whole extents, in order.
+    fn item_bytes(&self, spans: &[(usize, u64)]) -> Cow<'_, [u8]> {
+        if let [(n, _)] = spans {
+            return Cow::Borrowed(slice(self.data, self.nodes[*n].range.clone()));
+        }
+        let mut v = Vec::new();
+        for (n, _) in spans {
+            v.extend_from_slice(slice(self.data, self.nodes[*n].range.clone()));
+        }
+        Cow::Owned(v)
+    }
+
+    /// Split item data at internal ends, across however many extents it
+    /// spans: descriptor bytes the decode reads (grid, iovl), the EXIF offset
+    /// field and the bytes it skips, the XMP packet trailer, the ISO 21496-1
+    /// payload length.
+    fn split_item_data(
+        &mut self,
+        parsed: Option<(&HeifContainer<'_>, &Model)>,
+        declared: &BTreeMap<u32, (Option<String>, ItemInfo)>,
+        item_exts: &BTreeMap<u32, Vec<(usize, usize, u64)>>,
+        incomplete: &BTreeSet<u32>,
+        prefixes: &BTreeMap<u32, u64>,
+    ) -> Result<(), At<HeicError>> {
+        let Some((_, m)) = parsed else {
+            return Ok(());
+        };
+        for (&item, exts) in item_exts {
+            check_stop(self.stop)?;
+            if incomplete.contains(&item) {
                 continue;
             }
-            let r = n.range.clone();
-            let d = slice(self.data, r.clone());
-            let mut parts: Vec<(Range<u64>, Disposition, String)> = Vec::new();
-            match n.disp {
-                // codec.rs `extract_exif_from_container`: reports the bytes
-                // from 4 + offset on.
-                Disposition::Metadata(MetadataKind::Exif) => {
-                    let Some(off) = be32(d, 0) else { continue };
-                    let tiff = 4u64.saturating_add(off);
-                    if tiff >= d.len() as u64 {
-                        continue;
-                    }
-                    parts.push((
-                        r.start..r.start + 4,
-                        Disposition::Structure,
-                        "exif_tiff_header_offset".to_string(),
+            let mut exts = exts.clone();
+            exts.sort_unstable();
+            // (node, offset in the item's data)
+            let spans: Vec<(usize, u64)> = exts.iter().map(|&(_, n, at)| (n, at)).collect();
+            let total = exts.last().map_or(0, |&(_, n, at)| {
+                at + (self.nodes[n].range.end - self.nodes[n].range.start)
+            });
+            let disp = self.nodes[spans[0].0].disp;
+            let typ = declared.get(&item).map(|(_, i)| i.item_type.0);
+            let mut segs: Vec<(Range<u64>, Option<Disposition>, String)> = Vec::new();
+            let mut tile = false;
+            if let Some(&p) = prefixes.get(&item) {
+                if p < total {
+                    segs.push((
+                        p..total,
+                        Some(Disposition::Dropped),
+                        format!("after the {p} descriptor bytes the decode reads"),
                     ));
-                    if off > 0 {
-                        parts.push((
-                            r.start + 4..r.start + tiff,
-                            Disposition::Dropped,
-                            "bytes the TIFF-header offset skips".to_string(),
-                        ));
-                    }
-                    parts.push((
-                        r.start + tiff..r.end,
-                        Disposition::Metadata(MetadataKind::Exif),
-                        "TIFF data, reported in ImageInfo".to_string(),
-                    ));
-                    self.nodes[i].body = Some(r.clone());
                 }
-                Disposition::Metadata(MetadataKind::Xmp) => {
-                    if let Some(end) = xmp_packet_end(d)
-                        && (end as u64) < d.len() as u64
-                    {
-                        parts.push((
-                            r.start + end as u64..r.end,
-                            Disposition::Unreferenced,
-                            "after the XMP packet trailer; reported with the packet".to_string(),
-                        ));
+            } else {
+                match (typ.as_ref(), disp) {
+                    // codec.rs `extract_exif_from_container` reports the
+                    // bytes from 4 + offset on.
+                    (Some(b"Exif"), Disposition::Metadata(kind)) => {
+                        let d = self.item_bytes(&spans);
+                        if let Some(off) = be32(&d, 0) {
+                            let tiff = 4u64.saturating_add(off);
+                            if tiff < total {
+                                segs.push((
+                                    0..4,
+                                    Some(Disposition::Structure),
+                                    "exif_tiff_header_offset".to_string(),
+                                ));
+                                if off > 0 {
+                                    segs.push((
+                                        4..tiff,
+                                        Some(Disposition::Dropped),
+                                        "bytes the TIFF-header offset skips".to_string(),
+                                    ));
+                                }
+                                let why = if kind == MetadataKind::Exif {
+                                    "TIFF data, reported in ImageInfo"
+                                } else {
+                                    "TIFF data: heic reads its Apple MakerNote HDR headroom for the gain-map parameters; the EXIF itself is not reported"
+                                };
+                                segs.push((tiff..total, Some(disp), why.to_string()));
+                                tile = true;
+                            }
+                        }
                     }
-                }
-                Disposition::Metadata(MetadataKind::GainMap) => {
-                    if matches!(&self.nodes[i].tag, PartTag::Code(id) if tmap_ids.contains(id))
-                        && let Some(end) = iso21496_avif_len(d)
-                        && end < d.len()
-                    {
-                        parts.push((
-                            r.start + end as u64..r.end,
-                            Disposition::Dropped,
-                            "after the ISO 21496-1 gain-map metadata".to_string(),
-                        ));
+                    // codec.rs `extract_xmp_from_container` and decode.rs
+                    // `decode_gain_map` hand over the whole item.
+                    (Some(b"mime"), Disposition::Metadata(_)) => {
+                        let d = self.item_bytes(&spans);
+                        if let Some(end) = xmp_packet_end(&d)
+                            && (end as u64) < total
+                        {
+                            segs.push((
+                                end as u64..total,
+                                None,
+                                "after the XMP packet trailer, but heic hands the whole item to the caller".to_string(),
+                            ));
+                        }
                     }
+                    (Some(b"tmap"), Disposition::Metadata(MetadataKind::GainMap)) => {
+                        let d = self.item_bytes(&spans);
+                        if let Some(end) = iso21496_avif_len(&d)
+                            && (end as u64) < total
+                        {
+                            let (d, why) = if m.tmap_attached == Some(item) {
+                                (
+                                    None,
+                                    "after the ISO 21496-1 gain-map metadata, but the whole payload is attached as HdrGainMap::iso21496",
+                                )
+                            } else {
+                                (
+                                    Some(Disposition::Dropped),
+                                    "after the ISO 21496-1 gain-map metadata",
+                                )
+                            };
+                            segs.push((end as u64..total, d, why.to_string()));
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
-            self.nodes[i].inner.extend(parts);
+            if segs.is_empty() {
+                continue;
+            }
+            for (r, d, why) in segs {
+                for (k, &(n, at)) in spans.iter().enumerate() {
+                    let e = spans.get(k + 1).map_or(total, |x| x.1);
+                    let (a, b) = (r.start.max(at), r.end.min(e));
+                    if a < b {
+                        let file = self.nodes[n].range.start;
+                        self.nodes[n].inner.push((
+                            file + (a - at)..file + (b - at),
+                            d,
+                            why.clone(),
+                        ));
+                    }
+                }
+            }
+            if tile {
+                for &(n, _) in &spans {
+                    self.nodes[n].body = Some(self.nodes[n].range.clone());
+                }
+            }
         }
+        Ok(())
     }
 
     fn cap() -> At<HeicError> {
@@ -2557,18 +3528,159 @@ impl Walker<'_> {
     fn add_coded_units(
         &mut self,
         parsed: Option<(&HeifContainer<'_>, &Model)>,
-        item_exts: &BTreeMap<u32, Vec<(usize, usize)>>,
+        item_exts: &BTreeMap<u32, Vec<(usize, usize, u64)>>,
         incomplete: &BTreeSet<u32>,
+        prop_nodes: &[usize],
     ) -> Result<(), At<HeicError>> {
+        // hevc/mod.rs `decode_with_config_stop` puts the hvcC's NAL units
+        // ahead of the item's, and `decode_nal_units` keeps the last SPS and
+        // the last PPS: per hvcC part, (items using it, of which carry an
+        // SPS, of which carry a PPS in their own data).
+        let mut stream_params: BTreeMap<usize, (usize, usize, usize)> = BTreeMap::new();
+        if let Some((c, m)) = parsed {
+            for (&item, exts) in item_exts {
+                check_stop(self.stop)?;
+                let mut exts = exts.clone();
+                exts.sort_unstable();
+                let nodes: Vec<usize> = exts.iter().map(|&(_, n, _)| n).collect();
+                let Some(info) = c.get_item(item) else {
+                    continue;
+                };
+                let unwalked = |w: &mut Self, why: &str| {
+                    for &n in &nodes {
+                        w.nodes[n].notes.retain(|x| x != NOT_WALKED);
+                        w.note(n, why);
+                    }
+                };
+                if incomplete.contains(&item) {
+                    unwalked(
+                        self,
+                        "coded units not listed: an extent of this item is not listed whole",
+                    );
+                    continue;
+                }
+                // decode.rs `decode_item`: an `hvcC` (the first tile's, for
+                // an HEVC grid tile) means length-prefixed NAL units; an
+                // `hvc1` item without one goes to hevc/mod.rs `decode`, which
+                // takes Annex B or 4-byte lengths.
+                let cfg_item = m.hevc_cfg.get(&item).copied().unwrap_or(item);
+                let cfg = if cfg_item == item {
+                    info.hevc_config.clone()
+                } else {
+                    c.get_item(cfg_item).and_then(|t| t.hevc_config)
+                };
+                // The hvcC part that configuration came from: an ipco
+                // property, or the decoded sample entry's (synthetic items
+                // of an image sequence have no ipco property).
+                let cfg_node = match hvcc_prop(c, cfg_item) {
+                    Some(p) => prop_nodes.get(p).copied(),
+                    None if cfg.is_some() => self.entry_hvcc.last().copied(),
+                    None => None,
+                };
+                let stream: Cow<'_, [u8]> = if let [n] = nodes[..] {
+                    Cow::Borrowed(slice(self.data, self.nodes[n].range.clone()))
+                } else {
+                    let mut v = Vec::new();
+                    for &n in &nodes {
+                        v.extend_from_slice(slice(self.data, self.nodes[n].range.clone()));
+                    }
+                    Cow::Owned(v)
+                };
+                let length_size = match (&cfg, info.item_type) {
+                    (Some(cfg), _) => usize::from(cfg.length_size_minus_one) + 1,
+                    (None, ItemType::Hvc1)
+                        if stream.starts_with(&[0, 0, 1]) || stream.starts_with(&[0, 0, 0, 1]) =>
+                    {
+                        unwalked(
+                            self,
+                            "Annex B stream (hevc/mod.rs decode): coded units not listed",
+                        );
+                        continue;
+                    }
+                    (None, ItemType::Hvc1) => 4,
+                    (None, ItemType::Av01) => {
+                        unwalked(
+                            self,
+                            "AV1 item: OBU framing is not walked by heic's inventory",
+                        );
+                        continue;
+                    }
+                    _ => {
+                        for &n in &nodes {
+                            self.nodes[n].notes.retain(|x| x != NOT_WALKED);
+                        }
+                        continue;
+                    }
+                };
+                let slice_disp = self.nodes[nodes[0]].disp;
+                let (units, end) = length_prefixed_units(&stream, length_size, self.budget())
+                    .ok_or_else(Self::cap)?;
+                let last = last_parameter_sets(&units);
+                if let Some(h) = cfg_node {
+                    let e = stream_params.entry(h).or_default();
+                    e.0 += 1;
+                    e.1 += usize::from(last.sps.is_some());
+                    e.2 += usize::from(last.pps.is_some());
+                }
+                // Where each extent sits in the item's byte stream.
+                let mut spans: Vec<(usize, usize, u64)> = Vec::with_capacity(nodes.len());
+                let mut at = 0usize;
+                for &n in &nodes {
+                    let r = self.nodes[n].range.clone();
+                    spans.push((n, at, r.start));
+                    at += (r.end - r.start) as usize;
+                    self.nodes[n].body = Some(r);
+                    self.nodes[n].notes.retain(|x| x != NOT_WALKED);
+                    let how =
+                        format!("{length_size}-byte NAL unit lengths (hvcC lengthSizeMinusOne)");
+                    self.note(n, how);
+                }
+                let pieces_of = |range: Range<usize>| -> Vec<(usize, Range<u64>)> {
+                    let mut out = Vec::new();
+                    for (k, &(n, s, file)) in spans.iter().enumerate() {
+                        let e = spans.get(k + 1).map_or(stream.len(), |x| x.1);
+                        let (a, b) = (range.start.max(s), range.end.min(e));
+                        if a < b {
+                            out.push((n, file + (a - s) as u64..file + (b - s) as u64));
+                        }
+                    }
+                    out
+                };
+                for (j, rec) in units.iter().enumerate() {
+                    let (disp, why) =
+                        nal_disposition(rec.shape, slice_disp, last.superseded(j, rec));
+                    let pieces = pieces_of(rec.range.clone());
+                    self.add_nal(&stream, rec, &pieces, disp, why)?;
+                }
+                if end < stream.len() {
+                    for (n, r) in pieces_of(end..stream.len()) {
+                        let mut g = Self::leaf(
+                            Some(n),
+                            PartKind::Gap,
+                            PartTag::None,
+                            r,
+                            Disposition::Unreferenced,
+                        );
+                        g.notes.push(format!(
+                            "after the last NAL unit: fewer bytes than a {length_size}-byte length, which heic does not read"
+                        ));
+                        self.add(g)?;
+                    }
+                }
+            }
+        }
+
         // `hvcC` payloads: parser.rs `parse_hvcc` keeps every NAL unit, and
         // hevc/mod.rs `decode_with_config_stop` hands them all to the
-        // decoder ahead of the item data.
+        // decoder ahead of the item data. A part that holds an item extent
+        // (one lying outside every mdat/idat) is not split further.
         let hvccs: Vec<usize> = (0..self.nodes.len())
             .filter(|&i| {
                 let n = &self.nodes[i];
                 n.tag == PartTag::FourCc(*b"hvcC")
                     && matches!(n.kind, PartKind::Property | PartKind::Box)
                     && n.disp != Disposition::Malformed
+                    && !self.hosted.contains(&i)
             })
             .collect();
         for i in hvccs {
@@ -2582,138 +3694,48 @@ impl Walker<'_> {
             let (units, _) = hvcc_units(c, self.budget()).ok_or_else(Self::cap)?;
             let parent_disp = self.nodes[i].disp;
             let last = last_parameter_sets(&units);
+            // Replaced for every item that uses this hvcC.
+            let (users, with_sps, with_pps) = stream_params.get(&i).copied().unwrap_or_default();
+            let sps_replaced = users > 0 && with_sps == users;
+            let pps_replaced = users > 0 && with_pps == users;
             for (j, rec) in units.iter().enumerate() {
-                let (disp, why) = if parent_disp.is_consumed() {
-                    nal_disposition(rec.shape, Disposition::ImageData, last.superseded(j, rec))
-                } else {
+                let (disp, why) = if !parent_disp.is_consumed() {
                     (
                         parent_disp,
                         "in an hvcC the decode does not use".to_string(),
                     )
+                } else if let NalShape::Overrun { declared } = rec.shape {
+                    (
+                        Disposition::Malformed,
+                        format!(
+                            "length {declared} runs past the hvcC; parse_hvcc skips the rest of this array and reads the next array header right after this length"
+                        ),
+                    )
+                } else {
+                    let by_item = match rec.shape {
+                        NalShape::Unit { typ: 33, .. } => sps_replaced,
+                        NalShape::Unit { typ: 34, .. } => pps_replaced,
+                        _ => false,
+                    };
+                    let (d, why) = nal_disposition(
+                        rec.shape,
+                        Disposition::ImageData,
+                        by_item || last.superseded(j, rec),
+                    );
+                    if by_item {
+                        (
+                            d,
+                            "parsed, then replaced by a later one of the same type in the item data (heic keeps the last)".to_string(),
+                        )
+                    } else {
+                        (d, why)
+                    }
                 };
                 let pieces = [(
                     i,
                     base + rec.range.start as u64..base + rec.range.end as u64,
                 )];
                 self.add_nal(c, rec, &pieces, disp, why)?;
-            }
-        }
-
-        let Some((c, m)) = parsed else {
-            return Ok(());
-        };
-        for (&item, exts) in item_exts {
-            check_stop(self.stop)?;
-            let mut exts = exts.clone();
-            exts.sort_unstable();
-            let nodes: Vec<usize> = exts.iter().map(|&(_, n)| n).collect();
-            let Some(info) = c.get_item(item) else {
-                continue;
-            };
-            let unwalked = |w: &mut Self, why: String| {
-                for &n in &nodes {
-                    w.nodes[n].notes.retain(|x| x != NOT_WALKED);
-                    w.note(n, why.clone());
-                }
-            };
-            if incomplete.contains(&item) {
-                unwalked(
-                    self,
-                    "coded units not listed: an extent of this item is not a part".to_string(),
-                );
-                continue;
-            }
-            // decode.rs `decode_item`: an `hvcC` (the first tile's, for an
-            // HEVC grid tile) means length-prefixed NAL units; an `hvc1`
-            // item without one goes to hevc/mod.rs `decode`, which takes
-            // Annex B or 4-byte lengths.
-            let cfg_item = m.hevc_cfg.get(&item).copied().unwrap_or(item);
-            let cfg = if cfg_item == item {
-                info.hevc_config.clone()
-            } else {
-                c.get_item(cfg_item).and_then(|t| t.hevc_config)
-            };
-            let stream: Cow<'_, [u8]> = if let [n] = nodes[..] {
-                Cow::Borrowed(slice(self.data, self.nodes[n].range.clone()))
-            } else {
-                let mut v = Vec::new();
-                for &n in &nodes {
-                    v.extend_from_slice(slice(self.data, self.nodes[n].range.clone()));
-                }
-                Cow::Owned(v)
-            };
-            let length_size = match (&cfg, info.item_type) {
-                (Some(cfg), _) => usize::from(cfg.length_size_minus_one) + 1,
-                (None, ItemType::Hvc1)
-                    if stream.starts_with(&[0, 0, 1]) || stream.starts_with(&[0, 0, 0, 1]) =>
-                {
-                    unwalked(
-                        self,
-                        "Annex B stream (hevc/mod.rs decode): coded units not listed".to_string(),
-                    );
-                    continue;
-                }
-                (None, ItemType::Hvc1) => 4,
-                (None, ItemType::Av01) => {
-                    unwalked(
-                        self,
-                        "AV1 item: OBU framing is not walked by heic's inventory".to_string(),
-                    );
-                    continue;
-                }
-                _ => {
-                    for &n in &nodes {
-                        self.nodes[n].notes.retain(|x| x != NOT_WALKED);
-                    }
-                    continue;
-                }
-            };
-            let slice_disp = self.nodes[nodes[0]].disp;
-            let (units, end) =
-                length_prefixed_units(&stream, length_size, self.budget()).ok_or_else(Self::cap)?;
-            // Where each extent sits in the item's byte stream.
-            let mut spans: Vec<(usize, usize, u64)> = Vec::with_capacity(nodes.len());
-            let mut at = 0usize;
-            for &n in &nodes {
-                let r = self.nodes[n].range.clone();
-                spans.push((n, at, r.start));
-                at += (r.end - r.start) as usize;
-                self.nodes[n].body = Some(r);
-                self.nodes[n].notes.retain(|x| x != NOT_WALKED);
-                let how = format!("{length_size}-byte NAL unit lengths (hvcC lengthSizeMinusOne)");
-                self.note(n, how);
-            }
-            let pieces_of = |range: Range<usize>| -> Vec<(usize, Range<u64>)> {
-                let mut out = Vec::new();
-                for (k, &(n, s, file)) in spans.iter().enumerate() {
-                    let e = spans.get(k + 1).map_or(stream.len(), |x| x.1);
-                    let (a, b) = (range.start.max(s), range.end.min(e));
-                    if a < b {
-                        out.push((n, file + (a - s) as u64..file + (b - s) as u64));
-                    }
-                }
-                out
-            };
-            let last = last_parameter_sets(&units);
-            for (j, rec) in units.iter().enumerate() {
-                let (disp, why) = nal_disposition(rec.shape, slice_disp, last.superseded(j, rec));
-                let pieces = pieces_of(rec.range.clone());
-                self.add_nal(&stream, rec, &pieces, disp, why)?;
-            }
-            if end < stream.len() {
-                for (n, r) in pieces_of(end..stream.len()) {
-                    let mut g = Self::leaf(
-                        Some(n),
-                        PartKind::Gap,
-                        PartTag::None,
-                        r,
-                        Disposition::Unreferenced,
-                    );
-                    g.notes.push(format!(
-                        "after the last NAL unit: fewer bytes than a {length_size}-byte length, which heic does not read"
-                    ));
-                    self.add(g)?;
-                }
             }
         }
         Ok(())
@@ -2833,13 +3855,18 @@ impl Walker<'_> {
         }
         let mut inv = Inventory::new(ImageFormat::Heic, self.data.len() as u64);
         let mut ids: Vec<PartId> = Vec::with_capacity(self.nodes.len());
-        for n in &self.nodes {
-            let mut part = Part::new(n.kind, n.tag.clone(), n.range.clone(), n.disp);
-            if let Some(l) = &n.label {
-                part = part.with_label(l.clone());
+        let mut fills: Vec<(PartId, Disposition)> = Vec::new();
+        // Consume the nodes, so each one's strings move into its part (or
+        // are freed) instead of being copied: the walk never holds two full
+        // copies of the part list.
+        for n in self.nodes {
+            let mut part = Part::new(n.kind, n.tag, n.range, n.disp);
+            if let Some(l) = n.label {
+                part = part.with_label(l);
             }
-            if let Some(b) = &n.body {
-                part = part.with_body(b.clone());
+            let has_body = n.body.is_some();
+            if let Some(b) = n.body {
+                part = part.with_body(b);
             }
             if !n.notes.is_empty() || n.dropped_notes > 0 {
                 let mut d = n.notes.join("; ");
@@ -2849,14 +3876,17 @@ impl Walker<'_> {
                 part = part.with_detail(d);
             }
             let parent = n.parent.map(|p| ids[p]);
-            ids.push(inv.push(parent, part).map_err(cap)?);
-        }
-        for (i, n) in self.nodes.iter().enumerate() {
+            let id = inv.push(parent, part).map_err(cap)?;
+            ids.push(id);
             if let Some(d) = n.gap_fill
-                && n.body.is_some()
+                && has_body
             {
-                inv.fill_gaps(Some(ids[i]), d).map_err(cap)?;
+                fills.push((id, d));
             }
+        }
+        drop(ids);
+        for (id, d) in fills {
+            inv.fill_gaps(Some(id), d).map_err(cap)?;
         }
         inv.fill_gaps(None, Disposition::Trailing).map_err(cap)?;
         Ok(inv)
@@ -3000,15 +4030,15 @@ fn hvcc_units(c: &[u8], limit: usize) -> Option<(Vec<NalRec>, usize)> {
             }
             let l = usize::from(u16::from_be_bytes([c[pos], c[pos + 1]]));
             if pos + 2 + l > c.len() {
-                // parse_hvcc stops taking units here (it goes on reading
-                // array headers from inside these bytes).
+                // parse_hvcc skips the length field, abandons this array and
+                // reads the next array header right after the length.
                 out.push(NalRec {
-                    range: pos..c.len(),
+                    range: pos..pos + 2,
                     prefix: 2,
                     shape: NalShape::Overrun { declared: l as u64 },
                 });
-                pos = c.len();
-                break 'arrays;
+                pos += 2;
+                continue 'arrays;
             }
             out.push(NalRec {
                 range: pos..pos + 2 + l,

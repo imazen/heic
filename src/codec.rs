@@ -379,7 +379,7 @@ impl HeicDecodeJob {
         &self,
         data: &[u8],
     ) -> Result<zencodec::inventory::Inventory, At<HeicError>> {
-        use crate::inventory::{GainMapUse, Options};
+        use crate::inventory::Options;
         self.limits
             .check_input_size(data.len() as u64)
             .map_err(|e| at!(HeicError::ResourceLimit(e)))?;
@@ -388,16 +388,14 @@ impl HeicDecodeJob {
             None => &enough::Unstoppable,
         };
         // Mirrors `HeicDecoder::decode_inner`: ReconstructHdr applies the gain
-        // map; Components or `extract_gain_map` decode and attach it.
-        let gain_map = match self.gain_map_render {
-            zencodec::GainMapRender::ReconstructHdr { .. } => GainMapUse::Reconstruct,
-            zencodec::GainMapRender::Components => GainMapUse::Surface,
-            _ if self.extract_gain_map => GainMapUse::Surface,
-            _ => GainMapUse::Describe,
-        };
+        // map; Components or `extract_gain_map` decode and attach it, whatever
+        // the render mode (both can hold at once).
+        let render = self.gain_map_render;
         let policy = self.policy.as_ref();
         let opts = Options {
-            gain_map,
+            apply_gain_map: matches!(render, zencodec::GainMapRender::ReconstructHdr { .. }),
+            attach_gain_map: self.extract_gain_map
+                || matches!(render, zencodec::GainMapRender::Components),
             decode_depth: self.extract_depth,
             keep_icc: policy.is_none_or(|p| p.resolve_icc(true)),
             keep_exif: policy.is_none_or(|p| p.resolve_exif(true)),

@@ -172,7 +172,9 @@ fn reported_metadata_matches_probe_full() {
         };
         let inv = inventory_of(HeicDecoderConfig::new(), &data);
         // EXIF: the leaf (a split extent's TIFF child is what is reported).
-        // XMP and ICC: the whole extent or property, trailer included.
+        // XMP and ICC: the whole extent or property, whose trailer child
+        // (bytes past the internal end that still reach the caller) has the
+        // same disposition: count the outermost part only.
         let mut has_child = vec![false; inv.parts().len()];
         for p in inv.parts() {
             if let Some(q) = p.parent {
@@ -180,12 +182,19 @@ fn reported_metadata_matches_probe_full() {
             }
         }
         let of_kind = |k: MetadataKind| -> Vec<&Part> {
+            let d = Disposition::Metadata(k);
             inv.parts()
                 .iter()
                 .enumerate()
                 .filter(|(i, p)| {
-                    p.disposition == Disposition::Metadata(k)
-                        && (k != MetadataKind::Exif || !has_child[*i])
+                    p.disposition == d
+                        && if k == MetadataKind::Exif {
+                            !has_child[*i]
+                        } else {
+                            p.parent
+                                .and_then(|q| inv.get(q))
+                                .is_none_or(|q| q.disposition != d)
+                        }
                 })
                 .map(|(_, p)| p)
                 .collect()
@@ -648,7 +657,7 @@ box meta 24..928 structure
       property uuid 726..758 unknown \"30313233-3435-3637-3839-616263646566\"
       property ispe 758..778 skipped
       property colr 778..815 metadata(icc) \"prof\"
-        gap - 810..815 unreferenced
+        gap - 810..815 metadata(icc)
     box ipma 815..847 structure
   box idat 847..866 structure
     extent 0x6 855..863 skipped \"grid\"
@@ -657,6 +666,7 @@ box meta 24..928 structure
     box altr 874..902 skipped
   box zMet 902..928 unknown
 box free 928..953 padding
+  extent 0x5 936..941 unknown \"private\"
 box uuid 953..992 unknown \"be7acfcb-97a9-42e8-9c71-999491e3afac\"
 box mdat 992..1213 structure
   extent 0x1 1000..1112 image-data \"Primary\"
@@ -677,7 +687,7 @@ box mdat 992..1213 structure
     gap - 1121..1123 dropped
     gap - 1123..1133 metadata(exif)
   extent 0x3 1133..1185 metadata(xmp) \"XMP\"
-    gap - 1181..1185 unreferenced
+    gap - 1181..1185 metadata(xmp)
   extent 0x4 1185..1195 skipped \"notes\"
   extent 0x5 1195..1203 unknown \"private\"
   extent 0x7 1203..1213 skipped \"Thumb\"
