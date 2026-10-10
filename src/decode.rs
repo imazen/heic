@@ -774,7 +774,7 @@ fn decode_av1_item(
     limits: &Limits,
     stop: &dyn Stop,
 ) -> Result<crate::hevc::DecodedFrame> {
-    use rav1d_safe::src::managed::{Decoder, Planes, Settings};
+    use rav1d_safe::{Decoder, Planes, Settings};
 
     let config = item
         .av1_config
@@ -820,7 +820,7 @@ fn decode_av1_item(
     }
     let mut decoder = Decoder::with_settings(settings).map_err(|e| {
         at!(HeicError::InvalidData(match e.error() {
-            rav1d_safe::src::managed::Error::OutOfMemory => "AV1 decoder init: out of memory",
+            rav1d_safe::Error::OutOfMemory => "AV1 decoder init: out of memory",
             _ => "AV1 decoder initialization failed",
         }))
     })?;
@@ -852,10 +852,10 @@ fn decode_av1_item(
 
     // Map rav1d PixelLayout to our chroma_format
     let chroma_format = match frame.pixel_layout() {
-        rav1d_safe::src::managed::PixelLayout::I400 => 0u8,
-        rav1d_safe::src::managed::PixelLayout::I420 => 1,
-        rav1d_safe::src::managed::PixelLayout::I422 => 2,
-        rav1d_safe::src::managed::PixelLayout::I444 => 3,
+        rav1d_safe::PixelLayout::I400 => 0u8,
+        rav1d_safe::PixelLayout::I420 => 1,
+        rav1d_safe::PixelLayout::I422 => 2,
+        rav1d_safe::PixelLayout::I444 => 3,
     };
 
     let mut output =
@@ -934,7 +934,7 @@ fn decode_av1_item(
 
     // Set color info from the AV1 frame
     let color_info = frame.color_info();
-    output.full_range = color_info.color_range == rav1d_safe::src::managed::ColorRange::Full;
+    output.full_range = color_info.color_range == rav1d_safe::ColorRange::Full;
     output.matrix_coeffs = color_info.matrix_coefficients as u8;
     output.color_primaries = color_info.primaries as u8;
     output.transfer_characteristics = color_info.transfer_characteristics as u8;
