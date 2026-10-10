@@ -26,6 +26,7 @@
 //! does not predict whether the decode succeeds; when `heif::parse` rejects
 //! the file outright, nothing reaches the caller and every item is `Dropped`.
 
+use alloc::borrow::Cow;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -349,7 +350,9 @@ struct InfeRec {
 
 struct IlocRec {
     node: usize,
-    entries: Result<Vec<ItemLocation>, String>,
+    /// Box size and payload range, to re-parse in the second pass.
+    size: u64,
+    content: Range<u64>,
 }
 
 struct PropRec {
@@ -745,28 +748,13 @@ impl<'a> Walker<'a> {
             (Ctx::Top, b"moov") => self.moovs.push(id),
             (Ctx::Top, b"mdat") => self.mdats.push(id),
             (Ctx::Meta, b"pitm") => self.pitms.push(id),
-            (Ctx::Meta, b"iloc") => {
-                let entries = heif::iloc_entries(&bmff, self.stop).map_err(|e| {
-                    if matches!(e.error(), HeicError::Cancelled(_)) {
-                        String::new()
-                    } else {
-                        e.error().to_string()
-                    }
-                });
-                check_stop(self.stop)?;
-                let entries = entries.map(|(v, read)| {
-                    let read_end = content.start.saturating_add(read as u64);
-                    if read_end < content.end {
-                        self.nodes[id].inner.push((
-                            read_end..content.end,
-                            Disposition::Dropped,
-                            "after the last entry heic's iloc parser reads".to_string(),
-                        ));
-                    }
-                    v
-                });
-                self.ilocs.push(IlocRec { node: id, entries });
-            }
+            // Parsed in the second pass, after `heif::parse`, so the walk
+            // never holds a second copy of heic's item locations.
+            (Ctx::Meta, b"iloc") => self.ilocs.push(IlocRec {
+                node: id,
+                size: h.end - pos,
+                content: content.clone(),
+            }),
             (Ctx::Meta, b"idat") => self.idats.push((id, true)),
             (_, b"idat") => self.idats.push((id, false)),
             (Ctx::Iref, typ) => self.irefs.push((id, *typ)),
@@ -2235,13 +2223,49 @@ impl Walker<'_> {
 
         // Extents.
         let file_len = self.data.len() as u64;
-        let mut sources: Vec<(usize, Vec<ItemLocation>)> = Vec::new();
+        // When `heif::parse` succeeded, each iloc box's locations are the
+        // next run of `HeifContainer::item_locations` (parse_meta appends in
+        // box order); `iloc_layout` counts them without storing anything.
+        // Otherwise parse each box on its own, after heic's parse has freed
+        // its copy.
+        let mut sources: Vec<(usize, Cow<'_, [ItemLocation]>)> = Vec::new();
+        let mut next = 0usize;
         for rec in core::mem::take(&mut self.ilocs) {
-            match rec.entries {
-                Ok(v) => sources.push((rec.node, v)),
+            check_stop(self.stop)?;
+            let data = self.data;
+            let bmff = BmffBox {
+                header: BoxHeader {
+                    box_type: FourCC(*b"iloc"),
+                    size: rec.size,
+                    content_offset: usize::try_from(rec.content.start).unwrap_or(usize::MAX),
+                },
+                content: slice(data, rec.content.clone()),
+            };
+            let laid_out = match parsed {
+                Some((c, _)) => heif::iloc_layout(&bmff, self.stop).map(|(n, read)| {
+                    let end = next.saturating_add(n).min(c.item_locations.len());
+                    let run = Cow::Borrowed(&c.item_locations[next.min(end)..end]);
+                    next = end;
+                    (run, read)
+                }),
+                None => heif::iloc_entries(&bmff, self.stop).map(|(v, read)| (Cow::Owned(v), read)),
+            };
+            match laid_out {
+                Ok((locs, read)) => {
+                    let read_end = rec.content.start.saturating_add(read as u64);
+                    if read_end < rec.content.end {
+                        self.nodes[rec.node].inner.push((
+                            read_end..rec.content.end,
+                            Disposition::Dropped,
+                            "after the last entry heic's iloc parser reads".to_string(),
+                        ));
+                    }
+                    sources.push((rec.node, locs));
+                }
+                Err(e) if matches!(e.error(), HeicError::Cancelled(_)) => return Err(e),
                 Err(e) => self.note(
                     rec.node,
-                    format!("heic's iloc parser rejects this box: {e}"),
+                    format!("heic's iloc parser rejects this box: {}", e.error()),
                 ),
             }
         }
@@ -2250,7 +2274,7 @@ impl Walker<'_> {
             && let Some(&moov) = self.moovs.first()
         {
             // parser.rs `parse_moov`: synthetic items for the decoded sample.
-            sources.push((moov, c.item_locations.clone()));
+            sources.push((moov, Cow::Borrowed(&c.item_locations[..])));
         }
         let mut cands: Vec<Cand> = Vec::new();
         let mut located: BTreeSet<u32> = BTreeSet::new();
@@ -2260,7 +2284,7 @@ impl Walker<'_> {
                 note_to,
                 format!("{} item locations, {n_ext} extents", locs.len()),
             );
-            for loc in locs {
+            for loc in locs.iter() {
                 check_stop(self.stop)?;
                 let id = loc.item_id;
                 let info = declared.get(&id);
@@ -2332,6 +2356,14 @@ impl Walker<'_> {
                             format!("item {id} extent {k}/{n} at {start}..{end} runs past the end of the {what} ({})", src.end),
                         );
                         continue;
+                    }
+                    // Every candidate becomes a part: refuse before the list
+                    // outgrows the part cap (heic accepts up to 65,536 items
+                    // of 1,024 extents each).
+                    if cands.len() >= self.max_nodes {
+                        return Err(at!(HeicError::LimitExceeded(
+                            "inventory exceeds the zencodec part cap"
+                        )));
                     }
                     cands.push(Cand {
                         item: id,

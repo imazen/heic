@@ -19,4 +19,4 @@ pub use parser::{HeifContainer, Item, ItemType, parse};
 #[cfg(feature = "zencodec")]
 pub(crate) use boxes::{Box as BmffBox, BoxHeader, ItemInfo, ItemLocation};
 #[cfg(feature = "zencodec")]
-pub(crate) use parser::{iloc_entries, parse_infe, parse_property};
+pub(crate) use parser::{iloc_entries, iloc_layout, parse_infe, parse_property};

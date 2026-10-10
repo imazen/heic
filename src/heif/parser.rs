@@ -607,6 +607,23 @@ fn parse_pitm(pitm: &Box<'_>, container: &mut HeifContainer<'_>) -> Result<()> {
 
 /// Returns how many content bytes the parse read.
 fn parse_iloc(iloc: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop) -> Result<usize> {
+    parse_iloc_inner(iloc, Some(container), stop).map(|(_, read)| read)
+}
+
+/// How many item locations one `iloc` box yields and how many content bytes
+/// [`parse_iloc`] reads, without storing anything (the same loop, so the
+/// two cannot disagree). Used by the structural inventory.
+pub(crate) fn iloc_layout(iloc: &Box<'_>, stop: &dyn Stop) -> Result<(usize, usize)> {
+    parse_iloc_inner(iloc, None, stop)
+}
+
+/// The `iloc` parse. With `container`, locations are stored in it; without,
+/// they are only counted. Returns `(locations, content bytes read)`.
+fn parse_iloc_inner(
+    iloc: &Box<'_>,
+    mut container: Option<&mut HeifContainer<'_>>,
+    stop: &dyn Stop,
+) -> Result<(usize, usize)> {
     let content = iloc.content;
     if content.len() < 8 {
         return Err(at!(HeicError::InvalidContainer("iloc too short")));
@@ -651,10 +668,13 @@ fn parse_iloc(iloc: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop
         )));
     }
 
-    container
-        .item_locations
-        .try_reserve(item_count as usize)
-        .map_err(|_| at!(HeicError::OutOfMemory))?;
+    let store = container.is_some();
+    let mut locations = 0usize;
+    if let Some(c) = container.as_deref_mut() {
+        c.item_locations
+            .try_reserve(item_count as usize)
+            .map_err(|_| at!(HeicError::OutOfMemory))?;
+    }
 
     for _ in 0..item_count {
         check_stop(stop)?;
@@ -710,9 +730,11 @@ fn parse_iloc(iloc: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop
         }
 
         let mut extents = Vec::new();
-        extents
-            .try_reserve(extent_count as usize)
-            .map_err(|_| at!(HeicError::OutOfMemory))?;
+        if store {
+            extents
+                .try_reserve(extent_count as usize)
+                .map_err(|_| at!(HeicError::OutOfMemory))?;
+        }
         for _ in 0..extent_count {
             if version >= 1 && index_size > 0 {
                 // Extent index - skip
@@ -724,18 +746,23 @@ fn parse_iloc(iloc: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop
 
             let extent_offset = read_sized_int(content, &mut pos, offset_size as usize);
             let extent_length = read_sized_int(content, &mut pos, length_size as usize);
-            extents.push((extent_offset, extent_length));
+            if store {
+                extents.push((extent_offset, extent_length));
+            }
         }
 
-        container.item_locations.push(ItemLocation {
-            item_id,
-            construction_method,
-            base_offset,
-            extents,
-        });
+        if let Some(c) = container.as_deref_mut() {
+            c.item_locations.push(ItemLocation {
+                item_id,
+                construction_method,
+                base_offset,
+                extents,
+            });
+        }
+        locations += 1;
     }
 
-    Ok(pos)
+    Ok((locations, pos))
 }
 
 /// The item locations one `iloc` box declares, parsed exactly as [`parse`]
