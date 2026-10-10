@@ -71,7 +71,7 @@ fn inventory_of(config: HeicDecoderConfig, data: &[u8]) -> Inventory {
 }
 
 fn bytes<'a>(data: &'a [u8], p: &Part) -> &'a [u8] {
-    &data[p.range.start as usize..p.range.end as usize]
+    &data[p.range().start as usize..p.range().end as usize]
 }
 
 // ── Committed corpus ────────────────────────────────────────────────────────
@@ -111,7 +111,7 @@ fn check_file(config: &HeicDecoderConfig, data: &[u8], name: &str, undecodable: 
     if inv
         .parts()
         .iter()
-        .any(|p| p.disposition == Disposition::ImageData)
+        .any(|p| p.disposition() == Disposition::ImageData)
     {
         zencodec_testkit::check_inventory(config.clone(), data)
             .unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -132,16 +132,16 @@ fn check_file(config: &HeicDecoderConfig, data: &[u8], name: &str, undecodable: 
     let inv = inventory_of(config.clone(), &junked);
     let mut has_child = vec![false; inv.parts().len()];
     for p in inv.parts() {
-        if let Some(q) = p.parent {
+        if let Some(q) = p.parent() {
             has_child[q.index()] = true;
         }
     }
     for (i, p) in inv.parts().iter().enumerate() {
-        if !has_child[i] && p.range.end > data.len() as u64 {
+        if !has_child[i] && p.range().end > data.len() as u64 {
             assert!(
-                !p.disposition.is_consumed(),
+                !p.disposition().is_consumed(),
                 "{name}: appended junk reported as {}\n{inv}",
-                p.disposition
+                p.disposition()
             );
         }
     }
@@ -177,7 +177,7 @@ fn reported_metadata_matches_probe_full() {
         // same disposition: count the outermost part only.
         let mut has_child = vec![false; inv.parts().len()];
         for p in inv.parts() {
-            if let Some(q) = p.parent {
+            if let Some(q) = p.parent() {
                 has_child[q.index()] = true;
             }
         }
@@ -187,13 +187,13 @@ fn reported_metadata_matches_probe_full() {
                 .iter()
                 .enumerate()
                 .filter(|(i, p)| {
-                    p.disposition == d
+                    p.disposition() == d
                         && if k == MetadataKind::Exif {
                             !has_child[*i]
                         } else {
-                            p.parent
+                            p.parent()
                                 .and_then(|q| inv.get(q))
-                                .is_none_or(|q| q.disposition != d)
+                                .is_none_or(|q| q.disposition() != d)
                         }
                 })
                 .map(|(_, p)| p)
@@ -262,8 +262,8 @@ fn gain_map_disposition_follows_the_job() {
     let gain_map_extents = |inv: &Inventory| -> Vec<Disposition> {
         inv.parts()
             .iter()
-            .filter(|p| p.kind == PartKind::Extent && p.tag == PartTag::Code(10))
-            .map(|p| p.disposition)
+            .filter(|p| p.kind() == PartKind::Extent && *p.tag() == PartTag::Code(10))
+            .map(|p| p.disposition())
             .collect()
     };
     let plain = inventory_of(HeicDecoderConfig::new(), &data);
@@ -598,12 +598,12 @@ fn synthetic_fixture_part_list_is_pinned() {
             out.push(format!(
                 "{}{} {} {}..{} {}{}",
                 "  ".repeat(depth),
-                p.kind.name(),
-                p.tag,
-                p.range.start,
-                p.range.end,
-                p.disposition,
-                p.label
+                p.kind().name(),
+                p.tag(),
+                p.range().start,
+                p.range().end,
+                p.disposition(),
+                p.label()
                     .as_deref()
                     .map(|l| format!(" {l:?}"))
                     .unwrap_or_default()
@@ -782,47 +782,47 @@ fn planted_units_change_nothing_and_are_unconsumed() {
         inv.parts()
             .iter()
             .find(|p| {
-                p.range == (start as u64..(start + len) as u64) && p.kind == PartKind::CodedUnit
+                p.range() == (start as u64..(start + len) as u64) && p.kind() == PartKind::CodedUnit
             })
             .unwrap_or_else(|| panic!("no coded unit at {start}+{len}\n{inv}"))
     };
     let sei_part = at(ext.start, sei.len());
-    assert_eq!(sei_part.disposition, Disposition::Skipped);
-    assert_eq!(sei_part.label.as_deref(), Some("PREFIX_SEI_NUT"));
+    assert_eq!(sei_part.disposition(), Disposition::Skipped);
+    assert_eq!(sei_part.label(), Some("PREFIX_SEI_NUT"));
     let msg = inv
         .parts()
         .iter()
-        .find(|p| p.label.as_deref() == Some(PLANTED_UUID_STR))
+        .find(|p| p.label() == Some(PLANTED_UUID_STR))
         .unwrap_or_else(|| panic!("no part labelled with the planted UUID\n{inv}"));
-    assert_eq!(msg.disposition, Disposition::Skipped);
+    assert_eq!(msg.disposition(), Disposition::Skipped);
     assert!(
         bytes(&planted, msg)
             .windows(20)
             .any(|w| w == b"encoder=planted-id-7")
     );
     let fd_at = ext.end - suffix.len();
-    assert_eq!(at(fd_at, fd.len()).disposition, Disposition::Padding);
+    assert_eq!(at(fd_at, fd.len()).disposition(), Disposition::Padding);
     let junk = inv
         .parts()
         .iter()
-        .find(|p| p.range == ((ext.end - 3) as u64..ext.end as u64))
+        .find(|p| p.range() == ((ext.end - 3) as u64..ext.end as u64))
         .unwrap_or_else(|| panic!("no part for the junk\n{inv}"));
-    assert_eq!(junk.disposition, Disposition::Unreferenced);
+    assert_eq!(junk.disposition(), Disposition::Unreferenced);
     // No consumed leaf covers a planted byte.
     let planted_ranges = [ext.start..ext.start + sei.len(), fd_at..ext.end];
     let mut has_child = vec![false; inv.parts().len()];
     for p in inv.parts() {
-        if let Some(q) = p.parent {
+        if let Some(q) = p.parent() {
             has_child[q.index()] = true;
         }
     }
     for (i, p) in inv.parts().iter().enumerate() {
-        if has_child[i] || !p.disposition.is_consumed() {
+        if has_child[i] || !p.disposition().is_consumed() {
             continue;
         }
         for r in &planted_ranges {
             assert!(
-                p.range.end <= r.start as u64 || p.range.start >= r.end as u64,
+                p.range().end <= r.start as u64 || p.range().start >= r.end as u64,
                 "consumed part {p:?} covers planted bytes {r:?}"
             );
         }
@@ -973,7 +973,7 @@ fn exiftool_oracle_agrees() {
         let mut matched = 0;
         for u in &units {
             let hit = inv.parts().iter().any(|p| {
-                let tag_ok = match (&p.kind, &p.tag) {
+                let tag_ok = match (&p.kind(), &p.tag()) {
                     (PartKind::Item, _) => u.fourcc == "infe",
                     (_, PartTag::FourCc(cc)) => cc.as_slice() == u.fourcc.as_bytes(),
                     _ => false,
@@ -981,13 +981,13 @@ fn exiftool_oracle_agrees() {
                 if !tag_ok {
                     return false;
                 }
-                let start = p.range.start as usize;
+                let start = p.range().start as usize;
                 let h = header_len(&data, start);
-                let mut ok = p.range.start + h == u.payload_at
-                    && p.range.end - u.payload_at == u.payload_len;
+                let mut ok = p.range().start + h == u.payload_at
+                    && p.range().end - u.payload_at == u.payload_len;
                 if !ok && u.fourcc == "uuid" {
-                    ok = p.range.start + h + 16 == u.payload_at
-                        && p.range.end - u.payload_at == u.payload_len;
+                    ok = p.range().start + h + 16 == u.payload_at
+                        && p.range().end - u.payload_at == u.payload_len;
                 }
                 ok
             });
@@ -1117,18 +1117,18 @@ fn ffmpeg_oracle_agrees() {
         let unit_parts: Vec<(std::ops::Range<u64>, u32, Option<usize>)> = inv
             .parts()
             .iter()
-            .filter(|p| p.kind == PartKind::CodedUnit)
+            .filter(|p| p.kind() == PartKind::CodedUnit)
             .filter(|p| {
-                p.parent
+                p.parent()
                     .and_then(|q| inv.get(q))
-                    .is_some_and(|q| q.kind != PartKind::CodedUnit)
+                    .is_some_and(|q| q.kind() != PartKind::CodedUnit)
             })
             .map(|p| {
-                let tag = match p.tag {
-                    PartTag::Code(t) => t,
+                let tag = match p.tag() {
+                    PartTag::Code(t) => *t,
                     _ => u32::MAX,
                 };
-                (p.range.clone(), tag, p.parent.map(|q| q.index()))
+                (p.range(), tag, p.parent().map(|q| q.index()))
             })
             .collect();
         // A NAL unit's payload at o..o+len is a part ending there whose
@@ -1161,7 +1161,9 @@ fn ffmpeg_oracle_agrees() {
                 .map(|&(pos, size)| {
                     inv.parts()
                         .iter()
-                        .position(|p| p.kind == PartKind::Extent && p.range == (pos..pos + size))
+                        .position(|p| {
+                            p.kind() == PartKind::Extent && p.range() == (pos..pos + size)
+                        })
                         .filter(|&e| unit_parts.iter().any(|u| u.2 == Some(e)))
                 })
                 .collect();
@@ -1236,7 +1238,7 @@ fn ffmpeg_oracle_agrees() {
                         // read lhvC, so it is one Unknown property.
                         let in_lhvc = || {
                             inv.parts().iter().any(|p| {
-                                p.tag == PartTag::FourCc(*b"lhvC")
+                                *p.tag() == PartTag::FourCc(*b"lhvC")
                                     && bytes(&data, p).windows(nal.len()).any(|w| w == nal)
                             })
                         };

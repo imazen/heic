@@ -51,10 +51,10 @@ fn same_pixels(a: &[u8], b: &[u8]) {
 
 /// The deepest part covering byte `at`: `(index, disposition, description)`.
 fn leaf_at(inv: &Inventory, at: u64) -> (usize, Disposition, String) {
-    let covers = |p: &zencodec::inventory::Part| p.range.start <= at && at < p.range.end;
+    let covers = |p: &zencodec::inventory::Part| p.range().start <= at && at < p.range().end;
     let mut has_child = vec![false; inv.parts().len()];
     for p in inv.parts() {
-        if let Some(q) = p.parent
+        if let Some(q) = p.parent()
             && covers(p)
         {
             has_child[q.index()] = true;
@@ -64,14 +64,14 @@ fn leaf_at(inv: &Inventory, at: u64) -> (usize, Disposition, String) {
         if !has_child[i] && covers(p) {
             return (
                 i,
-                p.disposition,
+                p.disposition(),
                 format!(
                     "{} {} {}..{} {}",
-                    p.kind.name(),
-                    p.tag,
-                    p.range.start,
-                    p.range.end,
-                    p.detail.clone().unwrap_or_default()
+                    p.kind().name(),
+                    p.tag(),
+                    p.range().start,
+                    p.range().end,
+                    p.detail().clone().unwrap_or_default()
                 ),
             );
         }
@@ -833,13 +833,13 @@ fn many_extents_outside_mdat_return_promptly() {
     let extents: Vec<_> = inv
         .parts()
         .iter()
-        .filter(|p| p.kind == PartKind::Extent)
+        .filter(|p| p.kind() == PartKind::Extent)
         .collect();
     assert_eq!(extents.len(), 1, "{inv}");
-    assert_eq!(extents[0].tag, PartTag::Code(1));
-    assert_eq!(extents[0].disposition, Disposition::ImageData);
-    let host = inv.get(extents[0].parent.expect("nested")).unwrap();
-    assert_eq!(host.disposition, Disposition::Malformed, "{inv}");
+    assert_eq!(*extents[0].tag(), PartTag::Code(1));
+    assert_eq!(extents[0].disposition(), Disposition::ImageData);
+    let host = inv.get(extents[0].parent().expect("nested")).unwrap();
+    assert_eq!(host.disposition(), Disposition::Malformed, "{inv}");
 }
 
 // ── F8/F9: properties and item entries ──────────────────────────────────────
@@ -1002,10 +1002,10 @@ fn policy_stripped_exif_still_feeds_gain_map_params() {
     let exif = inv
         .parts()
         .iter()
-        .find(|p| p.kind == PartKind::Extent && p.label.as_deref() == Some("Exif"))
+        .find(|p| p.kind() == PartKind::Extent && p.label() == Some("Exif"))
         .unwrap();
     assert_eq!(
-        exif.disposition,
+        exif.disposition(),
         Disposition::Metadata(MetadataKind::GainMap),
         "{inv}"
     );
@@ -1227,8 +1227,8 @@ fn sample_entry_colr_is_the_reported_colour() {
     let colrs: Vec<_> = inv
         .parts()
         .iter()
-        .filter(|p| p.tag == PartTag::FourCc(*b"colr"))
-        .map(|p| p.disposition)
+        .filter(|p| *p.tag() == PartTag::FourCc(*b"colr"))
+        .map(|p| p.disposition())
         .collect();
     assert_eq!(
         colrs,
@@ -1392,9 +1392,9 @@ fn second_meta_repeating_items_is_dropped() {
         let p = inv
             .parts()
             .iter()
-            .find(|p| p.tag == PartTag::FourCc(*typ) && p.range.start >= second)
+            .find(|p| *p.tag() == PartTag::FourCc(*typ) && p.range().start >= second)
             .unwrap();
-        assert_eq!(p.disposition, Disposition::Dropped, "{p:?}");
+        assert_eq!(p.disposition(), Disposition::Dropped, "{p:?}");
     }
 }
 
@@ -1443,16 +1443,16 @@ fn iref_version_after_a_64_bit_header() {
         .parts()
         .iter()
         .enumerate()
-        .find(|(_, p)| p.tag == PartTag::FourCc(*b"dimg") && p.range.start > iref.start as u64)
+        .find(|(_, p)| *p.tag() == PartTag::FourCc(*b"dimg") && p.range().start > iref.start as u64)
         .unwrap();
-    assert_eq!(dimg.1.disposition, Disposition::Structure, "{inv}");
+    assert_eq!(dimg.1.disposition(), Disposition::Structure, "{inv}");
     let tail: Vec<_> = inv
         .parts()
         .iter()
-        .filter(|p| p.parent.is_some_and(|q| q.index() == dimg.0))
-        .map(|p| (p.range.clone(), p.disposition))
+        .filter(|p| p.parent().is_some_and(|q| q.index() == dimg.0))
+        .map(|p| (p.range(), p.disposition()))
         .collect();
-    let end = dimg.1.range.end;
+    let end = dimg.1.range().end;
     assert_eq!(
         tail,
         [(end - 3..end, Disposition::Dropped)],
@@ -1563,11 +1563,11 @@ fn r2_boxes_after_a_rejecting_iloc_are_not_read() {
     let iloc_end = path(&m, &[(b"meta", 0), (b"iloc", 0)])[1];
     let iloc_end = (iloc_end.start + iloc_end.size) as u64;
     for p in inv.parts() {
-        if p.range.start >= iloc_end {
+        if p.range().start >= iloc_end {
             assert!(
-                !p.disposition.is_consumed(),
+                !p.disposition().is_consumed(),
                 "part after the rejecting iloc reported {}: {p:?}\n{inv}",
-                p.disposition
+                p.disposition()
             );
         }
     }
