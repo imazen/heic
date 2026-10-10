@@ -14,6 +14,9 @@
 //! - `INVENTORY_ORACLE_EXIFTOOL=<exiftool>` with `HEIC_INVENTORY_CORPUS`
 //!   cross-checks every box exiftool lists against the inventory
 //!   (`just inventory-oracle`).
+//! - `INVENTORY_ORACLE_FFMPEG=<ffmpeg>` (and `ffprobe` beside it) with
+//!   `HEIC_INVENTORY_CORPUS` cross-checks every NAL unit ffmpeg reads
+//!   against the coded-unit parts (`just inventory-oracle-ffmpeg`).
 //!
 //! The env-gated tests are decided by the caller (justfile / CI), not by the
 //! test: with the variable unset they do nothing and say so.
@@ -329,6 +332,48 @@ fn iloc(locs: &[Loc]) -> Vec<u8> {
 /// A HEIC holding every box and item kind heic handles, private units, an
 /// unreferenced property, slack in `mdat` and `idat`, an extent outside every
 /// `mdat`, a zero-length extent and trailing bytes.
+/// UUID planted in the synthetic `user_data_unregistered` SEI message.
+const PLANTED_UUID: [u8; 16] = *b"\x9d\x41\x7a\x52\x3b\x60\x4f\x1e\x8c\x2a\x71\x45\x0e\x93\xd6\xb8";
+const PLANTED_UUID_STR: &str = "9d417a52-3b60-4f1e-8c2a-71450e93d6b8";
+
+/// A NAL unit with a 4-byte length.
+fn nal4(nal: &[u8]) -> Vec<u8> {
+    cat(&[(nal.len() as u32).to_be_bytes().to_vec(), nal.to_vec()])
+}
+
+/// A prefix SEI NAL unit holding one `user_data_unregistered` message: the
+/// planted UUID, then an identifying string whose RBSP contains `00 00 01`
+/// (escaped as `00 00 03 01`).
+fn planted_sei() -> Vec<u8> {
+    let user = b"encoder=planted-id-7\0\0\x01!";
+    let mut nal = vec![0x4E, 0x01, 5, (16 + user.len()) as u8];
+    nal.extend_from_slice(&PLANTED_UUID);
+    nal.extend_from_slice(b"encoder=planted-id-7\0\0\x03\x01!");
+    nal.push(0x80);
+    nal
+}
+
+/// A filler-data NAL unit.
+fn planted_fd() -> Vec<u8> {
+    vec![0x4C, 0x01, 0xFF, 0xFF, 0xFF, 0x80]
+}
+
+fn planted_nal_units() -> Vec<u8> {
+    cat(&[
+        nal4(&planted_sei()),
+        nal4(&[0x46, 0x01, 0x50]),             // AUD
+        nal4(&[0x26, 0x01, b's', b'l', b'c']), // IDR_W_RADL slice
+        nal4(&[0x02, 0x09, b'e', b'l']),       // TRAIL_R, nuh_layer_id 1
+        nal4(&[0x52, 0x01, b'r']),             // reserved type 41
+        nal4(&[]),                             // zero-length unit
+        nal4(&planted_fd()),
+        // Suffix SEI: user_data_registered_itu_t_t35, country 0xB5,
+        // provider 0x003C.
+        nal4(&[0x50, 0x01, 4, 5, 0xB5, 0x00, 0x3C, 0x00, 0x01, 0x80]),
+        b"JNK".to_vec(),
+    ])
+}
+
 fn synthetic_heic() -> Vec<u8> {
     let ftyp = bx(b"ftyp", b"heic\0\0\0\0mif1heic");
     let hdlr = full(b"hdlr", 0, 0, b"\0\0\0\0pict\0\0\0\0\0\0\0\0\0\0\0\0\0");
@@ -450,8 +495,10 @@ fn synthetic_heic() -> Vec<u8> {
         b"\xbe\x7a\xcf\xcb\x97\xa9\x42\xe8\x9c\x71\x99\x94\x91\xe3\xaf\xacprivate payload",
     );
 
-    // mdat payload.
-    let primary = b"PRIMARY-HEVC-SLICE-DATA".to_vec();
+    // mdat payload. The primary item's data is 4-byte length-prefixed NAL
+    // units: SEI carrying an identifying string, decoded and ignored types,
+    // filler, and 3 bytes too short for a length field.
+    let primary = planted_nal_units();
     let slack = b"slack".to_vec();
     // EXIF with a 2-byte gap before its TIFF header; XMP with bytes after
     // its packet trailer.
@@ -588,7 +635,8 @@ box meta 24..928 structure
   box iprp 536..847 structure
     box ipco 544..815 structure
       property hvcC 552..595 structure
-        gap - 589..595 dropped
+        coded-unit 0x27 589..595 skipped \"PREFIX_SEI_NUT\"
+          coded-unit 0x5 593..595 malformed \"user_data_unregistered\"
       property ispe 595..618 structure
         gap - 615..618 dropped
       property colr 618..637 dropped \"nclx\"
@@ -610,20 +658,166 @@ box meta 24..928 structure
   box zMet 902..928 unknown
 box free 928..953 padding
 box uuid 953..992 unknown \"be7acfcb-97a9-42e8-9c71-999491e3afac\"
-box mdat 992..1124 structure
-  extent 0x1 1000..1023 image-data \"Primary\"
-  gap - 1023..1028 unreferenced
-  extent 0x2 1028..1044 metadata(exif) \"Exif\"
-    gap - 1028..1032 structure
-    gap - 1032..1034 dropped
-    gap - 1034..1044 metadata(exif)
-  extent 0x3 1044..1096 metadata(xmp) \"XMP\"
-    gap - 1092..1096 unreferenced
-  extent 0x4 1096..1106 skipped \"notes\"
-  extent 0x5 1106..1114 unknown \"private\"
-  extent 0x7 1114..1124 skipped \"Thumb\"
-gap - 1124..1131 trailing
+box mdat 992..1213 structure
+  extent 0x1 1000..1112 image-data \"Primary\"
+    coded-unit 0x27 1000..1050 skipped \"PREFIX_SEI_NUT\"
+      coded-unit 0x5 1006..1049 skipped \"9d417a52-3b60-4f1e-8c2a-71450e93d6b8\"
+    coded-unit 0x23 1050..1057 skipped \"AUD_NUT\"
+    coded-unit 0x13 1057..1066 image-data \"IDR_W_RADL\"
+    coded-unit 0x1 1066..1074 skipped \"TRAIL_R\"
+    coded-unit 0x29 1074..1081 unknown \"RSV_NVCL41\"
+    coded-unit - 1081..1085 dropped
+    coded-unit 0x26 1085..1095 padding \"FD_NUT\"
+    coded-unit 0x28 1095..1109 skipped \"SUFFIX_SEI_NUT\"
+      coded-unit 0x4 1101..1108 skipped \"itu_t_t35 country 0xb5 provider 0x003c\"
+    gap - 1109..1112 unreferenced
+  gap - 1112..1117 unreferenced
+  extent 0x2 1117..1133 metadata(exif) \"Exif\"
+    gap - 1117..1121 structure
+    gap - 1121..1123 dropped
+    gap - 1123..1133 metadata(exif)
+  extent 0x3 1133..1185 metadata(xmp) \"XMP\"
+    gap - 1181..1185 unreferenced
+  extent 0x4 1185..1195 skipped \"notes\"
+  extent 0x5 1195..1203 unknown \"private\"
+  extent 0x7 1203..1213 skipped \"Thumb\"
+gap - 1213..1220 trailing
 ";
+
+/// Insert `prefix` and `suffix` around the data of a file whose only `iloc`
+/// extent is the last thing in the file, inside a final `mdat`: patches the
+/// extent length and the `mdat` size. Returns the new file and the extent's
+/// new range.
+fn plant(file: &[u8], prefix: &[u8], suffix: &[u8]) -> (Vec<u8>, std::ops::Range<usize>) {
+    let be = |b: &[u8]| b.iter().fold(0u64, |n, &x| (n << 8) | u64::from(x));
+    // Top-level boxes: meta's iloc, and the last box (mdat).
+    let (mut pos, mut meta, mut last) = (0usize, None, 0usize);
+    while pos + 8 <= file.len() {
+        let size = be(&file[pos..pos + 4]) as usize;
+        if &file[pos + 4..pos + 8] == b"meta" {
+            meta = Some(pos..pos + size);
+        }
+        last = pos;
+        pos += size;
+    }
+    assert_eq!(pos, file.len());
+    assert_eq!(&file[last + 4..last + 8], b"mdat");
+    let meta = meta.unwrap();
+    let mut q = meta.start + 12;
+    let iloc = loop {
+        let size = be(&file[q..q + 4]) as usize;
+        if &file[q + 4..q + 8] == b"iloc" {
+            break q;
+        }
+        q += size;
+    };
+    let version = file[iloc + 8];
+    assert!(version <= 1);
+    let (off_sz, len_sz) = (
+        usize::from(file[iloc + 12] >> 4),
+        usize::from(file[iloc + 12] & 15),
+    );
+    let (base_sz, idx_sz) = (
+        usize::from(file[iloc + 13] >> 4),
+        usize::from(file[iloc + 13] & 15),
+    );
+    assert_eq!(be(&file[iloc + 14..iloc + 16]), 1, "one item");
+    let mut f = iloc + 16 + 2 + if version == 1 { 2 } else { 0 } + 2;
+    let base = be(&file[f..f + base_sz]) as usize;
+    f += base_sz;
+    assert_eq!(be(&file[f..f + 2]), 1, "one extent");
+    f += 2 + if version == 1 { idx_sz } else { 0 };
+    let start = base + be(&file[f..f + off_sz]) as usize;
+    let len_at = f + off_sz;
+    let len = be(&file[len_at..len_at + len_sz]) as usize;
+    assert_eq!(start + len, file.len(), "the extent ends the file");
+    let new_len = len + prefix.len() + suffix.len();
+    let mut out = file.to_vec();
+    out[len_at..len_at + len_sz].copy_from_slice(&(new_len as u64).to_be_bytes()[8 - len_sz..]);
+    let mdat_size = be(&file[last..last + 4]) as usize + prefix.len() + suffix.len();
+    out[last..last + 4].copy_from_slice(&(mdat_size as u32).to_be_bytes());
+    out.splice(start..start, prefix.iter().copied());
+    out.extend_from_slice(suffix);
+    (out, start..start + new_len)
+}
+
+/// SEI with an identifying string, filler and junk planted in a real
+/// image's data change nothing the decode returns, and the inventory lists
+/// each as unconsumed.
+#[test]
+fn planted_units_change_nothing_and_are_unconsumed() {
+    let orig = std::fs::read(testdata_dir().join("features/single.heic")).unwrap();
+    let sei = nal4(&planted_sei());
+    let fd = nal4(&planted_fd());
+    let suffix = cat(&[fd.clone(), b"JNK".to_vec()]);
+    let (planted, ext) = plant(&orig, &sei, &suffix);
+
+    let decode = |d: &[u8]| {
+        heic::DecoderConfig::new()
+            .decode(d, heic::PixelLayout::Rgba8)
+            .unwrap()
+    };
+    let (a, b) = (decode(&orig), decode(&planted));
+    assert_eq!((a.width, a.height), (b.width, b.height));
+    assert!(a.data == b.data, "planted units changed the pixels");
+    let probe = |d: &[u8]| HeicDecoderConfig::new().job().probe_full(d).unwrap();
+    assert_eq!(
+        format!("{:?}", probe(&orig)),
+        format!("{:?}", probe(&planted))
+    );
+
+    zencodec_testkit::check_inventory(HeicDecoderConfig::new(), &planted).unwrap();
+    let inv = inventory_of(HeicDecoderConfig::new(), &planted);
+    let at = |start: usize, len: usize| {
+        inv.parts()
+            .iter()
+            .find(|p| {
+                p.range == (start as u64..(start + len) as u64) && p.kind == PartKind::CodedUnit
+            })
+            .unwrap_or_else(|| panic!("no coded unit at {start}+{len}\n{inv}"))
+    };
+    let sei_part = at(ext.start, sei.len());
+    assert_eq!(sei_part.disposition, Disposition::Skipped);
+    assert_eq!(sei_part.label.as_deref(), Some("PREFIX_SEI_NUT"));
+    let msg = inv
+        .parts()
+        .iter()
+        .find(|p| p.label.as_deref() == Some(PLANTED_UUID_STR))
+        .unwrap_or_else(|| panic!("no part labelled with the planted UUID\n{inv}"));
+    assert_eq!(msg.disposition, Disposition::Skipped);
+    assert!(
+        bytes(&planted, msg)
+            .windows(20)
+            .any(|w| w == b"encoder=planted-id-7")
+    );
+    let fd_at = ext.end - suffix.len();
+    assert_eq!(at(fd_at, fd.len()).disposition, Disposition::Padding);
+    let junk = inv
+        .parts()
+        .iter()
+        .find(|p| p.range == ((ext.end - 3) as u64..ext.end as u64))
+        .unwrap_or_else(|| panic!("no part for the junk\n{inv}"));
+    assert_eq!(junk.disposition, Disposition::Unreferenced);
+    // No consumed leaf covers a planted byte.
+    let planted_ranges = [ext.start..ext.start + sei.len(), fd_at..ext.end];
+    let mut has_child = vec![false; inv.parts().len()];
+    for p in inv.parts() {
+        if let Some(q) = p.parent {
+            has_child[q.index()] = true;
+        }
+    }
+    for (i, p) in inv.parts().iter().enumerate() {
+        if has_child[i] || !p.disposition.is_consumed() {
+            continue;
+        }
+        for r in &planted_ranges {
+            assert!(
+                p.range.end <= r.start as u64 || p.range.start >= r.end as u64,
+                "consumed part {p:?} covers planted bytes {r:?}"
+            );
+        }
+    }
+}
 
 // ── Caller-gated corpus and oracle runs ─────────────────────────────────────
 
@@ -822,5 +1016,274 @@ fn exiftool_oracle_agrees() {
         mismatches.is_empty(),
         "{} exiftool units without a matching part",
         mismatches.len()
+    );
+}
+
+// ── ffmpeg coded-unit oracle ────────────────────────────────────────────────
+
+/// Split ffmpeg's Annex B output at start codes. NAL units never end in a
+/// zero byte (the stop bit, or `cabac_zero_word`'s emulation byte), so
+/// stripping zeros keeps a 4-byte start code's leading zero out of the unit.
+fn annexb_units(d: &[u8]) -> Vec<&[u8]> {
+    let mut starts = Vec::new();
+    let mut i = 0;
+    while i + 3 <= d.len() {
+        if d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 1 {
+            starts.push(i + 3);
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    let mut out = Vec::new();
+    for (k, &s) in starts.iter().enumerate() {
+        let mut e = starts.get(k + 1).map_or(d.len(), |&n| n - 3);
+        while e > s && d[e - 1] == 0 {
+            e -= 1;
+        }
+        out.push(&d[s..e]);
+    }
+    out
+}
+
+/// `trace_headers`: the `nal_unit_type` of every unit it decomposes, per
+/// section (`Extradata`, then one per `Packet`).
+fn trace_types(log: &str) -> Vec<Vec<u32>> {
+    let mut out: Vec<Vec<u32>> = Vec::new();
+    for line in log.lines() {
+        let Some(rest) = line.split_once("] ").map(|(_, r)| r) else {
+            continue;
+        };
+        if rest.starts_with("Extradata") || rest.starts_with("Packet:") {
+            out.push(Vec::new());
+        } else if rest.split_whitespace().nth(1) == Some("nal_unit_type")
+            && let (Some(v), Some(cur)) = (rest.rsplit_once("= "), out.last_mut())
+        {
+            cur.push(v.1.trim().parse().unwrap());
+        }
+    }
+    out
+}
+
+/// `INVENTORY_ORACLE_FFMPEG=<ffmpeg>` + `HEIC_INVENTORY_CORPUS=<dir>`: for
+/// every HEVC packet ffmpeg demuxes from an item the decode reads, ffprobe's
+/// packet position and size equal an extent, every NAL unit of ffmpeg's
+/// Annex B output sits at a coded-unit part with the same payload offset and
+/// length, and `trace_headers`' NAL unit types appear in the same order.
+#[test]
+fn ffmpeg_oracle_agrees() {
+    use std::process::Command;
+    let Some(ffmpeg) = std::env::var_os("INVENTORY_ORACLE_FFMPEG").map(PathBuf::from) else {
+        eprintln!(
+            "INVENTORY_ORACLE_FFMPEG unset: oracle run not requested (just inventory-oracle-ffmpeg)"
+        );
+        return;
+    };
+    let ffprobe = ffmpeg.with_file_name("ffprobe");
+    let dir = corpus_dir().expect("INVENTORY_ORACLE_FFMPEG needs HEIC_INVENTORY_CORPUS");
+    let files = files_under(&dir);
+    let (mut opened, mut rejected, mut packets, mut other_packets) = (0, 0, 0, 0);
+    let (mut nals, mut matched, mut extradata, mut extradata_matched) = (0, 0, 0, 0);
+    let (mut traced, mut ours, mut from_lhvc) = (0usize, 0usize, 0usize);
+    let mut failures = Vec::new();
+    for path in &files {
+        let data = std::fs::read(path).unwrap();
+        let name = path.display().to_string();
+        let inv = inventory_of(HeicDecoderConfig::new(), &data);
+        let probe = Command::new(&ffprobe)
+            .args(["-v", "error", "-select_streams", "v", "-show_entries"])
+            .args(["packet=stream_index,pos,size", "-of", "compact=p=0"])
+            .arg(path)
+            .output()
+            .unwrap();
+        let listing = String::from_utf8_lossy(&probe.stdout);
+        if !probe.status.success() || listing.trim().is_empty() {
+            rejected += 1;
+            continue;
+        }
+        opened += 1;
+        // Coded-unit parts directly under extents and hvcC boxes (SEI
+        // messages excluded): (range, tag).
+        let unit_parts: Vec<(std::ops::Range<u64>, u32, Option<usize>)> = inv
+            .parts()
+            .iter()
+            .filter(|p| p.kind == PartKind::CodedUnit)
+            .filter(|p| {
+                p.parent
+                    .and_then(|q| inv.get(q))
+                    .is_some_and(|q| q.kind != PartKind::CodedUnit)
+            })
+            .map(|p| {
+                let tag = match p.tag {
+                    PartTag::Code(t) => t,
+                    _ => u32::MAX,
+                };
+                (p.range.clone(), tag, p.parent.map(|q| q.index()))
+            })
+            .collect();
+        // A NAL unit's payload at o..o+len is a part ending there whose
+        // length field (1, 2 or 4 bytes) precedes it.
+        let find = |o: u64, len: u64| {
+            unit_parts.iter().position(|(r, _, _)| {
+                r.end == o + len && matches!(o.checked_sub(r.start), Some(1 | 2 | 4))
+            })
+        };
+        // Packets per stream, in order: `stream_index=0|pos=5901|size=106458`
+        // (ffprobe's own field order).
+        let mut streams: std::collections::BTreeMap<u64, Vec<(u64, u64)>> = Default::default();
+        for line in listing.lines() {
+            let field = |k: &str| {
+                line.split('|')
+                    .find_map(|kv| kv.strip_prefix(k)?.strip_prefix('='))
+                    .and_then(|v| v.parse::<u64>().ok())
+            };
+            if let (Some(stream), Some(pos), Some(size)) =
+                (field("stream_index"), field("pos"), field("size"))
+            {
+                streams.entry(stream).or_default().push((pos, size));
+            }
+        }
+        for (stream, pkts) in streams {
+            // A packet is checked when it is a walked extent (one with coded
+            // units): the item data the decode reads.
+            let walked: Vec<Option<usize>> = pkts
+                .iter()
+                .map(|&(pos, size)| {
+                    inv.parts()
+                        .iter()
+                        .position(|p| p.kind == PartKind::Extent && p.range == (pos..pos + size))
+                        .filter(|&e| unit_parts.iter().any(|u| u.2 == Some(e)))
+                })
+                .collect();
+            if walked.iter().all(Option::is_none) {
+                other_packets += pkts.len();
+                continue;
+            }
+            other_packets += walked.iter().filter(|w| w.is_none()).count();
+            // `hevc_mp4toannexb` explicitly: the hevc muxer skips it when a
+            // packet happens to start with bytes that look like a start code
+            // (a 4-byte length of 0x0000013x).
+            let out = Command::new(&ffmpeg)
+                .args(["-hide_banner", "-nostats", "-v", "info", "-i"])
+                .arg(path)
+                .args(["-map", &format!("0:{stream}"), "-c", "copy"])
+                .args([
+                    "-bsf:v",
+                    "trace_headers,hevc_mp4toannexb",
+                    "-f",
+                    "hevc",
+                    "-",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{name}: ffmpeg failed on stream {stream}"
+            );
+            let mut found: Vec<Vec<u32>> = vec![Vec::new(); pkts.len()];
+            let (mut pi, mut cursor) = (0usize, 0usize);
+            for nal in annexb_units(&out.stdout) {
+                // The current packet from the cursor, else the next one.
+                let mut hit = None;
+                for (q, &(pos, size)) in pkts.iter().enumerate().skip(pi).take(2) {
+                    let from = if q == pi { cursor } else { 0 };
+                    let region = &data[(pos as usize + from)..(pos + size) as usize];
+                    if let Some(k) = region.windows(nal.len()).position(|w| w == nal) {
+                        hit = Some((q, from + k));
+                        break;
+                    }
+                }
+                match hit {
+                    Some((q, k)) => {
+                        (pi, cursor) = (q, k + nal.len());
+                        if walked[q].is_none() {
+                            continue;
+                        }
+                        nals += 1;
+                        let o = pkts[q].0 + k as u64;
+                        match find(o, nal.len() as u64) {
+                            Some(i) => {
+                                matched += 1;
+                                found[q].push(unit_parts[i].1);
+                            }
+                            None => failures.push(format!(
+                                "{name}: stream {stream}: NAL unit at {o}+{} has no coded-unit part",
+                                nal.len()
+                            )),
+                        }
+                    }
+                    // Parameter sets ffmpeg inserts from the hvcC.
+                    None => {
+                        extradata += 1;
+                        let at_hvcc = unit_parts.iter().any(|(r, _, _)| {
+                            let (s, e) = (r.start as usize, r.end as usize);
+                            e - s > nal.len()
+                                && matches!(e - s - nal.len(), 1 | 2 | 4)
+                                && data[e - nal.len()..e] == *nal
+                        });
+                        // ffmpeg also merges an `lhvC` (layered HEVC)
+                        // configuration into its extradata; heic does not
+                        // read lhvC, so it is one Unknown property.
+                        let in_lhvc = || {
+                            inv.parts().iter().any(|p| {
+                                p.tag == PartTag::FourCc(*b"lhvC")
+                                    && bytes(&data, p).windows(nal.len()).any(|w| w == nal)
+                            })
+                        };
+                        if at_hvcc {
+                            extradata_matched += 1;
+                        } else if in_lhvc() {
+                            from_lhvc += 1;
+                        } else {
+                            failures.push(format!(
+                                "{name}: stream {stream}: inserted NAL unit ({} bytes) not found as a part",
+                                nal.len()
+                            ));
+                        }
+                    }
+                }
+            }
+            let sections = trace_types(&String::from_utf8_lossy(&out.stderr));
+            for (q, e) in walked.iter().enumerate() {
+                let Some(e) = *e else { continue };
+                packets += 1;
+                // Every coded unit of the extent is one ffmpeg found.
+                let listed = unit_parts.iter().filter(|u| u.2 == Some(e)).count();
+                if listed != found[q].len() {
+                    failures.push(format!(
+                        "{name}: stream {stream} packet {q}: {listed} coded-unit parts, ffmpeg found {}",
+                        found[q].len()
+                    ));
+                }
+                // trace_headers' types (section 0 is the extradata) are a
+                // subsequence of ours.
+                let traced_types = sections.get(q + 1).cloned().unwrap_or_default();
+                traced += traced_types.len();
+                ours += found[q].len();
+                let mut it = found[q].iter();
+                if !traced_types.iter().all(|t| it.any(|x| x == t)) {
+                    failures.push(format!(
+                        "{name}: stream {stream} packet {q}: trace_headers types {traced_types:?}, inventory {:?}",
+                        found[q]
+                    ));
+                }
+            }
+        }
+    }
+    eprintln!(
+        "ffmpeg read {opened} of {} files ({rejected} rejected); {packets} packets of walked extents ({other_packets} other packets); \
+         {matched}/{nals} packet NAL units match a coded-unit part, {extradata_matched}/{extradata} inserted parameter sets match an hvcC part ({from_lhvc} come from an lhvC property heic does not read); \
+         trace_headers decomposed {traced} of {ours} units",
+        files.len()
+    );
+    assert!(
+        failures.is_empty(),
+        "{} mismatches:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    assert!(
+        packets >= 20,
+        "the oracle needs at least 20 packets, got {packets}"
     );
 }

@@ -53,6 +53,8 @@ const MAX_DEPTH: usize = 32;
 const MAX_LABEL: usize = 64;
 /// Remarks kept per part; the rest are counted.
 const MAX_NOTES: usize = 24;
+/// The remark on an image-data extent whose coded units are not listed.
+const NOT_WALKED: &str = "coded-unit framing inside is not walked: bytes after the last NAL/OBU unit are not distinguished";
 
 const APPLE_GAIN_MAP_URN: &str = "urn:com:apple:photo:2020:aux:hdrgainmap";
 const ALPHA_URNS: [&str; 2] = [
@@ -1123,21 +1125,15 @@ fn inner_parts(
             _ => {}
         },
         (Ctx::Ipco, b"hvcC") | (Ctx::SampleEntry { used: true }, b"hvcC") => {
-            let (read, ignored) = hvcc_layout(c);
-            for (r, nal_type) in ignored {
-                out.push((
-                    content.start + r.start as u64..content.start + r.end as u64,
-                    Disposition::Dropped,
-                    format!(
-                        "NAL unit type {nal_type} in hvcC; heic decodes only VPS/SPS/PPS from it (hevc/mod.rs decode_nal_units)"
-                    ),
-                ));
+            // The NAL units themselves become coded-unit parts later
+            // (`add_coded_units`).
+            if let Some((_, read)) = hvcc_units(c, usize::MAX) {
+                tail(
+                    &mut out,
+                    read,
+                    "after the NAL arrays heic's hvcC parser reads",
+                );
             }
-            tail(
-                &mut out,
-                read,
-                "after the NAL arrays heic's hvcC parser reads",
-            );
         }
         (Ctx::Moov { .. }, b"tkhd") if moov_used => {
             let read = if c.first() == Some(&0) { 84 } else { 96 };
@@ -1256,38 +1252,6 @@ fn iref_entry_read_len(c: &[u8], version: u8) -> usize {
     pos
 }
 
-/// parser.rs `parse_hvcc`: the bytes its array loop reads, and the NAL units
-/// (length prefix included) whose type heic's decoder ignores.
-fn hvcc_layout(c: &[u8]) -> (usize, Vec<(Range<usize>, u8)>) {
-    let mut ignored = Vec::new();
-    let Some(&num_arrays) = c.get(22) else {
-        return (c.len(), ignored);
-    };
-    let mut pos = 23usize;
-    for _ in 0..num_arrays {
-        if pos + 3 > c.len() {
-            break;
-        }
-        let nal_type = c[pos] & 0x3F;
-        let n = u16::from_be_bytes([c[pos + 1], c[pos + 2]]);
-        pos += 3;
-        for _ in 0..n {
-            if pos + 2 > c.len() {
-                break;
-            }
-            let l = usize::from(u16::from_be_bytes([c[pos], c[pos + 1]]));
-            if pos + 2 + l > c.len() {
-                break;
-            }
-            if !matches!(nal_type, 32..=34) && ignored.len() < MAX_NOTES {
-                ignored.push((pos..pos + 2 + l, nal_type));
-            }
-            pos += 2 + l;
-        }
-    }
-    (pos, ignored)
-}
-
 /// `"VPS×1, SPS×1, PPS×1, SEI(prefix)×1"` for an `hvcC` payload.
 fn hvcc_nal_summary(content: &[u8]) -> String {
     let Some(&num_arrays) = content.get(22) else {
@@ -1388,6 +1352,9 @@ struct Model {
     items: BTreeMap<u32, Use>,
     props: BTreeMap<usize, Use>,
     visited: BTreeSet<(u32, u8)>,
+    /// HEVC grid tile → the tile whose `hvcC` decodes it (decode.rs
+    /// `decode_grid` uses the first tile's configuration for all of them).
+    hevc_cfg: BTreeMap<u32, u32>,
 }
 
 impl Model {
@@ -1652,6 +1619,7 @@ impl Model {
                         // their bytes with the first tile's configuration.
                         self.set_item(t, data_disp, format!("HEVC grid tile of item {id}"));
                         self.props_of(c, t, Role::HevcGridTile { first: i == 0 });
+                        self.hevc_cfg.entry(t).or_insert(tiles[0]);
                     } else {
                         self.visit_image(c, t, depth + 1, Role::Component, data_disp, "grid tile");
                     }
@@ -2278,6 +2246,11 @@ impl Walker<'_> {
         }
         let mut cands: Vec<Cand> = Vec::new();
         let mut located: BTreeSet<u32> = BTreeSet::new();
+        // Items with an extent that is not listed as a part: their coded
+        // units cannot be placed.
+        let mut incomplete: BTreeSet<u32> = BTreeSet::new();
+        // Consumed items' extents: (k, node).
+        let mut item_exts: BTreeMap<u32, Vec<(usize, usize)>> = BTreeMap::new();
         for (note_to, locs) in sources {
             let n_ext: usize = locs.iter().map(|l| l.extents.len()).sum();
             self.note(
@@ -2339,6 +2312,7 @@ impl Walker<'_> {
                         .and_then(|v| v.checked_add(off));
                     let end = start.and_then(|s| s.checked_add(len));
                     let (Some(start), Some(end)) = (start, end) else {
+                        incomplete.insert(id);
                         self.note(
                             note_to,
                             format!("item {id} extent {k}/{n}: offset overflows"),
@@ -2346,6 +2320,7 @@ impl Walker<'_> {
                         continue;
                     };
                     if end > src.end {
+                        incomplete.insert(id);
                         let what = if loc.construction_method == 1 {
                             "idat"
                         } else {
@@ -2394,6 +2369,7 @@ impl Walker<'_> {
             match holder {
                 Some(h) => placed.entry(h).or_default().push(cand),
                 None => {
+                    incomplete.insert(cand.item);
                     let place = self.top_box_at(cand.range.start);
                     self.note(
                         cand.note_to,
@@ -2417,6 +2393,7 @@ impl Walker<'_> {
                 if let Some((end, other)) = last
                     && cand.range.start < end
                 {
+                    incomplete.insert(cand.item);
                     self.note(
                         cand.note_to,
                         format!(
@@ -2438,12 +2415,13 @@ impl Walker<'_> {
                 node.notes.push(format!("extent {}/{}", cand.k, cand.n));
                 node.notes.push(cand.why);
                 if cand.disp == Disposition::ImageData {
-                    node.notes.push(
-                        "coded-unit framing inside is not walked yet: bytes after the last NAL/OBU unit are not distinguished"
-                            .to_string(),
-                    );
+                    node.notes.push(NOT_WALKED.to_string());
                 }
-                self.add(node)?;
+                let (item, k, consumed) = (cand.item, cand.k, cand.disp.is_consumed());
+                let at = self.add(node)?;
+                if consumed {
+                    item_exts.entry(item).or_default().push((k, at));
+                }
             }
         }
 
@@ -2454,6 +2432,7 @@ impl Walker<'_> {
             .collect();
         self.split_metadata_extents(&tmap_ids);
         self.add_inner_parts()?;
+        self.add_coded_units(parsed, &item_exts, &incomplete)?;
 
         if !self.moovs.is_empty() {
             for m in self.mdats.clone() {
@@ -2562,6 +2541,290 @@ impl Walker<'_> {
         }
     }
 
+    fn cap() -> At<HeicError> {
+        at!(HeicError::LimitExceeded(
+            "inventory exceeds the zencodec part cap"
+        ))
+    }
+
+    /// Room left under the part cap.
+    fn budget(&self) -> usize {
+        self.max_nodes.saturating_sub(self.nodes.len())
+    }
+
+    /// Coded-unit framing: the NAL units of every `hvcC`, and of every HEVC
+    /// item the decode reads, with each SEI NAL unit's messages under it.
+    fn add_coded_units(
+        &mut self,
+        parsed: Option<(&HeifContainer<'_>, &Model)>,
+        item_exts: &BTreeMap<u32, Vec<(usize, usize)>>,
+        incomplete: &BTreeSet<u32>,
+    ) -> Result<(), At<HeicError>> {
+        // `hvcC` payloads: parser.rs `parse_hvcc` keeps every NAL unit, and
+        // hevc/mod.rs `decode_with_config_stop` hands them all to the
+        // decoder ahead of the item data.
+        let hvccs: Vec<usize> = (0..self.nodes.len())
+            .filter(|&i| {
+                let n = &self.nodes[i];
+                n.tag == PartTag::FourCc(*b"hvcC")
+                    && matches!(n.kind, PartKind::Property | PartKind::Box)
+                    && n.disp != Disposition::Malformed
+            })
+            .collect();
+        for i in hvccs {
+            check_stop(self.stop)?;
+            let r = self.nodes[i].range.clone();
+            let HdrOutcome::Ok(h) = read_header(self.data, r.start, r.end) else {
+                continue;
+            };
+            let base = r.start + h.header;
+            let c = slice(self.data, base..r.end);
+            let (units, _) = hvcc_units(c, self.budget()).ok_or_else(Self::cap)?;
+            let parent_disp = self.nodes[i].disp;
+            let last = last_parameter_sets(&units);
+            for (j, rec) in units.iter().enumerate() {
+                let (disp, why) = if parent_disp.is_consumed() {
+                    nal_disposition(rec.shape, Disposition::ImageData, last.superseded(j, rec))
+                } else {
+                    (
+                        parent_disp,
+                        "in an hvcC the decode does not use".to_string(),
+                    )
+                };
+                let pieces = [(
+                    i,
+                    base + rec.range.start as u64..base + rec.range.end as u64,
+                )];
+                self.add_nal(c, rec, &pieces, disp, why)?;
+            }
+        }
+
+        let Some((c, m)) = parsed else {
+            return Ok(());
+        };
+        for (&item, exts) in item_exts {
+            check_stop(self.stop)?;
+            let mut exts = exts.clone();
+            exts.sort_unstable();
+            let nodes: Vec<usize> = exts.iter().map(|&(_, n)| n).collect();
+            let Some(info) = c.get_item(item) else {
+                continue;
+            };
+            let unwalked = |w: &mut Self, why: String| {
+                for &n in &nodes {
+                    w.nodes[n].notes.retain(|x| x != NOT_WALKED);
+                    w.note(n, why.clone());
+                }
+            };
+            if incomplete.contains(&item) {
+                unwalked(
+                    self,
+                    "coded units not listed: an extent of this item is not a part".to_string(),
+                );
+                continue;
+            }
+            // decode.rs `decode_item`: an `hvcC` (the first tile's, for an
+            // HEVC grid tile) means length-prefixed NAL units; an `hvc1`
+            // item without one goes to hevc/mod.rs `decode`, which takes
+            // Annex B or 4-byte lengths.
+            let cfg_item = m.hevc_cfg.get(&item).copied().unwrap_or(item);
+            let cfg = if cfg_item == item {
+                info.hevc_config.clone()
+            } else {
+                c.get_item(cfg_item).and_then(|t| t.hevc_config)
+            };
+            let stream: Cow<'_, [u8]> = if let [n] = nodes[..] {
+                Cow::Borrowed(slice(self.data, self.nodes[n].range.clone()))
+            } else {
+                let mut v = Vec::new();
+                for &n in &nodes {
+                    v.extend_from_slice(slice(self.data, self.nodes[n].range.clone()));
+                }
+                Cow::Owned(v)
+            };
+            let length_size = match (&cfg, info.item_type) {
+                (Some(cfg), _) => usize::from(cfg.length_size_minus_one) + 1,
+                (None, ItemType::Hvc1)
+                    if stream.starts_with(&[0, 0, 1]) || stream.starts_with(&[0, 0, 0, 1]) =>
+                {
+                    unwalked(
+                        self,
+                        "Annex B stream (hevc/mod.rs decode): coded units not listed".to_string(),
+                    );
+                    continue;
+                }
+                (None, ItemType::Hvc1) => 4,
+                (None, ItemType::Av01) => {
+                    unwalked(
+                        self,
+                        "AV1 item: OBU framing is not walked by heic's inventory".to_string(),
+                    );
+                    continue;
+                }
+                _ => {
+                    for &n in &nodes {
+                        self.nodes[n].notes.retain(|x| x != NOT_WALKED);
+                    }
+                    continue;
+                }
+            };
+            let slice_disp = self.nodes[nodes[0]].disp;
+            let (units, end) =
+                length_prefixed_units(&stream, length_size, self.budget()).ok_or_else(Self::cap)?;
+            // Where each extent sits in the item's byte stream.
+            let mut spans: Vec<(usize, usize, u64)> = Vec::with_capacity(nodes.len());
+            let mut at = 0usize;
+            for &n in &nodes {
+                let r = self.nodes[n].range.clone();
+                spans.push((n, at, r.start));
+                at += (r.end - r.start) as usize;
+                self.nodes[n].body = Some(r);
+                self.nodes[n].notes.retain(|x| x != NOT_WALKED);
+                let how = format!("{length_size}-byte NAL unit lengths (hvcC lengthSizeMinusOne)");
+                self.note(n, how);
+            }
+            let pieces_of = |range: Range<usize>| -> Vec<(usize, Range<u64>)> {
+                let mut out = Vec::new();
+                for (k, &(n, s, file)) in spans.iter().enumerate() {
+                    let e = spans.get(k + 1).map_or(stream.len(), |x| x.1);
+                    let (a, b) = (range.start.max(s), range.end.min(e));
+                    if a < b {
+                        out.push((n, file + (a - s) as u64..file + (b - s) as u64));
+                    }
+                }
+                out
+            };
+            let last = last_parameter_sets(&units);
+            for (j, rec) in units.iter().enumerate() {
+                let (disp, why) = nal_disposition(rec.shape, slice_disp, last.superseded(j, rec));
+                let pieces = pieces_of(rec.range.clone());
+                self.add_nal(&stream, rec, &pieces, disp, why)?;
+            }
+            if end < stream.len() {
+                for (n, r) in pieces_of(end..stream.len()) {
+                    let mut g = Self::leaf(
+                        Some(n),
+                        PartKind::Gap,
+                        PartTag::None,
+                        r,
+                        Disposition::Unreferenced,
+                    );
+                    g.notes.push(format!(
+                        "after the last NAL unit: fewer bytes than a {length_size}-byte length, which heic does not read"
+                    ));
+                    self.add(g)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// One NAL unit as a `CodedUnit` part per extent it lies in (`pieces`:
+    /// parent node and file range), and a SEI unit's messages under it.
+    /// `d` holds the bytes `rec` indexes.
+    fn add_nal(
+        &mut self,
+        d: &[u8],
+        rec: &NalRec,
+        pieces: &[(usize, Range<u64>)],
+        disp: Disposition,
+        why: String,
+    ) -> Result<(), At<HeicError>> {
+        let nal = &d[(rec.range.start + rec.prefix).min(rec.range.end)..rec.range.end];
+        let (tag, label) = match rec.shape {
+            NalShape::Unit { typ, .. } | NalShape::BadHeader { typ } => (
+                PartTag::Code(u32::from(typ)),
+                Some(nal_name(typ).to_string()),
+            ),
+            NalShape::Overrun { .. } if nal.len() >= 2 => {
+                let typ = (nal[0] >> 1) & 0x3F;
+                (
+                    PartTag::Code(u32::from(typ)),
+                    Some(nal_name(typ).to_string()),
+                )
+            }
+            _ => (PartTag::None, None),
+        };
+        let size = match rec.shape {
+            NalShape::Overrun { declared } => format!(
+                "{}-byte length field declaring {declared} bytes",
+                rec.prefix
+            ),
+            _ => format!("{}-byte length + {}-byte NAL unit", rec.prefix, nal.len()),
+        };
+        let layer = match rec.shape {
+            NalShape::Unit { layer, .. } if layer != 0 => format!("; nuh_layer_id {layer}"),
+            _ => String::new(),
+        };
+        let split = pieces.len() > 1;
+        let mut first = None;
+        for (k, (parent, r)) in pieces.iter().enumerate() {
+            let mut n = Self::leaf(
+                Some(*parent),
+                PartKind::CodedUnit,
+                tag.clone(),
+                r.clone(),
+                disp,
+            );
+            n.label = label.clone();
+            n.notes.push(format!("{size}{layer}; {why}"));
+            if split {
+                n.notes.push(format!(
+                    "piece {}/{} of a NAL unit that spans item extents",
+                    k + 1,
+                    pieces.len()
+                ));
+            }
+            let at = self.add(n)?;
+            first.get_or_insert(at);
+        }
+        let sei = matches!(rec.shape, NalShape::Unit { typ: 39 | 40, .. });
+        if let (true, false, Some(parent)) = (sei, split, first) {
+            let base = pieces[0].1.start + rec.prefix as u64;
+            let msgs = sei_messages(nal, self.budget()).ok_or_else(Self::cap)?;
+            for msg in msgs {
+                let r = base + msg.range.start as u64..base + msg.range.end as u64;
+                if r.start >= r.end {
+                    continue;
+                }
+                let name = sei_name(msg.payload_type);
+                let (d, what) = if msg.overrun {
+                    (
+                        Disposition::Malformed,
+                        format!(
+                            "sei_message payloadType {} payloadSize {} runs past the NAL unit",
+                            msg.payload_type, msg.payload_size
+                        ),
+                    )
+                } else {
+                    (
+                        disp,
+                        format!(
+                            "sei_message payloadType {} ({}), payloadSize {}",
+                            msg.payload_type,
+                            name.unwrap_or("unnamed"),
+                            msg.payload_size
+                        ),
+                    )
+                };
+                let mut n = Self::leaf(
+                    Some(parent),
+                    PartKind::CodedUnit,
+                    PartTag::Code(u32::try_from(msg.payload_type).unwrap_or(u32::MAX)),
+                    r,
+                    d,
+                );
+                n.label = msg
+                    .label
+                    .or_else(|| name.map(str::to_string))
+                    .or_else(|| Some(format!("sei_payload_{}", msg.payload_type)));
+                n.notes.push(what);
+                self.add(n)?;
+            }
+        }
+        Ok(())
+    }
+
     fn emit(self) -> Result<Inventory, At<HeicError>> {
         fn cap(_: InventoryError) -> At<HeicError> {
             at!(HeicError::LimitExceeded(
@@ -2621,4 +2884,484 @@ fn iso21496_avif_len(d: &[u8]) -> Option<usize> {
         16 + 40 * channels
     };
     Some(6 + body)
+}
+
+// ── HEVC coded units ─────────────────────────────────────────────────────
+
+/// What heic makes of one length-prefixed unit (bitstream.rs
+/// `parse_length_prefixed_ext` and `parse_nal_header`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NalShape {
+    /// A NAL unit whose header `parse_nal_header` accepts.
+    Unit { typ: u8, layer: u8 },
+    /// Shorter than the 2-byte NAL unit header: skipped without a word.
+    Short,
+    /// `parse_nal_header` rejects the header (forbidden_zero_bit set, or
+    /// nuh_temporal_id_plus1 = 0): skipped without a word.
+    BadHeader { typ: u8 },
+    /// The length runs past the data: the decode fails here.
+    Overrun { declared: u64 },
+}
+
+/// One length-prefixed NAL unit, offsets relative to the start of the data
+/// it was read from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NalRec {
+    /// The length field and the NAL unit.
+    range: Range<usize>,
+    /// Bytes of length field at the start of `range`.
+    prefix: usize,
+    shape: NalShape,
+}
+
+fn nal_shape(nal: &[u8]) -> NalShape {
+    let (Some(&b0), Some(&b1)) = (nal.first(), nal.get(1)) else {
+        return NalShape::Short;
+    };
+    let typ = (b0 >> 1) & 0x3F;
+    if b0 & 0x80 != 0 || b1 & 0x07 == 0 {
+        return NalShape::BadHeader { typ };
+    }
+    NalShape::Unit {
+        typ,
+        layer: ((b0 & 1) << 5) | (b1 >> 3),
+    }
+}
+
+/// bitstream.rs `parse_length_prefixed_ext`: the units it reads and where it
+/// stops (fewer bytes than a length field remain, or a length overruns).
+/// `None` when there are more than `limit` units.
+fn length_prefixed_units(
+    d: &[u8],
+    length_size: usize,
+    limit: usize,
+) -> Option<(Vec<NalRec>, usize)> {
+    let mut out = Vec::new();
+    if !(1..=4).contains(&length_size) {
+        return Some((out, 0));
+    }
+    let mut i = 0usize;
+    while d.len() - i >= length_size {
+        if out.len() >= limit {
+            return None;
+        }
+        let declared = d[i..i + length_size]
+            .iter()
+            .fold(0u64, |n, &b| (n << 8) | u64::from(b));
+        let body = i + length_size;
+        match usize::try_from(declared)
+            .ok()
+            .and_then(|n| body.checked_add(n))
+            .filter(|&e| e <= d.len())
+        {
+            Some(end) => {
+                out.push(NalRec {
+                    range: i..end,
+                    prefix: length_size,
+                    shape: nal_shape(&d[body..end]),
+                });
+                i = end;
+            }
+            None => {
+                out.push(NalRec {
+                    range: i..d.len(),
+                    prefix: length_size,
+                    shape: NalShape::Overrun { declared },
+                });
+                return Some((out, d.len()));
+            }
+        }
+    }
+    Some((out, i))
+}
+
+/// parser.rs `parse_hvcc`: the NAL units of the `hvcC` arrays (each with its
+/// 2-byte length) and where its reading stops, relative to the box payload.
+/// heic keeps every unit and hands them to the decoder ahead of the item
+/// data. `None` when there are more than `limit` units.
+fn hvcc_units(c: &[u8], limit: usize) -> Option<(Vec<NalRec>, usize)> {
+    let mut out = Vec::new();
+    let Some(&num_arrays) = c.get(22) else {
+        return Some((out, c.len()));
+    };
+    let mut pos = 23usize;
+    'arrays: for _ in 0..num_arrays {
+        if pos + 3 > c.len() {
+            break;
+        }
+        let n = u16::from_be_bytes([c[pos + 1], c[pos + 2]]);
+        pos += 3;
+        for _ in 0..n {
+            if pos + 2 > c.len() {
+                break;
+            }
+            if out.len() >= limit {
+                return None;
+            }
+            let l = usize::from(u16::from_be_bytes([c[pos], c[pos + 1]]));
+            if pos + 2 + l > c.len() {
+                // parse_hvcc stops taking units here (it goes on reading
+                // array headers from inside these bytes).
+                out.push(NalRec {
+                    range: pos..c.len(),
+                    prefix: 2,
+                    shape: NalShape::Overrun { declared: l as u64 },
+                });
+                pos = c.len();
+                break 'arrays;
+            }
+            out.push(NalRec {
+                range: pos..pos + 2 + l,
+                prefix: 2,
+                shape: nal_shape(&c[pos + 2..pos + 2 + l]),
+            });
+            pos += 2 + l;
+        }
+    }
+    Some((out, pos))
+}
+
+/// The last SPS and PPS of a NAL unit list: heic's `decode_nal_units`
+/// keeps the last of each, whatever its ID.
+struct LastParams {
+    sps: Option<usize>,
+    pps: Option<usize>,
+}
+
+impl LastParams {
+    fn superseded(&self, j: usize, rec: &NalRec) -> bool {
+        match rec.shape {
+            NalShape::Unit { typ: 33, .. } => self.sps.is_some_and(|l| j < l),
+            NalShape::Unit { typ: 34, .. } => self.pps.is_some_and(|l| j < l),
+            _ => false,
+        }
+    }
+}
+
+fn last_parameter_sets(units: &[NalRec]) -> LastParams {
+    let last = |t: u8| {
+        units
+            .iter()
+            .rposition(|r| matches!(r.shape, NalShape::Unit { typ, .. } if typ == t))
+    };
+    LastParams {
+        sps: last(33),
+        pps: last(34),
+    }
+}
+
+/// The disposition of one NAL unit, following hevc/mod.rs
+/// `decode_with_config_stop` / `decode_nal_units` (the pure-Rust decoder).
+/// `slice_disp` is what the decoded picture is (image data, a gain map, a
+/// depth map); `superseded` marks a parameter set a later one of the same
+/// type replaces.
+fn nal_disposition(
+    shape: NalShape,
+    slice_disp: Disposition,
+    superseded: bool,
+) -> (Disposition, String) {
+    use Disposition as D;
+    let (d, why): (Disposition, &str) = match shape {
+        NalShape::Overrun { declared } => {
+            return (
+                D::Malformed,
+                format!(
+                    "length {declared} runs past the data; heic's decode fails here (bitstream.rs parse_length_prefixed_ext)"
+                ),
+            );
+        }
+        NalShape::Short => (D::Dropped, "shorter than a NAL unit header; heic skips it"),
+        NalShape::BadHeader { .. } => (
+            D::Dropped,
+            "forbidden_zero_bit set or nuh_temporal_id_plus1 = 0; heic skips it",
+        ),
+        NalShape::Unit { typ, layer } => match typ {
+            0..=9 | 16..=21 if layer == 0 => (slice_disp, "slice segment heic decodes"),
+            0..=9 | 16..=21 => (
+                D::Skipped,
+                "slice of an enhancement layer; heic decodes layer 0 only",
+            ),
+            10..=15 | 22..=31 => (D::Unknown, "reserved VCL NAL unit type; heic ignores it"),
+            32 => (
+                D::Structure,
+                "parsed (a malformed VPS fails the decode); heic uses none of its values",
+            ),
+            33 | 34 if superseded => (
+                D::Dropped,
+                "parsed, then replaced by a later one of the same type (heic keeps the last)",
+            ),
+            33 | 34 => (D::Structure, "parameter set the decode uses"),
+            35..=37 => (D::Skipped, "heic ignores it"),
+            38 => (D::Padding, "filler data"),
+            39 | 40 => (D::Skipped, "heic does not read SEI messages"),
+            _ => (
+                D::Unknown,
+                "reserved or unspecified NAL unit type; heic ignores it",
+            ),
+        },
+    };
+    (d, why.to_string())
+}
+
+/// H.265 Table 7-1 names.
+fn nal_name(typ: u8) -> &'static str {
+    const NAMES: [&str; 64] = [
+        "TRAIL_N",
+        "TRAIL_R",
+        "TSA_N",
+        "TSA_R",
+        "STSA_N",
+        "STSA_R",
+        "RADL_N",
+        "RADL_R",
+        "RASL_N",
+        "RASL_R",
+        "RSV_VCL_N10",
+        "RSV_VCL_R11",
+        "RSV_VCL_N12",
+        "RSV_VCL_R13",
+        "RSV_VCL_N14",
+        "RSV_VCL_R15",
+        "BLA_W_LP",
+        "BLA_W_RADL",
+        "BLA_N_LP",
+        "IDR_W_RADL",
+        "IDR_N_LP",
+        "CRA_NUT",
+        "RSV_IRAP_VCL22",
+        "RSV_IRAP_VCL23",
+        "RSV_VCL24",
+        "RSV_VCL25",
+        "RSV_VCL26",
+        "RSV_VCL27",
+        "RSV_VCL28",
+        "RSV_VCL29",
+        "RSV_VCL30",
+        "RSV_VCL31",
+        "VPS_NUT",
+        "SPS_NUT",
+        "PPS_NUT",
+        "AUD_NUT",
+        "EOS_NUT",
+        "EOB_NUT",
+        "FD_NUT",
+        "PREFIX_SEI_NUT",
+        "SUFFIX_SEI_NUT",
+        "RSV_NVCL41",
+        "RSV_NVCL42",
+        "RSV_NVCL43",
+        "RSV_NVCL44",
+        "RSV_NVCL45",
+        "RSV_NVCL46",
+        "RSV_NVCL47",
+        "UNSPEC48",
+        "UNSPEC49",
+        "UNSPEC50",
+        "UNSPEC51",
+        "UNSPEC52",
+        "UNSPEC53",
+        "UNSPEC54",
+        "UNSPEC55",
+        "UNSPEC56",
+        "UNSPEC57",
+        "UNSPEC58",
+        "UNSPEC59",
+        "UNSPEC60",
+        "UNSPEC61",
+        "UNSPEC62",
+        "UNSPEC63",
+    ];
+    NAMES[usize::from(typ & 0x3F)]
+}
+
+/// H.265 Annex D `sei_payload` names for the types an auditor is likely to
+/// meet.
+fn sei_name(t: u64) -> Option<&'static str> {
+    Some(match t {
+        0 => "buffering_period",
+        1 => "pic_timing",
+        2 => "pan_scan_rect",
+        3 => "filler_payload",
+        4 => "user_data_registered_itu_t_t35",
+        5 => "user_data_unregistered",
+        6 => "recovery_point",
+        9 => "scene_info",
+        15 => "picture_snapshot",
+        16 => "progressive_refinement_segment_start",
+        17 => "progressive_refinement_segment_end",
+        19 => "film_grain_characteristics",
+        22 => "post_filter_hint",
+        23 => "tone_mapping_info",
+        45 => "frame_packing_arrangement",
+        47 => "display_orientation",
+        56 => "green_metadata",
+        128 => "structure_of_pictures_info",
+        129 => "active_parameter_sets",
+        130 => "decoding_unit_info",
+        131 => "temporal_sub_layer_zero_idx",
+        132 => "decoded_picture_hash",
+        133 => "scalable_nesting",
+        134 => "region_refresh_info",
+        135 => "no_display",
+        136 => "time_code",
+        137 => "mastering_display_colour_volume",
+        138 => "segmented_rect_frame_packing_arrangement",
+        139 => "temporal_motion_constrained_tile_sets",
+        140 => "chroma_resampling_filter_hint",
+        141 => "knee_function_info",
+        142 => "colour_remapping_info",
+        143 => "deinterlaced_field_identification",
+        144 => "content_light_level_info",
+        145 => "dependent_rap_indication",
+        146 => "coded_region_completion",
+        147 => "alternative_transfer_characteristics",
+        148 => "ambient_viewing_environment",
+        149 => "content_colour_volume",
+        150 => "equirectangular_projection",
+        151 => "cubemap_projection",
+        152 => "fisheye_video_info",
+        154 => "sphere_rotation",
+        155 => "regionwise_packing",
+        156 => "omni_viewport",
+        157 => "regional_nesting",
+        165 => "alpha_channel_info",
+        166 => "overlay_info",
+        177 => "depth_representation_info",
+        200 => "sei_manifest",
+        201 => "sei_prefix_indication",
+        202 => "annotated_regions",
+        205 => "shutter_interval_info",
+        _ => return None,
+    })
+}
+
+/// One `sei_message` of a SEI NAL unit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SeiMsg {
+    /// Raw (escaped) bytes of the message within the NAL unit, header
+    /// included in the offsets.
+    range: Range<usize>,
+    payload_type: u64,
+    payload_size: u64,
+    /// The payload or its size fields run past the NAL unit.
+    overrun: bool,
+    /// The UUID of `user_data_unregistered`, the country and provider code
+    /// of `user_data_registered_itu_t_t35`.
+    label: Option<String>,
+}
+
+/// H.265 7.3.2.4 `sei_rbsp` (7.3.5 `sei_message`) over a SEI NAL unit,
+/// 2-byte header included. heic reads none of this; it is for the
+/// inventory only. `None` when there are more than `limit` messages.
+fn sei_messages(nal: &[u8], limit: usize) -> Option<Vec<SeiMsg>> {
+    // Emulation prevention, as bitstream.rs `remove_emulation_prevention`
+    // removes it; `at[i]` is the raw index of RBSP byte `i`.
+    let raw = nal.get(2..).unwrap_or(&[]);
+    let mut rbsp = Vec::with_capacity(raw.len());
+    let mut at = Vec::with_capacity(raw.len());
+    let mut i = 0usize;
+    while i < raw.len() {
+        if i + 2 < raw.len() && raw[i] == 0 && raw[i + 1] == 0 && raw[i + 2] == 3 {
+            rbsp.extend_from_slice(&[0, 0]);
+            at.extend_from_slice(&[i, i + 1]);
+            i += 3;
+        } else {
+            rbsp.push(raw[i]);
+            at.push(i);
+            i += 1;
+        }
+    }
+    let raw_end = |r: usize| -> usize { 2 + at.get(r).map_or(raw.len(), |&a| a) };
+    // The rbsp_stop_one_bit is the last set bit.
+    let Some(last) = rbsp.iter().rposition(|&b| b != 0) else {
+        return Some(Vec::new());
+    };
+    let ff = |p: &mut usize| -> Option<u64> {
+        let mut v = 0u64;
+        loop {
+            let b = *rbsp.get(*p)?;
+            *p += 1;
+            v = v.saturating_add(u64::from(b));
+            if b != 0xFF {
+                return Some(v);
+            }
+        }
+    };
+    let mut out = Vec::new();
+    let mut p = 0usize;
+    // more_rbsp_data(): more than the stop bit and its alignment zeros.
+    while p < last || (p == last && rbsp[p] != 0x80) {
+        if out.len() >= limit {
+            return None;
+        }
+        let start = p;
+        let (Some(payload_type), Some(payload_size)) = (ff(&mut p), ff(&mut p)) else {
+            out.push(SeiMsg {
+                range: raw_end(start)..nal.len(),
+                payload_type: 0,
+                payload_size: 0,
+                overrun: true,
+                label: None,
+            });
+            break;
+        };
+        let body = p;
+        let end = usize::try_from(payload_size)
+            .ok()
+            .and_then(|n| body.checked_add(n))
+            .filter(|&e| e <= rbsp.len());
+        let Some(end) = end else {
+            out.push(SeiMsg {
+                range: raw_end(start)..nal.len(),
+                payload_type,
+                payload_size,
+                overrun: true,
+                label: None,
+            });
+            break;
+        };
+        let payload = &rbsp[body..end];
+        let label = match payload_type {
+            5 => payload
+                .get(..16)
+                .and_then(|u| <[u8; 16]>::try_from(u).ok())
+                .map(|u| uuid_str(&u)),
+            4 => payload.first().map(|&cc| {
+                let rest = if cc == 0xFF {
+                    &payload[1.min(payload.len())..]
+                } else {
+                    payload
+                };
+                let ext = if cc == 0xFF {
+                    payload.get(1).copied()
+                } else {
+                    None
+                };
+                let provider = rest
+                    .get(1..3)
+                    .map(|b| format!(" provider {:#06x}", u16::from_be_bytes([b[0], b[1]])))
+                    .unwrap_or_default();
+                match ext {
+                    Some(x) => format!("itu_t_t35 country 0xff{x:02x}{provider}"),
+                    None => format!("itu_t_t35 country {cc:#04x}{provider}"),
+                }
+            }),
+            _ => None,
+        };
+        // The last payload byte's raw position, plus one.
+        let raw_stop = if end > start {
+            raw_end(end - 1) + 1
+        } else {
+            raw_end(start)
+        };
+        out.push(SeiMsg {
+            range: raw_end(start)..raw_stop,
+            payload_type,
+            payload_size,
+            overrun: false,
+            label,
+        });
+        p = end;
+    }
+    Some(out)
 }

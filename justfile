@@ -196,3 +196,8 @@ inventory-corpus corpus=env_var_or_default("CODEC_CORPUS", "../../codec-corpus")
 # Cross-check every box exiftool -v3 lists against the inventory
 inventory-oracle exiftool="exiftool" corpus=env_var_or_default("CODEC_CORPUS", "../../codec-corpus"):
     INVENTORY_ORACLE_EXIFTOOL="$(command -v {{exiftool}})" HEIC_INVENTORY_CORPUS={{corpus}}/heic-conformance cargo test --features "backend-rust,std,zencodec,av1,unci" --test inventory exiftool_oracle_agrees -- --nocapture
+
+# Cross-check every NAL unit ffmpeg demuxes (ffprobe packets, Annex B output,
+# trace_headers) against the coded-unit parts
+inventory-oracle-ffmpeg ffmpeg="ffmpeg" corpus=env_var_or_default("CODEC_CORPUS", "../../codec-corpus"):
+    INVENTORY_ORACLE_FFMPEG="$(command -v {{ffmpeg}})" HEIC_INVENTORY_CORPUS={{corpus}}/heic-conformance cargo test --release --features "backend-rust,std,zencodec,av1,unci" --test inventory ffmpeg_oracle_agrees -- --nocapture
