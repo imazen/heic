@@ -4,7 +4,30 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 ## [Unreleased]
 
+### Metadata integration
+
+- Add default-off `inventory`, reusing the structural walker and mutation/oracle
+  tests from PR 57 (`628ebc30`). `DecodeJob::inventory` returns the shared
+  zencodec inventory; builds without the feature return typed unsupported.
+- Reuse PR 51 (`e8008485`): requested gain-map decode/buffer failures propagate;
+  component extraction rejects absent/invalid rendering parameters; present
+  ISO 21496-1 data is authoritative and cannot fall back to Apple headroom.
+- Apple gain-map inspection delegates to zenmeta's strict parser. Public
+  signatures keep zencodec/HEIC types. Native container extraction remains
+  available without zenmeta, zencodecs or zenpipe.
+- Temporary pinned metadata dependencies share zencodec `702a6260`; ultrahdr
+  retains f16 support explicitly. Replace pins before publishing. Existing
+  queued breaks below predate this extraction and remain release concerns.
+- Reuse container parsing for inventory and decode. Track-role reporting is
+  collected only for inspection, and inventory-only helpers are feature-gated.
+
 ### QUEUED BREAKING CHANGES
+
+- `DecodedFrame` remains re-exported as `heic::DecodedFrame`, but its six
+  allocating conversion methods (`to_rgb`, `to_rgba`, `to_bgr`, `to_bgra`,
+  `to_rgb16`, `to_rgba16`) now return `heic_core::HevcError` instead of
+  `heic::HevcError` after the pre-existing move to heic-core (`edf1c0c`).
+  The crates.io 0.1.6 audit is recorded in `docs/metadata-api-audit.md`.
 <!-- Breaking changes that will ship together in the next major (or minor for 0.x) release.
      Add items here as you discover them. Do NOT ship these piecemeal — batch them. -->
 

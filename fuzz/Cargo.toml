@@ -19,13 +19,14 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+zencodec = { git = "https://github.com/imazen/zencodec", rev = "702a626049cd81f1200895b47931b751b660a776" }
 
 [dependencies.heic]
 path = ".."
 # `backend-rust` satisfies the HEVC-backend `compile_error!` gate in
 # `heic::lib`. `av1` enables the AVIF/AV1 fuzz target; `unci` enables
 # the uncompressed-codec target.
-features = ["backend-rust", "av1", "unci"]
+features = ["backend-rust", "av1", "unci", "inventory"]
 
 [[bin]]
 name = "fuzz_decode"
@@ -72,6 +73,16 @@ bench = false
 [[bin]]
 name = "fuzz_color_transform"
 path = "fuzz_targets/fuzz_color_transform.rs"
+test = false
+doc = false
+bench = false
+
+[patch.crates-io]
+zencodec = { git = "https://github.com/imazen/zencodec", rev = "702a626049cd81f1200895b47931b751b660a776" }
+
+[[bin]]
+name = "fuzz_inventory"
+path = "fuzz_targets/fuzz_inventory.rs"
 test = false
 doc = false
 bench = false

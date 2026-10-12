@@ -91,6 +91,7 @@ static HEIC_DECODE_CAPS: DecodeCapabilities = DecodeCapabilities::new()
     .with_enforces_max_input_bytes(true)
     .with_gain_map(true)
     .with_reconstructs_hdr(true)
+    .with_inventory(cfg!(feature = "inventory"))
     .with_threads_supported_range(1, if cfg!(feature = "parallel") { 256 } else { 1 });
 
 // ── Supported descriptors ──────────────────────────────────────────────────
@@ -374,6 +375,36 @@ impl HeicDecodeJob {
         ))
     }
 
+    #[cfg(feature = "inventory")]
+    fn inventory_inner(
+        &self,
+        data: &[u8],
+    ) -> Result<zencodec::inventory::Inventory, At<HeicError>> {
+        use crate::inventory::Options;
+        self.limits
+            .check_input_size(data.len() as u64)
+            .map_err(|e| at!(HeicError::ResourceLimit(e)))?;
+        let stop_ref: &dyn enough::Stop = match self.stop {
+            Some(ref s) => s,
+            None => &enough::Unstoppable,
+        };
+        // Mirrors `HeicDecoder::decode_inner`: ReconstructHdr applies the gain
+        // map; Components or `extract_gain_map` decode and attach it, whatever
+        // the render mode (both can hold at once).
+        let render = self.gain_map_render;
+        let policy = self.policy.as_ref();
+        let opts = Options {
+            apply_gain_map: matches!(render, zencodec::GainMapRender::ReconstructHdr { .. }),
+            attach_gain_map: self.extract_gain_map
+                || matches!(render, zencodec::GainMapRender::Components),
+            decode_depth: self.extract_depth,
+            keep_icc: policy.is_none_or(|p| p.resolve_icc(true)),
+            keep_exif: policy.is_none_or(|p| p.resolve_exif(true)),
+            keep_xmp: policy.is_none_or(|p| p.resolve_xmp(true)),
+        };
+        crate::inventory::inventory(data, &opts, stop_ref)
+    }
+
     fn output_info_inner(&self, data: &[u8]) -> Result<OutputInfo, At<HeicError>> {
         self.limits
             .check_input_size(data.len() as u64)
@@ -654,6 +685,17 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
     fn output_info(&self, data: &[u8]) -> Result<OutputInfo, At<zencodec::CodecError>> {
         self.output_info_inner(data)
             .map_err(zencodec::CodecError::of)
+    }
+
+    /// Every box, item, item extent and property, with what this job's
+    /// decode does with it. Follows the job's gain-map, depth and
+    /// [`DecodePolicy`] settings. See `src/inventory.rs`.
+    #[cfg(feature = "inventory")]
+    fn inventory(
+        &self,
+        data: &[u8],
+    ) -> Result<zencodec::inventory::Inventory, At<zencodec::CodecError>> {
+        self.inventory_inner(data).map_err(zencodec::CodecError::of)
     }
 
     fn decoder(
@@ -1041,32 +1083,38 @@ impl HeicDecoder<'_> {
             // Decode and attach the HDR gain map if requested and present.
             // (ReconstructHdr consumed the gain map above — `reconstructing`
             // and `surface_components` are never both true.)
-            if (self.extract_gain_map || surface_components)
-                && pi.has_gain_map
-                && let Ok(gain_map) = crate::decode::decode_gain_map(data, &[crate::Backend::Rust])
-            {
+            if (self.extract_gain_map || surface_components) && pi.has_gain_map {
+                let gain_map = crate::decode::decode_gain_map(data, &[crate::Backend::Rust])?;
                 if surface_components {
                     // heic surfaces gain maps as luma-only gray8; params come
                     // from the ISO 21496-1 tmap payload when present, else
                     // the Apple EXIF MakerNote headroom.
                     let params =
-                        gain_map_params_from(&gain_map, container.as_ref()).unwrap_or_default();
+                        gain_map_params_from(&gain_map, container.as_ref()).ok_or_else(|| {
+                            at!(HeicError::InvalidData(
+                                "Components: missing or invalid gain-map rendering metadata"
+                            ))
+                        })?;
                     let gm_info = zencodec::gainmap::GainMapInfo::new(
                         params,
                         gain_map.width,
                         gain_map.height,
                         1,
                     );
-                    if let Ok(pixels) = zenpixels::PixelBuffer::from_vec(
+                    let pixels = zenpixels::PixelBuffer::from_vec(
                         gain_map.data.clone(),
                         gain_map.width,
                         gain_map.height,
                         zenpixels::PixelDescriptor::GRAY8_SRGB,
-                    ) {
-                        output
-                            .extensions_mut()
-                            .insert(zencodec::decode::DecodedGainMap::new(pixels, gm_info));
-                    }
+                    )
+                    .map_err(|_| {
+                        at!(HeicError::InvalidData(
+                            "Components: invalid gain-map pixel buffer"
+                        ))
+                    })?;
+                    output
+                        .extensions_mut()
+                        .insert(zencodec::decode::DecodedGainMap::new(pixels, gm_info));
                 }
                 output.extensions_mut().insert(gain_map);
             }
@@ -1901,12 +1949,12 @@ fn extract_xmp_from_container(
 /// XMP — the MakerNote HDR headroom is their canonical parameter source
 /// (validated against real iPhone captures). Returns `None` when the EXIF
 /// or headroom is absent.
-fn apple_gain_map_params(
+pub(crate) fn apple_gain_map_params(
     container: &crate::heif::HeifContainer<'_>,
 ) -> Option<zencodec::GainMapParams> {
     let exif = extract_exif_from_container(container)?;
-    let info = ultrahdr_core::parse_exif_for_apple_hdr(&exif)?;
-    ultrahdr_core::from_apple_headroom(&info)
+    let info = zenmeta::apple::parse_exif_for_apple_hdr(&exif)?;
+    zenmeta::apple::from_apple_headroom(&info)
 }
 
 /// Gain-map parameters for a decoded [`crate::HdrGainMap`].
@@ -1921,10 +1969,11 @@ fn gain_map_params_from(
     gain_map: &crate::HdrGainMap,
     container: Option<&crate::heif::HeifContainer<'_>>,
 ) -> Option<zencodec::GainMapParams> {
-    if let Some(iso) = gain_map.iso21496.as_deref()
-        && let Ok(params) =
+    if let Some(iso) = gain_map.iso21496.as_deref() {
+        let params =
             zencodec::gainmap::parse_iso21496_fmt(iso, zencodec::gainmap::Iso21496Format::AvifTmap)
-    {
+                .ok()?;
+        params.validate().ok()?;
         return Some(params);
     }
     container.and_then(apple_gain_map_params)
@@ -1942,13 +1991,16 @@ fn extract_gain_map_info(
     container: &crate::heif::HeifContainer<'_>,
     primary_id: u32,
 ) -> Option<GainMapInfo> {
-    if let Some((_tmap_id, gainmap_id, iso)) = crate::decode::find_tmap_gain_map(container)
-        && let Ok(params) =
-            zencodec::gainmap::parse_iso21496_fmt(&iso, zencodec::gainmap::Iso21496Format::AvifTmap)
-        && let Some(item) = container.get_item(gainmap_id)
-        && let Some((width, height)) = item.dimensions
-    {
-        // heic surfaces gain maps as luma-only (single channel).
+    if let Some((_tmap_id, gainmap_id, iso)) = crate::decode::find_tmap_gain_map(container) {
+        // Present ISO metadata is authoritative. Never hide corruption by
+        // substituting a guessed Apple curve.
+        let params = zencodec::gainmap::parse_iso21496_fmt(
+            &iso,
+            zencodec::gainmap::Iso21496Format::AvifTmap,
+        )
+        .ok()?;
+        params.validate().ok()?;
+        let (width, height) = container.get_item(gainmap_id)?.dimensions?;
         return Some(GainMapInfo::new(params, width, height, 1));
     }
 
@@ -2172,6 +2224,26 @@ mod tests {
             origin: crate::GainMapOrigin::AppleAuxItem,
         };
         assert!(gain_map_params_from(&gm, None).is_none());
+    }
+
+    #[test]
+    fn corrupt_iso_cannot_fall_back_to_real_apple_headroom() {
+        let bytes = include_bytes!("../testdata/apple-hdr/hdr-sample.heic");
+        let container = crate::heif::parse(bytes, &enough::Unstoppable).unwrap();
+        assert!(
+            apple_gain_map_params(&container).is_some(),
+            "fixture supplies the legacy fallback"
+        );
+        let gm = crate::HdrGainMap {
+            data: vec![0u8; 4],
+            width: 2,
+            height: 2,
+            bit_depth: 8,
+            xmp: None,
+            iso21496: Some(vec![0xff]),
+            origin: crate::GainMapOrigin::HeifTmap,
+        };
+        assert!(gain_map_params_from(&gm, Some(&container)).is_none());
     }
 
     #[test]
