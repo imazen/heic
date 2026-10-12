@@ -220,3 +220,9 @@ metadata-contract-check:
     cargo check --no-default-features --features backend-rust,inventory --target wasm32-wasip1
     cargo clippy --features backend-rust,std,inventory,av1,unci --all-targets -- -D warnings
     just api-doc
+
+# Keep direct git contracts identical to the codec integration consumer.
+metadata-dependency-check:
+    cargo test --features backend-rust,std,inventory,av1,unci --test inventory --test inventory_review --test inventory_feature
+    cargo check --no-default-features --features backend-rust,inventory --target wasm32-wasip1
+    just metadata-fuzz-check
