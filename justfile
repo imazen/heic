@@ -226,3 +226,10 @@ metadata-dependency-check:
     cargo test --features backend-rust,std,inventory,av1,unci --test inventory --test inventory_review --test inventory_feature
     cargo check --no-default-features --features backend-rust,inventory --target wasm32-wasip1
     just metadata-fuzz-check
+
+# Exercise shared contracts with inventory enabled and disabled.
+shared-contract-check:
+    cargo fmt -p heic
+    cargo test --features backend-rust,std,inventory --test shared_contracts
+    cargo test --features backend-rust,std,zencodec --test shared_contracts
+    cargo clippy --features backend-rust,std,inventory --test shared_contracts -- -D warnings
