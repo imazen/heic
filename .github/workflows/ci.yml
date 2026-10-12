@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
@@ -72,6 +73,12 @@ jobs:
           --test cov_zencodec --test cov_container --test cov_multicodec
           --features "backend-rust,std,av1,unci,zencodec,parallel,fallible-alloc"
 
+      - name: Metadata inventory and configured errors
+        run: cargo test --features "backend-rust,std,inventory,av1,unci" --test inventory --test inventory_review --test inventory_feature --test fuzz_regression
+
+      - name: Inventory disabled contract
+        run: cargo test --features "backend-rust,std,zencodec" --test inventory_feature
+
       - name: Check (backend-rust, no_std)
         run: cargo check --no-default-features --features backend-rust
 
@@ -111,13 +118,13 @@ jobs:
           # tee's (always-zero) exit code, not cargo's, and the gate
           # silently passes when the compile_error fires correctly.
           set -o pipefail
-          if cargo build --no-default-features 2>&1 | tee /tmp/build-no-features.log; then
+          if cargo build --no-default-features 2>&1 | tee build-no-features.log; then
             echo "::error::Default build succeeded; the compile_error gate is broken."
             exit 1
           fi
-          if ! grep -q "no HEVC backend is enabled" /tmp/build-no-features.log; then
+          if ! grep -q "no HEVC backend is enabled" build-no-features.log; then
             echo "::error::compile_error message missing the user-facing helper string."
-            cat /tmp/build-no-features.log
+            cat build-no-features.log
             exit 1
           fi
 
@@ -281,6 +288,10 @@ jobs:
       # exercises the whole decode pipeline on a 32-bit target.
       - name: Corpus decode (i686, 32-bit)
         run: cross test --test corpus_decode --features "backend-rust,std,av1,unci" --target i686-unknown-linux-gnu
+
+      - name: Metadata inventory (i686)
+        run: cross test --features "backend-rust,std,inventory,av1,unci" --target i686-unknown-linux-gnu --test inventory --test inventory_review --test inventory_feature --test fuzz_regression
+
 
   backend-mediafoundation:
     # Cross-compile-check the heic-backend-mediafoundation crate for Windows

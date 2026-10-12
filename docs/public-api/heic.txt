@@ -6,7 +6,7 @@
 # impls omitted; re-export duplicates annotated `[also: path]`.
 # DO NOT EDIT BY HAND — commit regenerated changes with the code.
 #
-# files: heic.txt 203 lines (supported surface) | heic.features.txt 36 added (features: av1,backend-d3d11va,backend-mediacodec,backend-mediafoundation,backend-rust,backend-vaapi,backend-videotoolbox,fallible-alloc,parallel,std,unci,zencodec) | heic.internal.txt 453 lines (710 hidden + 0 excluded-feature)
+# files: heic.txt 203 lines (supported surface) | heic.features.txt 37 added (features: av1,backend-d3d11va,backend-mediacodec,backend-mediafoundation,backend-rust,backend-vaapi,backend-videotoolbox,fallible-alloc,inventory,parallel,std,unci,zencodec) | heic.internal.txt 453 lines (710 hidden + 0 excluded-feature)
 
 ## summary
 #

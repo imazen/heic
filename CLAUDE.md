@@ -464,6 +464,13 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 
 ## Known Bugs
 
+### Fixed during metadata integration: inventory fixture walker overflowed on i686
+
+The PR 57 mutation helper checked a declared box end with `p + size`.
+A deliberately oversized `mdat` wrapped on i686 before the unchanged extent
+assertions ran. The helper now compares against remaining bytes, preserving
+the test's oversized input and all decode/inventory expectations.
+
 ### FIXED 2026-09-06: SIMD residual addition wrapped before clamping
 
 `transform_simd::{add_residual_block_v3, add_residual_block_wasm128}` and
@@ -773,6 +780,17 @@ d3d11va_vs_rust_corpus_diff` to see the full corpus output;
 `d3d11va_vs_rust_synthetic_corpus` is the bit-exact subset gate.
 
 ## Investigation Notes
+
+### Metadata consolidation (2026-10-12)
+
+The published-source comparison and reusable validation commands live in
+[docs/metadata-api-audit.md](docs/metadata-api-audit.md). Inventory reuses the
+container parser under a default-off feature. Apple gain-map interpretation
+delegates privately to zenmeta; ISO metadata remains authoritative. The
+`DecodedFrame` re-export needs manual API review: automated semver checking
+reports a removed struct, but its path exists and its conversion error type
+changed in the earlier heic-core extraction.
+
 
 ### UNINIT pixel triage (conformance vectors with negative PSNR)
 

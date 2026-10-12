@@ -4,7 +4,30 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 ## [Unreleased]
 
+### Metadata integration
+
+- Add default-off `inventory`, reusing the structural walker and mutation/oracle
+  tests from PR 57 (`628ebc30`). `DecodeJob::inventory` returns the shared
+  zencodec inventory; builds without the feature return typed unsupported.
+- Reuse PR 51 (`e8008485`): requested gain-map decode/buffer failures propagate;
+  component extraction rejects absent/invalid rendering parameters; present
+  ISO 21496-1 data is authoritative and cannot fall back to Apple headroom.
+- Apple gain-map inspection delegates to zenmeta's strict parser. Public
+  signatures keep zencodec/HEIC types. Native container extraction remains
+  available without zenmeta, zencodecs or zenpipe.
+- Temporary pinned metadata dependencies share zencodec `702a6260`; ultrahdr
+  retains f16 support explicitly. Replace pins before publishing. Existing
+  queued breaks below predate this extraction and remain release concerns.
+- Reuse container parsing for inventory and decode. Track-role reporting is
+  collected only for inspection, and inventory-only helpers are feature-gated.
+
 ### QUEUED BREAKING CHANGES
+
+- `DecodedFrame` remains re-exported as `heic::DecodedFrame`, but its six
+  allocating conversion methods (`to_rgb`, `to_rgba`, `to_bgr`, `to_bgra`,
+  `to_rgb16`, `to_rgba16`) now return `heic_core::HevcError` instead of
+  `heic::HevcError` after the pre-existing move to heic-core (`edf1c0c`).
+  The crates.io 0.1.6 audit is recorded in `docs/metadata-api-audit.md`.
 <!-- Breaking changes that will ship together in the next major (or minor for 0.x) release.
      Add items here as you discover them. Do NOT ship these piecemeal — batch them. -->
 
@@ -15,6 +38,8 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 - **`HeicError::AllBackendsFailed` changed from a tuple variant (`AllBackendsFailed(String)`) to a struct variant** (`AllBackendsFailed { detail: String, rejected_bitstream: bool }`). The new `rejected_bitstream` field distinguishes "no backend could even be tried" (every backend reported itself unavailable) from "at least one available backend rejected this specific bitstream" — see the `zencodec` category mapping (`error.rs`). Breaking for any exhaustive/tuple-style match on this variant.
 
 ### Added
+- Typed `HeicError::Inventory` (inventory feature only) preserves shared part
+  limits and structural errors; coordinated metadata pins use `c1c3292f`.
 - **`feature = "zencodec"`: adopt the zencodec `CategorizedError` / `ErrorCategory` taxonomy (Pattern B, zencodec PR #116's two-level origin-first reshape)** (`src/error.rs`, `src/codec.rs`, `src/backend.rs`). `HeicError`, `HevcError`, and `ProbeError` each implement `zencodec::CategorizedError` (`codec_name() -> Some("heic")`, `category() -> ErrorCategory`), and the `zencodec` decode-trait impls now return the shared `At<zencodec::CodecError>` envelope (see the QUEUED BREAKING CHANGES entry above) instead of the native `At<HeicError>`, so a generic consumer routes on `.category()` (HTTP status, retry policy, logging) without naming heic's own error types, and recovers both the category and the codec name after erasure to `Box<dyn Error>`. The native rich-error API is untouched. New `HeicError` variants: `Truncated`, `NotHeif` (see next entry), `InvalidRequest` (general caller-request-parameter bucket, e.g. an unrecognized future `GainMapRender` variant), and — only with the `zencodec` feature, since they carry a zencodec-typed payload — `ResourceLimit(zencodec::LimitExceeded)` and `UnsupportedOperation(zencodec::UnsupportedOperation)`.
 - **`zencodec` bumped to the released `0.1.26`, `zencodec-testkit` to the released `0.1.0`** (`Cargo.toml`, `deny.toml`), which ship the two-level origin-first `ErrorCategory` reshape (PR #116) this feature adopts. Both now resolve from crates.io as plain version deps: the temporary `[patch.crates-io]` zencodec git pin (used while 0.1.26 was unreleased, then briefly retained tag-pinned to `v0.1.26` for graph unification while `zencodec-testkit` was still git-only) is fully removed, along with `deny.toml`'s matching `imazen/zencodec` allow-git entry. The published `zencodec-testkit 0.1.0` declares `zencodec ^0.1.26`, so both deps unify on a single registry crate instance with no patch.
 

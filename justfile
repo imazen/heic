@@ -183,3 +183,46 @@ arm-sample-decode fixture output:
 arm-capture-rgba fixture output:
     CARGO_BUILD_JOBS=4 TMPDIR="$HOME/tmp" nice -n19 cargo build --release --example heaptrack_decode --features backend-rust,std
     HEIC_PROFILE_RGBA_OUT="{{output}}" RAYON_NUM_THREADS=4 OMP_NUM_THREADS=4 TMPDIR="$HOME/tmp" nice -n19 ./target/release/examples/heaptrack_decode "{{fixture}}" 1
+
+# Metadata extraction and default-off inventory, using the shared contract.
+metadata-check:
+    cargo test --features backend-rust,std,inventory,av1,unci --lib --test inventory --test inventory_review --test fuzz_regression --test inventory_feature
+    cargo test --features backend-rust,std,zencodec --test inventory_feature
+    cargo clippy --workspace --features backend-rust,std,inventory,av1,unci -- -D warnings
+
+metadata-fuzz-check:
+    cargo check --manifest-path fuzz/Cargo.toml --bin fuzz_inventory
+
+# Independent readers inspect the committed fixtures by default.
+metadata-oracles corpus="testdata":
+    HEIC_INVENTORY_CORPUS={{corpus}} INVENTORY_ORACLE_EXIFTOOL=exiftool INVENTORY_ORACLE_FFMPEG=/usr/bin/ffmpeg cargo test --features backend-rust,std,inventory,av1,unci --test inventory oracle -- --nocapture
+
+metadata-portability:
+    CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_RUNNER=env cargo test --features backend-rust,std,inventory,av1,unci --target i686-unknown-linux-gnu --lib --test inventory --test inventory_review --test inventory_feature --test fuzz_regression
+    cargo check --no-default-features --features backend-rust --target wasm32-wasip1
+
+metadata-semver:
+    cargo semver-checks check-release -p heic --baseline-version 0.1.6 --release-type patch --only-explicit-features --features std,zencodec --current-features backend-rust,inventory
+
+# Existing bundled decode and public behavior suites with metadata integration enabled.
+metadata-decode-regression:
+    HEIC_SKIP_WIN_HOST_TESTS=1 cargo test --features backend-rust,std,inventory,av1,unci,parallel,fallible-alloc --test corpus_decode --test cov_features --test cov_decode_orchestration --test cov_public_api --test cov_metadata --test cov_zencodec --test cov_container --test cov_multicodec
+    cargo test --doc --features backend-rust,std,inventory,av1,unci
+    cargo clippy --workspace --all-targets --features backend-rust,std,inventory,av1,unci -- -D warnings
+
+metadata-final-check:
+    cargo test --features backend-rust,std,inventory,av1,unci --test inventory_feature
+    cargo clippy --workspace --all-targets --features backend-rust,std,inventory,av1,unci -- -D warnings
+
+# Shared error-cause alignment without changing the native decoder boundary.
+metadata-contract-check:
+    cargo test --features backend-rust,std,inventory,av1,unci --lib --test inventory --test inventory_review --test inventory_feature
+    cargo check --no-default-features --features backend-rust,inventory --target wasm32-wasip1
+    cargo clippy --features backend-rust,std,inventory,av1,unci --all-targets -- -D warnings
+    just api-doc
+
+# Keep direct git contracts identical to the codec integration consumer.
+metadata-dependency-check:
+    cargo test --features backend-rust,std,inventory,av1,unci --test inventory --test inventory_review --test inventory_feature
+    cargo check --no-default-features --features backend-rust,inventory --target wasm32-wasip1
+    just metadata-fuzz-check

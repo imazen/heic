@@ -65,6 +65,9 @@ pub enum HeicError {
     /// Only constructible with the `zencodec` feature enabled.
     #[cfg(feature = "zencodec")]
     ResourceLimit(zencodec::LimitExceeded),
+    /// A structural inventory part limit or invariant failed.
+    #[cfg(feature = "inventory")]
+    Inventory(zencodec::inventory::InventoryError),
     /// Memory allocation failed
     OutOfMemory,
     /// Operation was cancelled via cooperative cancellation
@@ -138,6 +141,8 @@ impl fmt::Display for HeicError {
             Self::LimitExceeded(msg) => write!(f, "limit exceeded: {msg}"),
             #[cfg(feature = "zencodec")]
             Self::ResourceLimit(limit) => write!(f, "resource limit exceeded: {limit}"),
+            #[cfg(feature = "inventory")]
+            Self::Inventory(error) => write!(f, "inventory: {error}"),
             Self::OutOfMemory => write!(f, "out of memory"),
             Self::Cancelled(reason) => write!(f, "{reason}"),
             Self::Sink(e) => write!(f, "decode sink error: {e}"),
@@ -165,6 +170,8 @@ impl core::error::Error for HeicError {
             Self::Sink(e) => Some(e.as_ref()),
             #[cfg(feature = "zencodec")]
             Self::ResourceLimit(e) => Some(e),
+            #[cfg(feature = "inventory")]
+            Self::Inventory(e) => Some(e),
             #[cfg(feature = "zencodec")]
             Self::UnsupportedOperation(e) => Some(e),
             _ => None,
@@ -476,6 +483,8 @@ impl zencodec::CategorizedError for HeicError {
             // A real `zencodec::LimitExceeded` was in hand at the call site —
             // delegate for the precise kind + actual/max.
             Self::ResourceLimit(limit) => limit.category(),
+            #[cfg(feature = "inventory")]
+            Self::Inventory(error) => error.category(),
             // Memory acquisition failure (alloc failed or address-space
             // overflow via `TryReserveError`).
             Self::OutOfMemory => C::Resource(Res::OutOfMemory),
