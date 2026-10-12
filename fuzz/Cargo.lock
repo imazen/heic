@@ -760,7 +760,7 @@ dependencies = [
 [[package]]
 name = "ultrahdr-core"
 version = "0.6.0"
-source = "git+https://github.com/imazen/ultrahdr?rev=1d86bffc297f84d8d1540fd614c285b995c9f757#1d86bffc297f84d8d1540fd614c285b995c9f757"
+source = "git+https://github.com/imazen/ultrahdr?rev=4db930c848acd70a11dc8f49c0557a95f4a39325#4db930c848acd70a11dc8f49c0557a95f4a39325"
 dependencies = [
  "archmage",
  "bytemuck",
@@ -828,7 +828,7 @@ dependencies = [
 [[package]]
 name = "zencodec"
 version = "0.1.27"
-source = "git+https://github.com/imazen/zencodec?rev=702a626049cd81f1200895b47931b751b660a776#702a626049cd81f1200895b47931b751b660a776"
+source = "git+https://github.com/imazen/zencodec?rev=c1c3292ff10f386191780ad407526951165da47a#c1c3292ff10f386191780ad407526951165da47a"
 dependencies = [
  "almost-enough",
  "enough",
@@ -848,7 +848,7 @@ dependencies = [
 [[package]]
 name = "zenmeta"
 version = "0.1.0"
-source = "git+https://github.com/imazen/zencodec?rev=702a626049cd81f1200895b47931b751b660a776#702a626049cd81f1200895b47931b751b660a776"
+source = "git+https://github.com/imazen/zencodec?rev=c1c3292ff10f386191780ad407526951165da47a#c1c3292ff10f386191780ad407526951165da47a"
 dependencies = [
  "zencodec",
  "zenpixels",

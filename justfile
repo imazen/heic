@@ -213,3 +213,10 @@ metadata-decode-regression:
 metadata-final-check:
     cargo test --features backend-rust,std,inventory,av1,unci --test inventory_feature
     cargo clippy --workspace --all-targets --features backend-rust,std,inventory,av1,unci -- -D warnings
+
+# Shared error-cause alignment without changing the native decoder boundary.
+metadata-contract-check:
+    cargo test --features backend-rust,std,inventory,av1,unci --lib --test inventory --test inventory_review --test inventory_feature
+    cargo check --no-default-features --features backend-rust,inventory --target wasm32-wasip1
+    cargo clippy --features backend-rust,std,inventory,av1,unci --all-targets -- -D warnings
+    just api-doc

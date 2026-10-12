@@ -1,5 +1,5 @@
 # heic public API — additions from non-default features
-# features: av1,backend-d3d11va,backend-mediacodec,backend-mediafoundation,backend-rust,backend-vaapi,backend-videotoolbox,fallible-alloc,parallel,std,unci,zencodec
+# features: av1,backend-d3d11va,backend-mediacodec,backend-mediafoundation,backend-rust,backend-vaapi,backend-videotoolbox,fallible-alloc,inventory,parallel,std,unci,zencodec
 # (regenerated on every `cargo test` by zenutils-apidoc; ZEN_API_DOC=check verifies, =off skips).
 # Encodings: crate-name prefix stripped; auto traits collapse to a
 # count + exceptions; trait impls collapse to one roster line per
@@ -13,17 +13,18 @@
 #   free functions                              2
 #   inherent methods                            5
 #   struct fields                               8
-#   enum variants                               3
+#   enum variants                               4
 #   trait roster entries (type × trait)        13
 #   auto-trait-complete types                   2
 #   auto-trait exceptions                       3
 #
 # per-module pub lines:
-#   (root)                           23
+#   (root)                           24
 
-## items (23 lines)
+## items (24 lines)
 
-pub Backend::VideoToolbox
+pub Backend::Vaapi
+pub HeicError::Inventory(zencodec::inventory::InventoryError)
 pub HeicError::ResourceLimit(zencodec::limits::LimitExceeded)
 pub HeicError::UnsupportedOperation(zencodec::capabilities::UnsupportedOperation)
 pub struct HeicAuxiliaryInfo

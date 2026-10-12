@@ -545,9 +545,9 @@ impl<'a> Walker<'a> {
 
     fn add(&mut self, node: Node) -> Result<usize, At<HeicError>> {
         if self.nodes.len() >= self.max_nodes {
-            return Err(at!(HeicError::LimitExceeded(
-                "inventory exceeds the zencodec part cap"
-            )));
+            return Err(at!(HeicError::Inventory(InventoryError::TooManyParts {
+                max: DEFAULT_MAX_PARTS
+            })));
         }
         self.nodes.push(node);
         Ok(self.nodes.len() - 1)
@@ -3610,9 +3610,9 @@ impl Walker<'_> {
     }
 
     fn cap() -> At<HeicError> {
-        at!(HeicError::LimitExceeded(
-            "inventory exceeds the zencodec part cap"
-        ))
+        at!(HeicError::Inventory(InventoryError::TooManyParts {
+            max: DEFAULT_MAX_PARTS
+        }))
     }
 
     /// Room left under the part cap.
@@ -3946,10 +3946,8 @@ impl Walker<'_> {
     }
 
     fn emit(self) -> Result<Inventory, At<HeicError>> {
-        fn cap(_: InventoryError) -> At<HeicError> {
-            at!(HeicError::LimitExceeded(
-                "inventory exceeds the zencodec part cap"
-            ))
+        fn cap(error: InventoryError) -> At<HeicError> {
+            at!(HeicError::Inventory(error))
         }
         let mut inv = Inventory::new(ImageFormat::Heic, self.data.len() as u64);
         let mut ids: Vec<PartId> = Vec::with_capacity(self.nodes.len());
