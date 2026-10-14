@@ -4,6 +4,11 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 ## [Unreleased]
 
+### Dependency integration
+
+- Align temporary zencodec/zenmeta/testkit pins with the checked fidelity and operation-matrix contracts (`4fda4391`). Replace coordinated git pins with released versions before publication.
+
+
 ### Added
 
 - Shared decoder-policy and inventory contract tests using a native HEIC fixture, with inventory enabled and disabled. The testkit revision remains pinned until its release.
