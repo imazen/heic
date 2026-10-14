@@ -32,7 +32,6 @@ jobs:
           - ubuntu-latest
           - ubuntu-24.04-arm
           - macos-latest
-          - macos-26-intel
           - windows-latest
           - windows-11-arm
     steps:
@@ -74,10 +73,10 @@ jobs:
           --features "backend-rust,std,av1,unci,zencodec,parallel,fallible-alloc"
 
       - name: Metadata inventory and configured errors
-        run: cargo test --features "backend-rust,std,inventory,av1,unci" --test inventory --test inventory_review --test inventory_feature --test fuzz_regression
+        run: cargo test --features "backend-rust,std,inventory,av1,unci" --test inventory --test inventory_review --test inventory_feature --test shared_contracts --test fuzz_regression
 
       - name: Inventory disabled contract
-        run: cargo test --features "backend-rust,std,zencodec" --test inventory_feature
+        run: cargo test --features "backend-rust,std,zencodec" --test inventory_feature --test shared_contracts
 
       - name: Check (backend-rust, no_std)
         run: cargo check --no-default-features --features backend-rust
@@ -290,7 +289,7 @@ jobs:
         run: cross test --test corpus_decode --features "backend-rust,std,av1,unci" --target i686-unknown-linux-gnu
 
       - name: Metadata inventory (i686)
-        run: cross test --features "backend-rust,std,inventory,av1,unci" --target i686-unknown-linux-gnu --test inventory --test inventory_review --test inventory_feature --test fuzz_regression
+        run: cross test --features "backend-rust,std,inventory,av1,unci" --target i686-unknown-linux-gnu --test inventory --test inventory_review --test inventory_feature --test shared_contracts --test fuzz_regression
 
 
   backend-mediafoundation:
@@ -413,7 +412,6 @@ jobs:
       matrix:
         os:
           - macos-latest
-          - macos-15-intel
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -428,7 +426,7 @@ jobs:
       # resolved the long-standing SIGABRT in
       # videotoolbox_decodes_example — the GH Actions macOS
       # runners now happily decode the entire bundled corpus on
-      # both arm64 (macos-latest) and Intel (macos-15-intel). The
+      # arm64 (macos-latest). The
       # vt-debug.yml workflow remains available for one-off
       # interactive triage via tmate / lldb when something
       # regresses; ci.yml just runs the test inline.

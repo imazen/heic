@@ -4,6 +4,10 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 ## [Unreleased]
 
+### Added
+
+- Shared decoder-policy and inventory contract tests using a native HEIC fixture, with inventory enabled and disabled. The testkit revision remains pinned until its release.
+
 ### Metadata integration
 
 - Add default-off `inventory`, reusing the structural walker and mutation/oracle

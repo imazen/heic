@@ -118,8 +118,8 @@ magetypes = { version = "0.9.29", default-features = false }
 safe_unaligned_simd = "0.2.5"
 memchr = { version = "2.8.3", default-features = false }
 rayon = { version = "1.12.0", optional = true }
-zencodec = { version = ">=0.1.27, <0.3.0", git = "https://github.com/imazen/zencodec", rev = "a81daf7605dc63074d4a39757e7b4399057d4a8f", optional = true }
-zenmeta = { version = "0.1.0", git = "https://github.com/imazen/zencodec", rev = "a81daf7605dc63074d4a39757e7b4399057d4a8f", default-features = false, features = ["apple"], optional = true }
+zencodec = { version = ">=0.1.27, <0.3.0", git = "https://github.com/imazen/zencodec", rev = "ab420b6c064eaa9c3abecb01f51b85413c0f2529", optional = true }
+zenmeta = { version = "0.1.0", git = "https://github.com/imazen/zencodec", rev = "ab420b6c064eaa9c3abecb01f51b85413c0f2529", default-features = false, features = ["apple"], optional = true }
 zenpixels = { version = ">=0.2.11, <0.4.0", default-features = false, features = ["rgb", "imgref"], optional = true }
 rgb = { version = "0.8.53", default-features = false, features = ["as-bytes"], optional = true }
 bytemuck = { version = "1.25.2", default-features = false, features = ["extern_crate_alloc"], optional = true }
@@ -127,7 +127,7 @@ imgref = { version = "1.12.3", optional = true }
 garb = { version = "0.2.8", default-features = false, optional = true }
 rav1d-safe = { version = "0.6.0", optional = true, default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
 zenflate = { version = "0.4.0", optional = true, default-features = false }
-ultrahdr-core = { version = "0.6.0", git = "https://github.com/imazen/ultrahdr", rev = "02c49bc5bf60c76d702322c2e089ad204a02228b", optional = true, default-features = false, features = ["f16"] }
+ultrahdr-core = { version = "0.6.0", git = "https://github.com/imazen/ultrahdr", rev = "08b2c660fe9b2bea3f8ae0a29e9a6ca67cdcde11", optional = true, default-features = false, features = ["f16"] }
 
 [dev-dependencies]
 zenbench = "0.1.10"
@@ -233,8 +233,8 @@ harness = false
 
 # Temporary metadata integration pins; replace with released versions before publication.
 [patch.crates-io]
-zencodec = { git = "https://github.com/imazen/zencodec", rev = "a81daf7605dc63074d4a39757e7b4399057d4a8f" }
-zencodec-testkit = { git = "https://github.com/imazen/zencodec", rev = "a81daf7605dc63074d4a39757e7b4399057d4a8f" }
+zencodec = { git = "https://github.com/imazen/zencodec", rev = "ab420b6c064eaa9c3abecb01f51b85413c0f2529" }
+zencodec-testkit = { git = "https://github.com/imazen/zencodec", rev = "ab420b6c064eaa9c3abecb01f51b85413c0f2529" }
 
 [[example]]
 name = "gm20_probe"
