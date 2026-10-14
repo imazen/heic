@@ -11,6 +11,7 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 ### Added
 
+- Incremental decode through zencodec's `WholeFileIncremental`: `dyn_incremental_decoder` reports the header as soon as a prefix probes and decodes once the file is complete (HEIF needs the whole container before HEVC tiles decode). `DecodeCapabilities` declares `incremental`; `tests/sansio.rs` runs the testkit's incremental contract on four fixtures. Pins zencodec `fa49f7ce` and ultrahdr-core `e6abe1cd` so both share one zencodec.
 - Shared decoder-policy and inventory contract tests using a native HEIC fixture, with inventory enabled and disabled. The testkit revision remains pinned until its release.
 
 ### Metadata integration

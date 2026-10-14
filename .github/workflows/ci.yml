@@ -75,8 +75,8 @@ jobs:
       - name: Metadata inventory and configured errors
         run: cargo test --features "backend-rust,std,inventory,av1,unci" --test inventory --test inventory_review --test inventory_feature --test shared_contracts --test fuzz_regression
 
-      - name: Inventory disabled contract
-        run: cargo test --features "backend-rust,std,zencodec" --test inventory_feature --test shared_contracts
+      - name: Inventory disabled and sans-I/O contracts
+        run: cargo test --features "backend-rust,std,zencodec" --test inventory_feature --test shared_contracts --test sansio
 
       - name: Check (backend-rust, no_std)
         run: cargo check --no-default-features --features backend-rust
