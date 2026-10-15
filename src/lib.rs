@@ -631,7 +631,7 @@ impl ImageInfo {
 
         // Extract CICP from colr nclx box on the primary item
         let (color_primaries, transfer_characteristics, matrix_coefficients, video_full_range) =
-            match &primary_item.color_info {
+            match container.item_nclx(primary_item.id) {
                 Some(heif::ColorInfo::Nclx {
                     color_primaries,
                     transfer_characteristics,
@@ -645,18 +645,12 @@ impl ImageInfo {
                 ),
                 _ => (2, 2, 2, false), // unspecified defaults
             };
-        let has_icc_profile = matches!(
-            &primary_item.color_info,
-            Some(heif::ColorInfo::IccProfile(_))
-        );
+        let has_icc_profile = container.item_icc(primary_item.id).is_some();
 
         // Extract raw metadata bytes
         let exif = Self::extract_exif_from_container(&container);
         let xmp = Self::extract_xmp_from_container(&container);
-        let icc_profile = match &primary_item.color_info {
-            Some(heif::ColorInfo::IccProfile(icc)) => Some(icc.clone()),
-            _ => None,
-        };
+        let icc_profile = container.item_icc(primary_item.id).map(<[u8]>::to_vec);
 
         // Try to get info from HEVC config (fast path for direct HEVC items)
         if let Some(ref config) = primary_item.hevc_config
@@ -1213,10 +1207,7 @@ impl DecoderConfig {
         let primary_item = container
             .primary_item()
             .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
-        match &primary_item.color_info {
-            Some(heif::ColorInfo::IccProfile(icc)) => Ok(Some(icc.clone())),
-            _ => Ok(None),
-        }
+        Ok(container.item_icc(primary_item.id).map(<[u8]>::to_vec))
     }
 
     /// Decode the thumbnail image from a HEIC file.

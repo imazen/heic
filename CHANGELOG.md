@@ -4,6 +4,10 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 ## [Unreleased]
 
+### Fixed (colour)
+
+- An item with both a `colr prof` (ICC) and a `colr nclx` kept only the last one listed, so with the ICC last the nclx matrix and range no longer drove the YUV-to-RGB conversion (heic#53: 9.6 MAD against libheif on the reported fixture). Decoding, probing and inventory now read the nclx and the profile separately (`HeifContainer::item_nclx` / `item_icc`, crate-private); `Item::color_info` is unchanged. Tests: `both_colr_boxes_are_kept_in_either_order`.
+
 ### Dependency integration
 
 - Align temporary zencodec/zenmeta/testkit pins with the checked fidelity and operation-matrix contracts (`4fda4391`). Replace coordinated git pins with released versions before publication.

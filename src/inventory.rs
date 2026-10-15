@@ -2022,7 +2022,7 @@ impl Model {
         };
         let dimg = FourCC(*b"dimg");
         // This item's nclx replaces its inputs' colour fields.
-        let has_nclx = matches!(item.color_info, Some(ColorInfo::Nclx { .. }));
+        let has_nclx = c.item_nclx(id).is_some();
         let below = overridden || has_nclx;
         match item.item_type {
             ItemType::Grid => {

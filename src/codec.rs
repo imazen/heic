@@ -1422,7 +1422,7 @@ impl HeicStreamDecoder {
             .ok_or_else(|| at!(HeicError::InvalidData("Missing tile dimensions")))?;
 
         // Color override from grid item's colr nclx
-        let color_override = match &primary_item.color_info {
+        let color_override = match container.item_nclx(primary_item.id) {
             Some(ColorInfo::Nclx {
                 full_range,
                 matrix_coefficients,
@@ -1836,9 +1836,9 @@ fn build_image_info_full(
         // ICC profile from colr box
         if pi.has_icc_profile
             && let Some(ref item) = primary_item
-            && let Some(crate::heif::ColorInfo::IccProfile(icc)) = &item.color_info
+            && let Some(icc) = container.item_icc(item.id)
         {
-            info = info.with_icc_profile(icc.clone());
+            info = info.with_icc_profile(icc.to_vec());
             // When nclx primaries are unspecified, recognize the ICC and
             // surface its CICP so lenient consumers get resolved color
             // without re-parsing the profile — Apple HEICs leave nclx

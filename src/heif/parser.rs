@@ -154,6 +154,41 @@ pub struct Item {
 }
 
 impl<'a> HeifContainer<'a> {
+    /// An item's `colr` boxes by type. HEIF allows one `prof` (ICC) and one
+    /// `nclx` on an item: the profile defines the colour space and the nclx
+    /// still sets the YUV matrix and range (heic#53). [`Item::color_info`]
+    /// keeps only the last one listed, so code that needs either reads them
+    /// here. The first box of each type wins.
+    pub(crate) fn item_nclx(&self, item_id: u32) -> Option<&ColorInfo> {
+        self.item_colr(item_id)
+            .find(|c| matches!(c, ColorInfo::Nclx { .. }))
+    }
+
+    /// The item's `prof` ICC profile; see [`Self::item_nclx`].
+    pub(crate) fn item_icc(&self, item_id: u32) -> Option<&[u8]> {
+        self.item_colr(item_id).find_map(|c| match c {
+            ColorInfo::IccProfile(icc) => Some(icc.as_slice()),
+            _ => None,
+        })
+    }
+
+    fn item_colr(&self, item_id: u32) -> impl Iterator<Item = &ColorInfo> + '_ {
+        self.property_associations
+            .iter()
+            .find(|a| a.item_id == item_id)
+            .into_iter()
+            .flat_map(|a| a.properties.iter())
+            .filter_map(|&(idx, _)| {
+                match idx
+                    .checked_sub(1)
+                    .and_then(|i| self.properties.get(i as usize))
+                {
+                    Some(ItemProperty::ColorInfo(c)) => Some(c),
+                    _ => None,
+                }
+            })
+    }
+
     /// Get the primary item
     pub fn primary_item(&self) -> Option<Item> {
         self.get_item(self.primary_item_id)
@@ -2745,4 +2780,73 @@ fn resolve_sample_offset(
     Err(at!(HeicError::InvalidData(
         "sample not found in stsc mapping"
     )))
+}
+
+#[cfg(test)]
+mod colr_tests {
+    use super::*;
+
+    fn container(properties: Vec<ItemProperty>) -> HeifContainer<'static> {
+        let n = properties.len() as u16;
+        HeifContainer {
+            data: &[],
+            brand: FourCC(*b"heic"),
+            compatible_brands: Vec::new(),
+            primary_item_id: 1,
+            item_locations: Vec::new(),
+            item_infos: Vec::new(),
+            properties,
+            property_associations: vec![PropertyAssociation {
+                item_id: 1,
+                properties: (1..=n).map(|i| (i, false)).collect(),
+            }],
+            item_references: Vec::new(),
+            idat_data: None,
+            mdat_offset: None,
+            mdat_length: None,
+        }
+    }
+
+    const NCLX: ColorInfo = ColorInfo::Nclx {
+        color_primaries: 1,
+        transfer_characteristics: 13,
+        matrix_coefficients: 6,
+        full_range: false,
+    };
+
+    /// heic#53: an item with a `prof` and an `nclx` keeps both, in either
+    /// order, so the nclx matrix and range still drive the YUV conversion.
+    #[test]
+    fn both_colr_boxes_are_kept_in_either_order() {
+        let icc = vec![1u8, 2, 3];
+        for props in [
+            vec![
+                ItemProperty::ColorInfo(ColorInfo::IccProfile(icc.clone())),
+                ItemProperty::ColorInfo(NCLX),
+            ],
+            vec![
+                ItemProperty::ColorInfo(NCLX),
+                ItemProperty::ColorInfo(ColorInfo::IccProfile(icc.clone())),
+            ],
+        ] {
+            let c = container(props);
+            assert!(matches!(
+                c.item_nclx(1),
+                Some(ColorInfo::Nclx {
+                    matrix_coefficients: 6,
+                    full_range: false,
+                    ..
+                })
+            ));
+            assert_eq!(c.item_icc(1), Some(&icc[..]));
+        }
+    }
+
+    #[test]
+    fn a_single_colr_box_answers_only_its_own_type() {
+        let c = container(vec![ItemProperty::ColorInfo(NCLX)]);
+        assert!(c.item_nclx(1).is_some());
+        assert_eq!(c.item_icc(1), None);
+        assert!(c.item_nclx(2).is_none(), "other items have no colr");
+    }
 }

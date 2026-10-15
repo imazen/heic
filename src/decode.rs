@@ -354,7 +354,7 @@ fn decode_item(
         matrix_coefficients,
         color_primaries,
         transfer_characteristics,
-    }) = &item.color_info
+    }) = container.item_nclx(item.id)
     {
         frame.full_range = *full_range;
         frame.matrix_coeffs = *matrix_coefficients as u8;
@@ -1552,7 +1552,7 @@ pub(crate) fn try_decode_grid_streaming(
         .ok_or_else(|| at!(HeicError::InvalidData("Missing tile dimensions")))?;
 
     // Determine color conversion overrides from grid item's colr nclx
-    let color_override = match &primary_item.color_info {
+    let color_override = match container.item_nclx(primary_item.id) {
         Some(ColorInfo::Nclx {
             full_range,
             matrix_coefficients,
@@ -1755,7 +1755,7 @@ pub(crate) fn try_decode_grid_to_sink(
         .ok_or_else(|| at!(HeicError::InvalidData("Missing tile dimensions")))?;
 
     // Determine color conversion overrides from grid item's colr nclx
-    let color_override = match &primary_item.color_info {
+    let color_override = match container.item_nclx(primary_item.id) {
         Some(ColorInfo::Nclx {
             full_range,
             matrix_coefficients,
