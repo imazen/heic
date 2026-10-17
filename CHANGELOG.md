@@ -4,6 +4,10 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 ## [Unreleased]
 
+### Added
+
+- `image` feature: `register_decoding_hook()` registers HEIC/HEIF decoding with the `image` crate's hook system (`image::open` by extension; `load_from_memory` for files whose major brand is an HEVC brand). Contributed by SimonIT (#5). Test: `image_hook_pixels_match_direct_decode`.
+
 ### Fixed (colour)
 
 - An item with both a `colr prof` (ICC) and a `colr nclx` kept only the last one listed, so with the ICC last the nclx matrix and range no longer drove the YUV-to-RGB conversion (heic#53: 9.6 MAD against libheif on the reported fixture). Decoding, probing and inventory now read the nclx and the profile separately (`HeifContainer::item_nclx` / `item_icc`, crate-private); `Item::color_info` is unchanged. Tests: `both_colr_boxes_are_kept_in_either_order`.

@@ -155,7 +155,8 @@ fn map_heic_error(err: At<HeicError>) -> ImageError {
     ))
 }
 
-fn map_probe_error(err: ProbeError) -> ImageError {
+fn map_probe_error(err: At<ProbeError>) -> ImageError {
+    let (err, _trace) = err.decompose();
     match err {
         ProbeError::NeedMoreData => ImageError::IoError(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
@@ -165,7 +166,7 @@ fn map_probe_error(err: ProbeError) -> ImageError {
             ImageFormatHint::Name("HEIC".into()),
             "not a valid HEIC/HEIF file",
         )),
-        ProbeError::Corrupt(inner) => map_heic_error(inner),
+        ProbeError::Corrupt(inner) => map_heic_error(whereat::at!(inner)),
     }
 }
 
@@ -239,10 +240,11 @@ impl ImageDecoder for HeicImageDecoder {
         limits.check_dimensions(width, height)?;
 
         self.limits = Limits {
-            max_width: limits.max_image_width.map(|w| w as u64),
-            max_height: limits.max_image_height.map(|w| w as u64),
+            max_width: limits.max_image_width.map(u64::from),
+            max_height: limits.max_image_height.map(u64::from),
             max_pixels: None,
             max_memory_bytes: limits.max_alloc,
+            ..Limits::default()
         };
 
         Ok(())
