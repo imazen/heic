@@ -75,6 +75,7 @@ fn policy_to_threads(policy: ThreadingPolicy) -> usize {
 // ── Capabilities ─────────────────────────────────────────────────────────
 
 static HEIC_DECODE_CAPS: DecodeCapabilities = DecodeCapabilities::new()
+    .with_incremental(true)
     .with_icc(true)
     .with_exif(true)
     .with_xmp(true)
@@ -737,6 +738,23 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
         // `UnsupportedOperation::AnimationDecode`), not a fault in any
         // particular image's bytes.
         Err(HeicError::UnsupportedOperation(zencodec::UnsupportedOperation::AnimationDecode).into())
+    }
+
+    /// Incremental (sans-I/O) decode: the header is reported as soon as it
+    /// probes, and the image decodes through `push_decoder` once the whole
+    /// file is offered. The HEIF container parse and the HEVC tile decode
+    /// both need their bytes complete; a source binding that fetches only
+    /// the items a decode needs is a follow-up.
+    fn dyn_incremental_decoder(
+        self,
+        preferred: &[PixelDescriptor],
+    ) -> Result<
+        alloc::boxed::Box<zencodec::decode::DynIncrementalDecoder>,
+        zencodec::decode::BoxedError,
+    > {
+        Ok(zencodec::decode::erase_incremental(
+            zencodec::helpers::WholeFileIncremental::new(self, preferred),
+        ))
     }
 }
 
