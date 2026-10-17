@@ -9,7 +9,8 @@ use super::refpic;
 use crate::error::HevcError;
 use alloc::vec::Vec;
 
-type Result<T> = core::result::Result<T, HevcError>;
+use super::Result;
+use whereat::at;
 
 /// Slice type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,7 +284,7 @@ impl SliceHeader {
 
         let pps_id = reader.read_ue()? as u8;
         if pps_id != pps.pps_id {
-            return Err(HevcError::InvalidBitstream("PPS ID mismatch"));
+            return Err(at!(HevcError::InvalidBitstream("PPS ID mismatch")));
         }
 
         let dependent_slice_segment_flag;
@@ -308,7 +309,7 @@ impl SliceHeader {
         // If dependent slice, we'd inherit from previous slice header
         // For simplicity in still images, we don't support dependent slices
         if dependent_slice_segment_flag {
-            return Err(HevcError::Unsupported("dependent slice segments"));
+            return Err(at!(HevcError::Unsupported("dependent slice segments")));
         }
 
         // Skip reserved bits
@@ -318,7 +319,7 @@ impl SliceHeader {
 
         let slice_type_val = reader.read_ue()? as u8;
         let slice_type = SliceType::from_u8(slice_type_val)
-            .ok_or(HevcError::InvalidBitstream("invalid slice type"))?;
+            .ok_or_else(|| at!(HevcError::InvalidBitstream("invalid slice type")))?;
 
         let pic_output_flag = if pps.output_flag_present_flag {
             reader.read_bit()? != 0
@@ -368,6 +369,25 @@ impl SliceHeader {
                 let num_lt_sps = sps.long_term_ref_pics_sps.lt_ref_pic_poc_lsb.len();
                 let num_long_term_sps = if num_lt_sps > 0 { reader.read_ue()? } else { 0 };
                 let num_long_term_pics = reader.read_ue()?;
+
+                // H.265 7.4.7.1: num_long_term_sps ≤ num_long_term_ref_pics_sps,
+                // and the total long-term reference count is bounded by the DPB
+                // (≤ 16). Reject out-of-range rather than computing
+                // `num_long_term_sps + num_long_term_pics` below — both are
+                // unbounded ue(v) (up to ~4.29e9) whose sum overflow-panics in
+                // debug/fuzz builds, wraps in release, and drives a huge loop.
+                // Bound each operand to 16 BEFORE summing so the addition in the
+                // loop bound below cannot itself overflow (num_lt_sps can be
+                // large if the SPS LT list was long).
+                if num_long_term_sps as usize > num_lt_sps
+                    || num_long_term_sps > 16
+                    || num_long_term_pics > 16
+                    || num_long_term_sps + num_long_term_pics > 16
+                {
+                    return Err(at!(HevcError::InvalidBitstream(
+                        "long-term ref pic count exceeds DPB bound (16)",
+                    )));
+                }
 
                 let poc_bits = sps.log2_max_pic_order_cnt_lsb_minus4 + 4;
 
@@ -431,17 +451,17 @@ impl SliceHeader {
             if override_flag {
                 let v = reader.read_ue()?;
                 if v > 14 {
-                    return Err(HevcError::InvalidBitstream(
+                    return Err(at!(HevcError::InvalidBitstream(
                         "num_ref_idx_l0_active_minus1 exceeds 14",
-                    ));
+                    )));
                 }
                 num_ref_idx_l0_active = v as u8 + 1;
                 if slice_type == SliceType::B {
                     let v = reader.read_ue()?;
                     if v > 14 {
-                        return Err(HevcError::InvalidBitstream(
+                        return Err(at!(HevcError::InvalidBitstream(
                             "num_ref_idx_l1_active_minus1 exceeds 14",
-                        ));
+                        )));
                     }
                     num_ref_idx_l1_active = v as u8 + 1;
                 }
@@ -585,11 +605,16 @@ impl SliceHeader {
                 if n > 0 {
                     let offset_len_minus1 = reader.read_ue()?;
                     if offset_len_minus1 > 31 {
-                        return Err(HevcError::InvalidBitstream("offset_len_minus1 exceeds 31"));
+                        return Err(at!(HevcError::InvalidBitstream(
+                            "offset_len_minus1 exceeds 31"
+                        )));
                     }
                     let offset_len = offset_len_minus1 as u8 + 1;
                     for _ in 0..n {
-                        let offset = reader.read_bits(offset_len)? + 1; // offset_minus1 + 1
+                        // offset_minus1 + 1. With offset_len == 32 a malformed
+                        // header can read u32::MAX, so saturate rather than
+                        // overflow-panic; ctu.rs accumulates these saturating too.
+                        let offset = reader.read_bits(offset_len)?.saturating_add(1);
                         entry_point_offsets.push(offset);
                     }
                 }
@@ -685,6 +710,22 @@ fn count_curr_pics(sps: &Sps, rps_idx: u8, inline_rps: &Option<refpic::ShortTerm
     count
 }
 
+/// Read a `delta_luma_weight` / `delta_chroma_weight` se(v) and validate it against
+/// its H.265 7.4.7.3 range of [-128, 127].
+///
+/// The weight is derived as `(1 << log2_weight_denom) + delta`; a malformed se(v)
+/// outside the spec range would (a) overflow the i16 add below and (b) not correspond
+/// to a conforming bitstream, so reject it here rather than truncate or overflow.
+fn read_weight_delta(reader: &mut BitstreamReader<'_>) -> Result<i16> {
+    let delta = reader.read_se()?;
+    if !(-128..=127).contains(&delta) {
+        return Err(at!(HevcError::InvalidBitstream(
+            "delta_luma/chroma_weight out of range [-128, 127]",
+        )));
+    }
+    Ok(delta as i16)
+}
+
 /// Parse prediction weight table (H.265 7.3.6.3)
 fn parse_pred_weight_table(
     reader: &mut BitstreamReader<'_>,
@@ -697,15 +738,15 @@ fn parse_pred_weight_table(
     if num_ref_l0 as usize > super::inter::MAX_NUM_REF_PICS
         || num_ref_l1 as usize > super::inter::MAX_NUM_REF_PICS
     {
-        return Err(HevcError::InvalidBitstream(
+        return Err(at!(HevcError::InvalidBitstream(
             "num_ref_idx exceeds MAX_NUM_REF_PICS",
-        ));
+        )));
     }
     let luma_log2_weight_denom = reader.read_ue()?;
     if luma_log2_weight_denom > 7 {
-        return Err(HevcError::InvalidBitstream(
+        return Err(at!(HevcError::InvalidBitstream(
             "luma_log2_weight_denom exceeds 7",
-        ));
+        )));
     }
     let luma_log2_weight_denom = luma_log2_weight_denom as u8;
     let chroma_log2_weight_denom = if sps.chroma_array_type() != 0 {
@@ -735,7 +776,7 @@ fn parse_pred_weight_table(
     let chroma_denom = 1i16 << wt.chroma_log2_weight_denom;
     for i in 0..num_ref_l0 as usize {
         if wt.luma_weight_flag[0][i] {
-            let delta = reader.read_se()? as i16;
+            let delta = read_weight_delta(reader)?;
             wt.luma_weight[0][i] = luma_denom + delta;
             wt.luma_offset[0][i] = reader.read_se()? as i16;
         } else {
@@ -744,7 +785,7 @@ fn parse_pred_weight_table(
         }
         if wt.chroma_weight_flag[0][i] {
             for j in 0..2 {
-                let delta = reader.read_se()? as i16;
+                let delta = read_weight_delta(reader)?;
                 wt.chroma_weight[0][i][j] = chroma_denom + delta;
                 let offset = reader.read_se()? as i16;
                 // H.265 eq: ChromaOffset = Clip3(-128, 127, offset - ((128*w + 2^(wd-1)) >> wd) + 128)
@@ -776,7 +817,7 @@ fn parse_pred_weight_table(
 
         for i in 0..num_ref_l1 as usize {
             if wt.luma_weight_flag[1][i] {
-                let delta = reader.read_se()? as i16;
+                let delta = read_weight_delta(reader)?;
                 wt.luma_weight[1][i] = luma_denom + delta;
                 wt.luma_offset[1][i] = reader.read_se()? as i16;
             } else {
@@ -785,7 +826,7 @@ fn parse_pred_weight_table(
             }
             if wt.chroma_weight_flag[1][i] {
                 for j in 0..2 {
-                    let delta = reader.read_se()? as i16;
+                    let delta = read_weight_delta(reader)?;
                     wt.chroma_weight[1][i][j] = chroma_denom + delta;
                     let offset = reader.read_se()? as i16;
                     let wd = wt.chroma_log2_weight_denom;

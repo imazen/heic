@@ -1,8 +1,9 @@
 //! Parser tests using in-repo test data.
 //!
 //! These tests exercise HEIF container parsing (ISOBMFF boxes, item properties,
-//! references, grid layouts, auxiliary images) using committed test files that
-//! require no external downloads.
+//! references, grid layouts, auxiliary images) using committed test files
+//! under `testdata/`. The directory is NOT shipped in the published crate
+//! (kept lean); when a file is absent each test prints `SKIP` and returns.
 
 use heic::{DecoderConfig, ImageInfo, PixelLayout};
 use std::path::{Path, PathBuf};
@@ -11,16 +12,30 @@ fn testdata() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata")
 }
 
-fn read_file(rel: &str) -> Vec<u8> {
+/// Read a file from `testdata/`, or print SKIP and return `None` when the
+/// file is unavailable (e.g. on the packaged crate where `testdata/` is not
+/// bundled).
+fn read_file(rel: &str) -> Option<Vec<u8>> {
     let path = testdata().join(rel);
-    std::fs::read(&path).unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()))
+    match std::fs::read(&path) {
+        Ok(data) => Some(data),
+        Err(_) => {
+            eprintln!(
+                "SKIP: {} not present (testdata/ is not bundled)",
+                path.display()
+            );
+            None
+        }
+    }
 }
 
 // ---- libheif example.heic (HEVC grid image, main reference file) ----
 
 #[test]
 fn probe_libheif_example() {
-    let data = read_file("libheif-examples/example.heic");
+    let Some(data) = read_file("libheif-examples/example.heic") else {
+        return;
+    };
     let info = ImageInfo::from_bytes(&data).expect("probe failed");
     assert_eq!(info.width, 1280);
     assert_eq!(info.height, 854);
@@ -31,7 +46,9 @@ fn probe_libheif_example() {
 
 #[test]
 fn decode_libheif_example_rgb() {
-    let data = read_file("libheif-examples/example.heic");
+    let Some(data) = read_file("libheif-examples/example.heic") else {
+        return;
+    };
     let output = DecoderConfig::new()
         .decode(&data, heic::PixelLayout::Rgb8)
         .expect("decode failed");
@@ -44,7 +61,9 @@ fn decode_libheif_example_rgb() {
 
 #[test]
 fn probe_apple_hdr_has_gain_map() {
-    let data = read_file("apple-hdr/hdr-sample.heic");
+    let Some(data) = read_file("apple-hdr/hdr-sample.heic") else {
+        return;
+    };
     let info = ImageInfo::from_bytes(&data).expect("probe failed");
     assert!(info.has_gain_map, "HDR photo should report has_gain_map");
     assert!(info.width > 0);
@@ -53,7 +72,9 @@ fn probe_apple_hdr_has_gain_map() {
 
 #[test]
 fn decode_apple_hdr_gain_map() {
-    let data = read_file("apple-hdr/hdr-sample.heic");
+    let Some(data) = read_file("apple-hdr/hdr-sample.heic") else {
+        return;
+    };
     let decoder = DecoderConfig::new();
 
     let gain_map = decoder
@@ -72,11 +93,26 @@ fn decode_apple_hdr_gain_map() {
     let non_max = gain_map.data.iter().any(|&v| v != 255);
     assert!(non_zero, "gain map should not be all zeros");
     assert!(non_max, "gain map should not be all 255");
+
+    // Regression for the monochrome (4:0:0) CABAC desync: the gain map used to
+    // decode ~95% UNINIT, which downconverts to 255 — and the weak `non_max`
+    // check above still passed on the 5% real region. A correctly-decoded gain
+    // map (smooth, mostly low gain) is nowhere near saturated, so assert the
+    // 255 fraction is small. This would have failed at ~95% garbage.
+    let max_count = gain_map.data.iter().filter(|&&v| v == 255).count();
+    let max_frac = max_count as f64 / gain_map.data.len() as f64;
+    assert!(
+        max_frac < 0.5,
+        "gain map is {:.1}% saturated (255) — likely an incomplete/desynced decode",
+        max_frac * 100.0
+    );
 }
 
 #[test]
 fn apple_hdr_gain_map_has_xmp() {
-    let data = read_file("apple-hdr/hdr-sample.heic");
+    let Some(data) = read_file("apple-hdr/hdr-sample.heic") else {
+        return;
+    };
     let gain_map = DecoderConfig::new()
         .decode_gain_map(&data)
         .expect("decode_gain_map failed");
@@ -91,7 +127,9 @@ fn apple_hdr_gain_map_has_xmp() {
 
 #[test]
 fn apple_hdr_gain_map_lower_res_than_primary() {
-    let data = read_file("apple-hdr/hdr-sample.heic");
+    let Some(data) = read_file("apple-hdr/hdr-sample.heic") else {
+        return;
+    };
     let info = ImageInfo::from_bytes(&data).expect("probe failed");
     let gain_map = DecoderConfig::new()
         .decode_gain_map(&data)
@@ -107,7 +145,9 @@ fn apple_hdr_gain_map_lower_res_than_primary() {
 
 #[test]
 fn apple_hdr_auxiliary_types() {
-    let data = read_file("apple-hdr/hdr-sample.heic");
+    let Some(data) = read_file("apple-hdr/hdr-sample.heic") else {
+        return;
+    };
     let types = DecoderConfig::new()
         .auxiliary_types(&data)
         .expect("auxiliary_types failed");
@@ -127,7 +167,9 @@ fn probe_synthetic_files() {
         "synthetic/synth_8bit_q95.heic",
         "synthetic/synth_8bit_lossless.heic",
     ] {
-        let data = read_file(name);
+        let Some(data) = read_file(name) else {
+            continue;
+        };
         let info =
             ImageInfo::from_bytes(&data).unwrap_or_else(|e| panic!("probe failed for {name}: {e}"));
         assert!(info.width > 0, "{name}: width should be > 0");
@@ -144,7 +186,9 @@ fn decode_synthetic_files() {
         "synthetic/synth_8bit_q95.heic",
         "synthetic/synth_8bit_lossless.heic",
     ] {
-        let data = read_file(name);
+        let Some(data) = read_file(name) else {
+            continue;
+        };
         let output = DecoderConfig::new()
             .decode(&data, heic::PixelLayout::Rgb8)
             .unwrap_or_else(|e| panic!("decode failed for {name}: {e}"));
@@ -162,10 +206,17 @@ fn decode_synthetic_files() {
 #[test]
 fn probe_all_libheif_examples() {
     let dir = testdata().join("libheif-examples");
+    let Ok(read_dir) = std::fs::read_dir(&dir) else {
+        eprintln!(
+            "SKIP: {} not present (testdata/ is not bundled)",
+            dir.display()
+        );
+        return;
+    };
     let mut count = 0;
     let mut failures = Vec::new();
 
-    for entry in std::fs::read_dir(&dir).expect("read_dir failed") {
+    for entry in read_dir {
         let entry = entry.expect("entry failed");
         let path = entry.path();
         let ext = path
@@ -217,7 +268,9 @@ fn probe_all_libheif_examples() {
 
 #[test]
 fn no_gain_map_in_libheif_example() {
-    let data = read_file("libheif-examples/example.heic");
+    let Some(data) = read_file("libheif-examples/example.heic") else {
+        return;
+    };
     let info = ImageInfo::from_bytes(&data).expect("probe failed");
     assert!(!info.has_gain_map);
 
@@ -230,7 +283,9 @@ fn no_gain_map_in_libheif_example() {
 
 #[test]
 fn no_gain_map_in_synthetic() {
-    let data = read_file("synthetic/synth_8bit_q95.heic");
+    let Some(data) = read_file("synthetic/synth_8bit_q95.heic") else {
+        return;
+    };
     let info = ImageInfo::from_bytes(&data).expect("probe failed");
     assert!(!info.has_gain_map);
 }
@@ -243,7 +298,9 @@ fn no_gain_map_in_synthetic() {
 
 #[test]
 fn mif3_brand_probes_without_format_error() {
-    let data = read_file("libheif-examples/lightning_mini.heif");
+    let Some(data) = read_file("libheif-examples/lightning_mini.heif") else {
+        return;
+    };
     // lightning_mini.heif uses the mif3 brand with "mini" box format.
     // The brand should be accepted (no InvalidFormat), even though the
     // mini container structure may not fully parse (no pitm box).
@@ -251,7 +308,7 @@ fn mif3_brand_probes_without_format_error() {
         Ok(info) => {
             assert!(info.width > 0 && info.height > 0);
         }
-        Err(heic::ProbeError::InvalidFormat) => {
+        Err(e) if matches!(e.error(), heic::ProbeError::InvalidFormat) => {
             panic!("mif3 brand should be accepted, not rejected as InvalidFormat");
         }
         Err(_) => {
@@ -376,7 +433,9 @@ fn parse_av1c_synthetic() {
 
 #[test]
 fn probe_unci_zlib_file() {
-    let data = read_file("libheif-examples/rgb_generic_compressed_zlib.heif");
+    let Some(data) = read_file("libheif-examples/rgb_generic_compressed_zlib.heif") else {
+        return;
+    };
     let info = ImageInfo::from_bytes(&data).expect("probe failed");
     assert_eq!(info.width, 128);
     assert_eq!(info.height, 72);
@@ -385,7 +444,9 @@ fn probe_unci_zlib_file() {
 
 #[test]
 fn probe_unci_deflate_file() {
-    let data = read_file("libheif-examples/rgb_generic_compressed_defl.heif");
+    let Some(data) = read_file("libheif-examples/rgb_generic_compressed_defl.heif") else {
+        return;
+    };
     let info = ImageInfo::from_bytes(&data).expect("probe failed");
     assert_eq!(info.width, 128);
     assert_eq!(info.height, 72);
@@ -394,7 +455,9 @@ fn probe_unci_deflate_file() {
 
 #[test]
 fn probe_unci_uncompressed_rgb_file() {
-    let data = read_file("libheif-examples/uncompressed_comp_RGB.heif");
+    let Some(data) = read_file("libheif-examples/uncompressed_comp_RGB.heif") else {
+        return;
+    };
     let info = ImageInfo::from_bytes(&data).expect("probe failed");
     assert!(info.width > 0);
     assert!(info.height > 0);
@@ -406,7 +469,9 @@ fn probe_unci_uncompressed_rgb_file() {
 #[cfg(feature = "unci")]
 #[test]
 fn decode_unci_zlib() {
-    let data = read_file("libheif-examples/rgb_generic_compressed_zlib.heif");
+    let Some(data) = read_file("libheif-examples/rgb_generic_compressed_zlib.heif") else {
+        return;
+    };
     let output = DecoderConfig::new()
         .decode(&data, heic::PixelLayout::Rgb8)
         .expect("decode failed");
@@ -424,7 +489,9 @@ fn decode_unci_zlib() {
 #[cfg(feature = "unci")]
 #[test]
 fn decode_unci_deflate() {
-    let data = read_file("libheif-examples/rgb_generic_compressed_defl.heif");
+    let Some(data) = read_file("libheif-examples/rgb_generic_compressed_defl.heif") else {
+        return;
+    };
     let output = DecoderConfig::new()
         .decode(&data, heic::PixelLayout::Rgb8)
         .expect("decode failed");
@@ -439,7 +506,9 @@ fn decode_unci_deflate() {
 #[cfg(not(feature = "unci"))]
 #[test]
 fn decode_unci_returns_unsupported_without_feature() {
-    let data = read_file("libheif-examples/rgb_generic_compressed_zlib.heif");
+    let Some(data) = read_file("libheif-examples/rgb_generic_compressed_zlib.heif") else {
+        return;
+    };
     let result = DecoderConfig::new().decode(&data, heic::PixelLayout::Rgb8);
     match result {
         Err(e) => {
@@ -477,7 +546,9 @@ fn unci_decompression_bomb_protection() {
     //
     // We test this indirectly through the Limits system. If a file claims
     // huge dimensions, the limit check runs before decompression.
-    let data = read_file("libheif-examples/rgb_generic_compressed_zlib.heif");
+    let Some(data) = read_file("libheif-examples/rgb_generic_compressed_zlib.heif") else {
+        return;
+    };
 
     // Set very restrictive limits
     let mut limits = heic::Limits::default();
@@ -502,7 +573,9 @@ fn unci_decompression_bomb_protection() {
 #[cfg(feature = "unci")]
 #[test]
 fn unci_brotli_returns_unsupported() {
-    let data = read_file("libheif-examples/rgb_generic_compressed_brotli.heif");
+    let Some(data) = read_file("libheif-examples/rgb_generic_compressed_brotli.heif") else {
+        return;
+    };
     let result = DecoderConfig::new().decode(&data, heic::PixelLayout::Rgb8);
     match result {
         Err(e) => {
@@ -521,7 +594,9 @@ fn unci_brotli_returns_unsupported() {
 /// Verify that restrictive max_pixels limits reject HEVC decode.
 #[test]
 fn limits_reject_hevc_decode() {
-    let data = read_file("libheif-examples/example.heic");
+    let Some(data) = read_file("libheif-examples/example.heic") else {
+        return;
+    };
     let mut limits = heic::Limits::default();
     limits.max_pixels = Some(100); // 1280x854 will exceed this
 
@@ -545,7 +620,9 @@ fn limits_reject_hevc_decode() {
 /// Verify that restrictive max_width limits reject decode.
 #[test]
 fn limits_reject_max_width() {
-    let data = read_file("libheif-examples/example.heic");
+    let Some(data) = read_file("libheif-examples/example.heic") else {
+        return;
+    };
     let mut limits = heic::Limits::default();
     limits.max_width = Some(10); // 1280 wide, will exceed this
 
@@ -567,7 +644,9 @@ fn limits_reject_max_width() {
 #[cfg(feature = "unci")]
 #[test]
 fn limits_reject_unci_decode() {
-    let data = read_file("libheif-examples/uncompressed_comp_RGB.heif");
+    let Some(data) = read_file("libheif-examples/uncompressed_comp_RGB.heif") else {
+        return;
+    };
     let mut limits = heic::Limits::default();
     limits.max_pixels = Some(1); // Any unci image will exceed this
 
@@ -592,7 +671,9 @@ fn limits_reject_unci_decode() {
 #[cfg(feature = "unci")]
 #[test]
 fn unci_truncated_data_returns_error() {
-    let data = read_file("libheif-examples/uncompressed_comp_RGB.heif");
+    let Some(data) = read_file("libheif-examples/uncompressed_comp_RGB.heif") else {
+        return;
+    };
 
     // First, verify the file decodes successfully without truncation
     let ok_result = DecoderConfig::new().decode(&data, PixelLayout::Rgb8);
@@ -625,7 +706,9 @@ impl heic::Stop for AlwaysCancelled {
 /// Verify that a pre-cancelled Stop token causes early return from HEVC decode.
 #[test]
 fn check_stop_cancels_hevc_decode() {
-    let data = read_file("libheif-examples/example.heic");
+    let Some(data) = read_file("libheif-examples/example.heic") else {
+        return;
+    };
 
     let result = DecoderConfig::new()
         .decode_request(&data)
@@ -648,7 +731,9 @@ fn check_stop_cancels_hevc_decode() {
 #[cfg(feature = "unci")]
 #[test]
 fn check_stop_cancels_unci_decode() {
-    let data = read_file("libheif-examples/uncompressed_comp_RGB.heif");
+    let Some(data) = read_file("libheif-examples/uncompressed_comp_RGB.heif") else {
+        return;
+    };
 
     let result = DecoderConfig::new()
         .decode_request(&data)

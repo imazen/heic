@@ -16,7 +16,8 @@ macro_rules! rc_eprintln {
     };
 }
 
-type Result<T> = core::result::Result<T, HevcError>;
+use super::Result;
+use whereat::at;
 
 /// Scan order types for coefficient scanning
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,14 +32,19 @@ pub enum ScanOrder {
 
 /// Get scan order based on intra prediction mode and component index.
 ///
-/// Per H.265 Table 6-5:
+/// Per H.265 7.3.8.11:
 /// - Luma: directional scan at log2_size 2 (4x4) and 3 (8x8)
-/// - Chroma: directional scan at log2_size 2 only
-pub fn get_scan_order(log2_size: u8, intra_mode: u8, c_idx: u8) -> ScanOrder {
+/// - Chroma: directional scan at log2_size 2, and also at 3 when ChromaArrayType == 3
+pub fn get_scan_order(log2_size: u8, intra_mode: u8, c_idx: u8, chroma_444: bool) -> ScanOrder {
+    // H.265 7.3.8.11: the mode-dependent scan applies when
+    //   log2TrafoSize == 2, OR (log2TrafoSize == 3 && cIdx == 0),
+    //   OR (log2TrafoSize == 3 && ChromaArrayType == 3).
+    // The last clause was missing: 4:4:4 chroma at 8x8 got the diagonal scan, which
+    // reads the significance map in the wrong order and desyncs CABAC.
     let use_directional = if c_idx == 0 {
         log2_size == 2 || log2_size == 3
     } else {
-        log2_size == 2
+        log2_size == 2 || (log2_size == 3 && chroma_444)
     };
 
     if use_directional {
@@ -187,7 +193,8 @@ impl CoeffBuffer {
     }
 }
 
-/// Decode residual coefficients for a transform unit
+/// Decode residual coefficients into a freshly zeroed buffer for this transform unit.
+/// Returns whether transform skip is enabled.
 /// Debug counter to identify specific TU calls
 pub static DEBUG_RESIDUAL_COUNTER: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
@@ -204,7 +211,8 @@ pub fn decode_residual(
     transform_skip_enabled: bool,
     _x0: u32,
     _y0: u32,
-) -> Result<(CoeffBuffer, bool)> {
+    buffer: &mut CoeffBuffer,
+) -> Result<bool> {
     DEBUG_RESIDUAL_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
     // SE trace for differential testing against libde265
@@ -223,14 +231,13 @@ pub fn decode_residual(
         }
     }
 
-    // Trace disabled (enable for debugging)
+    // Trace disabled (enable for debugging via HEIC_RC_DBG)
     #[cfg(feature = "std")]
     let rc_trace = false;
     #[cfg(not(feature = "std"))]
     let rc_trace = false;
     let _rcp = "RCX";
 
-    let mut buffer = CoeffBuffer::new(log2_size);
     let size = 1u32 << log2_size;
 
     // Decode transform_skip_flag (H.265 7.3.8.11)
@@ -278,7 +285,9 @@ pub fn decode_residual(
     };
 
     if last_x >= size || last_y >= size {
-        return Err(HevcError::InvalidBitstream("invalid last coeff position"));
+        return Err(at!(HevcError::InvalidBitstream(
+            "invalid last coeff position"
+        )));
     }
 
     // Get scan tables
@@ -734,7 +743,7 @@ pub fn decode_residual(
         let (_byte_pos, _, _) = cabac.get_position();
         rc_eprintln!("{_rcp}_END range={} byte={}", _range, _byte_pos);
     }
-    Ok((buffer, transform_skip))
+    Ok(transform_skip)
 }
 
 /// Get sub-block scan order

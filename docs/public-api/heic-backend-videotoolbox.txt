@@ -1,0 +1,34 @@
+# heic-backend-videotoolbox public API — supported surface (default features)
+# (regenerated on every `cargo test` by zenutils-apidoc; ZEN_API_DOC=check verifies, =off skips).
+# Encodings: crate-name prefix stripped; auto traits collapse to a
+# count + exceptions; trait impls collapse to one roster line per
+# type (method signatures live at the trait definition); blanket
+# impls omitted; re-export duplicates annotated `[also: path]`.
+# DO NOT EDIT BY HAND — commit regenerated changes with the code.
+#
+# files: heic-backend-videotoolbox.txt 5 lines (supported surface) | heic-backend-videotoolbox.features.txt 0 added (features: none) | heic-backend-videotoolbox.internal.txt 0 lines (0 hidden + 0 excluded-feature)
+
+## summary
+#
+#   pub modules                                 1
+#   pub types (struct/enum/trait/alias)         1
+#   inherent methods                            1
+#   trait roster entries (type × trait)         2
+#   auto-trait-complete types                   1
+#
+# per-module pub lines:
+#   (root)                            3
+
+## items (3 lines)
+
+pub mod heic_backend_videotoolbox
+pub struct VideoToolboxBackend
+pub fn VideoToolboxBackend::new() -> Self
+
+## trait impls (1 types)
+
+VideoToolboxBackend: Default, heic_core::HevcBackend
+
+## auto traits
+
+1 types implement all of: Freeze, RefUnwindSafe, Send, Sync, Unpin, UnwindSafe

@@ -12,6 +12,14 @@ test-all:
 test-parallel:
     cargo test --lib --features parallel
 
+# Run the Windows-native backend tests (MediaFoundation + D3D11VA) on the
+# Windows HOST via powershell.exe. Only does real work under WSL (the
+# backends are target_os=windows and need a real GPU + the HEVC codec, neither
+# of which exists in WSL); a no-op elsewhere. See scripts/win-test.ps1.
+# Set HEIC_SKIP_WIN_HOST_TESTS=1 to skip during fast iteration.
+test-win:
+    cargo test --test backend_dispatch windows_backends_via_host -- --nocapture
+
 # Check all feature permutations
 feature-check:
     cargo check
@@ -23,12 +31,54 @@ feature-check:
 clippy:
     cargo clippy --all-targets --features parallel -- -D warnings
 
-# Format
+# Format (also regenerates the public-API surface snapshots).
+# The snapshot runner lives in the workspace-excluded apidoc/ package, so it
+# is never built or run by plain `cargo test` or any CI job.
 fmt:
     cargo fmt
+    cargo test --manifest-path apidoc/Cargo.toml
 
-# Local CI sanity check
-ci: fmt clippy feature-check test test-parallel
+# Regenerate the public-API surface snapshots (docs/public-api/) only
+api-doc:
+    cargo test --manifest-path apidoc/Cargo.toml
+
+# Verify the committed snapshots are current
+api-doc-check:
+    ZEN_API_DOC=check cargo test --manifest-path apidoc/Cargo.toml
+
+# Local CI sanity check. Under WSL, `test-win` also runs the Windows-native
+# backends (MF + D3D11VA) on the Windows host; elsewhere it's a no-op.
+ci: fmt clippy feature-check test test-parallel test-win
+
+# ── Release ──────────────────────────────────────────────────────────────
+#
+# Single-command publish for the entire workspace. Reads the version
+# from `[workspace.package].version` in Cargo.toml — the human bumps
+# that BEFORE running these (one edit + commit + push + wait-for-CI).
+#
+# `just publish-dry` runs everything through `cargo publish --dry-run`
+# without touching crates.io or pushing tags. Safe to run any time.
+#
+# `just publish` is the real ship: runs the full validation flow,
+# tags the commit, creates a GitHub release, and uploads every
+# crate to crates.io in topological order. Prompts for an explicit
+# "PUBLISH" confirmation before the irreversible step.
+#
+# Both delegate to `scripts/release.sh`. See its docstring for the
+# full sequence + env-var knobs (PUBLISH_DRY, PUBLISH_SKIP_CI,
+# PUBLISH_FORCE).
+
+# Validate the full publish flow without touching crates.io
+publish-dry:
+    PUBLISH_DRY=true ./scripts/release.sh
+
+# Publish every workspace crate to crates.io (REAL — irreversible)
+publish:
+    ./scripts/release.sh
+
+# Show the current workspace version (helps you remember what `just publish` will ship)
+version:
+    @awk '/^\[workspace\.package\]/{f=1; next} /^\[/{f=0} f && /^version = "/{print}' Cargo.toml
 
 # Run reference comparison tests (requires test files)
 compare:
@@ -107,3 +157,79 @@ fuzz-coverage:
 # Run fuzz regression tests
 fuzz-regression:
     cargo test --all-features --test fuzz_regression
+
+# Profile decode-from-bytes heap allocations with heaptrack (needs heaptrack installed).
+# Defaults to the bundled example.heic (1280x854) decoded 8x; pass a path + iters to override.
+# Inspect with: heaptrack_print /tmp/heic-ht.zst
+heaptrack-decode *ARGS:
+    cargo build --release --example heaptrack_decode --features backend-rust,std
+    rm -f /tmp/heic-ht.zst
+    heaptrack --output /tmp/heic-ht ./target/release/examples/heaptrack_decode {{ARGS}}
+
+# Exact residual arithmetic across native runtime tiers.
+arm-residual-check:
+    CARGO_BUILD_JOBS=4 RAYON_NUM_THREADS=4 OMP_NUM_THREADS=4 TMPDIR="$HOME/tmp" nice -n 19 cargo test -p heic --features backend-rust,std,_dev --lib residual_add_matches_widened_scalar_at_every_prediction_value -- --nocapture
+
+# Requires caller-provided HEIC_BENCH_INPUTS (colon-separated fixture paths).
+arm-tier-audit:
+    CARGO_BUILD_JOBS=4 RAYON_NUM_THREADS=4 OMP_NUM_THREADS=4 TMPDIR="$HOME/tmp" nice -n 19 cargo bench --bench tier_isolation --features backend-rust,std,_dev
+
+# Apple sample profiler; explicit fixture, 200 complete decodes, retained output.
+arm-sample-decode fixture output:
+    CARGO_BUILD_JOBS=4 RAYON_NUM_THREADS=4 OMP_NUM_THREADS=4 TMPDIR="$HOME/tmp" nice -n19 cargo build --release --example heaptrack_decode --features backend-rust,std
+    RAYON_NUM_THREADS=4 OMP_NUM_THREADS=4 TMPDIR="$HOME/tmp" python3 -c 'import subprocess; f=open("{{output}}.run.log","w"); p=subprocess.Popen(["nice","-n19","./target/release/examples/heaptrack_decode","{{fixture}}","200"],stdout=f,stderr=f); subprocess.run(["sample",str(p.pid),"5","1","-file","{{output}}.sample.txt"],check=True); raise SystemExit(p.wait())'
+
+# Capture exact first-frame RGBA bytes for before/after decoder comparisons.
+arm-capture-rgba fixture output:
+    CARGO_BUILD_JOBS=4 TMPDIR="$HOME/tmp" nice -n19 cargo build --release --example heaptrack_decode --features backend-rust,std
+    HEIC_PROFILE_RGBA_OUT="{{output}}" RAYON_NUM_THREADS=4 OMP_NUM_THREADS=4 TMPDIR="$HOME/tmp" nice -n19 ./target/release/examples/heaptrack_decode "{{fixture}}" 1
+
+# Metadata extraction and default-off inventory, using the shared contract.
+metadata-check:
+    cargo test --features backend-rust,std,inventory,av1,unci --lib --test inventory --test inventory_review --test fuzz_regression --test inventory_feature
+    cargo test --features backend-rust,std,zencodec --test inventory_feature
+    cargo clippy --workspace --features backend-rust,std,inventory,av1,unci -- -D warnings
+
+metadata-fuzz-check:
+    cargo check --manifest-path fuzz/Cargo.toml --bin fuzz_inventory
+
+# Independent readers inspect the committed fixtures by default.
+metadata-oracles corpus="testdata":
+    HEIC_INVENTORY_CORPUS={{corpus}} INVENTORY_ORACLE_EXIFTOOL=exiftool INVENTORY_ORACLE_FFMPEG=/usr/bin/ffmpeg cargo test --features backend-rust,std,inventory,av1,unci --test inventory oracle -- --nocapture
+
+metadata-portability:
+    CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_RUNNER=env cargo test --features backend-rust,std,inventory,av1,unci --target i686-unknown-linux-gnu --lib --test inventory --test inventory_review --test inventory_feature --test fuzz_regression
+    cargo check --no-default-features --features backend-rust --target wasm32-wasip1
+
+metadata-semver:
+    cargo semver-checks check-release -p heic --baseline-version 0.1.6 --release-type patch --only-explicit-features --features std,zencodec --current-features backend-rust,inventory
+
+# Existing bundled decode and public behavior suites with metadata integration enabled.
+metadata-decode-regression:
+    HEIC_SKIP_WIN_HOST_TESTS=1 cargo test --features backend-rust,std,inventory,av1,unci,parallel,fallible-alloc --test corpus_decode --test cov_features --test cov_decode_orchestration --test cov_public_api --test cov_metadata --test cov_zencodec --test cov_container --test cov_multicodec
+    cargo test --doc --features backend-rust,std,inventory,av1,unci
+    cargo clippy --workspace --all-targets --features backend-rust,std,inventory,av1,unci -- -D warnings
+
+metadata-final-check:
+    cargo test --features backend-rust,std,inventory,av1,unci --test inventory_feature
+    cargo clippy --workspace --all-targets --features backend-rust,std,inventory,av1,unci -- -D warnings
+
+# Shared error-cause alignment without changing the native decoder boundary.
+metadata-contract-check:
+    cargo test --features backend-rust,std,inventory,av1,unci --lib --test inventory --test inventory_review --test inventory_feature
+    cargo check --no-default-features --features backend-rust,inventory --target wasm32-wasip1
+    cargo clippy --features backend-rust,std,inventory,av1,unci --all-targets -- -D warnings
+    just api-doc
+
+# Keep direct git contracts identical to the codec integration consumer.
+metadata-dependency-check:
+    cargo test --features backend-rust,std,inventory,av1,unci --test inventory --test inventory_review --test inventory_feature
+    cargo check --no-default-features --features backend-rust,inventory --target wasm32-wasip1
+    just metadata-fuzz-check
+
+# Exercise shared contracts with inventory enabled and disabled.
+shared-contract-check:
+    cargo fmt -p heic
+    cargo test --features backend-rust,std,inventory --test shared_contracts
+    cargo test --features backend-rust,std,zencodec --test shared_contracts
+    cargo clippy --features backend-rust,std,inventory --test shared_contracts -- -D warnings

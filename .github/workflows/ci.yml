@@ -1,13 +1,20 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
     branches: [main]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  # `github.head_ref` is set ONLY on pull_request events. On a push it is
+  # empty, so the group fell through to `github.run_id` — unique per run,
+  # so pushes never collided and nothing was ever cancelled. `github.ref`
+  # is set on both event types (`refs/heads/main` on push,
+  # `refs/pull/N/merge` on a PR), so PR behaviour is unchanged while
+  # consecutive pushes to a branch now supersede each other.
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -25,70 +32,218 @@ jobs:
           - ubuntu-latest
           - ubuntu-24.04-arm
           - macos-latest
-          - macos-26-intel
           - windows-latest
           - windows-11-arm
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: Test (default features)
-        run: cargo test --lib
+      - name: Test (backend-rust + std)
+        run: cargo test --lib --features "backend-rust,std"
 
-      - name: Test (parallel)
-        run: cargo test --lib --features parallel
+      - name: Residual arithmetic across runtime SIMD tiers
+        run: >-
+          cargo test --lib --features "backend-rust,std,_dev"
+          residual_add_matches_widened_scalar_at_every_prediction_value -- --nocapture
 
-      - name: Check (no_std)
-        run: cargo check --no-default-features
+      - name: Test (backend-rust + parallel)
+        run: cargo test --lib --features "backend-rust,parallel"
+
+      # Decode the bundled testdata corpus end-to-end (not just --lib) on every
+      # OS. The corpus (95 committed files incl. example.heic, 10-bit apple-hdr,
+      # grids, uncompressed HEIF) ships in the checkout, so no download. This is
+      # the regression gate for wrong-pixel / panic-on-corpus bugs.
+      - name: Corpus decode gate
+        run: cargo test --test corpus_decode --features "backend-rust,std,av1,unci"
+
+      # Public-API coverage/behavior integration tests (decode orchestration,
+      # API surface, metadata, zencodec, container robustness, multi-codec).
+      # ~150 meaningful assertions over the bundled corpus + crafted inputs;
+      # runs on every OS. HEIC_SKIP_WIN_HOST_TESTS guards the WSL→Windows bridge
+      # (a no-op off WSL anyway).
+      - name: Behavior/coverage integration tests
+        env:
+          HEIC_SKIP_WIN_HOST_TESTS: '1'
+        run: >-
+          cargo test
+          --test cov_features
+          --test cov_decode_orchestration --test cov_public_api --test cov_metadata
+          --test cov_zencodec --test cov_container --test cov_multicodec
+          --features "backend-rust,std,av1,unci,zencodec,parallel,fallible-alloc"
+
+      - name: Metadata inventory and configured errors
+        run: cargo test --features "backend-rust,std,inventory,av1,unci" --test inventory --test inventory_review --test inventory_feature --test shared_contracts --test fuzz_regression
+
+      - name: Inventory disabled and sans-I/O contracts
+        run: cargo test --features "backend-rust,std,zencodec" --test inventory_feature --test shared_contracts --test sansio
+
+      - name: Check (backend-rust, no_std)
+        run: cargo check --no-default-features --features backend-rust
+
+      - name: Default build must fail with the compile_error message
+        shell: bash
+        run: |
+          set -e
+          if cargo build --no-default-features 2>build.log; then
+            echo "::error::Expected compile_error but build succeeded"
+            cat build.log
+            exit 1
+          fi
+          if ! grep -q "no HEVC backend is enabled" build.log; then
+            echo "::error::compile_error message did not match expected text"
+            cat build.log
+            exit 1
+          fi
 
   feature-perms:
     name: Feature permutations
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: Check (no_std)
-        run: cargo check --no-default-features
+      - name: Check (backend-rust, no_std)
+        run: cargo check --no-default-features --features backend-rust
 
-      - name: Test (parallel)
-        run: cargo test --lib --features parallel
+      # Default `cargo build` must fail with the compile_error gate
+      # directing users to pick a backend feature. Catches the case
+      # where someone accidentally puts `default = ["backend-rust"]`
+      # back in heic/Cargo.toml.
+      - name: Default build must error
+        run: |
+          # set -o pipefail required: otherwise `if cargo ... | tee` reads
+          # tee's (always-zero) exit code, not cargo's, and the gate
+          # silently passes when the compile_error fires correctly.
+          set -o pipefail
+          if cargo build --no-default-features 2>&1 | tee build-no-features.log; then
+            echo "::error::Default build succeeded; the compile_error gate is broken."
+            exit 1
+          fi
+          if ! grep -q "no HEVC backend is enabled" build-no-features.log; then
+            echo "::error::compile_error message missing the user-facing helper string."
+            cat build-no-features.log
+            exit 1
+          fi
 
-      - name: Test (zencodec)
-        run: cargo test --lib --features zencodec
+      - name: Test (backend-rust + parallel)
+        run: cargo test --lib --features "backend-rust,parallel"
 
-      - name: Test (parallel,zencodec)
-        run: cargo test --lib --features "parallel,zencodec"
+      - name: Test (backend-rust + zencodec)
+        run: cargo test --lib --features "backend-rust,zencodec"
+
+      - name: Test (backend-rust + parallel + zencodec)
+        run: cargo test --lib --features "backend-rust,parallel,zencodec"
 
       - name: Test (all publishable features)
-        run: cargo test --lib --features "std,fallible-alloc,parallel,zencodec"
+        run: cargo test --lib --features "backend-rust,std,fallible-alloc,parallel,zencodec"
+
+      # av1 + unci are publishable features but were never lint-/unit-gated.
+      - name: Test (backend-rust + av1 + unci)
+        run: cargo test --lib --features "backend-rust,std,av1,unci"
+
+  # Decode the corpus + run every fuzz-regression seed with integer overflow
+  # checks forced ON in release. The HEVC parameter-set overflow bugs
+  # (scaling-list DC, long-term-RPS sum, derived transform size) only panic
+  # under overflow-checks; plain release would wrap them silently. This gate
+  # catches a regression that the normal corpus job (debug, checks already on)
+  # also catches but pins it for release-shaped builds too.
+  overflow-checks:
+    name: Overflow-checked corpus + fuzz seeds
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-C overflow-checks=on"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Corpus decode (overflow-checked, release)
+        run: cargo test --release --test corpus_decode --features "backend-rust,std,av1,unci"
+      - name: Fuzz regression seeds (overflow-checked)
+        run: cargo test --release --test fuzz_regression --features "backend-rust,std,av1,unci"
+
+  # cargo-semver-checks is mandated before every release (RELEASING.md /
+  # CLAUDE.md) but was not gated in CI. Run it on PRs so an accidental public
+  # API break surfaces in review, not at publish time. Informational on the
+  # 0.x line (a break is allowed with a minor bump) — does not fail the build,
+  # but the report is visible.
+  semver:
+    name: semver-checks (informational)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          feature-group: only-explicit-features
+          features: "backend-rust,std,zencodec"
+        continue-on-error: true
+
+  # Doc build must be warning-free (broken intra-doc links, etc.).
+  doc:
+    name: Doc build
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo doc
+        run: cargo doc --no-deps --features "backend-rust,std,av1,unci,zencodec"
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
 
-      - name: Clippy (default + parallel)
-        run: cargo clippy --lib --features parallel -- -D warnings
+      - name: Clippy (backend-rust + parallel)
+        run: cargo clippy --lib --features "backend-rust,parallel" -- -D warnings
 
-      - name: Clippy (zencodec)
-        run: cargo clippy --lib --features zencodec -- -D warnings
+      - name: Clippy (backend-rust + zencodec)
+        run: cargo clippy --lib --features "backend-rust,zencodec" -- -D warnings
 
       - name: Clippy (all publishable features)
-        run: cargo clippy --lib --features "std,fallible-alloc,parallel,zencodec" -- -D warnings
+        run: cargo clippy --lib --features "backend-rust,std,fallible-alloc,parallel,zencodec" -- -D warnings
+
+      - name: Clippy (av1 + unci + tests)
+        run: cargo clippy --tests --features "backend-rust,std,av1,unci" -- -D warnings
+
+  supply-chain:
+    name: Supply chain (cargo audit + deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Pin the tools so a downstream-published regression doesn't
+      # silently break CI. Use --locked so cargo doesn't churn its
+      # own lockfile during the install.
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny
+      - name: cargo audit
+        # Scans Cargo.lock against the RustSec advisory database for
+        # known security vulnerabilities. The `paste` unmaintained
+        # advisory is suppressed in deny.toml's ignore list — it has
+        # no safe upgrade path until upstream rav1e migrates, and
+        # carries no CVE.
+        run: cargo audit --deny warnings --ignore RUSTSEC-2024-0436
+      - name: cargo deny
+        run: cargo deny check
 
   fmt:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -100,19 +255,22 @@ jobs:
     name: MSRV
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@cargo-hack
       - uses: Swatinem/rust-cache@v2
 
       - name: Check MSRV
-        run: cargo hack check --rust-version
+        # cargo-hack defaults to no features which now fails the
+        # compile_error gate. Pin --features so MSRV checks the actual
+        # supported configurations rather than the unbuildable empty one.
+        run: cargo hack check --rust-version --features backend-rust
 
   i686:
     name: Test (i686)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@cross
       - uses: Swatinem/rust-cache@v2
@@ -120,22 +278,263 @@ jobs:
           key: cross-i686
 
       - name: Test (i686)
-        run: cross test --lib --target i686-unknown-linux-gnu
+        run: cross test --lib --features "backend-rust,std" --target i686-unknown-linux-gnu
+
+      # 32-bit decode correctness, not just compile. Several review fixes are
+      # 32-bit overflow/wrap bugs (NAL length-prefix checked_add, stsc clamp,
+      # zencodec strip checked_mul) that only manifest where usize is 32-bit —
+      # i686 and wasm32. Running the corpus gate under `cross` (qemu) on i686
+      # exercises the whole decode pipeline on a 32-bit target.
+      - name: Corpus decode (i686, 32-bit)
+        run: cross test --test corpus_decode --features "backend-rust,std,av1,unci" --target i686-unknown-linux-gnu
+
+      - name: Metadata inventory (i686)
+        run: cross test --features "backend-rust,std,inventory,av1,unci" --target i686-unknown-linux-gnu --test inventory --test inventory_review --test inventory_feature --test shared_contracts --test fuzz_regression
+
+
+  backend-mediafoundation:
+    # Cross-compile-check the heic-backend-mediafoundation crate for Windows
+    # targets. Server 2025 (windows-latest) is structurally unsupported by
+    # Microsoft's HEVC MFT — see spec.md. windows-11-arm (Win 11 Enterprise
+    # client) gets a full runtime test below.
+    name: backend-mediafoundation (compile, ${{ matrix.target }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: backend-mediafoundation-${{ matrix.target }}
+      - name: Build heic-backend-mediafoundation
+        run: cargo build -p heic-backend-mediafoundation --target ${{ matrix.target }}
+      - name: Clippy heic-backend-mediafoundation
+        run: cargo clippy -p heic-backend-mediafoundation --target ${{ matrix.target }} -- -D warnings
+
+  backend-mediafoundation-runtime:
+    # Runtime end-to-end test on Windows 11 ARM client (the only
+    # GitHub-hosted Win11 client image) with HEVC Video Extensions
+    # side-loaded. Decodes example.heic via the MF MFT through the
+    # parent crate's allowlist dispatcher.
+    name: backend-mediafoundation (runtime, windows-11-arm)
+    runs-on: windows-11-arm
+    env:
+      HEIC_REQUIRE_MF_HEVC: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: backend-mediafoundation-runtime
+      - name: Install HEVC Video Extensions (free Device Manufacturer variant)
+        shell: pwsh
+        # Map the secret to an env var (never interpolate ${{ secrets.* }}
+        # directly into the script body).
+        env:
+          HEVC_APPX_URL_ARM64: ${{ secrets.HEVC_APPX_URL_ARM64 }}
+        run: |
+          # HEIC_REQUIRE_MF_HEVC / HEVC_APPX_URL_ARM64 — LICENSING NOTE.
+          # "HEVC Video Extensions" (Store product 9N4WGH0Z6VHQ, the free
+          # "from Device Manufacturer" variant) is a Microsoft Store "Digital
+          # Good". The Microsoft Services Agreement (§14.j) says you may "not
+          # redistribute ... or transfer any copies of the Digital Goods", so
+          # mirroring the .appx at a public URL is NOT licensed — being free +
+          # Microsoft-signed does NOT grant redistribution. (Store CDN
+          # delivery.mp.microsoft.com links are also short-lived/signed and
+          # would rot.) So HEVC_APPX_URL_ARM64 is intentionally LEFT UNSET on
+          # this repo and the MF runtime decode is skipped here; the licensed
+          # ways to acquire the codec for a real run are:
+          #   * `winget install --id 9N4WGH0Z6VHQ --source msstore` on the
+          #     runner (keeps acquisition inside the Store license; may need
+          #     Store auth, so test it works unattended), or
+          #   * a Microsoft Store for Business / Intune offline license you own,
+          #     pointed at by HEVC_APPX_URL_ARM64, or
+          #   * run the MF dispatch test on a licensed Windows host instead.
+          #
+          # Fail-loud policy: if HEVC_APPX_URL_ARM64 is UNSET, skip the runtime
+          # decode (HEIC_REQUIRE_MF_HEVC=0) and exit clean. If it IS set (you
+          # supplied a license-clean offline package), a download/install
+          # failure propagates and FAILs the job — no continue-on-error, so a
+          # broken URL can't silently turn the gate into a no-op.
+          $url = $env:HEVC_APPX_URL_ARM64
+          if (-not $url) {
+            Write-Host "::warning::HEVC_APPX_URL_ARM64 not set; skipping MF HEVC runtime decode"
+            "HEIC_REQUIRE_MF_HEVC=0" | Out-File -FilePath $env:GITHUB_ENV -Append
+            exit 0
+          }
+          $ErrorActionPreference = "Stop"
+          Invoke-WebRequest -Uri $url -OutFile hevc.appx
+          Add-AppxPackage -Path hevc.appx
+          Get-AppxPackage Microsoft.HEVCVideoExtension*
+      - name: Test backend_dispatch
+        run: cargo test --test backend_dispatch --features "backend-rust,backend-mediafoundation,std" --target aarch64-pc-windows-msvc
+      - name: Test backend-mediafoundation smoke
+        run: cargo test -p heic-backend-mediafoundation --target aarch64-pc-windows-msvc
+
+  backend-d3d11va:
+    name: backend-d3d11va (${{ matrix.target }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: backend-d3d11va-${{ matrix.target }}
+      - name: Build heic-backend-d3d11va
+        run: cargo build -p heic-backend-d3d11va --target ${{ matrix.target }}
+      - name: Clippy heic-backend-d3d11va
+        run: cargo clippy -p heic-backend-d3d11va --target ${{ matrix.target }} -- -D warnings
+
+  backend-videotoolbox:
+    name: backend-videotoolbox (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: backend-videotoolbox-${{ matrix.os }}
+      - name: Build heic-backend-videotoolbox
+        run: cargo build -p heic-backend-videotoolbox
+      - name: Clippy heic-backend-videotoolbox
+        run: cargo clippy -p heic-backend-videotoolbox -- -D warnings
+      # Runtime decode test. The kCFAllocatorNull fix in b64af911
+      # resolved the long-standing SIGABRT in
+      # videotoolbox_decodes_example — the GH Actions macOS
+      # runners now happily decode the entire bundled corpus on
+      # arm64 (macos-latest). The
+      # vt-debug.yml workflow remains available for one-off
+      # interactive triage via tmate / lldb when something
+      # regresses; ci.yml just runs the test inline.
+      - name: Test backend_dispatch (full runtime)
+        env:
+          HEIC_RUN_VT_RUNTIME: '1'
+        run: cargo test --test backend_dispatch --features "backend-rust,backend-videotoolbox,std" -- --nocapture --test-threads=1
+
+  backend-mediacodec:
+    name: backend-mediacodec (android compile-only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+      - name: Install cargo-ndk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: backend-mediacodec-android
+      - name: Build heic-backend-mediacodec (aarch64-linux-android)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: cargo ndk -t arm64-v8a --platform 34 build -p heic-backend-mediacodec
+
+      # Lint the MediaCodec backend with the same -D warnings gate the other
+      # native backends get. clippy doesn't need the NDK linker (it only checks),
+      # so a plain --target build is enough and runs free on ubuntu.
+      - name: Clippy heic-backend-mediacodec (aarch64-linux-android)
+        run: cargo clippy -p heic-backend-mediacodec --target aarch64-linux-android -- -D warnings
+
+      # Build the backend_decode EXAMPLE (an executable) so the link actually
+      # runs — `cargo build -p <lib>` does not link, which is exactly why the
+      # AMEDIAFORMAT_KEY_CSD_0 undefined-symbol bug (libmediandk API 28+) went
+      # undetected. cargo-ndk drives the NDK toolchain + sysroot; --platform 34
+      # gives the API level the symbol needs. A future symbol needing a higher
+      # API fails here, on every push, cheaply (no emulator).
+      - name: Link-check backend_decode example (android)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: cargo ndk -t arm64-v8a --platform 34 build --example backend_decode --features "backend-rust,backend-mediacodec,std"
+
+  backend-vaapi:
+    name: backend-vaapi (linux compile-only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: backend-vaapi-linux
+      - name: Install libva-dev
+        run: sudo apt-get update && sudo apt-get install -y libva-dev libva-drm2 pkg-config
+      - name: Build heic-backend-vaapi
+        run: cargo build -p heic-backend-vaapi
+      - name: Clippy heic-backend-vaapi
+        run: cargo clippy -p heic-backend-vaapi --tests -- -D warnings
+      - name: Unit tests heic-backend-vaapi
+        run: cargo test -p heic-backend-vaapi --lib
+      - name: Build runtime example (vaapi_decode_test)
+        run: |
+          cargo build --release -p heic --example vaapi_decode_test \
+            --features 'backend-rust,backend-vaapi,std'
+      - name: Probe-fall-through (no /dev/dri, no driver — should report unavailable)
+        # ubuntu-latest GH runner has no GPU, so the backend should
+        # honestly report unavailable. We assert that decoding still
+        # succeeds via the rust fallback when both backends are in
+        # the allowlist.
+        run: |
+          set -o pipefail
+          cargo test --release -p heic --features 'backend-rust,backend-vaapi,std' \
+            --test backend_dispatch rust_backend_decodes_example -- --nocapture
 
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: Swatinem/rust-cache@v2
 
       - name: Generate coverage
-        run: cargo llvm-cov --lib --lcov --output-path lcov.info
+        # Cover the lib unit tests AND the behavior/coverage integration tests
+        # (cov_*, corpus, decode_heic, parse_testdata) so the number reflects the
+        # whole pure-Rust surface, not just --lib. The conformance.rs target is
+        # excluded (it downloads ITU vectors at runtime). HEIC_SKIP_WIN_HOST_TESTS
+        # guards the WSL→Windows bridge test.
+        env:
+          HEIC_SKIP_WIN_HOST_TESTS: '1'
+        run: >-
+          cargo llvm-cov
+          --lib
+          --test corpus_decode --test decode_heic --test parse_testdata --test cov_features
+          --test cov_decode_orchestration --test cov_public_api --test cov_metadata
+          --test cov_zencodec --test cov_container --test cov_multicodec
+          --features "backend-rust,std,av1,unci,zencodec,parallel,fallible-alloc"
+          --lcov --output-path lcov.info
 
       - name: Upload coverage
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           files: lcov.info
           fail_ci_if_error: false

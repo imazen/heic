@@ -221,11 +221,7 @@ fn load_reference_yuv(path: &Path, width: u32, height: u32) -> Vec<Vec<u16>> {
     let chroma_size = (width / 2 * height / 2) as usize;
     let frame_size = luma_size + 2 * chroma_size; // YUV420
 
-    let num_frames = if frame_size > 0 {
-        data.len() / frame_size
-    } else {
-        0
-    };
+    let num_frames = data.len().checked_div(frame_size).unwrap_or(0);
 
     let mut frames = Vec::with_capacity(num_frames);
     for i in 0..num_frames {

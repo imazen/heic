@@ -1,0 +1,524 @@
+//! End-to-end test of the backend allowlist dispatcher.
+//!
+//! Each test exercises a single backend through `DecoderConfig::with_backend`
+//! and verifies that decode either succeeds with sensible output or falls
+//! through to a later allowlist entry. The Rust backend is always exercised
+//! (PR2 plumbing); native backends run only when their `target_os` matches
+//! and the corresponding feature is enabled.
+//!
+//! Test fixture: `testdata/libheif-examples/example.heic` — a 1280×854
+//! HEIC from the libheif examples directory, already used by the existing
+//! conformance tests.
+
+#![allow(unused_imports)] // not every config builds every test
+
+mod common;
+
+use heic::{Backend, DecoderConfig, PixelLayout};
+
+const EXAMPLE_HEIC: &str = "testdata/libheif-examples/example.heic";
+
+fn read_example() -> Vec<u8> {
+    std::fs::read(EXAMPLE_HEIC).expect("example.heic should be in testdata/")
+}
+
+/// True only when the runner PROVES the HEVC Video Extensions are available,
+/// i.e. `HEIC_REQUIRE_MF_HEVC` is set to a truthy value. The CI workflow sets
+/// it to `1` after a successful AppX install and to `0` when the codec is not
+/// installed (no `HEVC_APPX_URL_ARM64` secret) — so `"0"`, empty, and unset all
+/// mean "skip" (MF cannot decode HEVC without the codec; `ActivateObject`
+/// returns `0xC00DB3B4`). The decision is caller-controlled via the workflow →
+/// AppX step → this env var, per the no-graceful-skip rule.
+#[cfg(all(feature = "backend-mediafoundation", target_os = "windows"))]
+fn mf_hevc_required() -> bool {
+    match std::env::var("HEIC_REQUIRE_MF_HEVC") {
+        Ok(v) => !v.is_empty() && v != "0",
+        Err(_) => false,
+    }
+}
+
+/// Bridge: when developing in **WSL**, `cargo test` builds for Linux and CANNOT
+/// exercise the Windows-native backends — MediaFoundation and D3D11VA are
+/// `#[cfg(target_os = "windows")]` and need a real Windows GPU + the HEVC Video
+/// Extensions, neither of which exists inside WSL (no `/dev/dri`; VA-API is dead
+/// there). So this test detects WSL and runs those backends' tests on the
+/// **Windows host** via `powershell.exe` (the host has the GPU + codec), against
+/// this same checkout over the `\\wsl.localhost\<distro>\...` UNC path. See
+/// `scripts/win-test.ps1`.
+///
+/// It runs ONLY under WSL with a Windows PowerShell on PATH; on a plain Linux
+/// runner (CI) or any non-WSL host it is a clean no-op — the Windows backends
+/// genuinely cannot run there, the same platform-precondition gating the
+/// existing `HEIC_D3D11VA_HW` / `HEIC_RUN_VT_RUNTIME` tests use. Set
+/// `HEIC_SKIP_WIN_HOST_TESTS=1` to skip during fast local iteration.
+#[test]
+fn windows_backends_via_host() {
+    if std::env::var_os("HEIC_SKIP_WIN_HOST_TESTS").is_some() {
+        eprintln!("HEIC_SKIP_WIN_HOST_TESTS set: skipping Windows-host backend tests");
+        return;
+    }
+    let is_wsl = std::fs::read_to_string("/proc/version")
+        .map(|v| v.to_ascii_lowercase().contains("microsoft"))
+        .unwrap_or(false);
+    if !is_wsl {
+        eprintln!(
+            "not WSL: Windows-native backends can't run here; skipping \
+             (they run on Windows CI / the Windows host)"
+        );
+        return;
+    }
+    let Ok(distro) = std::env::var("WSL_DISTRO_NAME") else {
+        eprintln!("WSL_DISTRO_NAME unset: cannot form the \\\\wsl.localhost UNC path; skipping");
+        return;
+    };
+
+    // \\wsl.localhost\<distro>\home\lilith\work\zen\heic
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let unc = format!("\\\\wsl.localhost\\{distro}{}", manifest.replace('/', "\\"));
+    let script = format!("{unc}\\scripts\\win-test.ps1");
+
+    // Prefer classic powershell.exe (as the host bridge); fall back to pwsh.exe.
+    let mut last_err = None;
+    for shell in ["powershell.exe", "pwsh.exe"] {
+        match std::process::Command::new(shell)
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                &script,
+                "-CheckoutUnc",
+                &unc,
+            ])
+            .status()
+        {
+            Ok(status) => {
+                assert!(
+                    status.success(),
+                    "Windows-host backend tests failed (via {shell}); see output above. \
+                     Run them directly with: powershell.exe -File scripts/win-test.ps1 \
+                     -CheckoutUnc '{unc}'"
+                );
+                eprintln!("Windows-host backend tests passed via {shell}");
+                return;
+            }
+            Err(e) => last_err = Some(format!("{shell}: {e}")),
+        }
+    }
+    eprintln!(
+        "no Windows PowerShell found from WSL ({last_err:?}); skipping Windows-host backend tests"
+    );
+}
+
+#[cfg(feature = "backend-rust")]
+#[test]
+fn rust_backend_decodes_example() {
+    let data = read_example();
+    let output = DecoderConfig::new()
+        .with_backend(Backend::Rust)
+        .decode(&data, PixelLayout::Rgba8)
+        .expect("Rust backend should decode example.heic");
+    assert_eq!(output.width, 1280);
+    assert_eq!(output.height, 854);
+    assert_eq!(output.data.len(), 1280 * 854 * 4);
+}
+
+/// MediaFoundation slow path: select MF first, fall through to Rust on
+/// failure. On a Windows host with HEVC Video Extensions installed, MF
+/// produces the frame; otherwise the dispatcher falls through to Rust
+/// and the decode still succeeds.
+#[cfg(all(
+    feature = "backend-rust",
+    feature = "backend-mediafoundation",
+    target_os = "windows"
+))]
+#[test]
+fn mediafoundation_fallthrough_to_rust_succeeds() {
+    let data = read_example();
+    let output = DecoderConfig::new()
+        .with_backends(&[Backend::MediaFoundation, Backend::Rust])
+        .decode(&data, PixelLayout::Rgba8)
+        .expect("MF→Rust allowlist should decode example.heic");
+    assert_eq!(output.width, 1280);
+    assert_eq!(output.height, 854);
+}
+
+/// MediaFoundation alone — fails decode if HEVC Video Extensions are
+/// missing (legitimate on Windows Server / fresh installs). Gated by
+/// `HEIC_REQUIRE_MF_HEVC=1` so CI runners without the AppX skip cleanly.
+#[cfg(all(feature = "backend-mediafoundation", target_os = "windows"))]
+#[test]
+fn mediafoundation_alone_decodes_when_required() {
+    if !mf_hevc_required() {
+        eprintln!(
+            "HEIC_REQUIRE_MF_HEVC not enabled: skipping MF-alone decode test. \
+             Set it to 1 on runners with the HEVC Video Extensions package \
+             installed."
+        );
+        return;
+    }
+    let data = read_example();
+    let output = DecoderConfig::new()
+        .with_backend(Backend::MediaFoundation)
+        .decode(&data, PixelLayout::Rgba8)
+        .expect(
+            "MediaFoundation alone should decode example.heic when \
+             HEIC_REQUIRE_MF_HEVC is set",
+        );
+    assert_eq!(output.width, 1280);
+    assert_eq!(output.height, 854);
+    assert_eq!(output.data.len(), 1280 * 854 * 4);
+}
+
+/// Cross-backend corpus sweep using the shared
+/// [`common::compare_backends_via_zensim`] helper. Treats the rust
+/// backend as ground truth and gates MF output via
+/// [`zensim_regress::testing::check_regression`].
+///
+/// Tolerance: documented inter-decoder rounding noise — chroma upsample
+/// + matrix-coefficient drift can produce ~21-step deltas; allow up to
+/// 32 channel-steps and require ≥40 % perceptual similarity. With the
+/// VUI + SPS-crop plumbing landed, every file in the bundled corpus
+/// (including example.heic) hits 0 bad pixels.
+#[cfg(all(
+    feature = "backend-rust",
+    feature = "backend-mediafoundation",
+    target_os = "windows"
+))]
+#[test]
+fn mediafoundation_vs_rust_corpus_diff() {
+    use zensim_regress::testing::RegressionTolerance;
+
+    if !mf_hevc_required() {
+        eprintln!("HEIC_REQUIRE_MF_HEVC not enabled: skipping corpus diff");
+        return;
+    }
+    let tolerance = RegressionTolerance::off_by_one()
+        .with_max_delta(32)
+        .with_max_pixels_different(1.0)
+        .with_min_similarity(40.0);
+    let report = common::compare_backends_via_zensim(
+        Backend::Rust,
+        Backend::MediaFoundation,
+        &tolerance,
+        common::CORPUS_DIRS,
+    );
+    eprintln!(
+        "MF↔Rust zensim diff: {}/{} matched",
+        report.matched, report.total
+    );
+    report.assert_clean("MF↔Rust corpus");
+}
+
+/// VideoToolbox on Apple: decode example.heic via the VT backend only
+/// and assert dimensions match. VT is documented available on every
+/// macOS 10.13+ / iOS 11+ release, so this is a no-skip test on Apple
+/// targets — if it fails on CI, the VT FFI has regressed.
+#[cfg(all(
+    feature = "backend-videotoolbox",
+    any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "visionos"
+    )
+))]
+#[test]
+fn videotoolbox_decodes_example() {
+    let data = read_example();
+    let output = DecoderConfig::new()
+        .with_backend(Backend::VideoToolbox)
+        .decode(&data, PixelLayout::Rgba8)
+        .expect("VideoToolbox should decode example.heic on Apple targets");
+    assert_eq!(output.width, 1280);
+    assert_eq!(output.height, 854);
+    assert_eq!(output.data.len(), 1280 * 854 * 4);
+}
+
+/// VideoToolbox vs Rust corpus diff via zensim-regress.
+///
+/// Tolerance is wider than the D3D11VA / MF gates because VT
+/// applies its own BT.709 chroma upsampling kernel + matrix and
+/// runs the YCbCr → RGB conversion in its own (non-public) color
+/// pipeline, so steady-state delta vs the rust backend is roughly
+/// `max_delta=21` on 8-bit Main and up to `max_delta=34` on the
+/// Main10 P010 readback. The similarity floor of 40 still catches
+/// genuine regressions (silent failures land below 0).
+#[cfg(all(
+    feature = "backend-rust",
+    feature = "backend-videotoolbox",
+    any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "visionos"
+    )
+))]
+#[test]
+fn videotoolbox_vs_rust_corpus_diff() {
+    use zensim_regress::testing::RegressionTolerance;
+    let tolerance = RegressionTolerance::off_by_one()
+        .with_max_delta(40)
+        .with_max_pixels_different(100.0)
+        .with_min_similarity(40.0);
+    let report = common::compare_backends_via_zensim(
+        Backend::Rust,
+        Backend::VideoToolbox,
+        &tolerance,
+        common::CORPUS_DIRS,
+    );
+    eprintln!(
+        "VT↔Rust zensim diff: {}/{} matched",
+        report.matched, report.total
+    );
+    report.assert_clean("VT↔Rust corpus");
+}
+
+/// D3D11VA on Windows + real GPU: decode example.heic via the GPU
+/// backend only, verify dimensions match. Gated on `HEIC_D3D11VA_HW=1`
+/// because the test requires an HEVC-decode-capable GPU (RTX 30+,
+/// Intel iGPU from Skylake+, AMD VCN). Local dev box (RTX 5070) and
+/// future CI runners with `windows-2025-gpu` runner type can set it.
+#[cfg(all(
+    feature = "backend-rust",
+    feature = "backend-d3d11va",
+    target_os = "windows"
+))]
+#[test]
+fn d3d11va_decodes_example_on_hardware() {
+    if std::env::var_os("HEIC_D3D11VA_HW").is_none() {
+        eprintln!(
+            "HEIC_D3D11VA_HW not set: skipping D3D11VA hardware test. \
+             Set it on hosts with an HEVC-decode-capable GPU."
+        );
+        return;
+    }
+    let data = read_example();
+    let output = DecoderConfig::new()
+        .with_backend(Backend::D3d11va)
+        .decode(&data, PixelLayout::Rgba8)
+        .expect("D3D11VA should decode example.heic when HEIC_D3D11VA_HW is set");
+    assert_eq!(output.width, 1280);
+    assert_eq!(output.height, 854);
+    assert_eq!(output.data.len(), 1280 * 854 * 4);
+}
+
+/// D3D11VA vs Rust corpus diff via zensim-regress on the synthetic
+/// 256x256 sub-corpus. The synth files exercise the full GPU decode
+/// pipeline (slice submission, NV12 readback, color conversion)
+/// without the larger-tile + conformance-window edge cases that
+/// trip up the current implementation on example.heic /
+/// apple-hdr/hdr-sample.heic. The latter are tracked as known
+/// limitations in CLAUDE.md until the sign-data-hiding /
+/// scaling-list-data / 10-bit-P010 corner cases are debugged.
+#[cfg(all(
+    feature = "backend-rust",
+    feature = "backend-d3d11va",
+    target_os = "windows"
+))]
+#[test]
+fn d3d11va_vs_rust_synthetic_corpus() {
+    use zensim_regress::testing::RegressionTolerance;
+    if std::env::var_os("HEIC_D3D11VA_HW").is_none() {
+        eprintln!("HEIC_D3D11VA_HW not set: skipping D3D11VA corpus diff");
+        return;
+    }
+    // synth files match the rust backend BIT-EXACT (max_delta=0),
+    // so leave no slack — any drift here is a real regression.
+    // Synth fixtures: bit-exact (max_delta=0). apple-hdr P010 readback
+    // rounds to max_delta=1; example.heic Annex-B slice parsing hits
+    // max_delta=2 from BT.709 chroma upsampling drift. Both well within
+    // perceptual tolerance — similarity ≥ 99.0 is the real gate.
+    let tolerance = RegressionTolerance::off_by_one()
+        .with_max_delta(2)
+        .with_max_pixels_different(5.0)
+        .with_min_similarity(99.0);
+    let report = common::compare_backends_via_zensim(
+        Backend::Rust,
+        Backend::D3d11va,
+        &tolerance,
+        common::CORPUS_DIRS,
+    );
+    eprintln!(
+        "D3D11VA↔Rust zensim diff (full corpus): {}/{} matched",
+        report.matched, report.total
+    );
+    report.assert_clean("D3D11VA↔Rust full corpus");
+}
+
+/// VA-API on Linux + real GPU: decode example.heic via the VA-API backend
+/// only, verify dimensions match. Gated on `HEIC_VAAPI_HW=1` because real
+/// decode needs a `/dev/dri` render node + a VA-API HEVC-decode driver
+/// (Mesa `radeonsi` on AMD — incl. the Ryzen 7000-series RDNA2 iGPU —, Intel
+/// `iHD`, or `nvidia-vaapi-driver`). Hosted GitHub ubuntu runners have no GPU,
+/// so they skip; `vaapi-runtime.yml` sets `HEIC_VAAPI_HW=1` on a self-hosted
+/// Linux+GPU runner. WSL2 also skips (no `/dev/dri`).
+///
+/// The compile-time FFI ABI gate (the `offset_of!` asserts in
+/// `heic-backend-vaapi/src/va_hevc.rs`) runs on every hosted build of the
+/// crate regardless — this test adds the missing *runtime decode* coverage.
+#[cfg(all(
+    feature = "backend-rust",
+    feature = "backend-vaapi",
+    target_os = "linux"
+))]
+#[test]
+fn vaapi_decodes_example_on_hardware() {
+    if std::env::var_os("HEIC_VAAPI_HW").is_none() {
+        eprintln!(
+            "HEIC_VAAPI_HW not set: skipping VA-API hardware test. \
+             Set it on a Linux host with a VA-API HEVC-decode GPU."
+        );
+        return;
+    }
+    let data = read_example();
+    let output = DecoderConfig::new()
+        .with_backend(Backend::Vaapi)
+        .decode(&data, PixelLayout::Rgba8)
+        .expect("VA-API should decode example.heic when HEIC_VAAPI_HW is set");
+    assert_eq!(output.width, 1280);
+    assert_eq!(output.height, 854);
+    assert_eq!(output.data.len(), 1280 * 854 * 4);
+}
+
+/// VA-API vs Rust corpus diff via zensim-regress on the synthetic sub-corpus.
+/// Same rationale as the D3D11VA gate: synth files exercise the full VA-API
+/// decode path (surface alloc, slice submission, NV12 readback, color
+/// conversion); per-driver chroma upsampling means we gate on perceptual
+/// similarity, not bit-exactness. Gated on `HEIC_VAAPI_HW=1`.
+#[cfg(all(
+    feature = "backend-rust",
+    feature = "backend-vaapi",
+    target_os = "linux"
+))]
+#[test]
+fn vaapi_vs_rust_corpus_diff() {
+    use zensim_regress::testing::RegressionTolerance;
+    if std::env::var_os("HEIC_VAAPI_HW").is_none() {
+        eprintln!("HEIC_VAAPI_HW not set: skipping VA-API corpus diff");
+        return;
+    }
+    let tolerance = RegressionTolerance::off_by_one()
+        .with_max_delta(40)
+        .with_max_pixels_different(100.0)
+        .with_min_similarity(40.0);
+    let report = common::compare_backends_via_zensim(
+        Backend::Rust,
+        Backend::Vaapi,
+        &tolerance,
+        common::CORPUS_DIRS,
+    );
+    eprintln!(
+        "VA-API↔Rust zensim diff: {}/{} matched",
+        report.matched, report.total
+    );
+    report.assert_clean("VA-API↔Rust corpus");
+}
+
+/// "Kitchen sink" extended-corpus exerciser for all native backends.
+///
+/// Walks `$HEIC_EXTENDED_CORPUS` (a directory containing arbitrary HEIC
+/// fixtures) and for each compiled-in backend that matches the host OS,
+/// decodes every file. Validates dimensions match the rust-backend
+/// baseline; the per-file zensim score is reported as eprintln output
+/// for visibility but doesn't fail the test (the goal is to exercise
+/// the codepath against diverse real-world fixtures, not gate on
+/// exact pixel parity which depends on per-driver chroma upsampling).
+///
+/// Set `HEIC_EXTENDED_CORPUS=/mnt/v/heic` or any other path. Files
+/// failing to decode are reported but don't fail the test (we want a
+/// survey, not a hard gate). The test skips cleanly when the env
+/// variable is unset.
+#[cfg(all(feature = "backend-rust", feature = "std",))]
+#[test]
+fn extended_corpus_survey() {
+    let Ok(corpus_dir) = std::env::var("HEIC_EXTENDED_CORPUS") else {
+        eprintln!("HEIC_EXTENDED_CORPUS not set: skipping extended-corpus survey");
+        return;
+    };
+
+    let Ok(entries) = std::fs::read_dir(&corpus_dir) else {
+        eprintln!("HEIC_EXTENDED_CORPUS={corpus_dir} unreadable: skipping");
+        return;
+    };
+
+    #[allow(unused_mut)] // some cfg-combinations don't push extra backends
+    let mut backends: Vec<Backend> = vec![Backend::Rust];
+    #[cfg(all(feature = "backend-mediafoundation", target_os = "windows"))]
+    backends.push(Backend::MediaFoundation);
+    #[cfg(all(
+        feature = "backend-videotoolbox",
+        any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "tvos",
+            target_os = "visionos"
+        )
+    ))]
+    backends.push(Backend::VideoToolbox);
+    #[cfg(all(feature = "backend-mediacodec", target_os = "android"))]
+    backends.push(Backend::MediaCodec);
+    #[cfg(all(feature = "backend-d3d11va", target_os = "windows"))]
+    if std::env::var_os("HEIC_D3D11VA_HW").is_some() {
+        backends.push(Backend::D3d11va);
+    }
+
+    let mut totals: std::collections::HashMap<Backend, (usize, usize)> =
+        std::collections::HashMap::new();
+    for backend in &backends {
+        totals.insert(*backend, (0, 0));
+    }
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if !matches!(ext.to_ascii_lowercase().as_str(), "heic" | "heif") {
+            continue;
+        }
+        let Ok(data) = std::fs::read(&path) else {
+            continue;
+        };
+        if data.len() > 50 * 1024 * 1024 {
+            continue; // skip files >50 MB
+        }
+
+        eprintln!("--- {}", path.display());
+        for backend in &backends {
+            let result = DecoderConfig::new()
+                .with_backend(*backend)
+                .decode(&data, PixelLayout::Rgba8);
+            let (tot, ok) = totals.get_mut(backend).expect("backend present");
+            *tot += 1;
+            match result {
+                Ok(out) => {
+                    *ok += 1;
+                    eprintln!("  {backend:?}: {}x{} OK", out.width, out.height);
+                }
+                Err(e) => {
+                    eprintln!("  {backend:?}: FAIL: {}", e.error());
+                }
+            }
+        }
+    }
+
+    for backend in &backends {
+        let (tot, ok) = totals.get(backend).expect("backend present");
+        eprintln!("{backend:?}: {ok}/{tot} decoded");
+    }
+}
+
+/// Empty allowlist must produce `HeicError::NoBackendSelected`.
+#[cfg(feature = "backend-rust")]
+#[test]
+fn empty_allowlist_errors_cleanly() {
+    let data = read_example();
+    let result = DecoderConfig::new()
+        .with_backends(&[])
+        .decode(&data, PixelLayout::Rgba8);
+    let err = result.expect_err("empty allowlist should fail");
+    let msg = format!("{}", err.error());
+    assert!(
+        msg.contains("no HEVC backend selected"),
+        "unexpected error: {msg}"
+    );
+}

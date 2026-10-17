@@ -1,0 +1,54 @@
+# heic-core public API — doc(hidden) items and excluded-feature surface
+# excluded features: (none)
+# (regenerated on every `cargo test` by zenutils-apidoc; ZEN_API_DOC=check verifies, =off skips).
+# Encodings: crate-name prefix stripped; auto traits collapse to a
+# count + exceptions; trait impls collapse to one roster line per
+# type (method signatures live at the trait definition); blanket
+# impls omitted; re-export duplicates annotated `[also: path]`.
+# DO NOT EDIT BY HAND — commit regenerated changes with the code.
+
+## summary
+#
+#   pub consts/statics                          5
+#   pub macros                                  1
+#   free functions                              2
+#   inherent methods                            9
+#   struct fields                               6
+#   trait roster entries (type × trait)         1
+#
+# per-module pub lines:
+#   (root)                            5
+#   color_convert                     1
+#   error                             1
+#   frame                            15
+#   sps                               1
+
+## items (23 lines)
+
+pub const frame::DEBLOCK_FLAG_HORIZ: u8
+pub const frame::DEBLOCK_FLAG_VERT: u8
+pub const frame::DEBLOCK_PB_EDGE_HORIZ: u8
+pub const frame::DEBLOCK_PB_EDGE_VERT: u8
+pub const frame::UNINIT_SAMPLE: u16
+pub fn alloc_vec_fallible<T: core::clone::Clone>(usize, T) -> core::result::Result<alloc::vec::Vec<T>, error::HevcError>
+pub fn color_convert::get_coefficients(bool, u8) -> (i32, i32, i32, i32, i32, i32, i32, i32)
+pub fn error::HevcError::assert_fields_are_eq(&self)
+pub fn frame::DecodedFrame::chroma_dims(&self) -> (u32, u32)
+pub fn frame::DecodedFrame::mark_pb_boundary(&mut self, u32, u32, u32, u32, bool)
+pub fn frame::DecodedFrame::mark_tu_boundary(&mut self, u32, u32, u32)
+pub fn frame::DecodedFrame::plane_mut(&mut self, u8) -> (&mut [u16], usize)
+pub fn frame::DecodedFrame::set_crop(&mut self, u32, u32, u32, u32)
+pub fn frame::DecodedFrame::store_block_qp(&mut self, u32, u32, u32, i8)
+pub fn frame::DecodedFrame::with_params(u32, u32, u8, u8) -> core::result::Result<Self, error::HevcError>
+pub fn sps::HevcScalingListData::assert_fields_are_eq(&self)
+pub DecodedFrame::deblock_flags: alloc::vec::Vec<u8>
+pub DecodedFrame::deblock_stride: u32
+pub DecodedFrame::qp_map: alloc::vec::Vec<i8>
+pub frame::DecodedFrame::deblock_flags: alloc::vec::Vec<u8>
+pub frame::DecodedFrame::deblock_stride: u32
+pub frame::DecodedFrame::qp_map: alloc::vec::Vec<i8>
+pub macro try_vec!
+
+## trait impls (1 types)
+
+error::HevcError: TrivialClone

@@ -1,0 +1,58 @@
+[package]
+name = "heic-backend-videotoolbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Apple VideoToolbox HEVC decoder backend for the heic crate (macOS, iOS, tvOS, visionOS)"
+keywords = ["heic", "heif", "hevc", "videotoolbox", "apple"]
+categories = ["multimedia::images", "os::macos-apis"]
+
+[features]
+default = []
+
+[dependencies]
+heic-core = { workspace = true, features = ["std"] }
+enough = { workspace = true }
+
+# Apple framework bindings. Gated on apple target_os so non-Apple builds
+# don't pull in objc2 or its transitive deps. Versions per the
+# platform-validation pass (objc2 0.6.x ecosystem, "Retained<T>" rename).
+[target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "visionos"))'.dependencies]
+objc2 = "0.6.4"
+objc2-foundation = "0.3.2"
+objc2-core-foundation = { version = "0.3.2", features = [
+    "CFBase",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+] }
+objc2-core-media = { version = "0.3.2", features = [
+    "CMBase",
+    "CMBlockBuffer",
+    "CMFormatDescription",
+    "CMSampleBuffer",
+    "CMTime",
+] }
+objc2-core-video = { version = "0.3.2", features = [
+    "CVBase",
+    "CVBuffer",
+    "CVImageBuffer",
+    "CVPixelBuffer",
+    "CVPixelFormatDescription",
+] }
+objc2-video-toolbox = { version = "0.3.2", features = [
+    "VTBase",
+    "VTDecompressionProperties",
+    "VTDecompressionSession",
+    "VTErrors",
+    "VTSession",
+] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"

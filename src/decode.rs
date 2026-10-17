@@ -3,17 +3,109 @@
 
 use alloc::borrow::Cow;
 use alloc::vec::Vec;
+use core::cell::Cell;
 
 use enough::{Stop, Unstoppable};
 
-use whereat::at;
+use whereat::{ResultAtExt, at};
 
 use crate::error::check_stop;
 use crate::heif::{self, CleanAperture, ColorInfo, FourCC, ItemType, Transform};
+use crate::hevc::transforms::DecodedFrameTransformExt;
 use crate::{
-    DecodeOutput, DecoderConfig, HdrGainMap, HeicError, Limits, PixelLayout, Result, floor_f64,
-    round_f64,
+    DecodeOutput, DecoderConfig, GainMapOrigin, HdrGainMap, HeicError, Limits, PixelLayout, Result,
+    floor_f64, round_f64,
 };
+
+/// Maximum derived-image (iden/grid/iovl) recursion depth.
+///
+/// HEIF's derived-item graph is shallow in practice — primary→grid→tiles
+/// is depth 2 — so a tight cap is appropriate. This kills the
+/// `(tiles_per_level)^N` blow-up an attacker can otherwise drive through
+/// crafted dimg references.
+pub(crate) const MAX_DERIVED_DEPTH: u32 = 3;
+
+/// Maximum total number of `decode_item` calls within a single decode
+/// request, summed across all recursion paths. Even with a tight depth
+/// cap, a flat fan-out of thousands of grid tiles each with their own
+/// derived-image chain can still consume excessive CPU on the linear
+/// `get_item`/`get_item_data` scans inside the parser. This counter
+/// caps the total work irrespective of graph shape.
+const MAX_DERIVED_INVOCATIONS: u32 = 32_768;
+
+/// Shared total-invocation counter. Lives at the top-level entry and
+/// is borrowed by every `decode_item` frame on the call stack so the
+/// total is an honest sum across siblings, not a per-frame copy.
+type DerivedCounter = Cell<u32>;
+
+/// Per-decode-request budget tracking recursion depth and a borrowed
+/// total-invocation counter. Single-threaded interior mutability via
+/// `Cell` is fine — the budget is consumed sequentially from a single
+/// decoder thread, and per-tile rayon parallelism in `decode_grid`
+/// only fans out *after* `decode_item` has accepted the grid item
+/// (the per-tile decode does not recurse through `decode_item`).
+#[derive(Debug, Clone, Copy)]
+struct DecodeBudget<'a> {
+    /// Current recursion depth (0 at the top-level entry).
+    depth: u32,
+    /// Shared counter of total `decode_item` calls in this request.
+    invocations: &'a DerivedCounter,
+    /// Ordered allowlist of HEVC backends to try per tile. Set at the
+    /// top-level entry from `DecoderConfig::backends()`; all recursion
+    /// (derived items, grid tiles, alpha, gain map) inherits the same
+    /// list so a single allowlist governs the whole decode request.
+    backends: &'a [crate::Backend],
+    /// Whether to apply the primary item's orientation transforms (`irot`,
+    /// `imir`) to the decoded pixels. Set at the top-level entry; `clap`
+    /// (clean-aperture crop) is always applied regardless. `true` matches the
+    /// historical default (bake orientation → display pixels). The zencodec
+    /// adapter sets `false` for `OrientationHint::Preserve` so the decoded
+    /// pixels stay in stored orientation and the orientation is reported on
+    /// `ImageInfo` instead. Only honored at `depth == 0` (the primary item);
+    /// derived sub-items always apply their own transforms as part of
+    /// composition.
+    apply_orientation: bool,
+}
+
+impl<'a> DecodeBudget<'a> {
+    fn root(invocations: &'a DerivedCounter, backends: &'a [crate::Backend]) -> Self {
+        Self {
+            depth: 0,
+            invocations,
+            backends,
+            apply_orientation: true,
+        }
+    }
+
+    /// Set whether the primary item's orientation transforms are baked into
+    /// the decoded pixels (default `true`). See [`DecodeBudget::apply_orientation`].
+    fn with_apply_orientation(mut self, apply: bool) -> Self {
+        self.apply_orientation = apply;
+        self
+    }
+
+    fn deeper(&self) -> Self {
+        Self {
+            depth: self.depth + 1,
+            invocations: self.invocations,
+            backends: self.backends,
+            apply_orientation: self.apply_orientation,
+        }
+    }
+
+    /// Account for one `decode_item` invocation, returning Err when the
+    /// per-request budget is exhausted.
+    fn charge(&self) -> Result<()> {
+        let n = self.invocations.get().saturating_add(1);
+        if n > MAX_DERIVED_INVOCATIONS {
+            return Err(at!(HeicError::InvalidData(
+                "Derived-image graph exceeds maximum invocation budget"
+            )));
+        }
+        self.invocations.set(n);
+        Ok(())
+    }
+}
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -24,20 +116,33 @@ use rayon::prelude::*;
 /// When `parallel` is enabled and `max_threads != Some(1)`, uses rayon
 /// parallelism scoped to the requested thread count. Otherwise falls back
 /// to sequential iteration.
+///
+/// `stop` is forwarded into each tile's HEVC decode, so cancellation is
+/// observed at tile entry *and* inside the per-CTU loop
+/// ([`crate::hevc::decode_with_config_stop`]) exactly as it is on the
+/// non-`parallel` tile loops, which check between tiles and hand `stop` to
+/// `backend::decode_one_tile`. `enough::Stop` is `Send + Sync`, so the shared
+/// `&dyn Stop` crosses into the rayon closures unchanged. Rayon's
+/// `collect::<Result<_>>()` stops feeding new tiles once one returns `Err`, so
+/// a cancellation aborts the remaining tiles rather than only the current one.
 #[cfg(feature = "parallel")]
 fn decode_tiles_parallel(
     tile_data_list: &[Cow<'_, [u8]>],
     tile_config: &crate::heif::HevcDecoderConfig,
     max_threads: Option<usize>,
+    stop: &dyn Stop,
 ) -> Result<Vec<crate::hevc::DecodedFrame>> {
+    let decode_tile = |tile_data: &Cow<'_, [u8]>| {
+        crate::hevc::decode_with_config_stop(tile_config, tile_data, stop)
+            .map_err(crate::error::hevc_at)
+            .at()
+    };
     match max_threads {
         Some(1) => {
             // Forced single-threaded
             tile_data_list
                 .iter()
-                .map(|tile_data| {
-                    crate::hevc::decode_with_config(tile_config, tile_data).map_err(Into::into)
-                })
+                .map(decode_tile)
                 .collect::<Result<_>>()
         }
         Some(n) if n > 1 => {
@@ -49,9 +154,7 @@ fn decode_tiles_parallel(
             pool.install(|| {
                 tile_data_list
                     .par_iter()
-                    .map(|tile_data| {
-                        crate::hevc::decode_with_config(tile_config, tile_data).map_err(Into::into)
-                    })
+                    .map(decode_tile)
                     .collect::<Result<_>>()
             })
         }
@@ -59,20 +162,33 @@ fn decode_tiles_parallel(
             // Unlimited: use global rayon pool
             tile_data_list
                 .par_iter()
-                .map(|tile_data| {
-                    crate::hevc::decode_with_config(tile_config, tile_data).map_err(Into::into)
-                })
+                .map(decode_tile)
                 .collect::<Result<_>>()
         }
     }
 }
 
-/// Sentinel for no limits
-static NO_LIMITS: Limits = Limits {
-    max_width: None,
-    max_height: None,
-    max_pixels: None,
-    max_memory_bytes: None,
+/// Default safety caps applied when a caller does not supply explicit
+/// `Limits`. These numbers are intentionally generous — well above any
+/// real-world HEIC image — but they put a hard ceiling on the
+/// allocations a crafted file can trigger through SPS-driven
+/// dimension and memory estimates.
+///
+/// `max_width` / `max_height` are above HEVC Level 6.2 (8192×4320) so
+/// any conforming HEIC decodes; `max_pixels` is the same 256 Mpx ceiling
+/// some other zen codecs use; `max_memory_bytes` is 1 GiB, generous for
+/// 8K/16K stills but well below the multi-GiB OOM an all-`None`
+/// (uncapped) configuration would permit.
+///
+/// Named `DEFAULT_LIMITS` because it is exactly that — the limits applied by
+/// default. (It is *not* "no limits"; see [`crate::Limits::server_defaults`],
+/// whose values it mirrors.)
+pub(crate) static DEFAULT_LIMITS: Limits = Limits {
+    max_width: Some(16_384),
+    max_height: Some(16_384),
+    max_pixels: Some(256 * 1024 * 1024),
+    max_memory_bytes: Some(1024 * 1024 * 1024),
+    alloc_pref: crate::alloc_util::AllocPreference::CodecDefault,
 };
 
 /// Core decode-to-frame implementation shared by all entry points.
@@ -81,8 +197,10 @@ pub(crate) fn decode_to_frame(
     limits: Option<&Limits>,
     stop: &dyn Stop,
     max_threads: Option<usize>,
+    backends: &[crate::Backend],
+    apply_orientation: bool,
 ) -> Result<crate::hevc::DecodedFrame> {
-    let limits = limits.unwrap_or(&NO_LIMITS);
+    let limits = limits.unwrap_or(&DEFAULT_LIMITS);
 
     check_stop(stop)?;
 
@@ -101,7 +219,9 @@ pub(crate) fn decode_to_frame(
 
     check_stop(stop)?;
 
-    let mut frame = decode_item(&container, &primary_item, 0, limits, stop, max_threads)?;
+    let counter = DerivedCounter::new(0);
+    let budget = DecodeBudget::root(&counter, backends).with_apply_orientation(apply_orientation);
+    let mut frame = decode_item(&container, &primary_item, budget, limits, stop, max_threads)?;
 
     check_stop(stop)?;
 
@@ -120,7 +240,8 @@ pub(crate) fn decode_to_frame(
                 .copied()
         });
     if let Some(alpha_id) = alpha_id
-        && let Some(alpha_plane) = decode_alpha_plane(&container, alpha_id, &frame, limits, stop)
+        && let Some(alpha_plane) =
+            decode_alpha_plane(&container, alpha_id, &frame, limits, stop, backends)
     {
         frame.alpha_plane = Some(alpha_plane);
     }
@@ -133,34 +254,53 @@ pub(crate) fn decode_to_frame(
 fn decode_item(
     container: &heif::HeifContainer<'_>,
     item: &heif::Item,
-    depth: u32,
+    budget: DecodeBudget<'_>,
     limits: &Limits,
     stop: &dyn Stop,
     max_threads: Option<usize>,
 ) -> Result<crate::hevc::DecodedFrame> {
-    if depth > 8 {
+    if budget.depth > MAX_DERIVED_DEPTH {
         return Err(at!(HeicError::InvalidData(
             "Derived image reference chain too deep"
         )));
     }
+    budget.charge()?;
 
     check_stop(stop)?;
 
     let mut frame = match item.item_type {
-        ItemType::Grid => decode_grid(container, item, depth, limits, stop, max_threads)?,
-        ItemType::Iden => decode_iden(container, item, depth, limits, stop, max_threads)?,
-        ItemType::Iovl => decode_iovl(container, item, depth, limits, stop, max_threads)?,
+        ItemType::Grid => decode_grid(container, item, budget, limits, stop, max_threads)?,
+        ItemType::Iden => decode_iden(container, item, budget, limits, stop, max_threads)?,
+        ItemType::Iovl => decode_iovl(container, item, budget, limits, stop, max_threads)?,
+        ItemType::Tmap => decode_tmap(container, item, budget, limits, stop, max_threads)?,
         ItemType::Hvc1 | ItemType::Unknown(_) => {
             // HEVC path — Unknown falls through to HEVC for backwards compat
             // Check limits before HEVC decode to avoid OOM from crafted SPS
+            // OR from extracting an oversized item out of the container.
+            // Both checks fire BEFORE `get_item_data` allocates, so a
+            // hostile grid with many large tiles can't exhaust memory by
+            // sneaking past the dimension gate while the byte budget is
+            // still untouched.
             if let Some((w, h)) = item.dimensions {
                 limits.check_dimensions(w, h)?;
+                // Conservative byte estimate: a 4K×4K Main10 frame is
+                // ~320 MB. The estimate uses saturating arithmetic so a
+                // hostile SPS (`pic_width = u32::MAX`) can't wrap.
+                let est = crate::DecoderConfig::estimate_memory(w, h, crate::PixelLayout::Rgba8);
+                limits.check_memory(est)?;
             }
             let image_data = container.get_item_data(item.id)?;
             if let Some(ref config) = item.hevc_config {
-                crate::hevc::decode_with_config(config, &image_data)?
+                let (w, h) = item.dimensions.unwrap_or((0, 0));
+                crate::backend::decode_one_tile(budget.backends, config, &image_data, w, h, stop)?
             } else if item.item_type == ItemType::Hvc1 {
-                crate::hevc::decode(&image_data)?
+                // Annex-B raw path: no hvcC config separately, so the
+                // dispatcher trait can't be used (every native backend
+                // requires VPS/SPS/PPS through HvccParams.nal_units). Stay
+                // on the Rust path.
+                crate::hevc::decode(&image_data)
+                    .map_err(crate::error::hevc_at)
+                    .at()?
             } else {
                 return Err(at!(HeicError::UnsupportedCodec(
                     "unknown item type with no decoder config"
@@ -214,7 +354,7 @@ fn decode_item(
         matrix_coefficients,
         color_primaries,
         transfer_characteristics,
-    }) = &item.color_info
+    }) = container.item_nclx(item.id)
     {
         frame.full_range = *full_range;
         frame.matrix_coeffs = *matrix_coefficients as u8;
@@ -222,27 +362,41 @@ fn decode_item(
         frame.transfer_characteristics = *transfer_characteristics as u8;
     }
 
-    // Apply transformative properties in ipma listing order (HEIF spec requirement)
+    // Apply transformative properties in ipma listing order (HEIF spec requirement).
+    // `clap` (clean-aperture crop) always applies; orientation (`irot`/`imir`)
+    // is gated by `apply_orientation` at the top level (depth 0). Derived
+    // sub-items (depth > 0) always apply their own orientation as part of
+    // composition. When orientation is skipped, the pixels stay in stored
+    // orientation and the caller reports the orientation on `ImageInfo`.
+    let apply_orientation = budget.apply_orientation || budget.depth > 0;
     for transform in &item.transforms {
         match transform {
             Transform::CleanAperture(clap) => {
                 apply_clean_aperture(&mut frame, clap);
             }
-            Transform::Mirror(mirror) => {
+            Transform::Mirror(mirror) if apply_orientation => {
                 frame = match mirror.axis {
-                    0 => frame.mirror_vertical()?,
-                    1 => frame.mirror_horizontal()?,
+                    0 => frame
+                        .mirror_vertical()
+                        .map_err(crate::error::hevc_at)
+                        .at()?,
+                    1 => frame
+                        .mirror_horizontal()
+                        .map_err(crate::error::hevc_at)
+                        .at()?,
                     _ => frame,
                 };
             }
-            Transform::Rotation(rotation) => {
+            Transform::Rotation(rotation) if apply_orientation => {
                 frame = match rotation.angle {
-                    90 => frame.rotate_90_cw()?,
-                    180 => frame.rotate_180()?,
-                    270 => frame.rotate_270_cw()?,
+                    90 => frame.rotate_90_cw().map_err(crate::error::hevc_at).at()?,
+                    180 => frame.rotate_180().map_err(crate::error::hevc_at).at()?,
+                    270 => frame.rotate_270_cw().map_err(crate::error::hevc_at).at()?,
                     _ => frame,
                 };
             }
+            // Orientation skipped (apply_orientation == false at the primary item).
+            Transform::Mirror(_) | Transform::Rotation(_) => {}
         }
     }
 
@@ -253,7 +407,7 @@ fn decode_item(
 fn decode_iden(
     container: &heif::HeifContainer<'_>,
     iden_item: &heif::Item,
-    depth: u32,
+    budget: DecodeBudget<'_>,
     limits: &Limits,
     stop: &dyn Stop,
     max_threads: Option<usize>,
@@ -270,7 +424,40 @@ fn decode_iden(
     decode_item(
         container,
         &source_item,
-        depth + 1,
+        budget.deeper(),
+        limits,
+        stop,
+        max_threads,
+    )
+}
+
+/// Decode a `tmap` derived image item (HEIF Amendment 1 / ISO 23008-12:2025).
+///
+/// The displayed result of a `tmap` item is its **base** image (first `dimg`
+/// reference). The other reference is the gain map image, reached via
+/// [`DecoderConfig::decode_gain_map`]. The `tmap` payload itself is the
+/// ISO 21496-1 binary metadata blob — also surfaced via `decode_gain_map`.
+fn decode_tmap(
+    container: &heif::HeifContainer<'_>,
+    tmap_item: &heif::Item,
+    budget: DecodeBudget<'_>,
+    limits: &Limits,
+    stop: &dyn Stop,
+    max_threads: Option<usize>,
+) -> Result<crate::hevc::DecodedFrame> {
+    let source_ids = container.get_item_references(tmap_item.id, FourCC::DIMG);
+    let &base_id = source_ids
+        .first()
+        .ok_or_else(|| at!(HeicError::InvalidData("tmap item has no dimg reference")))?;
+
+    let base_item = container
+        .get_item(base_id)
+        .ok_or_else(|| at!(HeicError::InvalidData("tmap base image not found")))?;
+
+    decode_item(
+        container,
+        &base_item,
+        budget.deeper(),
         limits,
         stop,
         max_threads,
@@ -281,20 +468,30 @@ fn decode_iden(
 fn decode_iovl(
     container: &heif::HeifContainer<'_>,
     iovl_item: &heif::Item,
-    depth: u32,
+    budget: DecodeBudget<'_>,
     limits: &Limits,
     stop: &dyn Stop,
     max_threads: Option<usize>,
 ) -> Result<crate::hevc::DecodedFrame> {
     let iovl_data = container.get_item_data(iovl_item.id)?;
 
-    // Parse iovl descriptor:
-    // - version (1 byte) + flags (3 bytes)
-    // - canvas_fill_value: 2 bytes * num_channels (flags & 0x01 determines 32-bit offsets)
-    if iovl_data.len() < 6 {
+    // ISO/IEC 23008-12 ImageOverlay layout (sample-style descriptor, not a
+    // FullBox — the version/flags pair is 2 bytes, not 4):
+    //   u8 version (=0); u8 flags;
+    //   u16 canvas_fill_value[4];           // R/G/B/A or Y/Cb/Cr/A
+    //   uN  output_width;  uN  output_height;        // N = (flags&1)? 32 : 16
+    //   for tile in dimg: sN horizontal_off; sN vertical_off;
+    // libheif always emits four canvas_fill_values; readers must do the same.
+    if iovl_data.len() < 2 + 4 * 2 + 4 {
         return Err(at!(HeicError::InvalidData("Overlay descriptor too short")));
     }
 
+    let version = iovl_data[0];
+    if version != 0 {
+        return Err(at!(HeicError::Unsupported(
+            "Overlay descriptor version != 0",
+        )));
+    }
     let flags = iovl_data[1];
     let large = (flags & 1) != 0;
 
@@ -305,34 +502,25 @@ fn decode_iovl(
         )));
     }
 
-    // Calculate expected layout
     let off_size = if large { 4usize } else { 2 };
     let per_tile = 2 * off_size;
-    let fixed_end = 4 + 2 * off_size; // version/flags + width/height
-    let tile_data_size = tile_ids.len() * per_tile;
-    let fill_bytes = iovl_data
-        .len()
-        .checked_sub(fixed_end + tile_data_size)
-        .ok_or_else(|| {
-            at!(HeicError::InvalidData(
-                "Overlay descriptor too short for tiles",
-            ))
-        })?;
-
-    // Parse canvas fill values (16-bit per channel)
-    let num_fill_channels = fill_bytes / 2;
-    let mut fill_values = [0u16; 4];
-    for i in 0..num_fill_channels.min(4) {
-        fill_values[i] = u16::from_be_bytes([iovl_data[4 + i * 2], iovl_data[4 + i * 2 + 1]]);
+    let expected_len = 2 + 8 + 2 * off_size + tile_ids.len() * per_tile;
+    if iovl_data.len() < expected_len {
+        return Err(at!(HeicError::InvalidData(
+            "Overlay descriptor too short for tiles",
+        )));
     }
 
-    let mut pos = 4 + fill_bytes;
+    // Canvas fill values: always 4 u16 entries.
+    let mut fill_values = [0u16; 4];
+    for (i, v) in fill_values.iter_mut().enumerate() {
+        let off = 2 + i * 2;
+        *v = u16::from_be_bytes([iovl_data[off], iovl_data[off + 1]]);
+    }
 
-    // Read canvas dimensions
+    let mut pos = 2 + 8;
+
     let (canvas_width, canvas_height) = if large {
-        if pos + 8 > iovl_data.len() {
-            return Err(at!(HeicError::InvalidData("Overlay descriptor truncated")));
-        }
         let w = u32::from_be_bytes([
             iovl_data[pos],
             iovl_data[pos + 1],
@@ -348,9 +536,6 @@ fn decode_iovl(
         pos += 8;
         (w, h)
     } else {
-        if pos + 4 > iovl_data.len() {
-            return Err(at!(HeicError::InvalidData("Overlay descriptor truncated")));
-        }
         let w = u16::from_be_bytes([iovl_data[pos], iovl_data[pos + 1]]) as u32;
         let h = u16::from_be_bytes([iovl_data[pos + 2], iovl_data[pos + 3]]) as u32;
         pos += 4;
@@ -360,8 +545,11 @@ fn decode_iovl(
     // Check canvas dimensions against limits
     limits.check_dimensions(canvas_width, canvas_height)?;
 
-    // Read per-tile offsets
-    let mut offsets = Vec::with_capacity(tile_ids.len());
+    // Read per-tile offsets. Small bounded scratch (one entry per dimg tile,
+    // and the tile count is bounded by the resource limits), so the per-site
+    // default is infallible; an explicit `Fallible` still forces try_reserve.
+    let mut offsets: Vec<(i32, i32)> =
+        crate::alloc_util::vec_with_capacity(limits.alloc_pref, false, tile_ids.len())?;
     for _ in 0..tile_ids.len() {
         let (x, y) = if large {
             if pos + 8 > iovl_data.len() {
@@ -412,56 +600,88 @@ fn decode_iovl(
         canvas_height,
         bit_depth,
         chroma_format,
+    )
+    .map_err(crate::error::at_core)?;
+
+    // Per ISO/IEC 23008-12 the four u16 entries are R/G/B/A in the
+    // canvas's *RGB* color space; libheif composites in 4:4:4 RGB and only
+    // converts at the end. Since we composite in YCbCr, convert the fill
+    // RGB → YCbCr first so background pixels round-trip correctly.
+    // libheif uses the high 8 bits of each u16 fill value; we do the same.
+    let fill_r = (fill_values[0] >> 8) as u8;
+    let fill_g = (fill_values[1] >> 8) as u8;
+    let fill_b = (fill_values[2] >> 8) as u8;
+
+    // We need the color-conversion matrix and range to map RGB→YCbCr. They
+    // come from the first decoded tile, so decode tile 0 up front, then
+    // fill, then blit tile 0 plus the remaining tiles.
+    let first_tile = decode_item(
+        container,
+        &first_tile_item,
+        budget.deeper(),
+        limits,
+        stop,
+        max_threads,
     )?;
+    output.full_range = first_tile.full_range;
+    output.matrix_coeffs = first_tile.matrix_coeffs;
+    let (fill_y, fill_cb, fill_cr) = crate::hevc::color_convert::rgb_to_ycbcr8(
+        fill_r,
+        fill_g,
+        fill_b,
+        output.full_range,
+        output.matrix_coeffs,
+    );
+    // Scale 8-bit fill up to the canvas bit depth (no-op for 8-bit canvases).
+    let bd_shift = (bit_depth as u32).saturating_sub(8);
+    output.y_plane.fill((fill_y as u16) << bd_shift);
+    output.cb_plane.fill((fill_cb as u16) << bd_shift);
+    output.cr_plane.fill((fill_cr as u16) << bd_shift);
 
-    // Apply canvas fill values (16-bit values scaled to bit depth)
-    let fill_shift = 16u32.saturating_sub(bit_depth as u32);
-    let y_fill = fill_values[0] >> fill_shift;
-    let cb_fill = if num_fill_channels > 1 {
-        fill_values[1] >> fill_shift
-    } else {
-        1u16 << (bit_depth - 1) // neutral chroma
-    };
-    let cr_fill = if num_fill_channels > 2 {
-        fill_values[2] >> fill_shift
-    } else {
-        1u16 << (bit_depth - 1) // neutral chroma
-    };
-    output.y_plane.fill(y_fill);
-    output.cb_plane.fill(cb_fill);
-    output.cr_plane.fill(cr_fill);
-
-    // Decode each tile and composite onto the canvas
+    // Composite tiles, treating tile 0 specially so we don't decode it twice.
+    let mut decoded_first: Option<crate::hevc::DecodedFrame> = Some(first_tile);
     for (idx, &tile_id) in tile_ids.iter().enumerate() {
         check_stop(stop)?;
 
-        let tile_item = container
-            .get_item(tile_id)
-            .ok_or_else(|| at!(HeicError::InvalidData("Missing overlay tile")))?;
-
-        let tile_frame = decode_item(container, &tile_item, depth + 1, limits, stop, max_threads)?;
-
-        // Propagate color conversion settings from first tile
-        if idx == 0 {
-            output.full_range = tile_frame.full_range;
-            output.matrix_coeffs = tile_frame.matrix_coeffs;
-        }
+        let tile_frame = if idx == 0 {
+            decoded_first.take().expect("first tile present")
+        } else {
+            let tile_item = container
+                .get_item(tile_id)
+                .ok_or_else(|| at!(HeicError::InvalidData("Missing overlay tile")))?;
+            decode_item(
+                container,
+                &tile_item,
+                budget.deeper(),
+                limits,
+                stop,
+                max_threads,
+            )?
+        };
 
         let (off_x, off_y) = offsets[idx];
+        // A negative offset places the tile partially off the top/left of the
+        // canvas: the on-canvas portion begins `-off_x`/`-off_y` pixels INTO the
+        // tile and is drawn at dst (0,0). Clamping dst to 0 WITHOUT advancing
+        // the source origin (the old behaviour) drew the tile's own left/top
+        // edge at the canvas origin, shifting the whole tile right/down by the
+        // offset magnitude — wrong pixels.
         let dst_x = off_x.max(0) as u32;
         let dst_y = off_y.max(0) as u32;
-        let tile_w = tile_frame.cropped_width();
-        let tile_h = tile_frame.cropped_height();
+        let src_skip_x = off_x.min(0).unsigned_abs(); // tile cols hidden off the left
+        let src_skip_y = off_y.min(0).unsigned_abs(); // tile rows hidden off the top
+        let tile_w = tile_frame.cropped_width().saturating_sub(src_skip_x);
+        let tile_h = tile_frame.cropped_height().saturating_sub(src_skip_y);
 
         // Copy luma
         let copy_w = tile_w.min(canvas_width.saturating_sub(dst_x));
         let copy_h = tile_h.min(canvas_height.saturating_sub(dst_y));
 
         for row in 0..copy_h {
-            let src_row = (tile_frame.crop_top + row) as usize;
+            let src_row = (tile_frame.crop_top + src_skip_y + row) as usize;
             let dst_row = (dst_y + row) as usize;
             for col in 0..copy_w {
-                let src_col = (tile_frame.crop_left + col) as usize;
+                let src_col = (tile_frame.crop_left + src_skip_x + col) as usize;
                 let dst_col = (dst_x + col) as usize;
                 let src_idx = src_row * tile_frame.y_stride() + src_col;
                 let dst_idx = dst_row * output.y_stride() + dst_col;
@@ -483,8 +703,8 @@ fn decode_iovl(
             let c_copy_h = copy_h.div_ceil(sub_y);
             let c_dst_x = dst_x / sub_x;
             let c_dst_y = dst_y / sub_y;
-            let c_src_x = tile_frame.crop_left / sub_x;
-            let c_src_y = tile_frame.crop_top / sub_y;
+            let c_src_x = (tile_frame.crop_left + src_skip_x) / sub_x;
+            let c_src_y = (tile_frame.crop_top + src_skip_y) / sub_y;
 
             let src_c_stride = tile_frame.c_stride();
             let dst_c_stride = output.c_stride();
@@ -509,6 +729,39 @@ fn decode_iovl(
     Ok(output)
 }
 
+/// AV1 arm of the alpha-plane codec dispatch in [`decode_alpha_plane`].
+///
+/// `None` when the item carries no av1C config (it isn't an AV1 item) or the
+/// decode fails — the same graceful give-up as every other `.ok()?` site in
+/// the alpha path.
+#[cfg(feature = "av1")]
+fn decode_av1_alpha(
+    item: &heif::Item,
+    image_data: &[u8],
+    limits: &Limits,
+    stop: &dyn Stop,
+) -> Option<crate::hevc::DecodedFrame> {
+    if item.av1_config.is_some() {
+        decode_av1_item(item, image_data, limits, stop).ok()
+    } else {
+        None
+    }
+}
+
+/// AV1 arm of the alpha-plane codec dispatch in [`decode_alpha_plane`].
+///
+/// Without the `av1` feature a non-HEVC alpha item simply yields no alpha
+/// plane, so this is always `None`.
+#[cfg(not(feature = "av1"))]
+fn decode_av1_alpha(
+    _item: &heif::Item,
+    _image_data: &[u8],
+    _limits: &Limits,
+    _stop: &dyn Stop,
+) -> Option<crate::hevc::DecodedFrame> {
+    None
+}
+
 /// Decode an AV1-coded image item using rav1d-safe.
 ///
 /// Prepends the av1C configOBUs to the image data, feeds the combined OBU
@@ -521,7 +774,7 @@ fn decode_av1_item(
     limits: &Limits,
     stop: &dyn Stop,
 ) -> Result<crate::hevc::DecodedFrame> {
-    use rav1d_safe::src::managed::{Decoder, Planes, Settings};
+    use rav1d_safe::{Decoder, Planes, Settings};
 
     let config = item
         .av1_config
@@ -540,10 +793,10 @@ fn decode_av1_item(
         )));
     }
 
-    let mut obu_data = Vec::new();
-    obu_data
-        .try_reserve(total_len)
-        .map_err(|_| at!(HeicError::OutOfMemory))?;
+    // Concatenated AV1 payload (config OBUs + image data). Attacker-influenced
+    // size (capped at 256 MiB above), so the per-site default is fallible.
+    let mut obu_data: Vec<u8> =
+        crate::alloc_util::vec_with_capacity(limits.alloc_pref, true, total_len)?;
     obu_data.extend_from_slice(&config.config_obus);
     obu_data.extend_from_slice(image_data);
 
@@ -566,8 +819,8 @@ fn decode_av1_item(
         settings.frame_size_limit = max_pixels.min(u32::MAX as u64) as u32;
     }
     let mut decoder = Decoder::with_settings(settings).map_err(|e| {
-        at!(HeicError::InvalidData(match e {
-            rav1d_safe::src::managed::Error::OutOfMemory => "AV1 decoder init: out of memory",
+        at!(HeicError::InvalidData(match e.error() {
+            rav1d_safe::Error::OutOfMemory => "AV1 decoder init: out of memory",
             _ => "AV1 decoder initialization failed",
         }))
     })?;
@@ -599,14 +852,15 @@ fn decode_av1_item(
 
     // Map rav1d PixelLayout to our chroma_format
     let chroma_format = match frame.pixel_layout() {
-        rav1d_safe::src::managed::PixelLayout::I400 => 0u8,
-        rav1d_safe::src::managed::PixelLayout::I420 => 1,
-        rav1d_safe::src::managed::PixelLayout::I422 => 2,
-        rav1d_safe::src::managed::PixelLayout::I444 => 3,
+        rav1d_safe::PixelLayout::I400 => 0u8,
+        rav1d_safe::PixelLayout::I420 => 1,
+        rav1d_safe::PixelLayout::I422 => 2,
+        rav1d_safe::PixelLayout::I444 => 3,
     };
 
     let mut output =
-        crate::hevc::DecodedFrame::with_params(width, height, bit_depth, chroma_format)?;
+        crate::hevc::DecodedFrame::with_params(width, height, bit_depth, chroma_format)
+            .map_err(crate::error::at_core)?;
 
     // Copy planes from rav1d frame to our DecodedFrame
     match frame.planes() {
@@ -680,7 +934,7 @@ fn decode_av1_item(
 
     // Set color info from the AV1 frame
     let color_info = frame.color_info();
-    output.full_range = color_info.color_range == rav1d_safe::src::managed::ColorRange::Full;
+    output.full_range = color_info.color_range == rav1d_safe::ColorRange::Full;
     output.matrix_coeffs = color_info.matrix_coefficients as u8;
     output.color_primaries = color_info.primaries as u8;
     output.transfer_characteristics = color_info.transfer_characteristics as u8;
@@ -765,11 +1019,10 @@ fn decode_unci_item(
     // Decompress if compression config is present
     let pixel_data: alloc::borrow::Cow<'_, [u8]> =
         if let Some(ref cmp_config) = item.compression_config {
-            let mut decompressed = Vec::new();
-            decompressed
-                .try_reserve(expected_size)
-                .map_err(|_| at!(HeicError::OutOfMemory))?;
-            decompressed.resize(expected_size, 0);
+            // Full decompressed `unci` surface (size bounded above by
+            // min(512 MiB, max_memory_bytes)). Untrusted, so default fallible.
+            let mut decompressed: Vec<u8> =
+                crate::alloc_util::alloc_filled(limits.alloc_pref, true, expected_size)?;
 
             let mut decompressor = zenflate::Decompressor::new();
             let result = match &cmp_config.compression_type.0 {
@@ -800,7 +1053,8 @@ fn decode_unci_item(
     }
 
     // Create output frame — use RGB (chroma_format=3 = 4:4:4) for unci
-    let mut output = crate::hevc::DecodedFrame::with_params(width, height, 8, 3)?;
+    let mut output = crate::hevc::DecodedFrame::with_params(width, height, 8, 3)
+        .map_err(crate::error::at_core)?;
 
     // Set full-range since unci pixels are typically full-range
     output.full_range = true;
@@ -867,20 +1121,14 @@ fn decode_unci_item(
                         if let Some(plane_id) = mapping {
                             let val = pixel_data[pixel_offset + c] as u16;
                             match plane_id {
-                                0 => {
-                                    if dst_idx < output.y_plane.len() {
-                                        output.y_plane[dst_idx] = val;
-                                    }
+                                0 if dst_idx < output.y_plane.len() => {
+                                    output.y_plane[dst_idx] = val;
                                 }
-                                1 => {
-                                    if dst_idx < output.cb_plane.len() {
-                                        output.cb_plane[dst_idx] = val;
-                                    }
+                                1 if dst_idx < output.cb_plane.len() => {
+                                    output.cb_plane[dst_idx] = val;
                                 }
-                                2 => {
-                                    if dst_idx < output.cr_plane.len() {
-                                        output.cr_plane[dst_idx] = val;
-                                    }
+                                2 if dst_idx < output.cr_plane.len() => {
+                                    output.cr_plane[dst_idx] = val;
                                 }
                                 _ => {}
                             }
@@ -916,7 +1164,7 @@ fn decode_unci_item(
 fn decode_grid(
     container: &heif::HeifContainer<'_>,
     grid_item: &heif::Item,
-    depth: u32,
+    budget: DecodeBudget<'_>,
     limits: &Limits,
     stop: &dyn Stop,
     max_threads: Option<usize>,
@@ -992,7 +1240,8 @@ fn decode_grid(
         output_height,
         bit_depth,
         chroma_format,
-    )?;
+    )
+    .map_err(crate::error::at_core)?;
 
     // Streaming decode: decode tiles and blit immediately, dropping each tile
     // (or row of tiles) before decoding the next. This keeps peak memory at
@@ -1010,7 +1259,7 @@ fn decode_grid(
     {
         if let Some(tile_config) = hevc_tile_config {
             // Parallel HEVC: decode tiles concurrently (respecting max_threads), then blit.
-            let all_tiles = decode_tiles_parallel(&tile_data_list, tile_config, max_threads)?;
+            let all_tiles = decode_tiles_parallel(&tile_data_list, tile_config, max_threads, stop)?;
 
             for (tile_idx, tile_frame) in all_tiles.iter().enumerate() {
                 if tile_idx == 0 {
@@ -1036,8 +1285,14 @@ fn decode_grid(
                 let tile_item = container
                     .get_item(tile_id)
                     .ok_or_else(|| at!(HeicError::InvalidData("Missing grid tile")))?;
-                let tile_frame =
-                    decode_item(container, &tile_item, depth + 1, limits, stop, max_threads)?;
+                let tile_frame = decode_item(
+                    container,
+                    &tile_item,
+                    budget.deeper(),
+                    limits,
+                    stop,
+                    max_threads,
+                )?;
                 if tile_idx == 0 {
                     output.full_range = tile_frame.full_range;
                     output.matrix_coeffs = tile_frame.matrix_coeffs;
@@ -1064,14 +1319,21 @@ fn decode_grid(
         for (tile_idx, tile_data) in tile_data_list.iter().enumerate() {
             check_stop(stop)?;
             let tile_frame = if let Some(tile_config) = hevc_tile_config {
-                crate::hevc::decode_with_config(tile_config, tile_data)?
+                crate::backend::decode_one_tile(
+                    budget.backends,
+                    tile_config,
+                    tile_data,
+                    tile_width,
+                    tile_height,
+                    stop,
+                )?
             } else {
                 // Non-HEVC tiles: look up the tile item and dispatch
                 let tile_id = tile_ids[tile_idx];
                 let tile_item = container
                     .get_item(tile_id)
                     .ok_or_else(|| at!(HeicError::InvalidData("Missing grid tile")))?;
-                decode_item(container, &tile_item, depth + 1, limits, stop, None)?
+                decode_item(container, &tile_item, budget.deeper(), limits, stop, None)?
             };
             if tile_idx == 0 {
                 output.full_range = tile_frame.full_range;
@@ -1185,8 +1447,13 @@ pub(crate) fn try_decode_grid_streaming(
     layout: PixelLayout,
     output: &mut [u8],
     max_threads: Option<usize>,
+    backends: &[crate::Backend],
 ) -> Result<Option<(u32, u32)>> {
-    let limits = limits.unwrap_or(&NO_LIMITS);
+    let limits = limits.unwrap_or(&DEFAULT_LIMITS);
+    // `backends` is only consumed by the sequential fallback path that is
+    // cfg-gated to `not(feature = "parallel")`. Silence unused-var warning
+    // when parallel is on.
+    let _ = backends;
 
     check_stop(stop)?;
 
@@ -1285,7 +1552,7 @@ pub(crate) fn try_decode_grid_streaming(
         .ok_or_else(|| at!(HeicError::InvalidData("Missing tile dimensions")))?;
 
     // Determine color conversion overrides from grid item's colr nclx
-    let color_override = match &primary_item.color_info {
+    let color_override = match container.item_nclx(primary_item.id) {
         Some(ColorInfo::Nclx {
             full_range,
             matrix_coefficients,
@@ -1312,6 +1579,7 @@ pub(crate) fn try_decode_grid_streaming(
                 &tile_data_list[row_start..row_end],
                 tile_config,
                 max_threads,
+                stop,
             )?;
 
             for (col, mut tile_frame) in row_tiles.into_iter().enumerate() {
@@ -1348,7 +1616,14 @@ pub(crate) fn try_decode_grid_streaming(
         let _ = max_threads; // unused without parallel feature
         for (tile_idx, tile_data) in tile_data_list.iter().enumerate() {
             check_stop(stop)?;
-            let mut tile_frame = crate::hevc::decode_with_config(tile_config, tile_data)?;
+            let mut tile_frame = crate::backend::decode_one_tile(
+                backends,
+                tile_config,
+                tile_data,
+                tile_width,
+                tile_height,
+                stop,
+            )?;
             if let Some((fr, mc)) = color_override {
                 tile_frame.full_range = fr;
                 tile_frame.matrix_coeffs = mc;
@@ -1392,8 +1667,13 @@ pub(crate) fn try_decode_grid_to_sink(
     layout: PixelLayout,
     sink: &mut dyn crate::RowSink,
     max_threads: Option<usize>,
+    backends: &[crate::Backend],
 ) -> Result<Option<(u32, u32)>> {
-    let limits = limits.unwrap_or(&NO_LIMITS);
+    let limits = limits.unwrap_or(&DEFAULT_LIMITS);
+    // `backends` is only consumed by the sequential fallback path that is
+    // cfg-gated to `not(feature = "parallel")`. Silence unused-var warning
+    // when parallel is on.
+    let _ = backends;
 
     check_stop(stop)?;
 
@@ -1475,7 +1755,7 @@ pub(crate) fn try_decode_grid_to_sink(
         .ok_or_else(|| at!(HeicError::InvalidData("Missing tile dimensions")))?;
 
     // Determine color conversion overrides from grid item's colr nclx
-    let color_override = match &primary_item.color_info {
+    let color_override = match container.item_nclx(primary_item.id) {
         Some(ColorInfo::Nclx {
             full_range,
             matrix_coefficients,
@@ -1516,6 +1796,7 @@ pub(crate) fn try_decode_grid_to_sink(
             &tile_data_list[row_start..row_end],
             tile_config,
             max_threads,
+            stop,
         )?;
 
         #[cfg(not(feature = "parallel"))]
@@ -1524,7 +1805,9 @@ pub(crate) fn try_decode_grid_to_sink(
             tile_data_list[row_start..row_end]
                 .iter()
                 .map(|tile_data| {
-                    crate::hevc::decode_with_config(tile_config, tile_data).map_err(Into::into)
+                    crate::hevc::decode_with_config(tile_config, tile_data)
+                        .map_err(crate::error::hevc_at)
+                        .at()
                 })
                 .collect::<Result<_>>()?
         };
@@ -1706,6 +1989,7 @@ fn decode_alpha_plane(
     primary_frame: &crate::hevc::DecodedFrame,
     limits: &Limits,
     stop: &dyn Stop,
+    backends: &[crate::Backend],
 ) -> Option<Vec<u16>> {
     let alpha_item = container.get_item(alpha_id)?;
     let alpha_data = container.get_item_data(alpha_id).ok()?;
@@ -1719,22 +2003,14 @@ fn decode_alpha_plane(
 
     check_stop(stop).ok()?;
 
-    // Multi-codec dispatch: try HEVC first, then AV1
-    let alpha_frame = if let Some(ref config) = alpha_item.hevc_config {
-        crate::hevc::decode_with_config(config, &alpha_data).ok()?
-    } else {
-        #[cfg(feature = "av1")]
-        {
-            if alpha_item.av1_config.is_some() {
-                decode_av1_item(&alpha_item, &alpha_data, limits, stop).ok()?
-            } else {
-                return None;
-            }
+    // Multi-codec dispatch: try HEVC first, then AV1 (`decode_av1_alpha` is
+    // `None` for a non-AV1 item, and always `None` without the `av1` feature).
+    let alpha_frame = match alpha_item.hevc_config.as_ref() {
+        Some(config) => {
+            let (w, h) = alpha_item.dimensions.unwrap_or((0, 0));
+            crate::backend::decode_one_tile(backends, config, &alpha_data, w, h, stop).ok()?
         }
-        #[cfg(not(feature = "av1"))]
-        {
-            return None;
-        }
+        None => decode_av1_alpha(&alpha_item, &alpha_data, limits, stop)?,
     };
 
     let primary_w = primary_frame.cropped_width();
@@ -1744,15 +2020,23 @@ fn decode_alpha_plane(
 
     // Use u64 arithmetic to avoid u32 overflow
     let total_pixels = usize::try_from((primary_w as u64).checked_mul(primary_h as u64)?).ok()?;
-    let mut alpha_plane = Vec::with_capacity(total_pixels);
+    // Full-image alpha plane, sized from the (untrusted) primary dimensions →
+    // default fallible. This fn returns Option, so an alloc failure maps to
+    // `None` (the same graceful give-up as the other `?`/`.ok()?` sites here).
+    let mut alpha_plane: Vec<u16> =
+        crate::alloc_util::vec_with_capacity(limits.alloc_pref, true, total_pixels).ok()?;
 
     if alpha_w == primary_w && alpha_h == primary_h {
-        // Same dimensions — direct copy of Y plane from cropped region
+        // Same dimensions — direct copy of Y plane from cropped region.
+        // Promote each coordinate to usize before multiplication so the
+        // index cannot wrap when alpha_frame.width is large.
         let y_start = alpha_frame.crop_top;
         let x_start = alpha_frame.crop_left;
+        let stride = alpha_frame.width as usize;
         for y in 0..primary_h {
             for x in 0..primary_w {
-                let src_idx = ((y_start + y) * alpha_frame.width + (x_start + x)) as usize;
+                let src_idx =
+                    (y_start as usize + y as usize) * stride + (x_start as usize + x as usize);
                 alpha_plane.push(alpha_frame.y_plane[src_idx]);
             }
         }
@@ -1770,12 +2054,12 @@ fn decode_alpha_plane(
                 let fx = sx - x0 as f64;
                 let fy = sy - y0 as f64;
 
-                let stride = alpha_frame.width;
-                let off_y = alpha_frame.crop_top;
-                let off_x = alpha_frame.crop_left;
+                let stride = alpha_frame.width as usize;
+                let off_y = alpha_frame.crop_top as usize;
+                let off_x = alpha_frame.crop_left as usize;
 
                 let get = |px: u32, py: u32| -> f64 {
-                    let idx = ((off_y + py) * stride + (off_x + px)) as usize;
+                    let idx = (off_y + py as usize) * stride + (off_x + px as usize);
                     alpha_frame.y_plane.get(idx).copied().unwrap_or(0) as f64
                 };
 
@@ -1797,32 +2081,111 @@ fn decode_alpha_plane(
     Some(alpha_plane)
 }
 
-/// Decode gain map from Apple HDR HEIC.
+/// Decode the HDR gain map from a HEIC/HEIF file.
 ///
-/// Returns the grayscale gain map pixels scaled to 8-bit, along with
-/// the source bit depth and any XMP metadata associated with the gain map item.
-pub(crate) fn decode_gain_map(data: &[u8]) -> Result<HdrGainMap> {
+/// Detects both gain map carriage mechanisms:
+/// 1. **Apple aux item** (iOS 14+) — `urn:com:apple:photo:2020:aux:hdrgainmap`
+///    auxiliary image with XMP metadata. The grayscale Y plane is the gain
+///    map; metadata is parsed from `xmp`.
+/// 2. **HEIF Amendment 1 `tmap`** (ISO 23008-12:2025) — `tmap` derived image
+///    item whose payload is the ISO 21496-1 binary blob (AVIF tmap variant).
+///    `dimg` references point at `[base_image, gain_map_image]`; the second
+///    reference is decoded as the grayscale gain map.
+///
+/// The Apple path is preferred when both are present.
+pub(crate) fn decode_gain_map(data: &[u8], backends: &[crate::Backend]) -> Result<HdrGainMap> {
     let container = heif::parse(data, &Unstoppable)?;
     let primary_item = container
         .primary_item()
         .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
 
-    let gainmap_ids =
-        container.find_auxiliary_items(primary_item.id, "urn:com:apple:photo:2020:aux:hdrgainmap");
+    // 1. Prefer the ISO 21496-1 `tmap` derived item (HEIF Amendment 1 — the
+    //    cross-vendor standard). Apple "Adaptive HDR" (iOS 18+) and Samsung HDR
+    //    files carry it, and it yields parseable ISO 21496-1 metadata
+    //    (`iso21496`). Checked BEFORE the legacy Apple aux so dual-format files
+    //    — which embed both a `tmap` and the proprietary `aux:hdrgainmap` for
+    //    back-compat — surface the standard metadata (a consistent
+    //    tmap-image + tmap-metadata pair) instead of the proprietary aux
+    //    headroom, which carries no ISO 21496-1 binary.
+    if let Some((tmap_item, gainmap_id, iso_bytes)) = find_tmap_gain_map(&container) {
+        let gainmap_item = container
+            .get_item(gainmap_id)
+            .ok_or_else(|| at!(HeicError::InvalidData("Missing tmap gain map item")))?;
+        // Optional XMP attached to the tmap item itself (rare but allowed).
+        let xmp = container
+            .find_xmp_for_item(tmap_item)
+            .map(|c| c.into_owned());
+        return decode_gainmap_image_item(
+            &container,
+            &gainmap_item,
+            xmp,
+            Some(iso_bytes),
+            GainMapOrigin::HeifTmap,
+            backends,
+        );
+    }
 
-    let &gainmap_id = gainmap_ids
+    // 2. Legacy Apple `aux:hdrgainmap` fallback (pre-iOS-18). Proprietary
+    //    headroom metadata lives in XMP-RDF; there is no ISO 21496-1 binary, so
+    //    `iso21496` is `None` and the origin is `AppleAuxItem`.
+    if let Some(&gainmap_id) = container
+        .find_auxiliary_items(primary_item.id, "urn:com:apple:photo:2020:aux:hdrgainmap")
         .first()
-        .ok_or_else(|| at!(HeicError::InvalidData("No HDR gain map found")))?;
+    {
+        let gainmap_item = container
+            .get_item(gainmap_id)
+            .ok_or_else(|| at!(HeicError::InvalidData("Missing gain map item")))?;
+        return decode_gainmap_image_item(
+            &container,
+            &gainmap_item,
+            container
+                .find_xmp_for_item(gainmap_id)
+                .map(|c| c.into_owned()),
+            None,
+            GainMapOrigin::AppleAuxItem,
+            backends,
+        );
+    }
 
-    let gainmap_item = container
-        .get_item(gainmap_id)
-        .ok_or_else(|| at!(HeicError::InvalidData("Missing gain map item")))?;
+    Err(at!(HeicError::InvalidData("No HDR gain map found")))
+}
 
-    // Use decode_item to handle grids, iden, and plain HEVC gain maps
+/// Locate a `tmap` derived item plus its gain map image reference, if any.
+///
+/// Returns `(tmap_item_id, gainmap_item_id, iso21496_bytes)`. Per
+/// av1-avif §4.2.2 and ISO 21496-1, `tmap` references `[base, gainmap]`
+/// via `dimg`; the second reference is the gain map image.
+pub(crate) fn find_tmap_gain_map(
+    container: &heif::HeifContainer<'_>,
+) -> Option<(u32, u32, Vec<u8>)> {
+    for tmap in container.items().filter(|i| i.item_type == ItemType::Tmap) {
+        let refs = container.get_item_references(tmap.id, FourCC::DIMG);
+        // Need at least two references (base + gain map); skip otherwise.
+        let &gainmap_id = refs.get(1)?;
+        let iso_bytes = container.get_item_data(tmap.id).ok()?.into_owned();
+        if iso_bytes.is_empty() {
+            continue;
+        }
+        return Some((tmap.id, gainmap_id, iso_bytes));
+    }
+    None
+}
+
+/// Shared post-processing: decode the gain map HEVC item, take its Y plane,
+/// scale to 8-bit, and assemble the public [`HdrGainMap`].
+fn decode_gainmap_image_item(
+    container: &heif::HeifContainer<'_>,
+    gainmap_item: &heif::Item,
+    xmp: Option<Vec<u8>>,
+    iso21496: Option<Vec<u8>>,
+    origin: GainMapOrigin,
+    backends: &[crate::Backend],
+) -> Result<HdrGainMap> {
+    let counter = DerivedCounter::new(0);
     let frame = decode_item(
-        &container,
-        &gainmap_item,
-        0,
+        container,
+        gainmap_item,
+        DecodeBudget::root(&counter, backends),
         &Limits::default(),
         &Unstoppable,
         None,
@@ -1832,7 +2195,6 @@ pub(crate) fn decode_gain_map(data: &[u8]) -> Result<HdrGainMap> {
     let height = frame.cropped_height();
     let bit_depth = frame.bit_depth;
 
-    // Extract Y plane as grayscale, scale to 8-bit if needed
     let total_pixels = (width as usize)
         .checked_mul(height as usize)
         .ok_or_else(|| at!(HeicError::LimitExceeded("gain map dimensions overflow")))?;
@@ -1841,10 +2203,14 @@ pub(crate) fn decode_gain_map(data: &[u8]) -> Result<HdrGainMap> {
     let y_start = frame.crop_top;
     let x_start = frame.crop_left;
 
-    let mut grayscale = Vec::new();
-    grayscale
-        .try_reserve(total_pixels)
-        .map_err(|_| at!(HeicError::OutOfMemory))?;
+    // Full-image gain-map grayscale plane. Direct-API path (no caller
+    // AllocPreference reaches here), so `CodecDefault` resolves to this site's
+    // own default: fallible, because `total_pixels` is image-sized.
+    let mut grayscale: Vec<u8> = crate::alloc_util::vec_with_capacity(
+        crate::alloc_util::AllocPreference::CodecDefault,
+        true,
+        total_pixels,
+    )?;
 
     for y in 0..height {
         for x in 0..width {
@@ -1859,30 +2225,31 @@ pub(crate) fn decode_gain_map(data: &[u8]) -> Result<HdrGainMap> {
         }
     }
 
-    // Extract XMP metadata associated with the gain map item (if any)
-    let xmp = container
-        .find_xmp_for_item(gainmap_id)
-        .map(|cow| cow.into_owned());
-
     Ok(HdrGainMap {
         data: grayscale,
         width,
         height,
         bit_depth,
         xmp,
+        iso21496,
+        origin,
     })
 }
 
-/// Check if the primary image has an HDR gain map auxiliary image.
+/// Check if the primary image has an HDR gain map, by either mechanism.
 pub(crate) fn has_gain_map(data: &[u8]) -> Result<bool> {
     let container = heif::parse(data, &Unstoppable)?;
     let primary_item = container
         .primary_item()
         .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
 
-    let gainmap_ids =
-        container.find_auxiliary_items(primary_item.id, "urn:com:apple:photo:2020:aux:hdrgainmap");
-    Ok(!gainmap_ids.is_empty())
+    if !container
+        .find_auxiliary_items(primary_item.id, "urn:com:apple:photo:2020:aux:hdrgainmap")
+        .is_empty()
+    {
+        return Ok(true);
+    }
+    Ok(find_tmap_gain_map(&container).is_some())
 }
 
 /// Apply clean aperture (clap box) crop to a decoded frame
@@ -1890,16 +2257,11 @@ fn apply_clean_aperture(frame: &mut crate::hevc::DecodedFrame, clap: &CleanApert
     let conf_width = frame.cropped_width();
     let conf_height = frame.cropped_height();
 
-    let clean_width = if clap.width_d > 0 {
-        clap.width_n / clap.width_d
-    } else {
-        conf_width
-    };
-    let clean_height = if clap.height_d > 0 {
-        clap.height_n / clap.height_d
-    } else {
-        conf_height
-    };
+    let clean_width = clap.width_n.checked_div(clap.width_d).unwrap_or(conf_width);
+    let clean_height = clap
+        .height_n
+        .checked_div(clap.height_d)
+        .unwrap_or(conf_height);
 
     if clean_width >= conf_width && clean_height >= conf_height {
         return;
@@ -1916,16 +2278,25 @@ fn apply_clean_aperture(frame: &mut crate::hevc::DecodedFrame, clap: &CleanApert
         0.0
     };
 
-    let extra_left =
-        round_f64((conf_width as f64 - clean_width as f64) / 2.0 + horiz_off_pixels) as u32;
-    let extra_top =
-        round_f64((conf_height as f64 - clean_height as f64) / 2.0 + vert_off_pixels) as u32;
-    let extra_right = conf_width
-        .saturating_sub(clean_width)
-        .saturating_sub(extra_left);
-    let extra_bottom = conf_height
-        .saturating_sub(clean_height)
-        .saturating_sub(extra_top);
+    // Clamp the offsets to the available crop budget. `horiz_off`/`vert_off`
+    // come straight from the clap box and are unbounded, so without the
+    // `.min()` a crafted clap inflated `extra_left`/`extra_top` past the frame
+    // dimensions; a later `irot` then swapped a huge offset into
+    // crop_right/crop_bottom and the YCbCr→RGB `width - crop_right` underflowed
+    // (panic/OOB). Clamping extra_left to [0, conf_width-clean_width] keeps
+    // extra_left+extra_right == conf_width-clean_width exactly, so the total
+    // crop can never exceed the frame size. (`as u32` already saturates a
+    // negative round to 0.)
+    let max_extra_horiz = conf_width.saturating_sub(clean_width);
+    let max_extra_vert = conf_height.saturating_sub(clean_height);
+    let extra_left = (round_f64((conf_width as f64 - clean_width as f64) / 2.0 + horiz_off_pixels)
+        as u32)
+        .min(max_extra_horiz);
+    let extra_top = (round_f64((conf_height as f64 - clean_height as f64) / 2.0 + vert_off_pixels)
+        as u32)
+        .min(max_extra_vert);
+    let extra_right = max_extra_horiz.saturating_sub(extra_left);
+    let extra_bottom = max_extra_vert.saturating_sub(extra_top);
 
     frame.crop_left += extra_left;
     frame.crop_right += extra_right;
@@ -1966,7 +2337,11 @@ pub(crate) fn extract_exif<'a>(data: &'a [u8]) -> Result<Option<Cow<'a, [u8]>>> 
 }
 
 /// Decode thumbnail image from HEIC container
-pub(crate) fn decode_thumbnail(data: &[u8], layout: PixelLayout) -> Result<Option<DecodeOutput>> {
+pub(crate) fn decode_thumbnail(
+    data: &[u8],
+    layout: PixelLayout,
+    backends: &[crate::Backend],
+) -> Result<Option<DecodeOutput>> {
     let container = heif::parse(data, &Unstoppable)?;
     let primary_item = container
         .primary_item()
@@ -1982,16 +2357,24 @@ pub(crate) fn decode_thumbnail(data: &[u8], layout: PixelLayout) -> Result<Optio
         .ok_or_else(|| at!(HeicError::InvalidData("Thumbnail item not found")))?;
 
     let stop: &dyn Stop = &Unstoppable;
-    let frame = decode_item(&container, &thumb_item, 0, &NO_LIMITS, stop, None)?;
+    let counter = DerivedCounter::new(0);
+    let frame = decode_item(
+        &container,
+        &thumb_item,
+        DecodeBudget::root(&counter, backends),
+        &DEFAULT_LIMITS,
+        stop,
+        None,
+    )?;
 
     let width = frame.cropped_width();
     let height = frame.cropped_height();
 
     let pixels = match layout {
-        PixelLayout::Rgb8 => frame.to_rgb()?,
-        PixelLayout::Rgba8 => frame.to_rgba()?,
-        PixelLayout::Bgr8 => frame.to_bgr()?,
-        PixelLayout::Bgra8 => frame.to_bgra()?,
+        PixelLayout::Rgb8 => frame.to_rgb().map_err(crate::error::at_core)?,
+        PixelLayout::Rgba8 => frame.to_rgba().map_err(crate::error::at_core)?,
+        PixelLayout::Bgr8 => frame.to_bgr().map_err(crate::error::at_core)?,
+        PixelLayout::Bgra8 => frame.to_bgra().map_err(crate::error::at_core)?,
     };
 
     Ok(Some(DecodeOutput {
@@ -2066,7 +2449,7 @@ pub(crate) fn has_depth(data: &[u8]) -> Result<bool> {
 }
 
 /// Decode the depth map auxiliary image.
-pub(crate) fn decode_depth(data: &[u8]) -> Result<crate::DepthMap> {
+pub(crate) fn decode_depth(data: &[u8], backends: &[crate::Backend]) -> Result<crate::DepthMap> {
     use crate::auxiliary::{AuxiliaryImageType, parse_depth_representation_info};
 
     let container = heif::parse(data, &Unstoppable)?;
@@ -2105,10 +2488,11 @@ pub(crate) fn decode_depth(data: &[u8]) -> Result<crate::DepthMap> {
         .unwrap_or_default();
 
     // Decode the depth image using the same item decode pipeline
+    let counter = DerivedCounter::new(0);
     let frame = decode_item(
         &container,
         &depth_item,
-        0,
+        DecodeBudget::root(&counter, backends),
         &Limits::default(),
         &Unstoppable,
         None,
@@ -2123,10 +2507,13 @@ pub(crate) fn decode_depth(data: &[u8]) -> Result<crate::DepthMap> {
         .checked_mul(height as usize)
         .ok_or_else(|| at!(HeicError::LimitExceeded("depth map dimensions overflow")))?;
 
-    let mut depth_data = Vec::new();
-    depth_data
-        .try_reserve(total_pixels)
-        .map_err(|_| at!(HeicError::OutOfMemory))?;
+    // Full-image depth (Y) plane. Direct-API path; `CodecDefault` resolves to
+    // the site default: fallible, because `total_pixels` is image-sized.
+    let mut depth_data: Vec<u16> = crate::alloc_util::vec_with_capacity(
+        crate::alloc_util::AllocPreference::CodecDefault,
+        true,
+        total_pixels,
+    )?;
 
     let y_start = frame.crop_top;
     let x_start = frame.crop_left;
@@ -2154,22 +2541,31 @@ pub(crate) fn decode_auxiliary_item(
     data: &[u8],
     item_id: u32,
     layout: PixelLayout,
+    backends: &[crate::Backend],
 ) -> Result<DecodeOutput> {
     let container = heif::parse(data, &Unstoppable)?;
     let item = container
         .get_item(item_id)
         .ok_or_else(|| at!(HeicError::InvalidData("auxiliary item not found")))?;
 
-    let frame = decode_item(&container, &item, 0, &Limits::default(), &Unstoppable, None)?;
+    let counter = DerivedCounter::new(0);
+    let frame = decode_item(
+        &container,
+        &item,
+        DecodeBudget::root(&counter, backends),
+        &Limits::default(),
+        &Unstoppable,
+        None,
+    )?;
 
     let width = frame.cropped_width();
     let height = frame.cropped_height();
 
     let pixels = match layout {
-        PixelLayout::Rgb8 => frame.to_rgb()?,
-        PixelLayout::Rgba8 => frame.to_rgba()?,
-        PixelLayout::Bgr8 => frame.to_bgr()?,
-        PixelLayout::Bgra8 => frame.to_bgra()?,
+        PixelLayout::Rgb8 => frame.to_rgb().map_err(crate::error::at_core)?,
+        PixelLayout::Rgba8 => frame.to_rgba().map_err(crate::error::at_core)?,
+        PixelLayout::Bgr8 => frame.to_bgr().map_err(crate::error::at_core)?,
+        PixelLayout::Bgra8 => frame.to_bgra().map_err(crate::error::at_core)?,
     };
 
     Ok(DecodeOutput {
@@ -2187,12 +2583,21 @@ pub(crate) fn decode_auxiliary_item(
 fn decode_aux_to_grayscale(
     container: &heif::HeifContainer<'_>,
     item_id: u32,
+    backends: &[crate::Backend],
 ) -> Result<(Vec<u8>, u32, u32)> {
     let item = container
         .get_item(item_id)
         .ok_or_else(|| at!(HeicError::InvalidData("auxiliary item not found")))?;
 
-    let frame = decode_item(container, &item, 0, &Limits::default(), &Unstoppable, None)?;
+    let counter = DerivedCounter::new(0);
+    let frame = decode_item(
+        container,
+        &item,
+        DecodeBudget::root(&counter, backends),
+        &Limits::default(),
+        &Unstoppable,
+        None,
+    )?;
 
     let width = frame.cropped_width();
     let height = frame.cropped_height();
@@ -2200,7 +2605,18 @@ fn decode_aux_to_grayscale(
     let y_start = frame.crop_top;
     let x_start = frame.crop_left;
 
-    let mut grayscale = Vec::with_capacity((width * height) as usize);
+    // Overflow-checked so a large auxiliary image can't wrap the byte count to
+    // a small value before the allocation.
+    let total_pixels = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| at!(HeicError::LimitExceeded("auxiliary dimensions overflow")))?;
+    // Full-image auxiliary grayscale plane. Direct-API path; `CodecDefault`
+    // resolves to the site default: fallible, because it is image-sized.
+    let mut grayscale: Vec<u8> = crate::alloc_util::vec_with_capacity(
+        crate::alloc_util::AllocPreference::CodecDefault,
+        true,
+        total_pixels,
+    )?;
     for y in 0..height {
         for x in 0..width {
             let src_idx = ((y_start + y) * frame.width + (x_start + x)) as usize;
@@ -2222,7 +2638,10 @@ fn decode_aux_to_grayscale(
 ///
 /// Looks for all known matte auxiliary types (portrait, skin, hair, teeth,
 /// glasses) and decodes each to an 8-bit grayscale matte.
-pub(crate) fn decode_mattes(data: &[u8]) -> Result<Vec<crate::SegmentationMatte>> {
+pub(crate) fn decode_mattes(
+    data: &[u8],
+    backends: &[crate::Backend],
+) -> Result<Vec<crate::SegmentationMatte>> {
     use crate::auxiliary::AuxiliaryImageType;
 
     let container = heif::parse(data, &Unstoppable)?;
@@ -2258,7 +2677,7 @@ pub(crate) fn decode_mattes(data: &[u8]) -> Result<Vec<crate::SegmentationMatte>
     for (aux_type, urn) in matte_urns {
         let aux_ids = container.find_auxiliary_items(primary_item.id, urn);
         if let Some(&aux_id) = aux_ids.first() {
-            let (pixels, width, height) = decode_aux_to_grayscale(&container, aux_id)?;
+            let (pixels, width, height) = decode_aux_to_grayscale(&container, aux_id, backends)?;
             mattes.push(crate::SegmentationMatte {
                 data: pixels,
                 width,
@@ -2277,6 +2696,7 @@ pub(crate) fn decode_mattes(data: &[u8]) -> Result<Vec<crate::SegmentationMatte>
 pub(crate) fn decode_matte(
     data: &[u8],
     matte_type: &crate::auxiliary::AuxiliaryImageType,
+    backends: &[crate::Backend],
 ) -> Result<Option<crate::SegmentationMatte>> {
     let container = heif::parse(data, &Unstoppable)?;
     let primary_item = container
@@ -2288,11 +2708,68 @@ pub(crate) fn decode_matte(
         return Ok(None);
     };
 
-    let (pixels, width, height) = decode_aux_to_grayscale(&container, aux_id)?;
+    let (pixels, width, height) = decode_aux_to_grayscale(&container, aux_id, backends)?;
     Ok(Some(crate::SegmentationMatte {
         data: pixels,
         width,
         height,
         matte_type: matte_type.clone(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// H-2 regression: the per-decode-request `decode_item` budget caps
+    /// the total number of derived-image traversals, so a crafted graph
+    /// with shallow depth but enormous fan-out cannot drive the
+    /// container parser into multi-second linear scans.
+    #[test]
+    fn decode_budget_charges_until_exhausted() {
+        let counter = DerivedCounter::new(0);
+        let budget = DecodeBudget::root(&counter, &[]);
+        // The counter should accept exactly MAX_DERIVED_INVOCATIONS calls.
+        for _ in 0..MAX_DERIVED_INVOCATIONS {
+            budget.charge().expect("under cap should succeed");
+        }
+        assert!(budget.charge().is_err(), "must reject past the cap");
+    }
+
+    /// H-2 regression: deeper budgets share the same counter, so fan-out
+    /// at depth 2 with thousands of children is accounted for in the
+    /// same total as the parent.
+    #[test]
+    fn decode_budget_shared_counter_across_depths() {
+        let counter = DerivedCounter::new(0);
+        let parent = DecodeBudget::root(&counter, &[]);
+        let child = parent.deeper();
+        let grandchild = child.deeper();
+        for _ in 0..10 {
+            parent.charge().unwrap();
+            child.charge().unwrap();
+            grandchild.charge().unwrap();
+        }
+        assert_eq!(counter.get(), 30, "all charges share the same counter");
+        assert_eq!(parent.depth, 0);
+        assert_eq!(child.depth, 1);
+        assert_eq!(grandchild.depth, 2);
+    }
+
+    /// CR-2 regression: the default `Limits` applied when a caller
+    /// passes `None` reject obvious OOM-bait dimensions like
+    /// 65535x65535.
+    #[test]
+    fn default_limits_reject_large_dimensions() {
+        // The audit's CR-2 example: pic_width=65535, pic_height=65535.
+        // Under an all-`None` limits config, check_dimensions returned
+        // Ok and the decoder went on to allocate ~8 GiB. The default
+        // limits must reject this.
+        let res = DEFAULT_LIMITS.check_dimensions(65535, 65535);
+        assert!(res.is_err(), "default limits must reject 65535x65535");
+
+        // A reasonable still (8K) is accepted.
+        let ok = DEFAULT_LIMITS.check_dimensions(7680, 4320);
+        assert!(ok.is_ok(), "default limits must accept 8K");
+    }
 }

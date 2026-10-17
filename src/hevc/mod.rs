@@ -6,8 +6,6 @@
 pub(crate) mod bitstream;
 pub(crate) mod cabac;
 pub(crate) mod color_convert;
-#[cfg(target_arch = "aarch64")]
-mod color_convert_neon;
 mod ctu;
 mod deblock;
 pub(crate) mod debug;
@@ -15,7 +13,7 @@ pub(crate) mod dpb;
 pub(crate) mod inter;
 mod intra;
 pub(crate) mod mc;
-pub(crate) mod params;
+pub mod params;
 mod picture;
 pub(crate) mod refpic;
 mod residual;
@@ -25,7 +23,7 @@ mod transform;
 mod transform_simd;
 #[cfg(target_arch = "aarch64")]
 mod transform_simd_neon;
-mod transforms;
+pub(crate) mod transforms;
 
 pub use picture::DecodedFrame;
 
@@ -35,17 +33,29 @@ pub use deblock::enable_deblock_trace;
 use crate::error::HevcError;
 use crate::heif::HevcDecoderConfig;
 use alloc::vec::Vec;
+use whereat::{At, at};
 
 use dpb::{Dpb, DpbEntry};
 use inter::RefPicLists;
 
-type Result<T> = core::result::Result<T, HevcError>;
+/// Result of every HEVC decoder entry point: a [`whereat`]-located
+/// [`HevcError`].
+///
+/// Every `HevcError` is born located (`at!`) at the line that detected the
+/// problem, so the trace a caller sees starts inside the CABAC / residual /
+/// slice / parameter-set code, not at the module boundary (#25). The public
+/// entry points (`decode`, `decode_with_config[_stop]`, `get_info[_from_config]`,
+/// `params::parse_{vps,sps,pps}`, `VideoDecoder::{decode_nal,decode_annex_b}`)
+/// return it unchanged, and `crate::error::hevc_at` carries it into
+/// `At<HeicError>` at the container boundary. Inspect the origin with
+/// [`At::full_trace`] / [`At::error`]; `At::into_inner` drops the trace.
+pub type Result<T> = core::result::Result<T, At<HevcError>>;
 
 /// Decode HEVC bitstream to pixels (Annex B or raw format)
 pub fn decode(data: &[u8]) -> Result<DecodedFrame> {
     // Parse NAL units
     let nal_units = bitstream::parse_nal_units(data)?;
-    decode_nal_units(&nal_units)
+    decode_nal_units(&nal_units, &enough::Unstoppable)
 }
 
 /// Decode HEVC from HEIC container (config + image data)
@@ -53,6 +63,24 @@ pub fn decode(data: &[u8]) -> Result<DecodedFrame> {
 /// This is the preferred method for HEIC files where parameter sets
 /// are stored separately in the hvcC box.
 pub fn decode_with_config(config: &HevcDecoderConfig, image_data: &[u8]) -> Result<DecodedFrame> {
+    decode_with_config_stop(config, image_data, &enough::Unstoppable)
+}
+
+/// Same as [`decode_with_config`], but checks `stop` for cancellation.
+///
+/// `stop` is observed both at tile entry (here) and *periodically inside the
+/// per-CTU decode loop* (every 256 CTUs, the internal `STOP_CHECK_CTU_INTERVAL`,
+/// checked in the slice decode loop). That second check is what lets a single
+/// large intra frame (e.g. a 16384×16384 one-tile image) be cancelled
+/// mid-frame, instead of only between tiles of a grid.
+pub fn decode_with_config_stop(
+    config: &HevcDecoderConfig,
+    image_data: &[u8],
+    stop: &dyn enough::Stop,
+) -> Result<DecodedFrame> {
+    if stop.should_stop() {
+        return Err(at!(HevcError::Cancelled(enough::StopReason::Cancelled)));
+    }
     let mut nal_units = Vec::new();
 
     // Parse parameter sets from hvcC
@@ -67,7 +95,7 @@ pub fn decode_with_config(config: &HevcDecoderConfig, image_data: &[u8]) -> Resu
     let mut slice_nals = bitstream::parse_length_prefixed_ext(image_data, length_size)?;
     nal_units.append(&mut slice_nals);
 
-    decode_nal_units(&nal_units)
+    decode_nal_units(&nal_units, stop)
 }
 
 /// Get image info from HEIC config
@@ -81,11 +109,18 @@ pub fn get_info_from_config(config: &HevcDecoderConfig) -> Result<ImageInfo> {
             return Ok(ImageInfo { width, height });
         }
     }
-    Err(HevcError::MissingParameterSet("SPS"))
+    Err(at!(HevcError::MissingParameterSet("SPS")))
 }
 
-/// Internal: decode from parsed NAL units
-fn decode_nal_units(nal_units: &[bitstream::NalUnit<'_>]) -> Result<DecodedFrame> {
+/// Internal: decode from parsed NAL units.
+///
+/// `stop` is forwarded into the per-slice CTU loop so cancellation is observed
+/// mid-frame, not only at slice entry. Pass [`enough::Unstoppable`] when
+/// cancellation is not needed.
+fn decode_nal_units(
+    nal_units: &[bitstream::NalUnit<'_>],
+    stop: &dyn enough::Stop,
+) -> Result<DecodedFrame> {
     // Find and parse parameter sets
     let mut _vps = None;
     let mut sps = None;
@@ -106,23 +141,23 @@ fn decode_nal_units(nal_units: &[bitstream::NalUnit<'_>]) -> Result<DecodedFrame
         }
     }
 
-    let sps = sps.ok_or(HevcError::MissingParameterSet("SPS"))?;
-    let pps = pps.ok_or(HevcError::MissingParameterSet("PPS"))?;
+    let sps = sps.ok_or_else(|| at!(HevcError::MissingParameterSet("SPS")))?;
+    let pps = pps.ok_or_else(|| at!(HevcError::MissingParameterSet("PPS")))?;
 
     // Sanity-check dimensions before allocating (prevent OOM from malicious SPS)
     let w = sps.pic_width_in_luma_samples;
     let h = sps.pic_height_in_luma_samples;
     if w == 0 || h == 0 || w > 16384 || h > 16384 {
-        return Err(HevcError::InvalidParameterSet {
+        return Err(at!(HevcError::InvalidParameterSet {
             kind: "SPS",
             msg: alloc::format!("invalid dimensions {}x{}", w, h),
-        });
+        }));
     }
     if w.checked_mul(h).is_none() {
-        return Err(HevcError::InvalidParameterSet {
+        return Err(at!(HevcError::InvalidParameterSet {
             kind: "SPS",
             msg: alloc::format!("dimensions {}x{} overflow u32", w, h),
-        });
+        }));
     }
 
     // Create frame buffer with actual bit depth and chroma format from SPS
@@ -131,7 +166,8 @@ fn decode_nal_units(nal_units: &[bitstream::NalUnit<'_>]) -> Result<DecodedFrame
         sps.pic_height_in_luma_samples,
         sps.bit_depth_y(),
         sps.chroma_format_idc,
-    )?;
+    )
+    .map_err(|e| at!(HevcError::from(e)))?;
     frame.full_range = sps.video_full_range_flag;
     frame.matrix_coeffs = sps.matrix_coeffs;
     frame.color_primaries = sps.color_primaries;
@@ -147,19 +183,44 @@ fn decode_nal_units(nal_units: &[bitstream::NalUnit<'_>]) -> Result<DecodedFrame
             3 => (1, 1), // 4:4:4
             _ => (2, 2), // Default to 4:2:0
         };
+        // SPS parser already rejects offsets that would overflow these
+        // multiplications or underflow the frame, but use saturating_mul
+        // here so the rest of the decoder cannot panic on debug-overflow
+        // even if a future caller injects an unvalidated SPS.
         frame.set_crop(
-            sps.conf_win_offset.0 * sub_width_c,  // left
-            sps.conf_win_offset.1 * sub_width_c,  // right
-            sps.conf_win_offset.2 * sub_height_c, // top
-            sps.conf_win_offset.3 * sub_height_c, // bottom
+            sps.conf_win_offset.0.saturating_mul(sub_width_c), // left
+            sps.conf_win_offset.1.saturating_mul(sub_width_c), // right
+            sps.conf_win_offset.2.saturating_mul(sub_height_c), // top
+            sps.conf_win_offset.3.saturating_mul(sub_height_c), // bottom
         );
     }
 
     // Decode slice data (base layer only — skip enhancement layer NALs in L-HEVC streams)
     for nal in nal_units {
         if nal.nal_type.is_slice() && nal.nuh_layer_id == 0 {
-            decode_slice(nal, &sps, &pps, &mut frame)?;
+            decode_slice(nal, &sps, &pps, &mut frame, stop)?;
         }
+    }
+
+    // A complete decode writes every coded luma sample. If any remain at the
+    // UNINIT sentinel, the bitstream was truncated/corrupt and the decoder ran
+    // out of data mid-frame — the CABAC EOF tolerance lets that "succeed" with
+    // undecoded CTBs. Fail loudly rather than return sentinel pixels (u16::MAX,
+    // which would otherwise leak into the output clamped to white). The scan
+    // short-circuits on the first sentinel; for a complete frame it is a single
+    // linear pass, negligible vs decode cost.
+    // Decode-completeness guard: a complete decode writes every coded luma
+    // sample. If any remain at the UNINIT sentinel, the bitstream was
+    // truncated/corrupt and the decoder ran out of data mid-frame (the CABAC
+    // EOF tolerance lets that "succeed" with undecoded CTBs) — fail loudly
+    // rather than return sentinel pixels (u16::MAX, clamped to white in RGB).
+    // Verified safe: the bundled corpus (tests/corpus_decode.rs) and the
+    // now-fixed monochrome gain map all decode with zero UNINIT. The scan
+    // short-circuits on the first sentinel.
+    if frame.y_plane.contains(&picture::UNINIT_SAMPLE) {
+        return Err(at!(HevcError::InvalidBitstream(
+            "incomplete decode: undecoded luma samples remain (truncated bitstream)",
+        )));
     }
 
     Ok(frame)
@@ -177,7 +238,45 @@ pub fn get_info(data: &[u8]) -> Result<ImageInfo> {
         }
     }
 
-    Err(HevcError::MissingParameterSet("SPS"))
+    Err(at!(HevcError::MissingParameterSet("SPS")))
+}
+
+/// Given the emulation prevention byte positions of a NAL payload (EBSP
+/// offsets relative to the byte after the 2-byte NAL header) and the RBSP
+/// offset where `slice_data` starts within that payload, return the EP byte
+/// positions in the *slice_data*'s EBSP space.
+///
+/// EP bytes located inside the slice header are filtered out; the remaining
+/// ones are translated so position 0 corresponds to the start of slice_data.
+/// This list is what `SliceContext` needs to convert WPP/tile entry point
+/// offsets (per H.265 spec 7.4.7.1, expressed in EBSP byte space) into RBSP
+/// offsets within `slice_data` before seeking.
+fn compute_ep_positions_in_slice_data(
+    payload_ep_positions: &[usize],
+    data_offset_rbsp: usize,
+) -> alloc::vec::Vec<u32> {
+    // For each EP byte at EBSP position e_i (0-indexed by i), the RBSP
+    // position the byte WOULD have occupied if not stripped is e_i - i. An
+    // EP byte belongs to the slice header iff that position is below
+    // data_offset_rbsp. The EBSP starting offset of slice_data is then
+    // data_offset_rbsp plus the count of header-internal EP bytes; once
+    // we've seen a slice_data EP, all later ones are also slice_data (EP
+    // positions are strictly increasing, so rbsp_pos_of_ep is monotonic).
+    //
+    // EP positions are spaced at least 3 bytes apart (the 0x00 0x00 0x03
+    // pattern), so ep_pos >= 2 + 3*i > i and the subtraction never wraps.
+    let mut result = alloc::vec::Vec::new();
+    let mut ep_in_header: usize = 0;
+    for (i, &ep_pos) in payload_ep_positions.iter().enumerate() {
+        let rbsp_pos_of_ep = ep_pos - i;
+        if rbsp_pos_of_ep < data_offset_rbsp {
+            ep_in_header += 1;
+            continue;
+        }
+        let slice_data_ebsp_start = data_offset_rbsp + ep_in_header;
+        result.push((ep_pos - slice_data_ebsp_start) as u32);
+    }
+    result
 }
 
 /// Calculate cropped dimensions from SPS conformance window
@@ -330,9 +429,11 @@ impl VideoDecoder {
         {
             if !lf.deblocking_disabled {
                 let inter_ctx = if !lf.is_intra_slice {
-                    let sps = self.sps.as_ref().ok_or(HevcError::MissingParameterSet(
-                        "SPS missing at picture finish",
-                    ))?;
+                    let sps = self.sps.as_ref().ok_or_else(|| {
+                        at!(HevcError::MissingParameterSet(
+                            "SPS missing at picture finish",
+                        ))
+                    })?;
                     let min_pu = ((1u32 << sps.log2_min_cb_size()) / 2).max(1);
                     let pu_stride = sps.pic_width_in_luma_samples.div_ceil(min_pu);
                     Some(deblock::InterDeblockCtx {
@@ -387,11 +488,11 @@ impl VideoDecoder {
         let sps = self
             .sps
             .clone()
-            .ok_or(HevcError::MissingParameterSet("SPS"))?;
+            .ok_or_else(|| at!(HevcError::MissingParameterSet("SPS")))?;
         let pps = self
             .pps
             .clone()
-            .ok_or(HevcError::MissingParameterSet("PPS"))?;
+            .ok_or_else(|| at!(HevcError::MissingParameterSet("PPS")))?;
 
         let parse_result = slice::SliceHeader::parse(nal, &sps, &pps)?;
         let slice_header = parse_result.header;
@@ -472,7 +573,7 @@ impl VideoDecoder {
                 if idx < sps.short_term_rps.len() {
                     &sps.short_term_rps[idx]
                 } else {
-                    return Err(HevcError::InvalidBitstream("RPS index out of range"));
+                    return Err(at!(HevcError::InvalidBitstream("RPS index out of range")));
                 }
             };
 
@@ -573,10 +674,14 @@ impl VideoDecoder {
         let pic = self
             .current_pic
             .as_mut()
-            .ok_or(HevcError::DecodingError("no current picture"))?;
+            .ok_or_else(|| at!(HevcError::DecodingError("no current picture")))?;
         let slice_data = &nal.payload[data_offset..];
         let mut ctx = ctu::SliceContext::new(&sps, &pps, &slice_header, slice_data)?;
         ctx.curr_poc = curr_poc;
+        ctx.set_ep_byte_positions(compute_ep_positions_in_slice_data(
+            &nal.ep_byte_positions,
+            data_offset,
+        ));
 
         // For continuation slices, inject maps from previous slices so that
         // CABAC context derivation (split_cu_flag, intra mode prediction, QP
@@ -640,7 +745,10 @@ impl VideoDecoder {
             }
         }
 
-        ctx.decode_slice(&mut pic.frame)?;
+        // The multi-frame video decoder path does not currently surface a
+        // `Stop`; cancellation is plumbed through the still-image HEIC path
+        // (`decode_with_config_stop` → `decode_nal_units` → free `decode_slice`).
+        ctx.decode_slice(&mut pic.frame, &enough::Unstoppable)?;
 
         // Store loop filter parameters (deferred until all slices are decoded)
         // Each slice may have different deblocking offsets; the last slice's
@@ -699,29 +807,16 @@ impl VideoDecoder {
     }
 }
 
-/// Clone a DecodedFrame's planes for use as a reference (no deblock/qp metadata needed)
+/// Clone a DecodedFrame's planes for use as a reference (no deblock/qp metadata needed).
 fn clone_frame_for_ref(f: &DecodedFrame) -> DecodedFrame {
-    DecodedFrame {
-        width: f.width,
-        height: f.height,
-        y_plane: f.y_plane.clone(),
-        cb_plane: f.cb_plane.clone(),
-        cr_plane: f.cr_plane.clone(),
-        bit_depth: f.bit_depth,
-        chroma_format: f.chroma_format,
-        crop_left: f.crop_left,
-        crop_right: f.crop_right,
-        crop_top: f.crop_top,
-        crop_bottom: f.crop_bottom,
-        deblock_flags: Vec::new(),
-        deblock_stride: 0,
-        qp_map: Vec::new(),
-        alpha_plane: None,
-        full_range: f.full_range,
-        matrix_coeffs: f.matrix_coeffs,
-        color_primaries: f.color_primaries,
-        transfer_characteristics: f.transfer_characteristics,
-    }
+    // Clone everything, then drop the transient decode-time metadata that
+    // reference frames don't need (saves memory across the DPB).
+    let mut out = f.clone();
+    out.deblock_flags = Vec::new();
+    out.deblock_stride = 0;
+    out.qp_map = Vec::new();
+    out.alpha_plane = None;
+    out
 }
 
 /// Create a frame from SPS parameters
@@ -731,7 +826,8 @@ fn create_frame(sps: &params::Sps) -> Result<DecodedFrame> {
         sps.pic_height_in_luma_samples,
         sps.bit_depth_y(),
         sps.chroma_format_idc,
-    )?;
+    )
+    .map_err(|e| at!(HevcError::from(e)))?;
     frame.full_range = sps.video_full_range_flag;
     frame.matrix_coeffs = sps.matrix_coeffs;
     frame.color_primaries = sps.color_primaries;
@@ -746,10 +842,10 @@ fn create_frame(sps: &params::Sps) -> Result<DecodedFrame> {
             _ => (2, 2),
         };
         frame.set_crop(
-            sps.conf_win_offset.0 * sub_width_c,
-            sps.conf_win_offset.1 * sub_width_c,
-            sps.conf_win_offset.2 * sub_height_c,
-            sps.conf_win_offset.3 * sub_height_c,
+            sps.conf_win_offset.0.saturating_mul(sub_width_c),
+            sps.conf_win_offset.1.saturating_mul(sub_width_c),
+            sps.conf_win_offset.2.saturating_mul(sub_height_c),
+            sps.conf_win_offset.3.saturating_mul(sub_height_c),
         );
     }
     Ok(frame)
@@ -797,27 +893,131 @@ fn apply_loop_filters(
 
 /// Stateless decode of a single slice (for HEIC I-frame images).
 /// Rejects P/B slices — use `VideoDecoder` for inter prediction.
+///
+/// `stop` is checked periodically inside the CTU loop so a large single-tile
+/// frame can be cancelled mid-decode.
 fn decode_slice(
     nal: &bitstream::NalUnit<'_>,
     sps: &params::Sps,
     pps: &params::Pps,
     frame: &mut DecodedFrame,
+    stop: &dyn enough::Stop,
 ) -> Result<()> {
     let parse_result = slice::SliceHeader::parse(nal, sps, pps)?;
     let slice_header = parse_result.header;
     let data_offset = parse_result.data_offset;
 
     if !slice_header.slice_type.is_intra() {
-        return Err(HevcError::Unsupported(
+        return Err(at!(HevcError::Unsupported(
             "P/B slices require VideoDecoder (use decode_nal())",
-        ));
+        )));
     }
 
     let slice_data = &nal.payload[data_offset..];
     let mut ctx = ctu::SliceContext::new(sps, pps, &slice_header, slice_data)?;
-    ctx.decode_slice(frame)?;
+    ctx.set_ep_byte_positions(compute_ep_positions_in_slice_data(
+        &nal.ep_byte_positions,
+        data_offset,
+    ));
+    ctx.decode_slice(frame, stop)?;
 
     apply_loop_filters(&slice_header, sps, pps, &ctx, frame);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn origin_file(err: &At<HevcError>) -> alloc::string::String {
+        let loc = err
+            .frames()
+            .next()
+            .and_then(|f| f.location())
+            .unwrap_or_else(|| panic!("error has no located frame: {err:?}"));
+        loc.file().replace('\\', "/")
+    }
+
+    /// #25: an error born deep in the decoder carries the line that detected
+    /// it, not the module boundary. A truncated SPS payload fails inside the
+    /// parameter-set / bitstream reader, so the first frame must be a
+    /// `src/hevc/` file other than this one.
+    #[test]
+    fn truncated_sps_error_is_located_inside_the_parser() {
+        // Annex-B start code + SPS NAL header (type 33) + a 1-byte payload.
+        let data = [0, 0, 0, 1, 0x42, 0x01, 0x01];
+        let err = decode(&data).unwrap_err();
+        let file = origin_file(&err);
+        assert!(
+            file.contains("src/hevc/") && !file.ends_with("src/hevc/mod.rs"),
+            "origin should be inside the parameter-set parser, got {file} ({err})"
+        );
+    }
+
+    /// The boundary-level check ("no SPS at all") is detected here in mod.rs,
+    /// and its frame says so.
+    #[test]
+    fn missing_sps_error_is_located_in_decode_nal_units() {
+        // A lone slice NAL (type 1) with no parameter sets.
+        let data = [0, 0, 0, 1, 0x02, 0x01, 0x00];
+        let err = decode(&data).unwrap_err();
+        assert!(
+            matches!(err.error(), HevcError::MissingParameterSet("SPS")),
+            "{err}"
+        );
+        let file = origin_file(&err);
+        assert!(file.ends_with("src/hevc/mod.rs"), "got {file}");
+    }
+
+    /// The public entry point keeps its bare `HevcError` signature and payload.
+    #[test]
+    fn public_decode_returns_the_same_payload() {
+        let data = [0, 0, 0, 1, 0x02, 0x01, 0x00];
+        assert!(matches!(
+            decode(&data),
+            Err(e) if matches!(e.error(), HevcError::MissingParameterSet("SPS"))
+        ));
+    }
+
+    #[test]
+    fn ep_positions_no_ep_bytes() {
+        // No emulation prevention bytes at all
+        let got = compute_ep_positions_in_slice_data(&[], 28);
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn ep_positions_all_after_header() {
+        // Slice header occupies RBSP bytes [0, 28); both EP bytes (EBSP pos 100,
+        // 5000) sit well past the header, so the result is each EP's EBSP
+        // position minus the slice_data EBSP start (= 28 since no EP byte
+        // landed in the header).
+        let got = compute_ep_positions_in_slice_data(&[100, 5000], 28);
+        assert_eq!(got, vec![72, 4972]);
+    }
+
+    #[test]
+    fn ep_positions_some_in_header() {
+        // EP at EBSP pos 10 falls inside the slice header (rbsp_pos = 10 - 0 = 10 < 28).
+        // EP at EBSP pos 6000 falls inside slice_data (rbsp_pos = 6000 - 1 = 5999 >= 28).
+        // The data_offset in EBSP space becomes 28 + 1 = 29 (one header-internal EP byte).
+        // So the second EP's slice-data-EBSP offset = 6000 - 29 = 5971.
+        let got = compute_ep_positions_in_slice_data(&[10, 6000], 28);
+        assert_eq!(got, vec![5971]);
+    }
+
+    #[test]
+    fn ep_offset_conversion_round_trip() {
+        // With EP at slice-data-EBSP positions [100, 250], an EBSP offset of
+        // 17846 falls past both EPs, so the RBSP offset is 17846 - 2 = 17844.
+        // (Implemented in SliceContext::ebsp_offset_to_rbsp via the same logic.)
+        let positions: Vec<u32> = vec![100, 250];
+        let count = positions.iter().filter(|&&p| p < 17846u32).count() as u32;
+        assert_eq!(17846 - count, 17844);
+
+        // An offset that lands before both EPs is unchanged.
+        let count = positions.iter().filter(|&&p| p < 50u32).count() as u32;
+        assert_eq!(50 - count, 50);
+    }
 }

@@ -63,9 +63,19 @@ fn trace_edge(
     use std::io::Write;
     use std::sync::LazyLock;
     use std::sync::Mutex;
-    static TRACE_FILE: LazyLock<Mutex<std::fs::File>> =
-        LazyLock::new(|| Mutex::new(std::fs::File::create("/tmp/our_deblock_trace.txt").unwrap()));
-    let mut f = TRACE_FILE.lock().unwrap();
+    // Trace file is best-effort: if /tmp/ is read-only or full, the
+    // LazyLock holds an `Option<File>` that's None — every write
+    // silently no-ops instead of panicking. This keeps the trace
+    // helper safe to call from production code with the trace
+    // toggle accidentally left on (server boxes with restricted
+    // tmpfs would otherwise crash on the first deblock edge).
+    static TRACE_FILE: LazyLock<Mutex<Option<std::fs::File>>> =
+        LazyLock::new(|| Mutex::new(std::fs::File::create("/tmp/our_deblock_trace.txt").ok()));
+    let mut guard = match TRACE_FILE.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let Some(f) = guard.as_mut() else { return };
     let _ = writeln!(
         f,
         "EDGE {} x={} y={} bS={} QP_P={} QP_Q={} qP_L={} beta={} tc={} dE={} dEp={} dEq={} d={} \
@@ -727,7 +737,13 @@ fn apply_chroma_deblocking(
                         cr_qp_offset
                     };
                     let qp_i = ((qp_q + qp_p + 1) >> 1) + qp_offset;
-                    let qp_c = chroma_qp_mapping(qp_i);
+                    // H.265 8.7.2.5.5: Table 8-10 only for ChromaArrayType == 1;
+                    // 4:2:2 / 4:4:4 use QpC = Min(qPi, 51).
+                    let qp_c = if frame.chroma_format == 1 {
+                        chroma_qp_mapping(qp_i)
+                    } else {
+                        qp_i.min(51)
+                    };
                     let q_tc = (qp_c + 2 + tc_offset).clamp(0, 53);
                     let tc = (TC_PRIME[q_tc as usize] as i32) << (bit_depth_c - 8);
 
@@ -803,7 +819,13 @@ fn apply_chroma_deblocking(
                         cr_qp_offset
                     };
                     let qp_i = ((qp_q + qp_p + 1) >> 1) + qp_offset;
-                    let qp_c = chroma_qp_mapping(qp_i);
+                    // H.265 8.7.2.5.5: Table 8-10 only for ChromaArrayType == 1;
+                    // 4:2:2 / 4:4:4 use QpC = Min(qPi, 51).
+                    let qp_c = if frame.chroma_format == 1 {
+                        chroma_qp_mapping(qp_i)
+                    } else {
+                        qp_i.min(51)
+                    };
                     let q_tc = (qp_c + 2 + tc_offset).clamp(0, 53);
                     let tc = (TC_PRIME[q_tc as usize] as i32) << (bit_depth_c - 8);
 

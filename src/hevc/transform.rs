@@ -680,28 +680,50 @@ pub fn dequantize(coeffs: &mut [i16], params: DequantParams) {
     static LEVEL_SCALE: [i32; 6] = [40, 45, 51, 57, 64, 72];
 
     // QP validated at SPS parse (bit_depth max 16 → max QP ~99 → qp_per max 16).
-    // Defense-in-depth: clamp to 180 (qp_per=30) to prevent i32 shift overflow
-    // even if QP derivation produces an out-of-range value.
+    // Defense-in-depth: clamp to 180 (qp_per=30) to prevent shift overflow even
+    // if QP derivation produces an out-of-range value.
     let qp = params.qp.min(180);
     let qp_per = qp / 6;
     let qp_rem = qp % 6;
-    let scale = LEVEL_SCALE[qp_rem as usize];
-    let combined_scale = scale * (1 << qp_per);
+    // i64 so `scale << qp_per` (qp_per up to 30, scale up to 72) cannot overflow
+    // on the way to the threshold test below — previously `scale * (1 << qp_per)`
+    // overflowed i32 for high qp_per.
+    let combined_scale = (LEVEL_SCALE[qp_rem as usize] as i64) << qp_per;
 
     // When m[x][y]=16 (flat), absorb the factor into shift: bdShift - 4
     let shift = params.bit_depth as i32 - 9 + params.log2_tr_size as i32;
-    let add = if shift > 0 { 1 << (shift - 1) } else { 0 };
 
-    if shift >= 0 {
+    // Fast path: when combined_scale fits the i32 kernel WITHOUT the
+    // per-coefficient product `coef(±32767) * combined_scale` overflowing i32,
+    // and the shift is a right shift, use the existing perf-tuned SIMD/scalar
+    // i32 dequant unchanged. This always covers 8-bit and normal-QP 10-bit (the
+    // overwhelmingly common case); gating the dispatch here also protects every
+    // SIMD/scalar kernel it calls. `i32::MAX / 32768 = 65535`.
+    if shift >= 0 && combined_scale <= (i32::MAX as i64 / 32768) {
+        let combined_scale = combined_scale as i32;
+        let add = if shift > 0 { 1 << (shift - 1) } else { 0 };
         incant!(
             dequantize(coeffs, combined_scale, shift, add),
             [v3, neon, wasm128, scalar]
         );
+        return;
+    }
+
+    // Slow path (rare: high-QP 10/12/16-bit RExt, or the left-shift case): the
+    // i32 product would overflow (panic under overflow-checks / fuzz, wrap to a
+    // garbage dequant factor in release), so do it in i64. This content is
+    // uncommon, so the scalar i64 loop's cost is negligible — and correctness
+    // beats a wrapped/panicking result.
+    if shift >= 0 {
+        let add: i64 = if shift > 0 { 1 << (shift - 1) } else { 0 };
+        for coef in coeffs.iter_mut() {
+            let value = (*coef as i64 * combined_scale + add) >> shift;
+            *coef = value.clamp(-32768, 32767) as i16;
+        }
     } else {
-        // Negative shift (left shift) — rare, keep scalar
         let neg_shift = -shift;
         for coef in coeffs.iter_mut() {
-            let value = (*coef as i32 * combined_scale) << neg_shift;
+            let value = (*coef as i64 * combined_scale) << neg_shift;
             *coef = value.clamp(-32768, 32767) as i16;
         }
     }
@@ -790,6 +812,248 @@ pub fn inverse_transform(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    /// Deterministic pseudo-random coefficients in a realistic transform range.
+    fn pseudo_coeffs(n: usize, seed: u32) -> Vec<i16> {
+        let mut s = seed.wrapping_add(0x9E37_79B9);
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (((s >> 13) & 0xFFF) as i16) - 2048 // [-2048, 2047]
+            })
+            .collect()
+    }
+
+    /// Directly exercise the AVX2 (`_v3`) kernels via a summoned token and
+    /// assert they match the scalar reference bit-for-bit. The public `idctN`
+    /// dispatch resolves to the scalar path under llvm-cov instrumentation, so
+    /// this is the only way to both COVER the `_v3` SIMD code in
+    /// transform_simd.rs and verify the SIMD==scalar invariant on those kernels.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn simd_v3_kernels_match_scalar() {
+        use crate::hevc::transform_simd::{
+            dequantize_scalar, dequantize_v3, idct8_v3, idct16_v3, idct32_v3, idst4_v3,
+        };
+        use archmage::{ScalarToken, SimdToken, X64V3Token};
+        let Some(v3) = X64V3Token::summon() else {
+            eprintln!("CPU lacks AVX2 (X64V3): skipping _v3 kernel parity");
+            return;
+        };
+        let st = ScalarToken::summon().expect("scalar token always available");
+
+        for bd in [8u8, 10, 12] {
+            // idst4
+            let c = pseudo_coeffs(16, 90 + bd as u32);
+            let a16: &[i16; 16] = c[..16].try_into().unwrap();
+            let (mut s, mut r) = ([0i16; 16], [0i16; 16]);
+            idst4_v3(v3, a16, &mut s, bd);
+            idst4_inner(a16, &mut r, bd);
+            assert_eq!(s, r, "idst4_v3≠scalar bd={bd}");
+
+            // idct8
+            let c = pseudo_coeffs(64, 91 + bd as u32);
+            let a64: &[i16; 64] = c[..64].try_into().unwrap();
+            let (mut s, mut r) = ([0i16; 64], [0i16; 64]);
+            idct8_v3(v3, a64, &mut s, bd);
+            idct8_inner(a64, &mut r, bd);
+            assert_eq!(s, r, "idct8_v3≠scalar bd={bd}");
+
+            // idct16
+            let c = pseudo_coeffs(256, 92 + bd as u32);
+            let a256: &[i16; 256] = c[..256].try_into().unwrap();
+            let (mut s, mut r) = ([0i16; 256], [0i16; 256]);
+            idct16_v3(v3, a256, &mut s, bd);
+            idct16_inner(a256, &mut r, bd);
+            assert_eq!(s, r, "idct16_v3≠scalar bd={bd}");
+
+            // idct32
+            let c = pseudo_coeffs(1024, 93 + bd as u32);
+            let a1024: &[i16; 1024] = c[..1024].try_into().unwrap();
+            let (mut s, mut r) = ([0i16; 1024], [0i16; 1024]);
+            idct32_v3(v3, a1024, &mut s, bd);
+            idct32_inner(a1024, &mut r, bd);
+            assert_eq!(s, r, "idct32_v3≠scalar bd={bd}");
+        }
+
+        // dequantize: v3 vs scalar over a range of (combined_scale, shift).
+        for &(cs, shift) in &[(40i32, 0i32), (18432, 4), (65535, 6), (1024, 2)] {
+            let add = if shift > 0 { 1 << (shift - 1) } else { 0 };
+            let base = pseudo_coeffs(256, cs as u32 ^ (shift as u32) << 8);
+            let mut a = base.clone();
+            let mut b = base.clone();
+            dequantize_v3(v3, &mut a, cs, shift, add);
+            dequantize_scalar(st, &mut b, cs, shift, add);
+            assert_eq!(a, b, "dequantize_v3≠scalar cs={cs} shift={shift}");
+        }
+    }
+
+    /// SIMD-vs-scalar parity for the inverse DCTs. The public `idctN`
+    /// dispatches to the AVX2 (`_v3`) kernel on this host; `idctN_inner` is the
+    /// scalar reference. They MUST produce identical output (the "SIMD must
+    /// equal scalar" invariant) — and this exercises the SIMD kernels in
+    /// transform_simd.rs that the corpus barely touches.
+    #[test]
+    fn idct8_simd_matches_scalar() {
+        for (seed, bd) in [(1u32, 8u8), (2, 10), (3, 12)] {
+            let c = pseudo_coeffs(64, seed);
+            let coeffs: &[i16; 64] = c[..64].try_into().unwrap();
+            let (mut simd, mut scalar) = ([0i16; 64], [0i16; 64]);
+            idct8(coeffs, &mut simd, bd);
+            idct8_inner(coeffs, &mut scalar, bd);
+            assert_eq!(simd, scalar, "idct8 SIMD≠scalar at bd={bd}");
+        }
+    }
+
+    #[test]
+    fn idct16_simd_matches_scalar() {
+        for (seed, bd) in [(4u32, 8u8), (5, 10), (6, 12)] {
+            let c = pseudo_coeffs(256, seed);
+            let coeffs: &[i16; 256] = c[..256].try_into().unwrap();
+            let (mut simd, mut scalar) = ([0i16; 256], [0i16; 256]);
+            idct16(coeffs, &mut simd, bd);
+            idct16_inner(coeffs, &mut scalar, bd);
+            assert_eq!(simd, scalar, "idct16 SIMD≠scalar at bd={bd}");
+        }
+    }
+
+    #[test]
+    fn idct32_simd_matches_scalar() {
+        for (seed, bd) in [(7u32, 8u8), (8, 10)] {
+            let c = pseudo_coeffs(1024, seed);
+            let coeffs: &[i16; 1024] = c[..1024].try_into().unwrap();
+            let (mut simd, mut scalar) = ([0i16; 1024], [0i16; 1024]);
+            idct32(coeffs, &mut simd, bd);
+            idct32_inner(coeffs, &mut scalar, bd);
+            assert_eq!(simd, scalar, "idct32 SIMD≠scalar at bd={bd}");
+        }
+    }
+
+    /// DC-only input through each IDCT produces a uniform block.
+    #[test]
+    fn idct_dc_only_is_uniform() {
+        let mut c8 = [0i16; 64];
+        c8[0] = 256;
+        let mut o8 = [0i16; 64];
+        idct8(&c8, &mut o8, 8);
+        assert!(o8.iter().all(|&v| v == o8[0]), "idct8 DC-only not uniform");
+
+        let mut c16 = [0i16; 256];
+        c16[0] = 256;
+        let mut o16 = [0i16; 256];
+        idct16(&c16, &mut o16, 8);
+        assert!(
+            o16.iter().all(|&v| v == o16[0]),
+            "idct16 DC-only not uniform"
+        );
+
+        let mut c32 = [0i16; 1024];
+        c32[0] = 256;
+        let mut o32 = [0i16; 1024];
+        idct32(&c32, &mut o32, 8);
+        assert!(
+            o32.iter().all(|&v| v == o32[0]),
+            "idct32 DC-only not uniform"
+        );
+    }
+
+    /// `dequantize` across the full QP × bit-depth × transform-size grid —
+    /// covers the AVX2 kernel, the i64 high-QP fallback, and the negative-shift
+    /// branch; output must stay clamped to i16 (no overflow panic).
+    #[test]
+    fn dequantize_full_grid_no_overflow() {
+        for bd in [8u8, 10, 12, 16] {
+            for log2_tr in 2u8..=5 {
+                let n = 1usize << (2 * log2_tr);
+                for qp in (0i32..=180).step_by(7) {
+                    let mut coeffs = pseudo_coeffs(
+                        n,
+                        (qp as u32) ^ ((bd as u32) << 8) ^ ((log2_tr as u32) << 16),
+                    );
+                    coeffs[0] = i16::MAX;
+                    dequantize(
+                        &mut coeffs,
+                        DequantParams {
+                            qp,
+                            bit_depth: bd,
+                            log2_tr_size: log2_tr,
+                        },
+                    );
+                    assert!(coeffs.iter().all(|&v| (i16::MIN..=i16::MAX).contains(&v)));
+                }
+            }
+        }
+    }
+
+    /// `dequantize_scaled` (custom scaling matrix path) across sizes.
+    #[test]
+    fn dequantize_scaled_runs_all_sizes() {
+        let scaling = [16u8; 1024];
+        for bd in [8u8, 10, 12] {
+            for log2_tr in 2u8..=5 {
+                let n = 1usize << (2 * log2_tr);
+                let mut coeffs = pseudo_coeffs(n, 99);
+                dequantize_scaled(
+                    &mut coeffs,
+                    DequantParams {
+                        qp: 120,
+                        bit_depth: bd,
+                        log2_tr_size: log2_tr,
+                    },
+                    &scaling[..n],
+                );
+                assert!(coeffs.iter().all(|&v| (i16::MIN..=i16::MAX).contains(&v)));
+            }
+        }
+    }
+
+    /// `inverse_transform` dispatch over every size + the intra-4x4 DST branch.
+    #[test]
+    fn inverse_transform_dispatch_all() {
+        for &(size, n) in &[(4usize, 16usize), (8, 64), (16, 256), (32, 1024)] {
+            let c = pseudo_coeffs(n, size as u32);
+            let mut out = vec![0i16; n];
+            inverse_transform(&c, &mut out, size, 10, false); // DCT path
+        }
+        // size==4 intra-luma → IDST
+        let c = pseudo_coeffs(16, 123);
+        let mut out = [0i16; 16];
+        inverse_transform(&c, &mut out, 4, 8, true);
+        // unsupported size is a no-op (must not panic)
+        let mut out2 = [0i16; 16];
+        inverse_transform(&c, &mut out2, 7, 8, false);
+        assert_eq!(out2, [0i16; 16]);
+    }
+
+    /// Regression: flat dequantize at high QP + high bit depth must not
+    /// overflow. Before the fix `combined_scale = scale * (1 << qp_per)` and
+    /// `coef * combined_scale` overflowed i32 — a panic under overflow-checks
+    /// (debug / cargo-fuzz) and a wrapped garbage factor in release. The i64
+    /// fallback handles it; the result must be finite and clamped to i16.
+    #[test]
+    fn dequantize_high_qp_high_depth_no_overflow() {
+        for &(qp, bit_depth, log2_tr_size) in &[(180, 16, 5), (153, 12, 5), (96, 10, 4), (51, 8, 5)]
+        {
+            let mut coeffs = [0i16; 32];
+            coeffs[0] = i16::MAX;
+            coeffs[1] = i16::MIN;
+            coeffs[5] = -12345;
+            dequantize(
+                &mut coeffs,
+                DequantParams {
+                    qp,
+                    bit_depth,
+                    log2_tr_size,
+                },
+            );
+            // Every output stays within i16 (the clamp held; no overflow panic).
+            for &c in &coeffs {
+                assert!((i16::MIN..=i16::MAX).contains(&c));
+            }
+        }
+    }
 
     #[test]
     fn test_idct4_dc_only() {

@@ -4,7 +4,8 @@ use crate::error::HevcError;
 use alloc::vec::Vec;
 use memchr::memchr;
 
-type Result<T> = core::result::Result<T, HevcError>;
+use super::Result;
+use whereat::at;
 
 /// NAL unit types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,6 +196,12 @@ pub struct NalUnit<'a> {
     pub nuh_temporal_id_plus1: u8,
     /// NAL unit payload (after header, emulation bytes removed)
     pub payload: Vec<u8>,
+    /// EBSP positions (in the payload's pre-removal byte stream, i.e. relative
+    /// to the byte after the 2-byte NAL header) of emulation prevention bytes
+    /// that were stripped from `payload`. WPP / tile entry point offsets are
+    /// specified in EBSP byte space, so converting EBSP→RBSP at seek time
+    /// requires this list.
+    pub ep_byte_positions: Vec<usize>,
     /// Raw data reference
     pub raw_data: &'a [u8],
 }
@@ -204,7 +211,7 @@ pub struct NalUnit<'a> {
 /// Handles both Annex B (start codes) and length-prefixed formats.
 pub fn parse_nal_units(data: &[u8]) -> Result<Vec<NalUnit<'_>>> {
     if data.is_empty() {
-        return Err(HevcError::InvalidBitstream("empty data"));
+        return Err(at!(HevcError::InvalidBitstream("empty data")));
     }
 
     // Detect format: Annex B or length-prefixed
@@ -294,13 +301,13 @@ pub fn parse_length_prefixed_ext(data: &[u8], length_size: usize) -> Result<Vec<
                 ((data[i] as usize) << 16) | ((data[i + 1] as usize) << 8) | (data[i + 2] as usize)
             }
             4 => u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]) as usize,
-            _ => return Err(HevcError::InvalidBitstream("unsupported length size")),
+            _ => return Err(at!(HevcError::InvalidBitstream("unsupported length size"))),
         };
 
         i += length_size;
 
         if i + nal_len > data.len() {
-            return Err(HevcError::InvalidBitstream("NAL length exceeds data"));
+            return Err(at!(HevcError::InvalidBitstream("NAL length exceeds data")));
         }
 
         let raw_data = &data[i..i + nal_len];
@@ -324,7 +331,7 @@ pub fn parse_single_nal(data: &[u8]) -> Result<NalUnit<'_>> {
 /// Parse NAL unit header and remove emulation prevention bytes
 fn parse_nal_header(raw_data: &[u8]) -> Result<NalUnit<'_>> {
     if raw_data.len() < 2 {
-        return Err(HevcError::InvalidNalUnit("too short"));
+        return Err(at!(HevcError::InvalidNalUnit("too short")));
     }
 
     // NAL unit header (2 bytes):
@@ -334,7 +341,7 @@ fn parse_nal_header(raw_data: &[u8]) -> Result<NalUnit<'_>> {
     // nuh_temporal_id_plus1 (3 bits)
 
     if (raw_data[0] & 0x80) != 0 {
-        return Err(HevcError::InvalidNalUnit("forbidden_zero_bit is set"));
+        return Err(at!(HevcError::InvalidNalUnit("forbidden_zero_bit is set")));
     }
 
     let nal_type = NalType::from_u8((raw_data[0] >> 1) & 0x3F);
@@ -342,24 +349,32 @@ fn parse_nal_header(raw_data: &[u8]) -> Result<NalUnit<'_>> {
     let nuh_temporal_id_plus1 = raw_data[1] & 0x07;
 
     if nuh_temporal_id_plus1 == 0 {
-        return Err(HevcError::InvalidNalUnit("temporal_id_plus1 is zero"));
+        return Err(at!(HevcError::InvalidNalUnit("temporal_id_plus1 is zero")));
     }
 
     // Remove emulation prevention bytes (0x00 0x00 0x03 -> 0x00 0x00)
-    let payload = remove_emulation_prevention(&raw_data[2..]);
+    let (payload, ep_byte_positions) = remove_emulation_prevention(&raw_data[2..]);
 
     Ok(NalUnit {
         nal_type,
         nuh_layer_id,
         nuh_temporal_id_plus1,
         payload,
+        ep_byte_positions,
         raw_data,
     })
 }
 
-/// Remove emulation prevention bytes (0x03) from RBSP
-fn remove_emulation_prevention(data: &[u8]) -> Vec<u8> {
+/// Remove emulation prevention bytes (0x03) from RBSP.
+///
+/// Returns the RBSP and a list of EBSP byte positions (in the input `data`)
+/// where 0x03 emulation prevention bytes were stripped. The positions are
+/// strictly increasing. Callers that need to convert EBSP-relative offsets
+/// (such as WPP/tile entry points per H.265 spec) to RBSP-relative offsets
+/// can subtract the count of EP positions strictly less than the EBSP offset.
+fn remove_emulation_prevention(data: &[u8]) -> (Vec<u8>, Vec<usize>) {
     let mut result = Vec::with_capacity(data.len());
+    let mut ep_positions = Vec::new();
     let mut i = 0;
 
     while i < data.len() {
@@ -367,6 +382,7 @@ fn remove_emulation_prevention(data: &[u8]) -> Vec<u8> {
             // Emulation prevention byte found
             result.push(0);
             result.push(0);
+            ep_positions.push(i + 2); // EBSP position of the 0x03 byte
             i += 3; // Skip the 0x03
         } else {
             result.push(data[i]);
@@ -374,7 +390,7 @@ fn remove_emulation_prevention(data: &[u8]) -> Vec<u8> {
         }
     }
 
-    result
+    (result, ep_positions)
 }
 
 /// Bitstream reader for parsing RBSP data
@@ -412,7 +428,7 @@ impl<'a> BitstreamReader<'a> {
     /// Read a single bit
     pub fn read_bit(&mut self) -> Result<u8> {
         if self.byte_offset >= self.data.len() {
-            return Err(HevcError::InvalidBitstream("unexpected end of data"));
+            return Err(at!(HevcError::InvalidBitstream("unexpected end of data")));
         }
 
         let bit = (self.data[self.byte_offset] >> (7 - self.bit_offset)) & 1;
@@ -428,7 +444,7 @@ impl<'a> BitstreamReader<'a> {
     /// Read up to 32 bits
     pub fn read_bits(&mut self, n: u8) -> Result<u32> {
         if n > 32 {
-            return Err(HevcError::InvalidBitstream("too many bits requested"));
+            return Err(at!(HevcError::InvalidBitstream("too many bits requested")));
         }
 
         let mut value = 0u32;
@@ -444,7 +460,7 @@ impl<'a> BitstreamReader<'a> {
         while self.read_bit()? == 0 {
             leading_zeros += 1;
             if leading_zeros > 31 {
-                return Err(HevcError::InvalidBitstream("exp-golomb overflow"));
+                return Err(at!(HevcError::InvalidBitstream("exp-golomb overflow")));
             }
         }
 

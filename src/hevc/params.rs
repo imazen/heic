@@ -7,7 +7,18 @@ use super::bitstream::BitstreamReader;
 use super::refpic::{self, LongTermRefPicSps, ShortTermRefPicSet};
 use crate::error::HevcError;
 
-type Result<T> = core::result::Result<T, HevcError>;
+use super::Result;
+use whereat::at;
+
+/// Upper bound for `pic_width_in_luma_samples` and
+/// `pic_height_in_luma_samples` enforced at SPS parse time.
+///
+/// HEVC Level 6.2 caps luma dimensions at 8192×4320; we accept up to
+/// 16384 on each axis to allow some headroom for non-conforming but
+/// plausible content while rejecting crafted u32-scale values that
+/// would otherwise feed the picture-buffer allocator with attacker-
+/// chosen sizes.
+pub const MAX_SPS_DIM: u32 = 16384;
 
 /// Video Parameter Set
 #[allow(dead_code)]
@@ -109,6 +120,25 @@ pub struct Sps {
     pub color_primaries: u8,
     /// Transfer characteristics (from VUI). 1=BT.709, 13=sRGB, 16=PQ, 18=HLG, 2=unspecified
     pub transfer_characteristics: u8,
+    // --- sps_range_extension flags (H.265 7.3.2.2.2), default false ---
+    /// `transform_skip_rotation_enabled_flag`
+    pub transform_skip_rotation_enabled_flag: bool,
+    /// `transform_skip_context_enabled_flag`
+    pub transform_skip_context_enabled_flag: bool,
+    /// `implicit_rdpcm_enabled_flag` — gates intra residual DPCM (modes 10/26)
+    pub implicit_rdpcm_enabled_flag: bool,
+    /// `explicit_rdpcm_enabled_flag`
+    pub explicit_rdpcm_enabled_flag: bool,
+    /// `extended_precision_processing_flag`
+    pub extended_precision_processing_flag: bool,
+    /// `intra_smoothing_disabled_flag`
+    pub intra_smoothing_disabled_flag: bool,
+    /// `high_precision_offsets_enabled_flag`
+    pub high_precision_offsets_enabled_flag: bool,
+    /// `persistent_rice_adaptation_enabled_flag` — RExt coeff_abs_level Rice init
+    pub persistent_rice_adaptation_enabled_flag: bool,
+    /// `cabac_bypass_alignment_enabled_flag`
+    pub cabac_bypass_alignment_enabled_flag: bool,
 }
 
 impl Sps {
@@ -439,7 +469,7 @@ pub struct ProfileTierLevel {
     pub general_level_idc: u8,
 }
 
-/// Parse Video Parameter Set
+/// Parse a VPS NAL payload.
 pub fn parse_vps(data: &[u8]) -> Result<Vps> {
     let mut reader = BitstreamReader::new(data);
 
@@ -453,10 +483,10 @@ pub fn parse_vps(data: &[u8]) -> Result<Vps> {
     // vps_reserved_0xffff_16bits
     let reserved = reader.read_bits(16)?;
     if reserved != 0xFFFF {
-        return Err(HevcError::InvalidParameterSet {
+        return Err(at!(HevcError::InvalidParameterSet {
             kind: "VPS",
             msg: "invalid reserved bits".to_string(),
-        });
+        }));
     }
 
     let ptl = parse_profile_tier_level(&mut reader, true, max_sub_layers_minus1)?;
@@ -472,7 +502,72 @@ pub fn parse_vps(data: &[u8]) -> Result<Vps> {
     })
 }
 
-/// Parse Sequence Parameter Set
+/// Parse and discard `hrd_parameters()` (H.265 E.3.2). We don't use the HRD
+/// values but must consume the exact bits to reach `sps_extension_present_flag`.
+fn skip_hrd_parameters(
+    reader: &mut BitstreamReader,
+    common_inf_present: bool,
+    max_num_sub_layers_minus1: u8,
+) -> Result<()> {
+    let mut nal_hrd = false;
+    let mut vcl_hrd = false;
+    let mut sub_pic_hrd = false;
+    if common_inf_present {
+        nal_hrd = reader.read_bit()? != 0;
+        vcl_hrd = reader.read_bit()? != 0;
+        if nal_hrd || vcl_hrd {
+            sub_pic_hrd = reader.read_bit()? != 0;
+            if sub_pic_hrd {
+                reader.read_bits(8)?; // tick_divisor_minus2
+                reader.read_bits(5)?; // du_cpb_removal_delay_increment_length_minus1
+                reader.read_bit()?; // sub_pic_cpb_params_in_pic_timing_sei_flag
+                reader.read_bits(5)?; // dpb_output_delay_du_length_minus1
+            }
+            reader.read_bits(4)?; // bit_rate_scale
+            reader.read_bits(4)?; // cpb_size_scale
+            if sub_pic_hrd {
+                reader.read_bits(4)?; // cpb_size_du_scale
+            }
+            reader.read_bits(5)?; // initial_cpb_removal_delay_length_minus1
+            reader.read_bits(5)?; // au_cpb_removal_delay_length_minus1
+            reader.read_bits(5)?; // dpb_output_delay_length_minus1
+        }
+    }
+    for _ in 0..=max_num_sub_layers_minus1 {
+        let fixed_pic_rate_general = reader.read_bit()? != 0;
+        let mut fixed_pic_rate_within_cvs = fixed_pic_rate_general;
+        if !fixed_pic_rate_general {
+            fixed_pic_rate_within_cvs = reader.read_bit()? != 0;
+        }
+        let mut low_delay_hrd = false;
+        if fixed_pic_rate_within_cvs {
+            reader.read_ue()?; // elemental_duration_in_tc_minus1
+        } else {
+            low_delay_hrd = reader.read_bit()? != 0;
+        }
+        let cpb_cnt = if !low_delay_hrd {
+            reader.read_ue()? + 1 // cpb_cnt_minus1 + 1
+        } else {
+            1
+        };
+        for &present in &[nal_hrd, vcl_hrd] {
+            if present {
+                for _ in 0..cpb_cnt {
+                    reader.read_ue()?; // bit_rate_value_minus1
+                    reader.read_ue()?; // cpb_size_value_minus1
+                    if sub_pic_hrd {
+                        reader.read_ue()?; // cpb_size_du_value_minus1
+                        reader.read_ue()?; // bit_rate_du_value_minus1
+                    }
+                    reader.read_bit()?; // cbr_flag
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Parse an SPS NAL payload.
 pub fn parse_sps(data: &[u8]) -> Result<Sps> {
     let mut reader = BitstreamReader::new(data);
 
@@ -494,12 +589,65 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
     let pic_width_in_luma_samples = reader.read_ue()?;
     let pic_height_in_luma_samples = reader.read_ue()?;
 
+    // Cap luma dimensions before they feed allocators downstream. The HEVC
+    // spec's highest non-extension level (6.2) is 8192x4320; we accept up
+    // to MAX_SPS_DIM on each axis to leave headroom for unusual but
+    // plausible content while still rejecting attacker-crafted u32::MAX
+    // values that would drive the picture-buffer allocator into OOM.
+    if pic_width_in_luma_samples == 0 || pic_width_in_luma_samples > MAX_SPS_DIM {
+        return Err(at!(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!(
+                "pic_width_in_luma_samples={pic_width_in_luma_samples} out of range (1..={MAX_SPS_DIM})"
+            ),
+        }));
+    }
+    if pic_height_in_luma_samples == 0 || pic_height_in_luma_samples > MAX_SPS_DIM {
+        return Err(at!(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!(
+                "pic_height_in_luma_samples={pic_height_in_luma_samples} out of range (1..={MAX_SPS_DIM})"
+            ),
+        }));
+    }
+
     let conformance_window_flag = reader.read_bit()? != 0;
     let conf_win_offset = if conformance_window_flag {
         let left = reader.read_ue()?;
         let right = reader.read_ue()?;
         let top = reader.read_ue()?;
         let bottom = reader.read_ue()?;
+
+        // Validate conformance-window offsets against the picture dimensions
+        // *at parse time*, in luma-sample units (i.e. multiplied by SubWidthC/
+        // SubHeightC). Without this gate, `cropped_width()` and the crop
+        // multiplications in mod.rs underflow / wrap on crafted input.
+        let (sub_width_c, sub_height_c) = match chroma_format_idc {
+            0 => (1u32, 1u32),
+            1 => (2, 2),
+            2 => (2, 1),
+            3 => (1, 1),
+            _ => (2, 2),
+        };
+        let left_luma = left.checked_mul(sub_width_c);
+        let right_luma = right.checked_mul(sub_width_c);
+        let top_luma = top.checked_mul(sub_height_c);
+        let bottom_luma = bottom.checked_mul(sub_height_c);
+        let horiz = left_luma.and_then(|l| right_luma.and_then(|r| l.checked_add(r)));
+        let vert = top_luma.and_then(|t| bottom_luma.and_then(|b| t.checked_add(b)));
+        match (horiz, vert) {
+            (Some(h), Some(v))
+                if h < pic_width_in_luma_samples && v < pic_height_in_luma_samples => {}
+            _ => {
+                return Err(at!(HevcError::InvalidParameterSet {
+                    kind: "SPS",
+                    msg: alloc::format!(
+                        "conformance window offsets ({left},{right},{top},{bottom}) exceed picture dimensions {pic_width_in_luma_samples}x{pic_height_in_luma_samples}"
+                    ),
+                }));
+            }
+        }
+
         (left, right, top, bottom)
     } else {
         (0, 0, 0, 0)
@@ -507,26 +655,26 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
 
     let bit_depth_luma_minus8 = reader.read_ue()? as u8;
     if bit_depth_luma_minus8 > 8 {
-        return Err(HevcError::InvalidParameterSet {
+        return Err(at!(HevcError::InvalidParameterSet {
             kind: "SPS",
             msg: alloc::format!("bit_depth_luma_minus8={bit_depth_luma_minus8} exceeds 8"),
-        });
+        }));
     }
     let bit_depth_chroma_minus8 = reader.read_ue()? as u8;
     if bit_depth_chroma_minus8 > 8 {
-        return Err(HevcError::InvalidParameterSet {
+        return Err(at!(HevcError::InvalidParameterSet {
             kind: "SPS",
             msg: alloc::format!("bit_depth_chroma_minus8={bit_depth_chroma_minus8} exceeds 8"),
-        });
+        }));
     }
     let log2_max_pic_order_cnt_lsb_minus4 = reader.read_ue()? as u8;
     if log2_max_pic_order_cnt_lsb_minus4 > 12 {
-        return Err(HevcError::InvalidParameterSet {
+        return Err(at!(HevcError::InvalidParameterSet {
             kind: "SPS",
             msg: alloc::format!(
                 "log2_max_pic_order_cnt_lsb_minus4={log2_max_pic_order_cnt_lsb_minus4} exceeds 12"
             ),
-        });
+        }));
     }
 
     let sub_layer_ordering_info_present_flag = reader.read_bit()? != 0;
@@ -547,57 +695,76 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
     // Reject out-of-range values rather than clamping — they indicate a corrupt bitstream.
     let log2_min_luma_coding_block_size_minus3 = reader.read_ue()? as u8;
     if log2_min_luma_coding_block_size_minus3 > 3 {
-        return Err(HevcError::InvalidParameterSet {
+        return Err(at!(HevcError::InvalidParameterSet {
             kind: "SPS",
             msg: alloc::format!(
                 "log2_min_cb_size_minus3={log2_min_luma_coding_block_size_minus3} exceeds 3"
             ),
-        });
+        }));
     }
     let log2_diff_max_min_luma_coding_block_size = reader.read_ue()? as u8;
     if log2_diff_max_min_luma_coding_block_size > 3 {
-        return Err(HevcError::InvalidParameterSet {
+        return Err(at!(HevcError::InvalidParameterSet {
             kind: "SPS",
             msg: alloc::format!(
                 "log2_diff_max_min_cb={log2_diff_max_min_luma_coding_block_size} exceeds 3"
             ),
-        });
+        }));
     }
     let log2_min_luma_transform_block_size_minus2 = reader.read_ue()? as u8;
     if log2_min_luma_transform_block_size_minus2 > 3 {
-        return Err(HevcError::InvalidParameterSet {
+        return Err(at!(HevcError::InvalidParameterSet {
             kind: "SPS",
             msg: alloc::format!(
                 "log2_min_tb_size_minus2={log2_min_luma_transform_block_size_minus2} exceeds 3"
             ),
-        });
+        }));
     }
     let log2_diff_max_min_luma_transform_block_size = reader.read_ue()? as u8;
     if log2_diff_max_min_luma_transform_block_size > 3 {
-        return Err(HevcError::InvalidParameterSet {
+        return Err(at!(HevcError::InvalidParameterSet {
             kind: "SPS",
             msg: alloc::format!(
                 "log2_diff_max_min_tb={log2_diff_max_min_luma_transform_block_size} exceeds 3"
             ),
-        });
+        }));
+    }
+    // Validate the DERIVED transform-block sizes (H.265 7.4.3.2), not just the
+    // individual minus2/diff fields above. A crafted SPS with min_tb=5 (minus2=3)
+    // and diff=3 yields log2_max_tb=8 (256×256); an inter-CU transform leaf can
+    // then reach that size — bypassing intra's log2>5 guard — and slice the
+    // fixed `[i16; 1024]` CoeffBuffer out of bounds in residual dequant
+    // (ctu.rs). Spec requires MinTb ≤ MinCb and MinTb ≤ MaxTb ≤ min(CtbSize, 5).
+    let log2_min_cb = log2_min_luma_coding_block_size_minus3 + 3;
+    let log2_ctb = log2_min_cb + log2_diff_max_min_luma_coding_block_size;
+    let log2_min_tb = log2_min_luma_transform_block_size_minus2 + 2;
+    let log2_max_tb = log2_min_tb + log2_diff_max_min_luma_transform_block_size;
+    if log2_max_tb > 5 || log2_min_tb > log2_min_cb || log2_max_tb > log2_ctb {
+        return Err(at!(HevcError::InvalidParameterSet {
+            kind: "SPS",
+            msg: alloc::format!(
+                "derived transform sizes invalid: log2_min_tb={log2_min_tb} \
+                 log2_max_tb={log2_max_tb} log2_min_cb={log2_min_cb} log2_ctb={log2_ctb}"
+            ),
+        }));
     }
     let max_transform_hierarchy_depth_inter = reader.read_ue()? as u8;
     if max_transform_hierarchy_depth_inter > 5 {
-        return Err(HevcError::InvalidParameterSet {
+        return Err(at!(HevcError::InvalidParameterSet {
             kind: "SPS",
             msg: alloc::format!(
                 "max_transform_depth_inter={max_transform_hierarchy_depth_inter} exceeds 5"
             ),
-        });
+        }));
     }
     let max_transform_hierarchy_depth_intra = reader.read_ue()? as u8;
     if max_transform_hierarchy_depth_intra > 5 {
-        return Err(HevcError::InvalidParameterSet {
+        return Err(at!(HevcError::InvalidParameterSet {
             kind: "SPS",
             msg: alloc::format!(
                 "max_transform_depth_intra={max_transform_hierarchy_depth_intra} exceeds 5"
             ),
-        });
+        }));
     }
 
     let scaling_list_enabled_flag = reader.read_bit()? != 0;
@@ -622,16 +789,16 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
         let pcm_sample_bit_depth_chroma_minus1 = reader.read_bits(4)? as u8;
         let log2_min_pcm_val = reader.read_ue()?;
         if log2_min_pcm_val > 2 {
-            return Err(HevcError::InvalidBitstream(
+            return Err(at!(HevcError::InvalidBitstream(
                 "log2_min_pcm_luma_coding_block_size_minus3 exceeds 2",
-            ));
+            )));
         }
         let log2_min_pcm_luma_coding_block_size_minus3 = log2_min_pcm_val as u8;
         let log2_diff_val = reader.read_ue()?;
         if log2_diff_val > 2 {
-            return Err(HevcError::InvalidBitstream(
+            return Err(at!(HevcError::InvalidBitstream(
                 "log2_diff_max_min_pcm_luma_coding_block_size exceeds 2",
-            ));
+            )));
         }
         let log2_diff_max_min_pcm_luma_coding_block_size = log2_diff_val as u8;
         let pcm_loop_filter_disabled_flag = reader.read_bit()? != 0;
@@ -664,13 +831,13 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
         let num_long_term_ref_pics_sps = reader.read_ue()? as usize;
         // H.265 spec limit: num_long_term_ref_pics_sps shall be in range 0..32
         if num_long_term_ref_pics_sps > 32 {
-            return Err(HevcError::InvalidParameterSet {
+            return Err(at!(HevcError::InvalidParameterSet {
                 kind: "SPS",
                 msg: alloc::format!(
                     "num_long_term_ref_pics_sps {} exceeds spec limit of 32",
                     num_long_term_ref_pics_sps
                 ),
-            });
+            }));
         }
         let poc_bits = log2_max_pic_order_cnt_lsb_minus4.saturating_add(4);
         long_term_ref_pics_sps
@@ -697,6 +864,15 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
     let mut matrix_coeffs = 2u8; // default: unspecified
     let mut colour_primaries = 2u8; // default: unspecified
     let mut transfer_chars = 2u8; // default: unspecified
+    let mut transform_skip_rotation_enabled_flag = false;
+    let mut transform_skip_context_enabled_flag = false;
+    let mut implicit_rdpcm_enabled_flag = false;
+    let mut explicit_rdpcm_enabled_flag = false;
+    let mut extended_precision_processing_flag = false;
+    let mut intra_smoothing_disabled_flag = false;
+    let mut high_precision_offsets_enabled_flag = false;
+    let mut persistent_rice_adaptation_enabled_flag = false;
+    let mut cabac_bypass_alignment_enabled_flag = false;
     if vui_parameters_present_flag {
         let aspect_ratio_info_present = reader.read_bit()? != 0;
         if aspect_ratio_info_present {
@@ -722,7 +898,68 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
                 matrix_coeffs = reader.read_bits(8)? as u8;
             }
         }
-        // Don't parse the rest of VUI — we only need color info
+        // Remaining VUI fields (H.265 E.2.1) — consumed to reach the SPS
+        // extension flags. We don't use these values.
+        let chroma_loc_info_present = reader.read_bit()? != 0;
+        if chroma_loc_info_present {
+            reader.read_ue()?; // chroma_sample_loc_type_top_field
+            reader.read_ue()?; // chroma_sample_loc_type_bottom_field
+        }
+        reader.read_bit()?; // neutral_chroma_indication_flag
+        reader.read_bit()?; // field_seq_flag
+        reader.read_bit()?; // frame_field_info_present_flag
+        let default_display_window = reader.read_bit()? != 0;
+        if default_display_window {
+            reader.read_ue()?; // def_disp_win_left_offset
+            reader.read_ue()?; // def_disp_win_right_offset
+            reader.read_ue()?; // def_disp_win_top_offset
+            reader.read_ue()?; // def_disp_win_bottom_offset
+        }
+        let vui_timing_info_present = reader.read_bit()? != 0;
+        if vui_timing_info_present {
+            reader.read_bits(32)?; // vui_num_units_in_tick
+            reader.read_bits(32)?; // vui_time_scale
+            let poc_proportional = reader.read_bit()? != 0;
+            if poc_proportional {
+                reader.read_ue()?; // vui_num_ticks_poc_diff_one_minus1
+            }
+            let hrd_present = reader.read_bit()? != 0;
+            if hrd_present {
+                skip_hrd_parameters(&mut reader, true, max_sub_layers_minus1)?;
+            }
+        }
+        let bitstream_restriction = reader.read_bit()? != 0;
+        if bitstream_restriction {
+            reader.read_bit()?; // tiles_fixed_structure_flag
+            reader.read_bit()?; // motion_vectors_over_pic_boundaries_flag
+            reader.read_bit()?; // restricted_ref_pic_lists_flag
+            reader.read_ue()?; // min_spatial_segmentation_idc
+            reader.read_ue()?; // max_bytes_per_pic_denom
+            reader.read_ue()?; // max_bits_per_min_cu_denom
+            reader.read_ue()?; // log2_max_mv_length_horizontal
+            reader.read_ue()?; // log2_max_mv_length_vertical
+        }
+    }
+
+    // sps_extension (H.265 7.3.2.2.1) → sps_range_extension (7.3.2.2.2)
+    let sps_extension_present_flag = reader.read_bit()? != 0;
+    if sps_extension_present_flag {
+        let sps_range_extension_flag = reader.read_bit()? != 0;
+        reader.read_bit()?; // sps_multilayer_extension_flag
+        reader.read_bit()?; // sps_3d_extension_flag
+        reader.read_bit()?; // sps_scc_extension_flag
+        reader.read_bits(4)?; // sps_extension_4bits
+        if sps_range_extension_flag {
+            transform_skip_rotation_enabled_flag = reader.read_bit()? != 0;
+            transform_skip_context_enabled_flag = reader.read_bit()? != 0;
+            implicit_rdpcm_enabled_flag = reader.read_bit()? != 0;
+            explicit_rdpcm_enabled_flag = reader.read_bit()? != 0;
+            extended_precision_processing_flag = reader.read_bit()? != 0;
+            intra_smoothing_disabled_flag = reader.read_bit()? != 0;
+            high_precision_offsets_enabled_flag = reader.read_bit()? != 0;
+            persistent_rice_adaptation_enabled_flag = reader.read_bit()? != 0;
+            cabac_bypass_alignment_enabled_flag = reader.read_bit()? != 0;
+        }
     }
 
     Ok(Sps {
@@ -764,10 +1001,19 @@ pub fn parse_sps(data: &[u8]) -> Result<Sps> {
         matrix_coeffs,
         color_primaries: colour_primaries,
         transfer_characteristics: transfer_chars,
+        transform_skip_rotation_enabled_flag,
+        transform_skip_context_enabled_flag,
+        implicit_rdpcm_enabled_flag,
+        explicit_rdpcm_enabled_flag,
+        extended_precision_processing_flag,
+        intra_smoothing_disabled_flag,
+        high_precision_offsets_enabled_flag,
+        persistent_rice_adaptation_enabled_flag,
+        cabac_bypass_alignment_enabled_flag,
     })
 }
 
-/// Parse Picture Parameter Set
+/// Parse a PPS NAL payload.
 pub fn parse_pps(data: &[u8]) -> Result<Pps> {
     let mut reader = BitstreamReader::new(data);
 
@@ -780,21 +1026,21 @@ pub fn parse_pps(data: &[u8]) -> Result<Pps> {
     let cabac_init_present_flag = reader.read_bit()? != 0;
     let num_ref_idx_l0_default_active_minus1 = reader.read_ue()? as u8;
     if num_ref_idx_l0_default_active_minus1 > 14 {
-        return Err(HevcError::InvalidParameterSet {
+        return Err(at!(HevcError::InvalidParameterSet {
             kind: "PPS",
             msg: alloc::format!(
                 "num_ref_idx_l0_default_active_minus1={num_ref_idx_l0_default_active_minus1} exceeds 14"
             ),
-        });
+        }));
     }
     let num_ref_idx_l1_default_active_minus1 = reader.read_ue()? as u8;
     if num_ref_idx_l1_default_active_minus1 > 14 {
-        return Err(HevcError::InvalidParameterSet {
+        return Err(at!(HevcError::InvalidParameterSet {
             kind: "PPS",
             msg: alloc::format!(
                 "num_ref_idx_l1_default_active_minus1={num_ref_idx_l1_default_active_minus1} exceeds 14"
             ),
-        });
+        }));
     }
     let init_qp_minus26 = reader.read_se()? as i8;
     let constrained_intra_pred_flag = reader.read_bit()? != 0;
@@ -817,8 +1063,28 @@ pub fn parse_pps(data: &[u8]) -> Result<Pps> {
     let entropy_coding_sync_enabled_flag = reader.read_bit()? != 0;
 
     let tile_info = if tiles_enabled_flag {
-        let num_tile_columns_minus1 = reader.read_ue()? as u16;
-        let num_tile_rows_minus1 = reader.read_ue()? as u16;
+        let num_tile_columns_minus1 = reader.read_ue()?;
+        let num_tile_rows_minus1 = reader.read_ue()?;
+        // H.265 Table A.1 caps tile columns at 20 and rows at 22 across all
+        // levels; the DXVA/VA-API picture-parameter structs carry
+        // column_width_minus1[19] / row_height_minus1[21] arrays sized to
+        // exactly that. Reject anything larger so (a) the `as u16` (and the
+        // native-backend `as u8`) narrowing can never silently truncate a huge
+        // attacker count and (b) native backends never index past their fixed
+        // tile arrays. Without this, read_ue() up to ~4.29e9 truncated to u16
+        // produced a desynced tile grid and an out-of-array FFI tile count.
+        if num_tile_columns_minus1 > 19 || num_tile_rows_minus1 > 21 {
+            return Err(at!(HevcError::InvalidParameterSet {
+                kind: "PPS",
+                msg: alloc::format!(
+                    "tile grid {}x{} exceeds HEVC max 20x22",
+                    num_tile_columns_minus1.saturating_add(1),
+                    num_tile_rows_minus1.saturating_add(1)
+                ),
+            }));
+        }
+        let num_tile_columns_minus1 = num_tile_columns_minus1 as u16;
+        let num_tile_rows_minus1 = num_tile_rows_minus1 as u16;
         let uniform_spacing_flag = reader.read_bit()? != 0;
 
         let (column_widths, row_heights) = if !uniform_spacing_flag {
@@ -1005,6 +1271,20 @@ fn parse_scaling_list_data(reader: &mut BitstreamReader<'_>) -> Result<ScalingLi
                 let mut next_coef: i32 = 8;
                 if size_id > 1 {
                     let dc_coef_minus8 = reader.read_se()?;
+                    // H.265 7.4.5: scaling_list_dc_coef_minus8 ∈ [-7, 247].
+                    // Reject out-of-range rather than computing `+ 8` with plain
+                    // `+`: read_se() can return up to i32::MAX, so `i32::MAX + 8`
+                    // overflow-panics in overflow-checked builds (debug /
+                    // cargo-fuzz) or wraps to a garbage DC factor in release
+                    // (wrong dequant). Matches the delta path's hardening below.
+                    if !(-7..=247).contains(&dc_coef_minus8) {
+                        return Err(at!(HevcError::InvalidParameterSet {
+                            kind: "scaling_list",
+                            msg: alloc::format!(
+                                "scaling_list_dc_coef_minus8={dc_coef_minus8} out of range [-7,247]"
+                            ),
+                        }));
+                    }
                     next_coef = dc_coef_minus8 + 8;
                     data.dc_coef[size_id - 2][matrix_id] = ((next_coef + 256) % 256) as u8;
                 }

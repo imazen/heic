@@ -1325,7 +1325,7 @@ pub(crate) fn add_residual_block_v3(
     size: usize,
     max_val: i32,
 ) {
-    let zero = _mm256_setzero_si256();
+    let bias = _mm256_set1_epi16(i16::MIN);
     let max_v = _mm256_set1_epi16(max_val as i16);
 
     for py in 0..size {
@@ -1340,8 +1340,10 @@ pub(crate) fn add_residual_block_v3(
                 _mm256_loadu_si256::<[u16; 16]>(row[offset..offset + 16].try_into().unwrap());
             let res =
                 _mm256_loadu_si256::<[i16; 16]>(res_row[offset..offset + 16].try_into().unwrap());
-            let sum = _mm256_add_epi16(pred, res);
-            let clamped = _mm256_min_epi16(_mm256_max_epi16(sum, zero), max_v);
+            // Bias into the signed domain so saturation also handles u16
+            // predictions above 32767 without wrapping or losing their sign.
+            let sum = _mm256_adds_epi16(_mm256_xor_si256(pred, bias), res);
+            let clamped = _mm256_min_epu16(_mm256_xor_si256(sum, bias), max_v);
             _mm256_storeu_si256::<[u16; 16]>(
                 (&mut row[offset..offset + 16]).try_into().unwrap(),
                 clamped,
@@ -1448,63 +1450,6 @@ pub(crate) fn dequantize_scalar(
     for coef in coeffs.iter_mut() {
         let value = (*coef as i32 * combined_scale + add) >> shift;
         *coef = value.clamp(-32768, 32767) as i16;
-    }
-}
-
-// =============================================================================
-// Generic SIMD implementations using magetypes
-// =============================================================================
-
-/// Generic add_residual_block using i16x8 with u16↔i16 bitcast.
-///
-/// Processes 8 pixels per iteration: load u16 prediction as u16x8, bitcast to i16x8,
-/// add i16 residual, clamp to [0, max_val], bitcast back to u16x8, store.
-/// Values are safe to reinterpret as i16 since max_val ≤ 1023 for 10-bit HEVC.
-#[cfg(target_arch = "wasm32")]
-#[inline(always)]
-#[allow(clippy::too_many_arguments)]
-fn add_residual_block_generic<T>(
-    token: T,
-    plane: &mut [u16],
-    stride: usize,
-    x0: usize,
-    y0: usize,
-    residual: &[i16],
-    size: usize,
-    max_val: i32,
-) where
-    T: magetypes::simd::backends::I16x8Bitcast,
-{
-    use magetypes::simd::generic::{i16x8, u16x8};
-
-    let zero = i16x8::zero(token);
-    let max_v = i16x8::splat(token, max_val as i16);
-
-    for py in 0..size {
-        let row_start = (y0 + py) * stride + x0;
-        let row = &mut plane[row_start..row_start + size];
-        let res_row = &residual[py * size..(py + 1) * size];
-
-        let chunks = size / 8;
-        for c in 0..chunks {
-            let offset = c * 8;
-            // Load prediction as u16x8, bitcast to i16x8
-            let pred_u = u16x8::load(token, row[offset..offset + 8].try_into().unwrap());
-            let pred = pred_u.bitcast_i16x8();
-            let res = i16x8::load(token, res_row[offset..offset + 8].try_into().unwrap());
-            // Add and clamp with signed operations
-            let sum = pred + res;
-            let clamped = sum.max(zero).min(max_v);
-            // Store back as u16
-            let clamped_u = clamped.bitcast_u16x8();
-            clamped_u.store((&mut row[offset..offset + 8]).try_into().unwrap());
-        }
-        // Scalar remainder
-        for i in (chunks * 8)..size {
-            let pred = row[i] as i32;
-            let r = res_row[i] as i32;
-            row[i] = (pred + r).clamp(0, max_val) as u16;
-        }
     }
 }
 
@@ -1986,11 +1931,12 @@ pub(crate) fn dequantize_wasm128(
     }
 }
 
-/// WASM128 add_residual_block: real i16x8 SIMD via magetypes generic implementation.
+/// WASM128 residual add with unsigned prediction and signed saturation.
 #[cfg(target_arch = "wasm32")]
 #[allow(clippy::too_many_arguments)]
+#[arcane]
 pub(crate) fn add_residual_block_wasm128(
-    token: Wasm128Token,
+    _token: Wasm128Token,
     plane: &mut [u16],
     stride: usize,
     x0: usize,
@@ -1999,5 +1945,91 @@ pub(crate) fn add_residual_block_wasm128(
     size: usize,
     max_val: i32,
 ) {
-    add_residual_block_generic(token, plane, stride, x0, y0, residual, size, max_val);
+    let bias = i16x8_splat(i16::MIN);
+    let max_v = u16x8_splat(max_val as u16);
+    for py in 0..size {
+        let row_start = (y0 + py) * stride + x0;
+        let row = &mut plane[row_start..row_start + size];
+        let res_row = &residual[py * size..(py + 1) * size];
+        let chunks = size / 8;
+        for c in 0..chunks {
+            let offset = c * 8;
+            let pred = v128_load::<[u16; 8]>(row[offset..offset + 8].try_into().unwrap());
+            let res = v128_load::<[i16; 8]>(res_row[offset..offset + 8].try_into().unwrap());
+            let sum = i16x8_add_sat(v128_xor(pred, bias), res);
+            let clamped = u16x8_min(v128_xor(sum, bias), max_v);
+            v128_store::<[u16; 8]>((&mut row[offset..offset + 8]).try_into().unwrap(), clamped);
+        }
+        for i in chunks * 8..size {
+            row[i] = (i32::from(row[i]) + i32::from(res_row[i])).clamp(0, max_val) as u16;
+        }
+    }
+}
+
+#[cfg(all(test, feature = "_dev"))]
+mod residual_range_tests {
+    use super::*;
+    #[cfg(target_arch = "aarch64")]
+    use crate::hevc::transform_simd_neon::add_residual_block_neon;
+    use alloc::vec;
+    #[cfg(not(target_arch = "wasm32"))]
+    use archmage::testing::{CompileTimePolicy, for_each_token_permutation};
+
+    #[test]
+    fn residual_add_matches_widened_scalar_at_every_prediction_value() {
+        let check = || {
+            for depth in [8, 10, 12, 15, 16] {
+                let max_val = (1i32 << depth) - 1;
+                for size in [4usize, 8, 16, 17, 32] {
+                    let stride = size + 5;
+                    let (x0, y0) = (2, 1);
+                    let mut plane = vec![0x55aa; stride * (size + 2)];
+                    for residual_value in [i16::MIN, -32767, -1, 0, 1, 32766, i16::MAX] {
+                        let residual = vec![residual_value; size * size];
+                        for base in (0..=max_val as usize).step_by(size * size) {
+                            plane.fill(0x55aa);
+                            for y in 0..size {
+                                for x in 0..size {
+                                    plane[(y + y0) * stride + x + x0] =
+                                        (base + y * size + x).min(max_val as usize) as u16;
+                                }
+                            }
+                            let mut expected = plane.clone();
+                            for y in 0..size {
+                                for x in 0..size {
+                                    let p = &mut expected[(y + y0) * stride + x + x0];
+                                    *p = (i32::from(*p) + i32::from(residual_value))
+                                        .clamp(0, max_val)
+                                        as u16;
+                                }
+                            }
+                            incant!(
+                                add_residual_block(
+                                    &mut plane, stride, x0, y0, &residual, size, max_val
+                                ),
+                                [v3, neon, wasm128, scalar]
+                            );
+                            assert_eq!(
+                                plane, expected,
+                                "depth={depth} size={size} residual={residual_value} prediction base={base}"
+                            );
+                        }
+                    }
+                }
+            }
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let report = for_each_token_permutation(CompileTimePolicy::WarnStderr, |_| check());
+            assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+            assert!(report.permutations_run >= 2);
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // WASM SIMD is selected at compile time, so require that this
+            // invocation actually exercises the vector implementation.
+            assert!(Wasm128Token::summon().is_some());
+            check();
+        }
+    }
 }

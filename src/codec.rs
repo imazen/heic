@@ -75,6 +75,7 @@ fn policy_to_threads(policy: ThreadingPolicy) -> usize {
 // ── Capabilities ─────────────────────────────────────────────────────────
 
 static HEIC_DECODE_CAPS: DecodeCapabilities = DecodeCapabilities::new()
+    .with_incremental(true)
     .with_icc(true)
     .with_exif(true)
     .with_xmp(true)
@@ -90,6 +91,8 @@ static HEIC_DECODE_CAPS: DecodeCapabilities = DecodeCapabilities::new()
     .with_enforces_max_memory(true)
     .with_enforces_max_input_bytes(true)
     .with_gain_map(true)
+    .with_reconstructs_hdr(true)
+    .with_inventory(cfg!(feature = "inventory"))
     .with_threads_supported_range(1, if cfg!(feature = "parallel") { 256 } else { 1 });
 
 // ── Supported descriptors ──────────────────────────────────────────────────
@@ -112,7 +115,7 @@ static DECODE_DESCRIPTORS: &[PixelDescriptor] = &[
 /// Supplement extraction (gain map, depth map) is **opt-in**: both default
 /// to `false`. Enable via [`with_extract_gain_map`](Self::with_extract_gain_map)
 /// or [`with_extract_depth`](Self::with_extract_depth). The flags propagate
-/// to every [`HeicDecodeJob`] created by [`job()`](Self::job).
+/// to every [`HeicDecodeJob`] created by its `job()` factory.
 #[derive(Clone, Debug)]
 pub struct HeicDecoderConfig {
     inner: crate::DecoderConfig,
@@ -127,6 +130,23 @@ pub struct HeicDecoderConfig {
     /// Default: `false`. Container metadata (`ImageInfo.supplements.depth_map`)
     /// is always populated during probe regardless of this flag.
     pub extract_depth: bool,
+    /// How to handle the image's stored orientation (`irot`/`imir`).
+    ///
+    /// Default: [`OrientationHint::Preserve`](zencodec::OrientationHint::Preserve)
+    /// — the zencodec ecosystem default. Under `Preserve` the decoder does
+    /// **not** bake the orientation into the pixels:
+    /// [`decode`](zencodec::decode::DecoderConfig::job)
+    /// returns pixels in stored orientation and [`ImageInfo`] reports the
+    /// stored dimensions plus the intrinsic [`Orientation`]. Under
+    /// [`Correct`](zencodec::OrientationHint::Correct) the decoder applies the
+    /// orientation and reports display dimensions with
+    /// [`Orientation::Identity`]. Either way
+    /// [`ImageInfo::display_width`]/[`display_height`](ImageInfo::display_height)
+    /// yield the upright dimensions.
+    ///
+    /// Set per-job via
+    /// [`DecodeJob::with_orientation`](zencodec::decode::DecodeJob::with_orientation).
+    pub orientation: zencodec::OrientationHint,
 }
 
 impl HeicDecoderConfig {
@@ -137,6 +157,7 @@ impl HeicDecoderConfig {
             inner: crate::DecoderConfig::new(),
             extract_gain_map: false,
             extract_depth: false,
+            orientation: zencodec::OrientationHint::Preserve,
         }
     }
 
@@ -159,6 +180,15 @@ impl HeicDecoderConfig {
         self.extract_depth = extract;
         self
     }
+
+    /// Set how the decoder handles the image's stored orientation. See
+    /// [`orientation`](Self::orientation) for semantics. Default
+    /// [`OrientationHint::Preserve`](zencodec::OrientationHint::Preserve).
+    #[must_use]
+    pub fn with_orientation(mut self, hint: zencodec::OrientationHint) -> Self {
+        self.orientation = hint;
+        self
+    }
 }
 
 impl Default for HeicDecoderConfig {
@@ -168,7 +198,7 @@ impl Default for HeicDecoderConfig {
 }
 
 impl zencodec::decode::DecoderConfig for HeicDecoderConfig {
-    type Error = At<HeicError>;
+    type Error = At<zencodec::CodecError>;
     type Job<'a> = HeicDecodeJob;
 
     fn formats() -> &'static [ImageFormat] {
@@ -183,6 +213,38 @@ impl zencodec::decode::DecoderConfig for HeicDecoderConfig {
         &HEIC_DECODE_CAPS
     }
 
+    fn estimate_decode_resources(
+        &self,
+        image: &zencodec::estimate::ImageCharacteristics,
+        compute: &zencodec::estimate::ComputeEnvironment,
+    ) -> zencodec::estimate::ResourceEstimate {
+        use zencodec::estimate::{ResourceEstimate, ThreadingInformation};
+
+        // Peak working set: the native `estimate_memory` upper bound — full
+        // YCbCr planes (4:2:0, u16/sample) + the output buffer at the requested
+        // layout + the deblocking metadata. For a grid image this over-counts
+        // (tiles are decoded into a tile-sized frame and color-converted into
+        // the output strip-by-strip), so it is a safe upper bound. The HEVC
+        // AV1-tile/grid assembly buffers it covers are heic's own; the inner
+        // HEVC decoder's transient per-CTU scratch is bounded and not modelled.
+        let layout = layout_for_descriptor(image.descriptor());
+        let peak = crate::DecoderConfig::estimate_memory(image.width(), image.height(), layout);
+
+        // Wall time: HEVC intra decode is heavy. Measured single-thread on this
+        // box ≈ 25 Mpix/s (1.09 MP example.heic ~54 ms; 12.2 MP iPhone still
+        // ~451 ms sequential). Conservative, content-independent.
+        const DECODE_MPIX_PER_S: u64 = 25;
+        let pixels = u64::from(image.width()).saturating_mul(u64::from(image.height()));
+        let wall_ms = pixels / (DECODE_MPIX_PER_S * 1_000) + 1;
+
+        // SERIAL for the peak/time model: tile parallelism (the optional
+        // `parallel` feature) only shortens grid wall-time, it does not lower
+        // the peak, and the serial time is a valid upper bound.
+        ResourceEstimate::new(peak, wall_ms)
+            .with_threading(ThreadingInformation::SERIAL)
+            .at_cores(compute.cores())
+    }
+
     fn job<'a>(self) -> Self::Job<'a> {
         let extract_gain_map = self.extract_gain_map;
         let extract_depth = self.extract_depth;
@@ -193,6 +255,7 @@ impl zencodec::decode::DecoderConfig for HeicDecoderConfig {
             policy: None,
             extract_gain_map,
             extract_depth,
+            gain_map_render: zencodec::GainMapRender::default(),
         }
     }
 }
@@ -212,6 +275,11 @@ pub struct HeicDecodeJob {
     pub extract_gain_map: bool,
     /// Whether to decode the depth map when present (default: `false`).
     pub extract_depth: bool,
+    /// Gain-map rendition intent (zencodec 0.1.21). `Components` (and
+    /// `ReconstructHdr`, downgraded — heic surfaces, it does not apply)
+    /// additionally surfaces the decoded gain map as a
+    /// [`zencodec::decode::DecodedGainMap`]. Default `BaseOnly`.
+    gain_map_render: zencodec::GainMapRender,
 }
 
 /// Apply [`DecodePolicy`] to an [`ImageInfo`], stripping metadata fields
@@ -234,7 +302,16 @@ fn apply_policy(policy: Option<&DecodePolicy>, mut info: ImageInfo) -> ImageInfo
 impl HeicDecodeJob {
     /// Build native limits from zencodec ResourceLimits.
     fn native_limits(&self) -> Option<crate::Limits> {
-        if !self.limits.has_any() {
+        let alloc_pref = crate::alloc_util::AllocPreference::from_zencodec(
+            self.limits.prefer_fallible_allocations,
+        );
+        // When no size/memory caps are set AND the alloc preference is the
+        // default, there is nothing to thread — `None` lets the decode path
+        // fall back to `DEFAULT_LIMITS` (which already carries `CodecDefault`).
+        // But an explicit Fallible/Infallible must survive even with no caps,
+        // so build a Limits in that case too.
+        if !self.limits.has_any() && alloc_pref == crate::alloc_util::AllocPreference::CodecDefault
+        {
             return None;
         }
         let mut limits = crate::Limits::default();
@@ -242,89 +319,42 @@ impl HeicDecodeJob {
         limits.max_height = self.limits.max_height.map(u64::from);
         limits.max_pixels = self.limits.max_pixels;
         limits.max_memory_bytes = self.limits.max_memory_bytes;
+        limits.alloc_pref = alloc_pref;
         Some(limits)
     }
-}
 
-/// Build the "available descriptors" list for format negotiation based on
-/// image properties (alpha, bit depth).
-fn available_descriptors(has_alpha: bool, bit_depth: u8) -> alloc::vec::Vec<PixelDescriptor> {
-    let mut available = alloc::vec::Vec::with_capacity(5);
-    if bit_depth > 8 {
-        // 16-bit formats first when source is >8-bit
-        if has_alpha {
-            available.push(PixelDescriptor::RGBA16_SRGB);
-            available.push(PixelDescriptor::RGB16_SRGB);
-        } else {
-            available.push(PixelDescriptor::RGB16_SRGB);
-            available.push(PixelDescriptor::RGBA16_SRGB);
-        }
-    }
-    // 8-bit formats
-    if has_alpha {
-        available.push(PixelDescriptor::RGBA8_SRGB);
-        available.push(PixelDescriptor::BGRA8_SRGB);
-        available.push(PixelDescriptor::RGB8_SRGB);
-    } else {
-        available.push(PixelDescriptor::RGB8_SRGB);
-        available.push(PixelDescriptor::RGBA8_SRGB);
-        available.push(PixelDescriptor::BGRA8_SRGB);
-    }
-    available
-}
+    // ── Pattern B: native-error bodies behind the thin trait wrappers ──────
+    //
+    // Each `*_inner` method is the exact pre-migration trait-method body
+    // (returning the native `At<HeicError>`, unchanged internal logic); the
+    // `zencodec::decode::DecodeJob` impl above wraps each with
+    // `.map_err(zencodec::CodecError::of)` to reach the shared envelope
+    // `type Error = At<CodecError>`. This keeps the (previously reviewed,
+    // tested) internals untouched and isolates the Pattern-B bridge to one
+    // line per method.
 
-/// Check whether a negotiated descriptor is a 16-bit format.
-fn is_16bit(desc: PixelDescriptor) -> bool {
-    desc == PixelDescriptor::RGB16_SRGB || desc == PixelDescriptor::RGBA16_SRGB
-}
-
-/// Map a negotiated PixelDescriptor to a native PixelLayout for 8-bit decode.
-fn descriptor_to_layout(desc: PixelDescriptor) -> crate::PixelLayout {
-    if desc.pixel_format() == PixelDescriptor::BGRA8_SRGB.pixel_format() {
-        crate::PixelLayout::Bgra8
-    } else if desc.pixel_format() == PixelDescriptor::RGBA8_SRGB.pixel_format() {
-        crate::PixelLayout::Rgba8
-    } else {
-        crate::PixelLayout::Rgb8
-    }
-}
-
-impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
-    type Error = At<HeicError>;
-    type Dec = HeicDecoder<'a>;
-    type StreamDec = HeicStreamDecoder;
-    type AnimationFrameDec = Unsupported<At<HeicError>>;
-
-    fn with_stop(mut self, stop: zencodec::StopToken) -> Self {
-        self.stop = Some(stop);
-        self
-    }
-
-    fn with_limits(mut self, limits: ResourceLimits) -> Self {
-        self.limits = limits;
-        self
-    }
-
-    fn with_policy(mut self, policy: DecodePolicy) -> Self {
-        self.policy = Some(policy);
-        self
-    }
-
-    fn probe(&self, data: &[u8]) -> Result<ImageInfo, At<HeicError>> {
+    fn probe_inner(&self, data: &[u8]) -> Result<ImageInfo, At<HeicError>> {
         self.limits
             .check_input_size(data.len() as u64)
-            .map_err(|e| at!(HeicError::LimitExceeded(limit_exceeded_msg(e))))?;
+            .map_err(|e| at!(HeicError::ResourceLimit(e)))?;
         let native = crate::ImageInfo::from_bytes(data).map_err(probe_error_to_heic)?;
+        let apply = will_auto_orient(self.config.orientation);
+        let (w, h, orientation) = reported_dims_and_orientation(
+            native.width,
+            native.height,
+            primary_orientation(data),
+            apply,
+        );
         Ok(apply_policy(
             self.policy.as_ref(),
-            build_image_info_lightweight(&native),
+            build_image_info_lightweight(&native, w, h, orientation),
         ))
     }
 
-    fn probe_full(&self, data: &[u8]) -> Result<ImageInfo, At<HeicError>> {
+    fn probe_full_inner(&self, data: &[u8]) -> Result<ImageInfo, At<HeicError>> {
         self.limits
             .check_input_size(data.len() as u64)
-            .map_err(|e| at!(HeicError::LimitExceeded(limit_exceeded_msg(e))))?;
+            .map_err(|e| at!(HeicError::ResourceLimit(e)))?;
         let native = crate::ImageInfo::from_bytes(data).map_err(probe_error_to_heic)?;
         // Parse the HEIF container once and extract all metadata from it
         let stop_ref: &dyn enough::Stop = match self.stop {
@@ -332,16 +362,54 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
             None => &enough::Unstoppable,
         };
         let container = crate::heif::parse(data, stop_ref).ok();
+        let apply = will_auto_orient(self.config.orientation);
+        let intrinsic = container
+            .as_ref()
+            .and_then(|c| c.primary_item())
+            .map(|it| compose_orientation(&it.transforms))
+            .unwrap_or(Orientation::Identity);
+        let (w, h, orientation) =
+            reported_dims_and_orientation(native.width, native.height, intrinsic, apply);
         Ok(apply_policy(
             self.policy.as_ref(),
-            build_image_info_full(&native, container.as_ref(), native.width, native.height),
+            build_image_info_full(&native, container.as_ref(), w, h, orientation),
         ))
     }
 
-    fn output_info(&self, data: &[u8]) -> Result<OutputInfo, At<HeicError>> {
+    #[cfg(feature = "inventory")]
+    fn inventory_inner(
+        &self,
+        data: &[u8],
+    ) -> Result<zencodec::inventory::Inventory, At<HeicError>> {
+        use crate::inventory::Options;
         self.limits
             .check_input_size(data.len() as u64)
-            .map_err(|e| at!(HeicError::LimitExceeded(limit_exceeded_msg(e))))?;
+            .map_err(|e| at!(HeicError::ResourceLimit(e)))?;
+        let stop_ref: &dyn enough::Stop = match self.stop {
+            Some(ref s) => s,
+            None => &enough::Unstoppable,
+        };
+        // Mirrors `HeicDecoder::decode_inner`: ReconstructHdr applies the gain
+        // map; Components or `extract_gain_map` decode and attach it, whatever
+        // the render mode (both can hold at once).
+        let render = self.gain_map_render;
+        let policy = self.policy.as_ref();
+        let opts = Options {
+            apply_gain_map: matches!(render, zencodec::GainMapRender::ReconstructHdr { .. }),
+            attach_gain_map: self.extract_gain_map
+                || matches!(render, zencodec::GainMapRender::Components),
+            decode_depth: self.extract_depth,
+            keep_icc: policy.is_none_or(|p| p.resolve_icc(true)),
+            keep_exif: policy.is_none_or(|p| p.resolve_exif(true)),
+            keep_xmp: policy.is_none_or(|p| p.resolve_xmp(true)),
+        };
+        crate::inventory::inventory(data, &opts, stop_ref)
+    }
+
+    fn output_info_inner(&self, data: &[u8]) -> Result<OutputInfo, At<HeicError>> {
+        self.limits
+            .check_input_size(data.len() as u64)
+            .map_err(|e| at!(HeicError::ResourceLimit(e)))?;
         let native = crate::ImageInfo::from_bytes(data).map_err(probe_error_to_heic)?;
         let available = available_descriptors(native.has_alpha, native.bit_depth);
         let base_desc = available[0]; // default for this image
@@ -350,17 +418,29 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
             native.color_primaries,
             native.transfer_characteristics,
         );
-        Ok(OutputInfo::full_decode(native.width, native.height, desc))
+        // Report the post-orientation output dims + what the decoder applies:
+        // `Correct` bakes the intrinsic orientation (output = display dims);
+        // `Preserve` applies nothing (output = stored dims, caller orients).
+        let apply = will_auto_orient(self.config.orientation);
+        let intrinsic = primary_orientation(data);
+        let (w, h, _) =
+            reported_dims_and_orientation(native.width, native.height, intrinsic, apply);
+        let orientation_applied = if apply {
+            intrinsic
+        } else {
+            Orientation::Identity
+        };
+        Ok(OutputInfo::full_decode(w, h, desc).with_orientation_applied(orientation_applied))
     }
 
-    fn decoder(
+    fn decoder_inner<'a>(
         mut self,
         data: Cow<'a, [u8]>,
         preferred: &[PixelDescriptor],
     ) -> Result<HeicDecoder<'a>, At<HeicError>> {
         self.limits
             .check_input_size(data.len() as u64)
-            .map_err(|e| at!(HeicError::LimitExceeded(limit_exceeded_msg(e))))?;
+            .map_err(|e| at!(HeicError::ResourceLimit(e)))?;
         let thread_count = policy_to_threads(self.limits.threading());
         let stop = self.stop.take();
         let limits = self.native_limits();
@@ -374,10 +454,11 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
             policy: self.policy,
             extract_gain_map: self.extract_gain_map,
             extract_depth: self.extract_depth,
+            gain_map_render: self.gain_map_render,
         })
     }
 
-    fn push_decoder(
+    fn push_decoder_inner<'a>(
         self,
         data: Cow<'a, [u8]>,
         sink: &mut dyn DecodeRowSink,
@@ -385,7 +466,7 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
     ) -> Result<OutputInfo, At<HeicError>> {
         self.limits
             .check_input_size(data.len() as u64)
-            .map_err(|e| at!(HeicError::LimitExceeded(limit_exceeded_msg(e))))?;
+            .map_err(|e| at!(HeicError::ResourceLimit(e)))?;
         // Probe for image properties
         let probe_info = crate::ImageInfo::from_bytes(&data).ok();
         let has_alpha = probe_info.as_ref().is_some_and(|pi| pi.has_alpha);
@@ -393,13 +474,16 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
 
         // Negotiate output format
         let available = available_descriptors(has_alpha, bit_depth);
-        let negotiated = negotiate_pixel_format(preferred, &available)
-            .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
+        let negotiated = negotiate_pixel_format(preferred, &available).ok_or_else(|| {
+            at!(HeicError::UnsupportedOperation(
+                zencodec::UnsupportedOperation::PixelFormat
+            ))
+        })?;
 
         if is_16bit(negotiated) {
             // 16-bit: full decode, then push rows
-            let dec = self.decoder(data, preferred)?;
-            let output = <HeicDecoder<'_> as zencodec::decode::Decode>::decode(dec)?;
+            let dec = self.decoder_inner(data, preferred)?;
+            let output = dec.decode_inner()?;
             let ps = output.pixels();
             let desc = ps.descriptor();
             let w = ps.width();
@@ -478,14 +562,14 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
         Ok(OutputInfo::full_decode(w, h, desc))
     }
 
-    fn streaming_decoder(
+    fn streaming_decoder_inner<'a>(
         self,
         data: Cow<'a, [u8]>,
         preferred: &[PixelDescriptor],
     ) -> Result<HeicStreamDecoder, At<HeicError>> {
         self.limits
             .check_input_size(data.len() as u64)
-            .map_err(|e| at!(HeicError::LimitExceeded(limit_exceeded_msg(e))))?;
+            .map_err(|e| at!(HeicError::ResourceLimit(e)))?;
         let thread_count = policy_to_threads(self.limits.threading());
         HeicStreamDecoder::new(
             &data,
@@ -495,15 +579,182 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
             thread_count,
         )
     }
+}
+
+/// Build the "available descriptors" list for format negotiation based on
+/// image properties (alpha, bit depth).
+fn available_descriptors(has_alpha: bool, bit_depth: u8) -> alloc::vec::Vec<PixelDescriptor> {
+    let mut available = alloc::vec::Vec::with_capacity(5);
+    if bit_depth > 8 {
+        // 16-bit formats first when source is >8-bit
+        if has_alpha {
+            available.push(PixelDescriptor::RGBA16_SRGB);
+            available.push(PixelDescriptor::RGB16_SRGB);
+        } else {
+            available.push(PixelDescriptor::RGB16_SRGB);
+            available.push(PixelDescriptor::RGBA16_SRGB);
+        }
+    }
+    // 8-bit formats
+    if has_alpha {
+        available.push(PixelDescriptor::RGBA8_SRGB);
+        available.push(PixelDescriptor::BGRA8_SRGB);
+        available.push(PixelDescriptor::RGB8_SRGB);
+    } else {
+        available.push(PixelDescriptor::RGB8_SRGB);
+        available.push(PixelDescriptor::RGBA8_SRGB);
+        available.push(PixelDescriptor::BGRA8_SRGB);
+    }
+    available
+}
+
+/// Check whether a negotiated descriptor is a 16-bit format.
+fn is_16bit(desc: PixelDescriptor) -> bool {
+    desc == PixelDescriptor::RGB16_SRGB || desc == PixelDescriptor::RGBA16_SRGB
+}
+
+/// Pick the native [`crate::PixelLayout`] that best bounds the output buffer
+/// for a negotiated descriptor, used only by the resource estimate.
+///
+/// heic's `PixelLayout` is 8-bit-only (3 or 4 Bpp), so a 16-bit output is not
+/// representable here — but the estimate's dominant term is the u16 YCbCr
+/// working set from `estimate_memory`, which already scales with bit depth, so
+/// an alpha-presence choice (Rgb8 vs Rgba8) is a sound conservative bound.
+fn layout_for_descriptor(desc: &PixelDescriptor) -> crate::PixelLayout {
+    if desc.has_alpha() {
+        crate::PixelLayout::Rgba8
+    } else {
+        crate::PixelLayout::Rgb8
+    }
+}
+
+/// Map a negotiated PixelDescriptor to a native PixelLayout for 8-bit decode.
+fn descriptor_to_layout(desc: PixelDescriptor) -> crate::PixelLayout {
+    if desc.pixel_format() == PixelDescriptor::BGRA8_SRGB.pixel_format() {
+        crate::PixelLayout::Bgra8
+    } else if desc.pixel_format() == PixelDescriptor::RGBA8_SRGB.pixel_format() {
+        crate::PixelLayout::Rgba8
+    } else {
+        crate::PixelLayout::Rgb8
+    }
+}
+
+impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
+    type Error = At<zencodec::CodecError>;
+    type Dec = HeicDecoder<'a>;
+    type StreamDec = HeicStreamDecoder;
+    type AnimationFrameDec = Unsupported<At<zencodec::CodecError>>;
+
+    fn with_stop(mut self, stop: zencodec::StopToken) -> Self {
+        self.stop = Some(stop);
+        self
+    }
+
+    fn with_limits(mut self, limits: ResourceLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// heic applies gain maps natively (`reconstructs_hdr()` is `true`):
+    /// `ReconstructHdr` decodes the SDR base, applies the Apple HDR gain map
+    /// via ultrahdr-core, and returns linear f32/f16 HDR pixels with the
+    /// content-light-level / mastering-display envelope populated.
+    fn with_gain_map_render(mut self, render: zencodec::GainMapRender) -> Self {
+        self.gain_map_render = render;
+        self
+    }
+
+    fn with_policy(mut self, policy: DecodePolicy) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+
+    fn with_orientation(mut self, hint: zencodec::OrientationHint) -> Self {
+        self.config.orientation = hint;
+        self
+    }
+
+    fn probe(&self, data: &[u8]) -> Result<ImageInfo, At<zencodec::CodecError>> {
+        self.probe_inner(data).map_err(zencodec::CodecError::of)
+    }
+
+    fn probe_full(&self, data: &[u8]) -> Result<ImageInfo, At<zencodec::CodecError>> {
+        self.probe_full_inner(data)
+            .map_err(zencodec::CodecError::of)
+    }
+
+    fn output_info(&self, data: &[u8]) -> Result<OutputInfo, At<zencodec::CodecError>> {
+        self.output_info_inner(data)
+            .map_err(zencodec::CodecError::of)
+    }
+
+    /// Every box, item, item extent and property, with what this job's
+    /// decode does with it. Follows the job's gain-map, depth and
+    /// [`DecodePolicy`] settings. See `src/inventory.rs`.
+    #[cfg(feature = "inventory")]
+    fn inventory(
+        &self,
+        data: &[u8],
+    ) -> Result<zencodec::inventory::Inventory, At<zencodec::CodecError>> {
+        self.inventory_inner(data).map_err(zencodec::CodecError::of)
+    }
+
+    fn decoder(
+        self,
+        data: Cow<'a, [u8]>,
+        preferred: &[PixelDescriptor],
+    ) -> Result<HeicDecoder<'a>, At<zencodec::CodecError>> {
+        self.decoder_inner(data, preferred)
+            .map_err(zencodec::CodecError::of)
+    }
+
+    fn push_decoder(
+        self,
+        data: Cow<'a, [u8]>,
+        sink: &mut dyn DecodeRowSink,
+        preferred: &[PixelDescriptor],
+    ) -> Result<OutputInfo, At<zencodec::CodecError>> {
+        self.push_decoder_inner(data, sink, preferred)
+            .map_err(zencodec::CodecError::of)
+    }
+
+    fn streaming_decoder(
+        self,
+        data: Cow<'a, [u8]>,
+        preferred: &[PixelDescriptor],
+    ) -> Result<HeicStreamDecoder, At<zencodec::CodecError>> {
+        self.streaming_decoder_inner(data, preferred)
+            .map_err(zencodec::CodecError::of)
+    }
 
     fn animation_frame_decoder(
         self,
         _data: Cow<'a, [u8]>,
         _preferred: &[PixelDescriptor],
-    ) -> Result<Unsupported<At<HeicError>>, At<HeicError>> {
-        Err(at!(HeicError::Unsupported(
-            "HEIC does not support animation decoding",
-        )))
+    ) -> Result<Unsupported<At<zencodec::CodecError>>, At<zencodec::CodecError>> {
+        // Invocation-origin, not image-bytes-origin: HEIC has no concept of
+        // an animation at all, so this is "the caller asked for an
+        // operation this codec doesn't support" (zencodec's
+        // `UnsupportedOperation::AnimationDecode`), not a fault in any
+        // particular image's bytes.
+        Err(HeicError::UnsupportedOperation(zencodec::UnsupportedOperation::AnimationDecode).into())
+    }
+
+    /// Incremental (sans-I/O) decode: the header is reported as soon as it
+    /// probes, and the image decodes through `push_decoder` once the whole
+    /// file is offered. The HEIF container parse and the HEVC tile decode
+    /// both need their bytes complete; a source binding that fetches only
+    /// the items a decode needs is a follow-up.
+    fn dyn_incremental_decoder(
+        self,
+        preferred: &[PixelDescriptor],
+    ) -> Result<
+        alloc::boxed::Box<zencodec::decode::DynIncrementalDecoder>,
+        zencodec::decode::BoxedError,
+    > {
+        Ok(zencodec::decode::erase_incremental(
+            zencodec::helpers::WholeFileIncremental::new(self, preferred),
+        ))
     }
 }
 
@@ -602,12 +853,22 @@ pub struct HeicDecoder<'a> {
     extract_gain_map: bool,
     /// Whether to decode the depth map when present.
     extract_depth: bool,
+    gain_map_render: zencodec::GainMapRender,
 }
 
 impl zencodec::decode::Decode for HeicDecoder<'_> {
-    type Error = At<HeicError>;
+    type Error = At<zencodec::CodecError>;
 
-    fn decode(self) -> Result<DecodeOutput, At<HeicError>> {
+    fn decode(self) -> Result<DecodeOutput, At<zencodec::CodecError>> {
+        self.decode_inner().map_err(zencodec::CodecError::of)
+    }
+}
+
+impl HeicDecoder<'_> {
+    /// Pattern B: the exact pre-migration `decode()` trait-method body,
+    /// returning the native `At<HeicError>` unchanged — see the `*_inner`
+    /// comment on `impl HeicDecodeJob` for the rationale.
+    fn decode_inner(self) -> Result<DecodeOutput, At<HeicError>> {
         let data: &[u8] = &self.data;
         let preferred = &self.preferred;
 
@@ -616,90 +877,139 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
         let bit_depth = probe_info.as_ref().map_or(8, |pi| pi.bit_depth);
         let has_alpha = probe_info.as_ref().is_some_and(|pi| pi.has_alpha);
 
+        // Orientation policy: `Correct` bakes orientation into the pixels and
+        // reports `Identity`; `Preserve` (default) keeps stored orientation and
+        // reports the intrinsic orientation on the output `ImageInfo`.
+        let apply_orientation = will_auto_orient(self.config.orientation);
+
         // Negotiate output format
         let available = available_descriptors(has_alpha, bit_depth);
-        let negotiated = negotiate_pixel_format(preferred, &available)
-            .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
+        let negotiated = negotiate_pixel_format(preferred, &available).ok_or_else(|| {
+            at!(HeicError::UnsupportedOperation(
+                zencodec::UnsupportedOperation::PixelFormat
+            ))
+        })?;
 
-        let (buf, width, height, has_alpha): (PixelBuffer, u32, u32, bool) = if is_16bit(negotiated)
-        {
-            // 16-bit path: decode to YCbCr frame, then convert at full precision.
-            let mut req = self.config.inner.decode_request(data);
-            if let Some(ref limits) = self.limits {
-                req = req.with_limits(limits);
+        // Gain-map rendition intent (zencodec contract): BaseOnly decodes the
+        // SDR base; Components surfaces the decoded gain map alongside the
+        // base; ReconstructHdr applies the gain map natively. Unknown future
+        // modes are refused, never mis-rendered.
+        let (surface_components, reconstruct_target) = match self.gain_map_render {
+            zencodec::GainMapRender::BaseOnly => (false, None),
+            zencodec::GainMapRender::Components => (true, None),
+            zencodec::GainMapRender::ReconstructHdr { target_headroom } => {
+                (false, Some(target_headroom))
             }
-            if let Some(ref stop) = self.stop {
-                req = req.with_stop(stop);
+            _ => {
+                // Invocation-origin: `GainMapRender` is `#[non_exhaustive]`,
+                // so this only fires for a variant added to zencodec after
+                // this crate was compiled — the caller's request names a
+                // real (to them) render mode this build doesn't recognize,
+                // not a fault in the image bytes.
+                return Err(at!(HeicError::InvalidRequest(
+                    "unrecognized GainMapRender mode"
+                )));
             }
-            if self.thread_count > 0 {
-                req = req.with_max_threads(self.thread_count);
-            }
-            let frame = req.decode_yuv()?;
-
-            let has_alpha = frame.alpha_plane.is_some();
-            let w = frame.cropped_width();
-            let h = frame.cropped_height();
-
-            let wants_alpha = negotiated == PixelDescriptor::RGBA16_SRGB;
-            if has_alpha || wants_alpha {
-                let desc = cicp_descriptor(
-                    PixelDescriptor::RGBA16_SRGB,
-                    frame.color_primaries as u16,
-                    frame.transfer_characteristics as u16,
-                );
-                let rgba_data = frame.to_rgba16()?;
-                let pixels = u16_vec_to_rgba(rgba_data);
-                let pb = PixelBuffer::from_pixels_erased(pixels, w, h)
-                    .map_err_at(|_| HeicError::InvalidData("pixel count mismatch"))?
-                    .with_descriptor(desc);
-                (pb, w, h, true)
-            } else {
-                let desc = cicp_descriptor(
-                    PixelDescriptor::RGB16_SRGB,
-                    frame.color_primaries as u16,
-                    frame.transfer_characteristics as u16,
-                );
-                let rgb_data = frame.to_rgb16()?;
-                let pixels = u16_vec_to_rgb(rgb_data);
-                let pb = PixelBuffer::from_pixels_erased(pixels, w, h)
-                    .map_err_at(|_| HeicError::InvalidData("pixel count mismatch"))?
-                    .with_descriptor(desc);
-                (pb, w, h, false)
-            }
-        } else {
-            // 8-bit path: use negotiated layout for decode.
-            let layout = descriptor_to_layout(negotiated);
-            let mut req = self
-                .config
-                .inner
-                .decode_request(data)
-                .with_output_layout(layout);
-            if let Some(ref limits) = self.limits {
-                req = req.with_limits(limits);
-            }
-            if let Some(ref stop) = self.stop {
-                req = req.with_stop(stop);
-            }
-            if self.thread_count > 0 {
-                req = req.with_max_threads(self.thread_count);
-            }
-            let native_output = req.decode()?;
-            let has_alpha =
-                layout == crate::PixelLayout::Rgba8 || layout == crate::PixelLayout::Bgra8;
-            let w = native_output.width;
-            let h = native_output.height;
-            let mut pb = raw_to_pixel_buffer(native_output.data, w, h, native_output.layout)?;
-            // Apply CICP from probe
-            if let Some(ref pi) = probe_info {
-                let desc = cicp_descriptor(
-                    pb.descriptor(),
-                    pi.color_primaries,
-                    pi.transfer_characteristics,
-                );
-                pb = pb.with_descriptor(desc);
-            }
-            (pb, w, h, has_alpha)
         };
+        let reconstructing =
+            reconstruct_target.is_some() && probe_info.as_ref().is_some_and(|pi| pi.has_gain_map);
+        // HEIC gain-map items are stored display-oriented (they carry no
+        // irot/imir of their own), while the primary may. Reconstruct in
+        // display space so the gain map and the base align — otherwise the
+        // apply would stretch a portrait gain map across a landscape base.
+        // `report_orientation` below then correctly reports Identity.
+        let apply_orientation = apply_orientation || reconstructing;
+
+        let (buf, width, height, has_alpha): (PixelBuffer, u32, u32, bool) =
+            if is_16bit(negotiated) && !reconstructing {
+                // 16-bit path: decode to YCbCr frame, then convert at full precision.
+                let mut req = self
+                    .config
+                    .inner
+                    .decode_request(data)
+                    .with_apply_orientation(apply_orientation);
+                if let Some(ref limits) = self.limits {
+                    req = req.with_limits(limits);
+                }
+                if let Some(ref stop) = self.stop {
+                    req = req.with_stop(stop);
+                }
+                if self.thread_count > 0 {
+                    req = req.with_max_threads(self.thread_count);
+                }
+                let frame = req.decode_yuv()?;
+
+                let has_alpha = frame.alpha_plane.is_some();
+                let w = frame.cropped_width();
+                let h = frame.cropped_height();
+
+                let wants_alpha = negotiated == PixelDescriptor::RGBA16_SRGB;
+                if has_alpha || wants_alpha {
+                    let desc = cicp_descriptor(
+                        PixelDescriptor::RGBA16_SRGB,
+                        frame.color_primaries as u16,
+                        frame.transfer_characteristics as u16,
+                    );
+                    let rgba_data = frame.to_rgba16().map_err(crate::error::at_core)?;
+                    let pixels = u16_vec_to_rgba(rgba_data);
+                    let pb = PixelBuffer::from_pixels_erased(pixels, w, h)
+                        .map_err_at(|_| HeicError::InvalidData("pixel count mismatch"))?
+                        .with_descriptor(desc);
+                    (pb, w, h, true)
+                } else {
+                    let desc = cicp_descriptor(
+                        PixelDescriptor::RGB16_SRGB,
+                        frame.color_primaries as u16,
+                        frame.transfer_characteristics as u16,
+                    );
+                    let rgb_data = frame.to_rgb16().map_err(crate::error::at_core)?;
+                    let pixels = u16_vec_to_rgb(rgb_data);
+                    let pb = PixelBuffer::from_pixels_erased(pixels, w, h)
+                        .map_err_at(|_| HeicError::InvalidData("pixel count mismatch"))?
+                        .with_descriptor(desc);
+                    (pb, w, h, false)
+                }
+            } else {
+                // 8-bit path: use negotiated layout for decode.
+                // ReconstructHdr forces RGBA8 — `apply_gainmap` consumes 8-bit
+                // SDR input (gain-map HEICs carry an 8-bit SDR base by design).
+                let layout = if reconstructing {
+                    crate::PixelLayout::Rgba8
+                } else {
+                    descriptor_to_layout(negotiated)
+                };
+                let mut req = self
+                    .config
+                    .inner
+                    .decode_request(data)
+                    .with_output_layout(layout)
+                    .with_apply_orientation(apply_orientation);
+                if let Some(ref limits) = self.limits {
+                    req = req.with_limits(limits);
+                }
+                if let Some(ref stop) = self.stop {
+                    req = req.with_stop(stop);
+                }
+                if self.thread_count > 0 {
+                    req = req.with_max_threads(self.thread_count);
+                }
+                let native_output = req.decode()?;
+                let has_alpha =
+                    layout == crate::PixelLayout::Rgba8 || layout == crate::PixelLayout::Bgra8;
+                let w = native_output.width;
+                let h = native_output.height;
+                let mut pb = raw_to_pixel_buffer(native_output.data, w, h, native_output.layout)?;
+                // Apply CICP from probe
+                if let Some(ref pi) = probe_info {
+                    let desc = cicp_descriptor(
+                        pb.descriptor(),
+                        pi.color_primaries,
+                        pi.transfer_characteristics,
+                    );
+                    pb = pb.with_descriptor(desc);
+                }
+                (pb, w, h, has_alpha)
+            };
 
         // Build ImageInfo with all available metadata.
         // Parse the HEIF container once for all metadata extraction.
@@ -729,10 +1039,45 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
             icc_profile: None,
         };
         let pi_ref = probe_info.as_ref().unwrap_or(&fallback_info);
+        // `width`/`height` are the decoded frame's dims — stored orientation when
+        // `Preserve` (not baked), display orientation when `Correct` (baked) —
+        // so they ARE the dims to report. Tag with the intrinsic orientation
+        // unless it was baked in.
+        let report_orientation = if apply_orientation {
+            Orientation::Identity
+        } else {
+            container
+                .as_ref()
+                .and_then(|c| c.primary_item())
+                .map(|it| compose_orientation(&it.transforms))
+                .unwrap_or(Orientation::Identity)
+        };
         let info = apply_policy(
             self.policy.as_ref(),
-            build_image_info_full(pi_ref, container.as_ref(), width, height),
+            build_image_info_full(
+                pi_ref,
+                container.as_ref(),
+                width,
+                height,
+                report_orientation,
+            ),
         );
+        // Native HDR reconstruction: apply the gain map to the SDR base
+        // before packaging the output.
+        let (buf, info) = if reconstructing {
+            reconstruct_hdr_base(
+                buf,
+                info,
+                data,
+                container.as_ref(),
+                reconstruct_target.flatten(),
+                preferred,
+                stop_ref,
+            )?
+        } else {
+            (buf, info)
+        };
+
         let mut output =
             DecodeOutput::new(buf, info).with_source_encoding_details(HeicSourceEncoding);
 
@@ -754,17 +1099,48 @@ impl zencodec::decode::Decode for HeicDecoder<'_> {
             });
 
             // Decode and attach the HDR gain map if requested and present.
-            if self.extract_gain_map
-                && pi.has_gain_map
-                && let Ok(gain_map) = crate::decode::decode_gain_map(data)
-            {
+            // (ReconstructHdr consumed the gain map above — `reconstructing`
+            // and `surface_components` are never both true.)
+            if (self.extract_gain_map || surface_components) && pi.has_gain_map {
+                let gain_map = crate::decode::decode_gain_map(data, &[crate::Backend::Rust])?;
+                if surface_components {
+                    // heic surfaces gain maps as luma-only gray8; params come
+                    // from the ISO 21496-1 tmap payload when present, else
+                    // the Apple EXIF MakerNote headroom.
+                    let params =
+                        gain_map_params_from(&gain_map, container.as_ref()).ok_or_else(|| {
+                            at!(HeicError::InvalidData(
+                                "Components: missing or invalid gain-map rendering metadata"
+                            ))
+                        })?;
+                    let gm_info = zencodec::gainmap::GainMapInfo::new(
+                        params,
+                        gain_map.width,
+                        gain_map.height,
+                        1,
+                    );
+                    let pixels = zenpixels::PixelBuffer::from_vec(
+                        gain_map.data.clone(),
+                        gain_map.width,
+                        gain_map.height,
+                        zenpixels::PixelDescriptor::GRAY8_SRGB,
+                    )
+                    .map_err(|_| {
+                        at!(HeicError::InvalidData(
+                            "Components: invalid gain-map pixel buffer"
+                        ))
+                    })?;
+                    output
+                        .extensions_mut()
+                        .insert(zencodec::decode::DecodedGainMap::new(pixels, gm_info));
+                }
                 output.extensions_mut().insert(gain_map);
             }
 
             // Decode and attach the depth map if requested and present.
             if self.extract_depth
                 && pi.has_depth
-                && let Ok(depth_map) = crate::decode::decode_depth(data)
+                && let Ok(depth_map) = crate::decode::decode_depth(data, &[crate::Backend::Rust])
             {
                 output.extensions_mut().insert(depth_map);
             }
@@ -832,8 +1208,17 @@ impl HeicStreamDecoder {
         // Parse container once for metadata extraction and grid init
         let container = crate::heif::parse(data, stop_ref).ok();
 
-        // Build ImageInfo for the trait (uses pre-parsed container)
-        let info = build_image_info_full(pi, container.as_ref(), pi.width, pi.height);
+        // Build ImageInfo for the trait (uses pre-parsed container). The
+        // streaming path only handles transform-free grid images (grid
+        // eligibility bails on any `irot`/`imir`/`clap`), so the intrinsic
+        // orientation is always Identity here and stored == display dims.
+        let info = build_image_info_full(
+            pi,
+            container.as_ref(),
+            pi.width,
+            pi.height,
+            Orientation::Identity,
+        );
 
         // Try grid path for 8-bit, no-alpha images
         if pi.bit_depth <= 8
@@ -860,8 +1245,11 @@ impl HeicStreamDecoder {
 
         // Non-grid fallback: full decode upfront
         let available = available_descriptors(pi.has_alpha, pi.bit_depth);
-        let negotiated = negotiate_pixel_format(preferred, &available)
-            .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
+        let negotiated = negotiate_pixel_format(preferred, &available).ok_or_else(|| {
+            at!(HeicError::UnsupportedOperation(
+                zencodec::UnsupportedOperation::PixelFormat
+            ))
+        })?;
 
         let pixels: PixelBuffer = if is_16bit(negotiated) {
             let mut req = config.decode_request(data);
@@ -882,15 +1270,12 @@ impl HeicStreamDecoder {
                     frame.color_primaries as u16,
                     frame.transfer_characteristics as u16,
                 );
-                let rgba_data = frame.to_rgba16()?;
+                let rgba_data = frame.to_rgba16().map_err(crate::error::at_core)?;
                 let pixels: alloc::vec::Vec<Rgba<u16>> = rgba_data
-                    .chunks_exact(4)
-                    .map(|c| Rgba {
-                        r: c[0],
-                        g: c[1],
-                        b: c[2],
-                        a: c[3],
-                    })
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|&[r, g, b, a]| Rgba { r, g, b, a })
                     .collect();
                 let w = frame.cropped_width();
                 let h = frame.cropped_height();
@@ -903,7 +1288,7 @@ impl HeicStreamDecoder {
                     frame.color_primaries as u16,
                     frame.transfer_characteristics as u16,
                 );
-                let rgb_data = frame.to_rgb16()?;
+                let rgb_data = frame.to_rgb16().map_err(crate::error::at_core)?;
                 let pixels = u16_vec_to_rgb(rgb_data);
                 let w = frame.cropped_width();
                 let h = frame.cropped_height();
@@ -1024,9 +1409,16 @@ impl HeicStreamDecoder {
             )
         };
 
-        if let Some(lim) = limits {
-            lim.check_dimensions(output_width, output_height)?;
-        }
+        // Always enforce the default resource ceiling when the caller passed no
+        // explicit Limits. The old `if let Some(lim)` skipped the check entirely
+        // in the common default-construction case, so a crafted grid with the
+        // 32-bit-dims flag and output_width/height up to 0xFFFFFFFF drove an
+        // uncapped allocation (OOM on 64-bit; usize-overflow undersized strip
+        // buffer + OOB index on 32-bit/wasm). Mirror the parent's
+        // try_decode_grid_streaming, which uses limits.unwrap_or(&DEFAULT_LIMITS).
+        limits
+            .unwrap_or(&crate::decode::DEFAULT_LIMITS)
+            .check_dimensions(output_width, output_height)?;
 
         // Get tile info
         let tile_ids = container.get_item_references(primary_item.id, FourCC::DIMG);
@@ -1048,7 +1440,7 @@ impl HeicStreamDecoder {
             .ok_or_else(|| at!(HeicError::InvalidData("Missing tile dimensions")))?;
 
         // Color override from grid item's colr nclx
-        let color_override = match &primary_item.color_info {
+        let color_override = match container.item_nclx(primary_item.id) {
             Some(ColorInfo::Nclx {
                 full_range,
                 matrix_coefficients,
@@ -1065,8 +1457,11 @@ impl HeicStreamDecoder {
 
         // Negotiate 8-bit layout for grid tiles (no alpha, ≤8-bit)
         let available = available_descriptors(false, 8);
-        let negotiated = negotiate_pixel_format(preferred, &available)
-            .ok_or_else(|| at!(HeicError::InvalidData("pixel format negotiation failed")))?;
+        let negotiated = negotiate_pixel_format(preferred, &available).ok_or_else(|| {
+            at!(HeicError::UnsupportedOperation(
+                zencodec::UnsupportedOperation::PixelFormat
+            ))
+        })?;
         let layout = descriptor_to_layout(negotiated);
 
         Ok(Some(GridState {
@@ -1109,7 +1504,13 @@ impl HeicStreamDecoder {
 
         let y_offset = row * grid.tile_height;
         let bpp = grid.layout.bytes_per_pixel();
-        let strip_bytes = grid.output_width as usize * strip_h as usize * bpp;
+        // checked_mul: even with the dimension cap applied in setup_grid this
+        // guards against usize overflow on 32-bit/wasm when a caller passes
+        // explicit large limits.
+        let strip_bytes = (grid.output_width as usize)
+            .checked_mul(strip_h as usize)
+            .and_then(|v| v.checked_mul(bpp))
+            .ok_or_else(|| at!(HeicError::InvalidData("grid strip size overflow")))?;
 
         self.strip_buffer.resize(strip_bytes, 0);
 
@@ -1122,7 +1523,9 @@ impl HeicStreamDecoder {
                 break;
             }
             let mut tile_frame =
-                crate::hevc::decode_with_config(&grid.tile_config, &grid.tile_data[tile_idx])?;
+                crate::hevc::decode_with_config(&grid.tile_config, &grid.tile_data[tile_idx])
+                    .map_err(crate::error::hevc_at)
+                    .at()?;
 
             if let Some((fr, mc)) = grid.color_override {
                 tile_frame.full_range = fr;
@@ -1150,12 +1553,13 @@ impl HeicStreamDecoder {
         self.current_grid_row += 1;
         Ok(Some((y_offset, grid.output_width, strip_h)))
     }
-}
 
-impl zencodec::decode::StreamingDecode for HeicStreamDecoder {
-    type Error = At<HeicError>;
-
-    fn next_batch(&mut self) -> Result<Option<(u32, zenpixels::PixelSlice<'_>)>, At<HeicError>> {
+    /// Pattern B: the exact pre-migration `next_batch()` trait-method body,
+    /// returning the native `At<HeicError>` unchanged — see the `*_inner`
+    /// comment on `impl HeicDecodeJob` for the rationale.
+    fn next_batch_inner(
+        &mut self,
+    ) -> Result<Option<(u32, zenpixels::PixelSlice<'_>)>, At<HeicError>> {
         if self.grid.is_some() {
             let result = self.decode_grid_row()?;
             match result {
@@ -1187,6 +1591,16 @@ impl zencodec::decode::StreamingDecode for HeicStreamDecoder {
         } else {
             Ok(None)
         }
+    }
+}
+
+impl zencodec::decode::StreamingDecode for HeicStreamDecoder {
+    type Error = At<zencodec::CodecError>;
+
+    fn next_batch(
+        &mut self,
+    ) -> Result<Option<(u32, zenpixels::PixelSlice<'_>)>, At<zencodec::CodecError>> {
+        self.next_batch_inner().map_err(zencodec::CodecError::of)
     }
 
     fn info(&self) -> &ImageInfo {
@@ -1236,19 +1650,111 @@ fn raw_to_pixel_buffer(
     }
 }
 
+// ── Orientation handling ────────────────────────────────────────────────────
+
+/// Whether the orientation hint requests baking the image's orientation into
+/// the decoded pixels. `Correct`/`CorrectAndTransform` bake; `Preserve`,
+/// `ExactTransform`, and any future variant do not (the safe default — keep
+/// pixels in stored orientation and report the orientation on `ImageInfo`).
+/// Mirrors zenjpeg's policy so the two codecs agree.
+fn will_auto_orient(hint: zencodec::OrientationHint) -> bool {
+    use zencodec::OrientationHint;
+    matches!(
+        hint,
+        OrientationHint::Correct | OrientationHint::CorrectAndTransform(_)
+    )
+}
+
+/// Compose the net intrinsic orientation from an item's HEIF transforms
+/// (`irot` rotation + `imir` mirror) in ipma listing order. `clap`
+/// (clean-aperture crop) is a crop, not an orientation, and is ignored.
+///
+/// The mapping mirrors the pixel ops applied in [`crate::decode`]: `irot`
+/// `angle` is clockwise degrees (`rotate_*_cw`); `imir` axis 0 is a top↔bottom
+/// flip (`mirror_vertical` ⇒ [`Orientation::FlipV`]) and axis 1 a left↔right
+/// flip (`mirror_horizontal` ⇒ [`Orientation::FlipH`]). Composed with
+/// [`Orientation::then`] in apply order so the result, applied to stored
+/// pixels, equals what a baking decode produces.
+fn compose_orientation(transforms: &[crate::heif::Transform]) -> Orientation {
+    use crate::heif::Transform;
+    let mut o = Orientation::Identity;
+    for t in transforms {
+        let step = match t {
+            Transform::Rotation(r) => match r.angle {
+                90 => Orientation::Rotate90,
+                180 => Orientation::Rotate180,
+                270 => Orientation::Rotate270,
+                _ => Orientation::Identity,
+            },
+            Transform::Mirror(m) => match m.axis {
+                0 => Orientation::FlipV,
+                1 => Orientation::FlipH,
+                _ => Orientation::Identity,
+            },
+            Transform::CleanAperture(_) => Orientation::Identity,
+        };
+        o = o.then(step);
+    }
+    o
+}
+
+/// Parse the container and compose the primary item's intrinsic orientation.
+/// Returns [`Orientation::Identity`] if parsing fails or there is no primary
+/// item. Used by the lightweight probe path, which has no container in hand.
+fn primary_orientation(data: &[u8]) -> Orientation {
+    crate::heif::parse(data, &enough::Unstoppable)
+        .ok()
+        .and_then(|c| {
+            c.primary_item()
+                .map(|it| compose_orientation(&it.transforms))
+        })
+        .unwrap_or(Orientation::Identity)
+}
+
+/// Resolve the dimensions and orientation tag to report on `ImageInfo`, given
+/// the display dimensions (as `crate::ImageInfo` reports them — orientation
+/// already folded into the dims), the composed intrinsic `orientation`, and
+/// whether the decoder will bake the orientation (`apply`).
+///
+/// - `apply == true` (e.g. `Correct`): the pixels are in display orientation,
+///   so report display dims + [`Orientation::Identity`].
+/// - `apply == false` (e.g. `Preserve`): the pixels stay in stored orientation,
+///   so report the stored dims (un-swap display dims for 90/270 rotations) plus
+///   the intrinsic orientation. `display_width`/`display_height` recover the
+///   upright dims.
+fn reported_dims_and_orientation(
+    display_w: u32,
+    display_h: u32,
+    orientation: Orientation,
+    apply: bool,
+) -> (u32, u32, Orientation) {
+    if apply {
+        (display_w, display_h, Orientation::Identity)
+    } else if orientation.swaps_axes() {
+        (display_h, display_w, orientation)
+    } else {
+        (display_w, display_h, orientation)
+    }
+}
+
 // ── Native → trait metadata conversion ─────────────────────────────────────
 
 /// Build a lightweight `zencodec::ImageInfo` from probe data only.
 ///
 /// Does NOT parse the HEIF container or extract ICC/EXIF/XMP/gain map.
 /// Used by `probe()` for cheap header-only metadata.
-fn build_image_info_lightweight(pi: &crate::ImageInfo) -> ImageInfo {
-    let mut info = ImageInfo::new(pi.width, pi.height, ImageFormat::Heic)
+fn build_image_info_lightweight(
+    pi: &crate::ImageInfo,
+    width: u32,
+    height: u32,
+    orientation: Orientation,
+) -> ImageInfo {
+    let mut info = ImageInfo::new(width, height, ImageFormat::Heic)
         .with_sequence(ImageSequence::Multi {
             image_count: Some(1),
             random_access: true,
         })
-        .with_orientation(Orientation::Identity) // Decoder applies transforms
+        .with_orientation(orientation)
         .with_alpha(pi.has_alpha)
         .with_bit_depth(pi.bit_depth)
         .with_channel_count(if pi.has_alpha { 4 } else { 3 })
@@ -1292,13 +1798,14 @@ fn build_image_info_full(
     container: Option<&crate::heif::HeifContainer<'_>>,
     width: u32,
     height: u32,
+    orientation: Orientation,
 ) -> ImageInfo {
     let mut info = ImageInfo::new(width, height, ImageFormat::Heic)
         .with_sequence(ImageSequence::Multi {
             image_count: Some(1),
             random_access: true,
         })
-        .with_orientation(Orientation::Identity) // Decoder applies transforms
+        .with_orientation(orientation)
         .with_alpha(pi.has_alpha)
         .with_bit_depth(pi.bit_depth)
         .with_channel_count(if pi.has_alpha { 4 } else { 3 })
@@ -1333,12 +1840,13 @@ fn build_image_info_full(
     if let Some(container) = container {
         let primary_item = container.primary_item();
 
-        // Upgrade gain map presence from Unknown to Available when we can parse
-        // the Apple HDR auxiliary item's XMP metadata. Falls back to Unknown if
-        // the aux item, dimensions, or hdrgm namespace is missing.
+        // Upgrade gain map presence from Unknown to Available when the
+        // container yields real parameters (ISO 21496-1 tmap payload, else
+        // Apple EXIF MakerNote headroom). Falls back to Unknown if neither
+        // the metadata nor the gain-map item dimensions are present.
         if pi.has_gain_map
             && let Some(ref pri) = primary_item
-            && let Some(gm_info) = extract_apple_gain_map_info(container, pri.id)
+            && let Some(gm_info) = extract_gain_map_info(container, pri.id)
         {
             info.gain_map = GainMapPresence::Available(alloc::boxed::Box::new(gm_info));
         }
@@ -1346,9 +1854,20 @@ fn build_image_info_full(
         // ICC profile from colr box
         if pi.has_icc_profile
             && let Some(ref item) = primary_item
-            && let Some(crate::heif::ColorInfo::IccProfile(icc)) = &item.color_info
+            && let Some(icc) = container.item_icc(item.id)
         {
-            info = info.with_icc_profile(icc.clone());
+            info = info.with_icc_profile(icc.to_vec());
+            // When nclx primaries are unspecified, recognize the ICC and
+            // surface its CICP so lenient consumers get resolved color
+            // without re-parsing the profile — Apple HEICs leave nclx
+            // unspecified and carry the gamut (typically Display P3) only in
+            // the ICC. The ICC stays the CMS authority (`with_cicp` does not
+            // change `color_authority`); this just fills the convenience CICP.
+            if pi.color_primaries == 2
+                && let Some(cicp) = zenpixels::icc::identify_common(icc).and_then(|id| id.to_cicp())
+            {
+                info = info.with_cicp(cicp);
+            }
         }
 
         // EXIF extraction
@@ -1441,56 +1960,170 @@ fn extract_xmp_from_container(
     None
 }
 
-/// Convert a [`zencodec::LimitExceeded`] to a static error message for [`HeicError::LimitExceeded`].
-fn limit_exceeded_msg(_e: zencodec::LimitExceeded) -> &'static str {
-    "input data size exceeds max_input_bytes"
+/// Apple HDR gain-map parameters from the primary item's EXIF MakerNote
+/// headroom (`ultrahdr_core::{parse_exif_for_apple_hdr, from_apple_headroom}`).
+///
+/// Legacy Apple aux-item HEICs carry no ISO 21496-1 payload and no `hdrgm:`
+/// XMP — the MakerNote HDR headroom is their canonical parameter source
+/// (validated against real iPhone captures). Returns `None` when the EXIF
+/// or headroom is absent.
+pub(crate) fn apple_gain_map_params(
+    container: &crate::heif::HeifContainer<'_>,
+) -> Option<zencodec::GainMapParams> {
+    let exif = extract_exif_from_container(container)?;
+    let info = zenmeta::apple::parse_exif_for_apple_hdr(&exif)?;
+    zenmeta::apple::from_apple_headroom(&info)
 }
 
-/// Build a [`GainMapInfo`] from an Apple HDR HEIC auxiliary gain map item.
+/// Gain-map parameters for a decoded [`crate::HdrGainMap`].
 ///
-/// Looks up the `urn:com:apple:photo:2020:aux:hdrgainmap` aux item for the
-/// primary, reads its `ispe` dimensions, parses the attached XMP via
-/// `ultrahdr_core::metadata::parse_xmp` (Adobe `hdrgm:` namespace), and builds
-/// the canonical zencodec gain map metadata. Returns `None` if any prerequisite
-/// (aux item, dimensions, parseable XMP) is missing — caller falls back to
-/// `GainMapPresence::Unknown`.
-fn extract_apple_gain_map_info(
+/// The ISO 21496-1 binary payload (HEIF Amendment 1 `tmap` — iOS 18+
+/// "Adaptive HDR" and Samsung HDR files) is authoritative when present: it
+/// carries the producer's real per-channel gain curve (gamma, min/max,
+/// offsets), where the MakerNote fallback can only synthesize a curve from
+/// the scalar headroom. Legacy Apple aux-item files have no ISO payload and
+/// use the MakerNote.
+fn gain_map_params_from(
+    gain_map: &crate::HdrGainMap,
+    container: Option<&crate::heif::HeifContainer<'_>>,
+) -> Option<zencodec::GainMapParams> {
+    if let Some(iso) = gain_map.iso21496.as_deref() {
+        let params =
+            zencodec::gainmap::parse_iso21496_fmt(iso, zencodec::gainmap::Iso21496Format::AvifTmap)
+                .ok()?;
+        params.validate().ok()?;
+        return Some(params);
+    }
+    container.and_then(apple_gain_map_params)
+}
+
+/// Build a [`GainMapInfo`] from the container's gain-map metadata without
+/// decoding pixels.
+///
+/// Mirrors `decode_gain_map`'s precedence: the ISO 21496-1 `tmap` derived
+/// item first (params from its binary payload, dimensions from the
+/// referenced gain-map image item), then the legacy Apple aux item (`ispe`
+/// dimensions + EXIF MakerNote headroom). Returns `None` if neither yields
+/// parameters — caller falls back to `GainMapPresence::Unknown`.
+fn extract_gain_map_info(
     container: &crate::heif::HeifContainer<'_>,
     primary_id: u32,
 ) -> Option<GainMapInfo> {
+    if let Some((_tmap_id, gainmap_id, iso)) = crate::decode::find_tmap_gain_map(container) {
+        // Present ISO metadata is authoritative. Never hide corruption by
+        // substituting a guessed Apple curve.
+        let params = zencodec::gainmap::parse_iso21496_fmt(
+            &iso,
+            zencodec::gainmap::Iso21496Format::AvifTmap,
+        )
+        .ok()?;
+        params.validate().ok()?;
+        let (width, height) = container.get_item(gainmap_id)?.dimensions?;
+        return Some(GainMapInfo::new(params, width, height, 1));
+    }
+
     let aux_ids =
         container.find_auxiliary_items(primary_id, "urn:com:apple:photo:2020:aux:hdrgainmap");
     let &gainmap_id = aux_ids.first()?;
     let aux_item = container.get_item(gainmap_id)?;
     let (width, height) = aux_item.dimensions?;
-    let xmp_bytes = container.find_xmp_for_item(gainmap_id)?;
-    let xmp_str = core::str::from_utf8(&xmp_bytes).ok()?;
-    let (uhdr_md, _len) = ultrahdr_core::metadata::parse_xmp(xmp_str).ok()?;
-    let params = uhdr_metadata_to_zencodec(&uhdr_md);
+    let params = apple_gain_map_params(container)?;
     // Apple HDR gain maps are luma-only (single channel).
     Some(GainMapInfo::new(params, width, height, 1))
 }
 
-/// Convert published `ultrahdr_core::GainMapMetadata` (flat per-axis arrays)
-/// to canonical [`zencodec::GainMapParams`] (per-channel structs). When
-/// ultrahdr-core publishes a release that uses zencodec types directly, this
-/// adapter can be deleted.
-fn uhdr_metadata_to_zencodec(md: &ultrahdr_core::GainMapMetadata) -> zencodec::GainMapParams {
-    let mut params = zencodec::GainMapParams::default();
-    for i in 0..3 {
-        params.channels[i] = zencodec::GainMapChannel {
-            min: md.gain_map_min[i],
-            max: md.gain_map_max[i],
-            gamma: md.gamma[i],
-            base_offset: md.base_offset[i],
-            alternate_offset: md.alternate_offset[i],
-        };
+/// Apply the HDR gain map to the decoded SDR base (`GainMapRender::ReconstructHdr`).
+///
+/// The caller forced the base decode to RGBA8 (`apply_gainmap` consumes 8-bit
+/// SDR input). `None` target reconstructs at the gain map's encoded maximum
+/// (`alternate_hdr_headroom` is log2 of the alternate/SDR peak ratio). A
+/// present-but-undecodable gain map or missing headroom metadata is an error —
+/// the caller asked for an HDR rendition, and silently returning SDR would
+/// misrepresent the image.
+fn reconstruct_hdr_base(
+    sdr: PixelBuffer,
+    mut info: ImageInfo,
+    data: &[u8],
+    container: Option<&crate::heif::HeifContainer<'_>>,
+    target_headroom: Option<f32>,
+    preferred: &[PixelDescriptor],
+    stop: &dyn enough::Stop,
+) -> Result<(PixelBuffer, ImageInfo), At<HeicError>> {
+    use ultrahdr_core::gainmap::{HdrOutputFormat, apply_gainmap};
+
+    /// SDR reference white (cd/m²) — 1.0 in the linear output maps here.
+    const SDR_WHITE_NITS: f32 = 203.0;
+
+    let gain_map = crate::decode::decode_gain_map(data, &[crate::Backend::Rust])?;
+    let params = gain_map_params_from(&gain_map, container).ok_or_else(|| {
+        at!(HeicError::InvalidData(
+            "ReconstructHdr: no gain-map parameters (neither ISO 21496-1 tmap \
+             metadata nor Apple EXIF MakerNote headroom)"
+        ))
+    })?;
+
+    if params.direction() == zencodec::gainmap::GainMapDirection::BaseIsHdr {
+        // The base image IS the HDR rendition (alternate is SDR) — nothing
+        // to apply; the base decode already carries the HDR signaling.
+        return Ok((sdr, info));
     }
-    params.base_hdr_headroom = md.base_hdr_headroom;
-    params.alternate_hdr_headroom = md.alternate_hdr_headroom;
-    params.use_base_color_space = md.use_base_color_space;
-    params.backward_direction = md.backward_direction;
-    params
+
+    let gm = ultrahdr_core::GainMap {
+        width: gain_map.width,
+        height: gain_map.height,
+        channels: 1, // heic decodes gain maps luma-only (both origins)
+        data: gain_map.data,
+    };
+
+    // Both buffers are display-oriented (the caller decoded the base with
+    // orientation applied; gain-map items are stored display-oriented).
+    // Refuse a producer whose aspects still disagree rather than silently
+    // stretching gain across the wrong axis.
+    let transposed = (sdr.width() > sdr.height()) != (gm.width > gm.height);
+    if transposed && sdr.width() != sdr.height() && gm.width != gm.height {
+        return Err(at!(HeicError::InvalidData(
+            "ReconstructHdr: gain map and base orientation mismatch"
+        )));
+    }
+
+    // Output form: honor an f16 preference; default linear f32 RGBA.
+    let wants_f16 = preferred
+        .iter()
+        .any(|d| d.channel_type() == zenpixels::ChannelType::F16);
+    let format = if wants_f16 {
+        HdrOutputFormat::LinearF16
+    } else {
+        HdrOutputFormat::LinearFloat
+    };
+
+    // `None` = full reconstruction at the gain map's encoded maximum, via
+    // the canonical rounding route shared across adapters (heic#20).
+    let capacity_max = ultrahdr_core::full_reconstruction_boost(&params);
+    let display_boost = target_headroom.unwrap_or(capacity_max).max(1.0);
+
+    let hdr = apply_gainmap(&sdr, &gm, &params, display_boost, format, stop).map_err(|_| {
+        at!(HeicError::InvalidData(
+            "ReconstructHdr: gain-map apply failed"
+        ))
+    })?;
+
+    // Envelope: derived peak (capped at the reconstruction boost) + mastering
+    // display matching the base image's primaries (`apply_gainmap` preserves
+    // them; Apple HEIC bases are typically Display P3).
+    let peak_nits = SDR_WHITE_NITS * capacity_max.min(display_boost);
+    let primaries = match info.source_color.cicp.map(|c| c.color_primaries) {
+        Some(12) => [[0.680, 0.320], [0.265, 0.690], [0.150, 0.060]], // Display P3
+        Some(9) => [[0.708, 0.292], [0.170, 0.797], [0.131, 0.046]],  // BT.2020
+        _ => [[0.640, 0.330], [0.300, 0.600], [0.150, 0.060]],        // BT.709/sRGB
+    };
+    info.source_color.content_light_level = Some(ContentLightLevel::new(peak_nits as u16, 0));
+    info.source_color.mastering_display = Some(zencodec::MasteringDisplay::new(
+        primaries,
+        [0.3127, 0.3290],
+        peak_nits,
+        0.005,
+    ));
+    Ok((hdr, info))
 }
 
 /// Derive TransferFunction and ColorPrimaries from native CICP values.
@@ -1515,14 +2148,26 @@ fn layout_to_descriptor(layout: crate::PixelLayout) -> PixelDescriptor {
 }
 
 /// Convert `ProbeError` to `At<HeicError>` for trait compatibility.
-fn probe_error_to_heic(e: crate::ProbeError) -> At<HeicError> {
-    match e {
-        crate::ProbeError::NeedMoreData => at!(HeicError::InvalidData("not enough data to probe")),
-        crate::ProbeError::InvalidFormat => {
-            at!(HeicError::InvalidData("not a valid HEIC/HEIF file"))
-        }
+///
+/// `ProbeError` has its own `zencodec::CategorizedError` impl that maps
+/// `NeedMoreData` -> `Image(UnexpectedEof)` and `InvalidFormat` ->
+/// `Image(Unsupported(Type))` (see `error.rs`), but callers here go through
+/// `HeicError`'s categorization instead (the zencodec trait boundary
+/// declares `type Error = At<CodecError>` built from `At<HeicError>`, not
+/// from `ProbeError` directly — see the Pattern B envelope bridge doc
+/// comment on `From<HeicError> for At<CodecError>`). Preserve the same two
+/// categories here via `HeicError::Truncated` / `HeicError::NotHeif` rather
+/// than collapsing both into `HeicError::InvalidData` (`Image(Malformed)`),
+/// which would misreport a truncated/unrecognized input as a corrupt one.
+///
+/// `map_error` keeps the probe's origin trace (for `Corrupt`, the container /
+/// parameter-set line that rejected the input) instead of restarting it here.
+fn probe_error_to_heic(e: At<crate::ProbeError>) -> At<HeicError> {
+    e.map_error(|p| match p {
+        crate::ProbeError::NeedMoreData => HeicError::Truncated("not enough data to probe"),
+        crate::ProbeError::InvalidFormat => HeicError::NotHeif("not a valid HEIC/HEIF file"),
         crate::ProbeError::Corrupt(inner) => inner,
-    }
+    })
 }
 
 /// Reinterpret `Vec<u16>` as `Vec<Rgb<u16>>` via bytemuck.
@@ -1550,6 +2195,74 @@ fn u16_vec_to_rgba(data: alloc::vec::Vec<u16>) -> alloc::vec::Vec<Rgba<u16>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ISO 21496-1 tmap payload is the authoritative params source and
+    /// round-trips through `gain_map_params_from`.
+    #[test]
+    fn gain_map_params_prefer_iso21496() {
+        let mut expected = zencodec::GainMapParams::default();
+        expected.alternate_hdr_headroom = 1.5;
+        expected.channels[0].max = 1.5;
+        expected.channels[0].gamma = 0.7;
+        let iso = zencodec::gainmap::serialize_iso21496_fmt(
+            &expected,
+            zencodec::gainmap::Iso21496Format::AvifTmap,
+        );
+        let gm = crate::HdrGainMap {
+            data: vec![0u8; 4],
+            width: 2,
+            height: 2,
+            bit_depth: 8,
+            xmp: None,
+            iso21496: Some(iso),
+            origin: crate::GainMapOrigin::HeifTmap,
+        };
+        // No container: the MakerNote fallback is unavailable, so success
+        // proves the ISO payload alone supplies the params.
+        let params = gain_map_params_from(&gm, None).expect("ISO payload parses");
+        assert!((params.alternate_hdr_headroom - 1.5).abs() < 1e-3);
+        assert!((params.channels[0].gamma - 0.7).abs() < 1e-3);
+        assert_eq!(
+            params.direction(),
+            zencodec::gainmap::GainMapDirection::BaseIsSdr
+        );
+    }
+
+    /// Neither ISO payload nor container metadata → no params (the
+    /// ReconstructHdr caller turns this into an error, never silent SDR).
+    #[test]
+    fn gain_map_params_none_without_sources() {
+        let gm = crate::HdrGainMap {
+            data: vec![0u8; 4],
+            width: 2,
+            height: 2,
+            bit_depth: 8,
+            xmp: None,
+            iso21496: None,
+            origin: crate::GainMapOrigin::AppleAuxItem,
+        };
+        assert!(gain_map_params_from(&gm, None).is_none());
+    }
+
+    #[test]
+    fn corrupt_iso_cannot_fall_back_to_real_apple_headroom() {
+        let bytes = include_bytes!("../testdata/apple-hdr/hdr-sample.heic");
+        let container = crate::heif::parse(bytes, &enough::Unstoppable).unwrap();
+        assert!(
+            apple_gain_map_params(&container).is_some(),
+            "fixture supplies the legacy fallback"
+        );
+        let gm = crate::HdrGainMap {
+            data: vec![0u8; 4],
+            width: 2,
+            height: 2,
+            bit_depth: 8,
+            xmp: None,
+            iso21496: Some(vec![0xff]),
+            origin: crate::GainMapOrigin::HeifTmap,
+        };
+        assert!(gain_map_params_from(&gm, Some(&container)).is_none());
+    }
 
     #[test]
     fn config_creation() {
@@ -1735,13 +2448,29 @@ mod tests {
 
     #[test]
     fn probe_error_conversion() {
-        let e = probe_error_to_heic(crate::ProbeError::NeedMoreData);
-        assert!(matches!(e.error(), HeicError::InvalidData(_)));
+        use zencodec::{CategorizedError, ErrorCategory, ImageError, UnsupportedImageKind};
 
-        let e = probe_error_to_heic(crate::ProbeError::InvalidFormat);
-        assert!(matches!(e.error(), HeicError::InvalidData(_)));
+        // NeedMoreData -> Truncated -> Image(UnexpectedEof), NOT
+        // Image(Malformed): a truncated input is not the same failure as a
+        // corrupt one.
+        let e = probe_error_to_heic(at!(crate::ProbeError::NeedMoreData));
+        assert!(matches!(e.error(), HeicError::Truncated(_)));
+        assert_eq!(
+            e.error().category(),
+            ErrorCategory::Image(ImageError::UnexpectedEof)
+        );
 
-        let e = probe_error_to_heic(crate::ProbeError::Corrupt(at!(HeicError::NoPrimaryImage)));
+        // InvalidFormat -> NotHeif -> Image(Unsupported(Type)): "not a
+        // HEIC/HEIF file at all" is not the same failure as "a HEIC/HEIF
+        // file with corrupt content".
+        let e = probe_error_to_heic(at!(crate::ProbeError::InvalidFormat));
+        assert!(matches!(e.error(), HeicError::NotHeif(_)));
+        assert_eq!(
+            e.error().category(),
+            ErrorCategory::Image(ImageError::Unsupported(UnsupportedImageKind::Type))
+        );
+
+        let e = probe_error_to_heic(at!(crate::ProbeError::Corrupt(HeicError::NoPrimaryImage)));
         assert!(matches!(e.error(), HeicError::NoPrimaryImage));
     }
 
@@ -1830,6 +2559,7 @@ mod tests {
 
     #[test]
     fn probe_enforces_max_input_bytes() {
+        use zencodec::CategorizedError;
         use zencodec::decode::{DecodeJob as _, DecoderConfig as _};
 
         let path =
@@ -1847,9 +2577,12 @@ mod tests {
         let result = job.probe(&data);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(
-            matches!(err.error(), HeicError::LimitExceeded(_)),
-            "expected LimitExceeded, got {err:?}"
+        assert_eq!(
+            err.category(),
+            zencodec::ErrorCategory::Resource(zencodec::ResourceError::Limits(
+                zencodec::LimitKind::InputSize
+            )),
+            "expected a resource-limit category, got {err:?}"
         );
     }
 
@@ -1875,6 +2608,7 @@ mod tests {
 
     #[test]
     fn decoder_enforces_max_input_bytes() {
+        use zencodec::CategorizedError;
         use zencodec::decode::{DecodeJob as _, DecoderConfig as _};
 
         let path =
@@ -1891,14 +2625,18 @@ mod tests {
         let result = job.decoder(Cow::Borrowed(&data), &[PixelDescriptor::RGB8_SRGB]);
         assert!(result.is_err());
         let err = result.err().unwrap();
-        assert!(
-            matches!(err.error(), HeicError::LimitExceeded(_)),
-            "expected LimitExceeded, got {err:?}"
+        assert_eq!(
+            err.category(),
+            zencodec::ErrorCategory::Resource(zencodec::ResourceError::Limits(
+                zencodec::LimitKind::InputSize
+            )),
+            "expected a resource-limit category, got {err:?}"
         );
     }
 
     #[test]
     fn probe_full_enforces_max_input_bytes() {
+        use zencodec::CategorizedError;
         use zencodec::decode::{DecodeJob as _, DecoderConfig as _};
 
         let path =
@@ -1915,9 +2653,12 @@ mod tests {
         let result = job.probe_full(&data);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(
-            matches!(err.error(), HeicError::LimitExceeded(_)),
-            "expected LimitExceeded, got {err:?}"
+        assert_eq!(
+            err.category(),
+            zencodec::ErrorCategory::Resource(zencodec::ResourceError::Limits(
+                zencodec::LimitKind::InputSize
+            )),
+            "expected a resource-limit category, got {err:?}"
         );
     }
 
@@ -1977,9 +2718,19 @@ mod tests {
         let job = config.job();
         let info = job.probe_full(&data).expect("probe_full should succeed");
 
-        // probe_full() should return dimensions
-        assert_eq!(info.width, 3024);
-        assert_eq!(info.height, 4032);
+        // Default config == OrientationHint::Preserve. classic-car is a portrait
+        // iPhone photo: stored (coded) landscape 4032×3024 with an `irot`,
+        // displayed portrait 3024×4032. Preserve reports the STORED dims + the
+        // intrinsic orientation tag; display_width/height recover the upright dims.
+        assert_eq!(info.width, 4032);
+        assert_eq!(info.height, 3024);
+        assert!(
+            info.orientation.swaps_axes(),
+            "portrait iPhone HEIC must report a 90/270 orientation under Preserve, got {:?}",
+            info.orientation
+        );
+        assert_eq!(info.display_width(), 3024);
+        assert_eq!(info.display_height(), 4032);
         assert_eq!(info.format, ImageFormat::Heic);
 
         // probe_full() should extract EXIF (iPhone image has EXIF)

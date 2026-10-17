@@ -1,25 +1,78 @@
-//! Integration tests for HEIC decoding
+//! Integration tests for HEIC decoding.
+//!
+//! `example_heic()` looks up the libheif example image. It is NOT bundled
+//! with the published crate (kept lean); developers can drop it under
+//! `testdata/libheif-examples/example.heic` in a checkout, or point
+//! `HEIC_TEST_DIR` at a developer corpus that contains
+//! `libheif/examples/example.heic`. Tests skip with an `eprintln!` when
+//! the file is absent rather than failing.
 
 use heic::DecoderConfig;
+use std::path::PathBuf;
 
-fn heic_base_dir() -> String {
-    std::env::var("HEIC_TEST_DIR").unwrap_or_else(|_| "/home/lilith/work/heic".into())
+/// Directory holding committed test data inside the crate (`testdata/`).
+/// Not shipped in the published crate; populated in the source checkout.
+fn testdata_dir() -> PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata")
 }
 
-fn example_heic() -> String {
-    format!("{}/libheif/examples/example.heic", heic_base_dir())
+/// Root for developer-only corpora (iPhone shots, Nokia stills, issue
+/// reproducers). Resolved via `HEIC_TEST_DIR` so the test suite skips
+/// without failing when the corpus is not present.
+fn heic_base_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("HEIC_TEST_DIR") {
+        return Some(PathBuf::from(dir));
+    }
+    let default = PathBuf::from("/home/lilith/work/heic");
+    default.exists().then_some(default)
 }
 
-fn iphone_heic() -> String {
-    format!(
-        "{}/test-images/classic-car-iphone12pro.heic",
-        heic_base_dir()
-    )
+/// Path to the libheif example image, if it can be located. Looks under
+/// `testdata/libheif-examples/example.heic` first (developer checkout),
+/// then `${HEIC_TEST_DIR}/libheif/examples/example.heic`. Returns `None`
+/// when neither exists.
+fn example_heic() -> Option<PathBuf> {
+    let bundled = testdata_dir().join("libheif-examples/example.heic");
+    if bundled.exists() {
+        return Some(bundled);
+    }
+    let dev = heic_base_dir()?.join("libheif/examples/example.heic");
+    dev.exists().then_some(dev)
+}
+
+/// Read the libheif example image as bytes, or print a SKIP message and
+/// return `None` when the file is unavailable.
+fn read_example(test_name: &str) -> Option<Vec<u8>> {
+    let path = require_path(example_heic(), test_name)?;
+    Some(std::fs::read(&path).expect("read example.heic"))
+}
+
+/// Path to the iPhone reference image, or `None` if the developer corpus is
+/// not configured.
+fn iphone_heic() -> Option<PathBuf> {
+    Some(heic_base_dir()?.join("test-images/classic-car-iphone12pro.heic"))
+}
+
+/// Skip helper: returns the path, or prints a SKIP message and `None`.
+fn require_path(path: Option<PathBuf>, name: &str) -> Option<PathBuf> {
+    match path {
+        Some(p) if p.exists() => Some(p),
+        Some(p) => {
+            eprintln!("SKIP {name}: {} not found (set HEIC_TEST_DIR)", p.display());
+            None
+        }
+        None => {
+            eprintln!("SKIP {name}: HEIC_TEST_DIR not set");
+            None
+        }
+    }
 }
 
 #[test]
 fn test_get_info() {
-    let data = std::fs::read(example_heic()).expect("Failed to read test file");
+    let Some(data) = read_example("test_get_info") else {
+        return;
+    };
 
     let info = heic::ImageInfo::from_bytes(&data).expect("Failed to get info");
     println!("Decoded info: {}x{}", info.width, info.height);
@@ -32,7 +85,9 @@ fn test_get_info() {
 #[test]
 #[ignore] // Ignore until coefficient decoding is fully implemented
 fn test_decode() {
-    let data = std::fs::read(example_heic()).expect("Failed to read test file");
+    let Some(data) = read_example("test_decode") else {
+        return;
+    };
     let decoder = DecoderConfig::new();
 
     let image = decoder
@@ -87,7 +142,9 @@ fn test_decode() {
 #[test]
 #[ignore]
 fn test_raw_yuv_values() {
-    let data = std::fs::read(example_heic()).expect("Failed to read test file");
+    let Some(data) = read_example("test_raw_yuv_values") else {
+        return;
+    };
     let decoder = DecoderConfig::new();
 
     // Decode and examine raw YCbCr
@@ -242,12 +299,11 @@ fn test_raw_yuv_values() {
             }
         }
 
-        if count > 0 {
+        if let (Some(cb_avg), Some(cr_avg)) = (cb_sum.checked_div(count), cr_sum.checked_div(count))
+        {
             println!(
                 "  CTU row {:2}: Cb avg={:3}, Cr avg={:3}",
-                ctu_row,
-                cb_sum / count,
-                cr_sum / count
+                ctu_row, cb_avg, cr_avg
             );
         }
     }
@@ -274,12 +330,11 @@ fn test_raw_yuv_values() {
             }
         }
 
-        if count > 0 {
+        if let (Some(cb_avg), Some(cr_avg)) = (cb_sum.checked_div(count), cr_sum.checked_div(count))
+        {
             println!(
                 "  CTU col {:2}: Cb avg={:3}, Cr avg={:3}",
-                ctu_col,
-                cb_sum / count,
-                cr_sum / count
+                ctu_col, cb_avg, cr_avg
             );
         }
     }
@@ -322,7 +377,10 @@ fn test_raw_yuv_values() {
 
 #[test]
 fn test_extract_exif() {
-    let data = std::fs::read(iphone_heic()).expect("read");
+    let Some(path) = require_path(iphone_heic(), "test_extract_exif") else {
+        return;
+    };
+    let data = std::fs::read(&path).expect("read");
     let decoder = DecoderConfig::new();
 
     let exif = decoder.extract_exif(&data).expect("extract_exif");
@@ -349,7 +407,9 @@ fn test_extract_exif() {
 #[test]
 fn test_extract_exif_none() {
     // example.heic has no EXIF
-    let data = std::fs::read(example_heic()).expect("read");
+    let Some(data) = read_example("test_extract_exif_none") else {
+        return;
+    };
     let decoder = DecoderConfig::new();
     let exif = decoder.extract_exif(&data).expect("extract_exif");
     assert!(exif.is_none(), "example.heic should not have EXIF");
@@ -358,7 +418,9 @@ fn test_extract_exif_none() {
 #[test]
 fn test_image_info_no_exif() {
     // example.heic: no EXIF, non-grid — probe should work
-    let data = std::fs::read(example_heic()).expect("read");
+    let Some(data) = read_example("test_image_info_no_exif") else {
+        return;
+    };
     let info = heic::ImageInfo::from_bytes(&data).expect("probe");
     assert!(!info.has_exif, "example.heic should not have EXIF");
     assert!(!info.has_xmp, "example.heic should not have XMP");
@@ -371,7 +433,10 @@ fn test_image_info_no_exif() {
 #[test]
 fn test_image_info_grid_with_exif() {
     // iPhone HEIC: grid image with EXIF + XMP
-    let data = std::fs::read(iphone_heic()).expect("read");
+    let Some(path) = require_path(iphone_heic(), "test_image_info_grid_with_exif") else {
+        return;
+    };
+    let data = std::fs::read(&path).expect("read");
     let info = heic::ImageInfo::from_bytes(&data).expect("probe grid image");
     assert!(info.has_exif, "iPhone HEIC should have EXIF");
     assert!(info.has_xmp, "iPhone HEIC should have XMP");
@@ -387,7 +452,10 @@ fn test_image_info_grid_with_exif() {
 
 #[test]
 fn test_extract_xmp() {
-    let data = std::fs::read(iphone_heic()).expect("read");
+    let Some(path) = require_path(iphone_heic(), "test_extract_xmp") else {
+        return;
+    };
+    let data = std::fs::read(&path).expect("read");
     let decoder = DecoderConfig::new();
     let xmp = decoder.extract_xmp(&data).expect("extract_xmp");
     // XMP may or may not be present; just ensure no crash
@@ -403,7 +471,9 @@ fn test_extract_xmp() {
 
 #[test]
 fn test_decode_thumbnail() {
-    let data = std::fs::read(example_heic()).expect("read");
+    let Some(data) = read_example("test_decode_thumbnail") else {
+        return;
+    };
     let decoder = DecoderConfig::new();
     let thumb = decoder
         .decode_thumbnail(&data, heic::PixelLayout::Rgb8)
@@ -423,7 +493,9 @@ fn test_decode_thumbnail() {
 
 #[test]
 fn test_image_info_has_thumbnail() {
-    let data = std::fs::read(example_heic()).expect("read");
+    let Some(data) = read_example("test_image_info_has_thumbnail") else {
+        return;
+    };
     let info = heic::ImageInfo::from_bytes(&data).expect("probe");
     assert!(
         info.has_thumbnail,
@@ -434,8 +506,12 @@ fn test_image_info_has_thumbnail() {
 #[test]
 fn test_decode_thumbnail_none() {
     // Nokia test files typically don't have thumbnails
-    let nokia_path = format!("{}/test-images/nokia/C001.heic", heic_base_dir());
-    if let Ok(data) = std::fs::read(nokia_path) {
+    let Some(base) = heic_base_dir() else {
+        eprintln!("SKIP test_decode_thumbnail_none: HEIC_TEST_DIR not set");
+        return;
+    };
+    let nokia_path = base.join("test-images/nokia/C001.heic");
+    if let Ok(data) = std::fs::read(&nokia_path) {
         let decoder = DecoderConfig::new();
         let thumb = decoder
             .decode_thumbnail(&data, heic::PixelLayout::Rgb8)
@@ -453,7 +529,11 @@ fn test_image_info_matches_decoded_dimensions() {
     // Regression: ImageInfo returned raw (pre-transform) dimensions while decoder
     // applied irot/imir/clap transforms, causing dimension mismatch panics.
     // iPhone photos have irot 90°, making raw 4032x3024 → decoded 3024x4032.
-    let data = std::fs::read(iphone_heic()).expect("read");
+    let Some(path) = require_path(iphone_heic(), "test_image_info_matches_decoded_dimensions")
+    else {
+        return;
+    };
+    let data = std::fs::read(&path).expect("read");
     let info = heic::ImageInfo::from_bytes(&data).expect("probe");
 
     let decoder = DecoderConfig::new();
@@ -471,4 +551,67 @@ fn test_image_info_matches_decoded_dimensions() {
         "ImageInfo height {} != decoded height {}",
         info.height, decoded.height
     );
+}
+
+#[test]
+fn test_wpp_with_emulation_prevention_bytes() {
+    // Regression for github.com/imazen/heic#12: an iPhone HEIC tile whose
+    // HEVC slice data contains an emulation prevention byte (0x03) located
+    // *within* a WPP substream after the first one. Entry point offsets in
+    // the slice header are spec'd in EBSP space (per H.265 7.4.7.1, they
+    // count emulation prevention bytes), but the decoder seeks within the
+    // already-stripped RBSP buffer. Without converting EBSP→RBSP at seek
+    // time, every WPP substream after the EP byte starts one byte too late
+    // and produces garbled pixels for the rest of that tile.
+    //
+    // The image is gated on HEIC_TEST_DIR because it is too large to commit.
+    let Some(base) = heic_base_dir() else {
+        eprintln!("SKIP test_wpp_with_emulation_prevention_bytes: HEIC_TEST_DIR not set");
+        return;
+    };
+    let path = base.join("test-images/issue12/IMG_1411.HEIC");
+    let Some(path) = require_path(Some(path), "test_wpp_with_emulation_prevention_bytes") else {
+        return;
+    };
+    let data = std::fs::read(&path).expect("read IMG_1411.HEIC");
+
+    let info = heic::ImageInfo::from_bytes(&data).expect("probe");
+    assert_eq!((info.width, info.height), (3024, 4032));
+
+    // Decode to YCbCr directly. Our HEVC tile decode is bit-exact against
+    // dec265, so the expected Y/Cb/Cr values below are the exact byte values
+    // dec265 produced for tile 39 of the image. Asserting on the YUV plane
+    // (rather than RGB output) keeps the regression test stable across any
+    // future tweak to the YCbCr→RGB conversion path.
+    let frame = DecoderConfig::new()
+        .decode_to_frame(&data)
+        .expect("decode_to_frame");
+    assert_eq!(
+        (frame.cropped_width(), frame.cropped_height()),
+        (3024, 4032)
+    );
+
+    // (rotated_x, rotated_y, expected Y, expected Cb, expected Cr) at points
+    // inside what used to be the corrupted tile #39. Tile 39 sits at
+    // unrotated (col=6, row=4) → unrotated x∈[3072,3584), y∈[2048,2560).
+    // irot=90 maps unrotated (ux, uy) to rotated (3023-uy, ux).
+    let samples: &[(usize, usize, u8, u8, u8)] = &[
+        (925, 3122, 14, 130, 127),
+        (875, 3272, 10, 129, 132),
+        (775, 3172, 154, 123, 132),
+        (725, 3372, 91, 121, 162),
+        (675, 3472, 105, 121, 164),
+    ];
+    let y_stride = frame.y_stride();
+    let c_stride = frame.c_stride();
+    for &(rx, ry, exp_y, exp_cb, exp_cr) in samples {
+        let y = frame.y_plane[ry * y_stride + rx] as u8;
+        let cb = frame.cb_plane[(ry / 2) * c_stride + rx / 2] as u8;
+        let cr = frame.cr_plane[(ry / 2) * c_stride + rx / 2] as u8;
+        assert_eq!(
+            (y, cb, cr),
+            (exp_y, exp_cb, exp_cr),
+            "IMG_1411 YUV mismatch at rotated ({rx},{ry})"
+        );
+    }
 }

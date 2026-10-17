@@ -1,0 +1,95 @@
+name: MediaCodec runtime decode
+
+# Runtime gate for heic-backend-mediacodec: EXECUTES the unsafe AMediaCodec FFI
+# on an Android emulator (the c2.android.hevc.decoder software codec ships in
+# every system image) — not just cross-compile. Hosted + KVM-accelerated, no
+# device farm, no extra cost. Uses examples/backend_decode (force-single
+# backend, no pure-Rust fallback) so a MediaCodec failure is a hard error.
+#
+# FIRST-RUN NOTE: the emulator + adb plumbing below is the standard
+# reactivecircus/android-emulator-runner pattern but cannot be validated
+# locally (the emulator only exists in CI). Treat the first CI run as the
+# validation and iterate the build / adb push / exec lines if the ABI path or
+# boot behaviour differs.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: mediacodec-runtime-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  emulator:
+    name: mediacodec runtime (android emulator)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mediacodec-runtime
+
+      # A fast x86_64 emulator needs nested KVM on the Linux runner.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+      - name: Install cargo-ndk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      - name: Build backend_decode for x86_64-linux-android
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          # Build for API 34 (matches the emulator). The backend references
+          # AMEDIAFORMAT_KEY_CSD_0, which libmediandk only exports from API 28+;
+          # cargo-ndk's lower default platform left it as an undefined symbol at
+          # link time. (Nothing else in CI *links* the mediacodec backend into a
+          # binary, so this only surfaces here — the backend requires API >= 28.)
+          cargo ndk -t x86_64 --platform 34 build --release \
+            --example backend_decode \
+            --features "backend-rust,backend-mediacodec,std"
+
+      - name: Run on emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          cores: 2
+          ram-size: 4096M
+          emulator-boot-timeout: 600
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -accel on
+          disable-animations: true
+          # IMPORTANT: this action runs the `script` LINE-BY-LINE, each as a
+          # separate `sh -c` — so shell variables do NOT persist across lines
+          # (a `BIN=...` line is lost, and the next line sees an empty `$BIN`),
+          # and multi-line `if`/`case` blocks break. So the whole thing must be
+          # ONE command: a `>-`-folded single line chained with `&&` (no shared
+          # variables, fail-fast). Requires the MediaCodec backend to decode
+          # (no rust fallback).
+          script: >-
+            adb wait-for-device &&
+            adb push target/x86_64-linux-android/release/examples/backend_decode /data/local/tmp/bd &&
+            adb shell chmod 755 /data/local/tmp/bd &&
+            adb push testdata/libheif-examples/example.heic /data/local/tmp/ex.heic &&
+            OUT="$(adb shell '/data/local/tmp/bd /data/local/tmp/ex.heic mediacodec' | tr -d '\r')" &&
+            echo "device output: $OUT" &&
+            { echo "$OUT" | grep -q '^OK mediacodec ' || { echo "::error::MediaCodec runtime decode failed: $OUT"; exit 1; }; }

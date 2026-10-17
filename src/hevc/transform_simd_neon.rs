@@ -452,10 +452,11 @@ pub(crate) fn add_residual_block_neon(
     size: usize,
     max_val: i32,
 ) {
-    // Use signed i16 operations: pred values are in [0, max_val] which fits in i16
-    // for typical bit depths (8-bit: max_val=255, 10-bit: max_val=1023).
-    let zero = vdupq_n_s16(0);
-    let max_v = vdupq_n_s16(max_val as i16);
+    // XOR maps unsigned [0,65535] to signed [-32768,32767]. Saturating
+    // signed addition in that domain, then XOR back, is unsigned clamping
+    // of (prediction + signed residual), including 16-bit prediction values.
+    let bias = vdupq_n_u16(0x8000);
+    let max_v = vdupq_n_u16(max_val as u16);
 
     for py in 0..size {
         let row_start = (y0 + py) * stride + x0;
@@ -465,15 +466,11 @@ pub(crate) fn add_residual_block_neon(
         let chunks = size / 8;
         for c in 0..chunks {
             let offset = c * 8;
-            // Load prediction as u16, reinterpret as i16 (values fit in i16 for <=15-bit)
             let pred_u = vld1q_u16(row[offset..offset + 8].try_into().unwrap());
-            let pred = vreinterpretq_s16_u16(pred_u);
+            let pred = vreinterpretq_s16_u16(veorq_u16(pred_u, bias));
             let res = vld1q_s16(res_row[offset..offset + 8].try_into().unwrap());
-            // Add and clamp with signed operations (handles negative results correctly)
-            let sum = vaddq_s16(pred, res);
-            let clamped = vminq_s16(vmaxq_s16(sum, zero), max_v);
-            // Store back as u16
-            let clamped_u = vreinterpretq_u16_s16(clamped);
+            let sum = vqaddq_s16(pred, res);
+            let clamped_u = vminq_u16(veorq_u16(vreinterpretq_u16_s16(sum), bias), max_v);
             vst1q_u16(
                 (&mut row[offset..offset + 8]).try_into().unwrap(),
                 clamped_u,

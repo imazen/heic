@@ -66,8 +66,12 @@
 //! for easier debugging. Use `.error()` to inspect the inner [`HeicError`], or
 //! `.decompose()` to separate the error from its trace.
 //!
-//! For probing, [`ImageInfo::from_bytes`] returns a separate [`ProbeError`] enum
-//! that distinguishes "not enough data" from "not a HEIC file" from "corrupt header".
+//! For probing, [`ImageInfo::from_bytes`] returns `At<`[`ProbeError`]`>`, a separate
+//! enum that distinguishes "not enough data" from "not a HEIC file" from "corrupt
+//! header". The raw HEVC entry points in [`hevc`] (`decode`, `get_info`,
+//! `params::parse_sps`, [`VideoDecoder`], …) return `At<`[`HevcError`]`>`.
+//! Every error is located at the line that detected it — there are no
+//! location-less hops anywhere in the public surface.
 //!
 //! # Advanced: Raw YCbCr Access
 //!
@@ -92,11 +96,59 @@
 //! decoding. For grid-based images, [`DecodeRequest::decode_into`] reduces peak
 //! memory by ~60% compared to [`DecodeRequest::decode`] by streaming tiles
 //! directly to the output buffer.
+//!
+//! # Patents
+//!
+//! HEVC (H.265) and its use in HEIF containers may be covered by patents
+//! held by third parties, including members of the Access Advance HEVC
+//! patent pool. This decoder may or may not be subject to those patents
+//! depending on jurisdiction and use.
+//!
+//! **Imazen holds no patents** and grants only **copyright** permissions
+//! for the implementation in this crate (AGPL-3.0 or commercial). No
+//! patent rights are granted. This codec is **decode-only**. We are not
+//! lawyers; consult a patent attorney to determine whether a patent
+//! license is required for your use.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 extern crate alloc;
+
+// At least one backend feature must be active for the current target, or the
+// crate is useless — a `heic` build with no HEVC decoder cannot decode HEIC
+// images. Fail loudly with a list of available backends; user picks at least
+// one in their `Cargo.toml`.
+//
+// As new native backends land (mediafoundation, videotoolbox, mediacodec,
+// vaapi, d3d11va), they get added to the cfg-any list below paired with the
+// target_os they support.
+#[cfg(not(any(
+    feature = "backend-rust",
+    all(feature = "backend-mediafoundation", target_os = "windows"),
+    all(
+        feature = "backend-videotoolbox",
+        any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "tvos",
+            target_os = "visionos"
+        )
+    ),
+    all(feature = "backend-mediacodec", target_os = "android"),
+    all(feature = "backend-vaapi", target_os = "linux"),
+    all(feature = "backend-d3d11va", target_os = "windows"),
+)))]
+compile_error!(
+    "heic: no HEVC backend is enabled for this target. Enable at least one \
+     of: `backend-rust` (any target), `backend-mediafoundation` (windows), \
+     `backend-videotoolbox` (apple), `backend-mediacodec` (android), \
+     `backend-vaapi` (linux), `backend-d3d11va` (windows). \
+     Native backends are wired but not yet plumbed through the decode \
+     dispatcher — they ship as opt-in subcrates and fall through to \
+     `backend-rust` at decode time until the next PR. \
+     Example: `cargo add heic --features backend-rust`."
+);
 
 whereat::define_at_crate_info!();
 
@@ -135,7 +187,9 @@ pub(crate) fn alloc_vec_fallible<T: Clone>(
     Ok(v)
 }
 
+mod alloc_util;
 mod auxiliary;
+mod backend;
 mod decode;
 mod error;
 #[doc(hidden)]
@@ -143,8 +197,12 @@ pub mod heif;
 #[doc(hidden)]
 pub mod hevc;
 
+pub use backend::{Backend, recommended_backends};
+
 #[cfg(feature = "zencodec")]
 mod codec;
+#[cfg(feature = "inventory")]
+mod inventory;
 
 #[cfg(feature = "image")]
 mod image;
@@ -185,6 +243,7 @@ pub fn cabac_bin_trace(limit: u32) {
 pub use enough::{Stop, StopReason, Unstoppable};
 
 // Re-export At for error location tracking
+use whereat::ResultAtExt;
 pub use whereat::{At, at};
 
 use alloc::borrow::Cow;
@@ -227,21 +286,50 @@ impl PixelLayout {
 
 /// Resource limits for decoding.
 ///
-/// All fields default to `None` (no limit). Set limits to prevent
-/// resource exhaustion from adversarial or oversized input.
+/// [`Limits::default()`] carries the same safe fallback the decoder applies
+/// when no `Limits` are supplied at all (`16_384 × 16_384`, 256 megapixels,
+/// 1 GiB) — see [`Limits::server_defaults`] for the rationale of those
+/// numbers. This is deliberate: a caller that passes `Limits::default()`
+/// gets a bounded decode, never a *weaker* one than passing nothing. Set a
+/// field to `None` to lift that particular cap, or set tighter values to
+/// further constrain adversarial or oversized input.
+///
+/// # Server safety
+///
+/// `Limits::default()` is **capped, not uncapped**: it returns exactly
+/// [`Limits::server_defaults`] (16 384² / 256 MP / 1 GiB), which is also the
+/// fallback the decoder applies internally when a caller omits limits
+/// altogether. So neither `Limits::default()` nor passing no limits at all
+/// leaves a decode unbounded, and `Some(Limits::default())` never *weakens*
+/// the protection of passing `None`. The only way to lift a cap is to set that
+/// field to `None` explicitly.
+///
+/// For untrusted input, prefer naming the intent at the call site so the caps
+/// are visible in review, then tighten to the deployment's memory budget:
+///
+/// ```
+/// use heic::Limits;
+///
+/// let limits = Limits::server_defaults(); // capped; safe for untrusted input
+/// ```
 ///
 /// # Example
 ///
 /// ```
 /// use heic::Limits;
 ///
+/// // Start from the safe defaults and tighten.
 /// let mut limits = Limits::default();
 /// limits.max_width = Some(8192);
 /// limits.max_height = Some(8192);
 /// limits.max_pixels = Some(64_000_000);
 /// limits.max_memory_bytes = Some(512 * 1024 * 1024);
+///
+/// // Or explicitly lift a cap (back to unlimited for that field).
+/// let mut unbounded_pixels = Limits::default();
+/// unbounded_pixels.max_pixels = None;
 /// ```
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Limits {
     /// Maximum image width in pixels
@@ -252,9 +340,63 @@ pub struct Limits {
     pub max_pixels: Option<u64>,
     /// Maximum memory usage in bytes
     pub max_memory_bytes: Option<u64>,
+    /// Per-site allocation-fallibility preference, applied at the untrusted
+    /// decode allocation sites (full-image planes, concatenated payloads).
+    ///
+    /// Internal carrier (`pub(crate)`): the `zencodec` decode adapter
+    /// ([`crate::codec`]) sets it from
+    /// `ResourceLimits::prefer_fallible_allocations`; the direct decode API
+    /// leaves it `CodecDefault`, so each allocation site keeps its own default
+    /// (big untrusted buffers fallible, small bounded scratch infallible). See
+    /// [`crate::alloc_util`].
+    pub(crate) alloc_pref: crate::alloc_util::AllocPreference,
+}
+
+impl Default for Limits {
+    /// Returns the **safe fallback** caps (`16_384 × 16_384`, 256 megapixels,
+    /// 1 GiB), identical to [`Limits::server_defaults`].
+    ///
+    /// This is intentionally *not* an all-`None` (unlimited) value. The
+    /// decoder applies the same fallback internally when a caller supplies no
+    /// `Limits` at all, so `Limits::default()` must match it — otherwise
+    /// `Limits::default()` would be *weaker* than passing nothing, which is a
+    /// footgun. A caller who genuinely wants no cap on a field sets it to
+    /// `None` explicitly.
+    fn default() -> Self {
+        Self::server_defaults()
+    }
 }
 
 impl Limits {
+    /// Conservative defaults for **server-side** deployments where
+    /// the input is untrusted (a public image-upload endpoint, a
+    /// CDN transformation worker, etc.).
+    ///
+    /// * `max_width = max_height = 16_384` — covers 16K imagery; the
+    ///   single-frame HEVC level-6.2 ceiling is 32_768 but real-
+    ///   world HEIC photos top out at ~12K (full-frame DSLR
+    ///   panoramas).
+    /// * `max_pixels = 268_435_456` (256 megapixels) — high enough
+    ///   for high-end stills, low enough to block 65k×65k probe
+    ///   bombs.
+    /// * `max_memory_bytes = 1_073_741_824` (1 GiB) — matches the
+    ///   default upstream memory budget but documented explicitly.
+    ///
+    /// Tune per-deployment based on the hosting tier's actual
+    /// memory budget. The defaults are intentionally generous
+    /// enough to decode the median real photo without
+    /// intervention, while bounding hostile-input blast radius.
+    #[must_use]
+    pub fn server_defaults() -> Self {
+        Self {
+            max_width: Some(16_384),
+            max_height: Some(16_384),
+            max_pixels: Some(268_435_456),
+            max_memory_bytes: Some(1_073_741_824),
+            alloc_pref: crate::alloc_util::AllocPreference::CodecDefault,
+        }
+    }
+
     /// Check that dimensions are within limits.
     pub(crate) fn check_dimensions(&self, width: u32, height: u32) -> Result<()> {
         if let Some(max_w) = self.max_width
@@ -355,7 +497,7 @@ pub struct ImageInfo {
     pub transfer_characteristics: u16,
     /// Matrix coefficients (CICP). 1=BT.709, 5/6=BT.601, 9=BT.2020, 2=unspecified
     pub matrix_coefficients: u16,
-    /// Full range flag (CICP). true = full [0,255], false = limited [16,235]
+    /// Full range flag (CICP). true = full `[0,255]`, false = limited `[16,235]`
     pub video_full_range: bool,
     /// Whether the file contains an ICC profile (in colr box)
     pub has_icc_profile: bool,
@@ -399,6 +541,16 @@ fn apply_transform_dimensions(
     (w, h)
 }
 
+/// Carry a located container / decoder error into the probe error space.
+///
+/// `map_error` keeps the origin trace (the parser line that rejected the
+/// input); call sites append the probe boundary frame with `.at()`
+/// (`#[track_caller]`). Deliberately not `#[track_caller]` itself — passed
+/// by name to `map_err` it would record `FnOnce::call_once`, not the caller.
+fn probe_corrupt(e: At<HeicError>) -> At<ProbeError> {
+    e.map_error(ProbeError::Corrupt)
+}
+
 impl ImageInfo {
     /// Minimum bytes needed to attempt header parsing.
     ///
@@ -416,23 +568,28 @@ impl ImageInfo {
     ///
     /// Returns [`ProbeError::NeedMoreData`] if the buffer is too small,
     /// [`ProbeError::InvalidFormat`] if this is not a HEIC/HEIF file,
-    /// or [`ProbeError::Corrupt`] if the header is malformed.
-    pub fn from_bytes(data: &[u8]) -> core::result::Result<Self, ProbeError> {
+    /// or [`ProbeError::Corrupt`] if the header is malformed. The error is
+    /// [`whereat`]-located: match on `err.error()` for the variant, and read
+    /// `err.full_trace()` for the container / parameter-set line that
+    /// rejected a corrupt header.
+    pub fn from_bytes(data: &[u8]) -> core::result::Result<Self, At<ProbeError>> {
         if data.len() < 12 {
-            return Err(ProbeError::NeedMoreData);
+            return Err(at!(ProbeError::NeedMoreData));
         }
 
         // Quick format check: HEIF files start with ftyp box
         let box_type = &data[4..8];
         if box_type != b"ftyp" {
-            return Err(ProbeError::InvalidFormat);
+            return Err(at!(ProbeError::InvalidFormat));
         }
 
-        let container = heif::parse(data, &Unstoppable).map_err(ProbeError::Corrupt)?;
+        let container = heif::parse(data, &Unstoppable)
+            .map_err(probe_corrupt)
+            .at()?;
 
         let primary_item = container
             .primary_item()
-            .ok_or_else(|| ProbeError::Corrupt(at!(HeicError::NoPrimaryImage)))?;
+            .ok_or_else(|| at!(ProbeError::Corrupt(HeicError::NoPrimaryImage)))?;
 
         // Check for alpha auxiliary image
         let has_alpha = !container
@@ -467,14 +624,20 @@ impl ImageInfo {
                 )
                 .is_empty();
 
-        // Check for HDR gain map
+        // Check for HDR gain map. Either the Apple aux-item URN, OR a
+        // `tmap` derived item (HEIF Amendment 1 / ISO 23008-12:2025) with
+        // at least two `dimg` references (base + gain map).
         let has_gain_map = !container
             .find_auxiliary_items(primary_item.id, "urn:com:apple:photo:2020:aux:hdrgainmap")
-            .is_empty();
+            .is_empty()
+            || container.items().any(|i| {
+                i.item_type == ItemType::Tmap
+                    && container.get_item_references(i.id, FourCC::DIMG).len() >= 2
+            });
 
         // Extract CICP from colr nclx box on the primary item
         let (color_primaries, transfer_characteristics, matrix_coefficients, video_full_range) =
-            match &primary_item.color_info {
+            match container.item_nclx(primary_item.id) {
                 Some(heif::ColorInfo::Nclx {
                     color_primaries,
                     transfer_characteristics,
@@ -488,18 +651,12 @@ impl ImageInfo {
                 ),
                 _ => (2, 2, 2, false), // unspecified defaults
             };
-        let has_icc_profile = matches!(
-            &primary_item.color_info,
-            Some(heif::ColorInfo::IccProfile(_))
-        );
+        let has_icc_profile = container.item_icc(primary_item.id).is_some();
 
         // Extract raw metadata bytes
         let exif = Self::extract_exif_from_container(&container);
         let xmp = Self::extract_xmp_from_container(&container);
-        let icc_profile = match &primary_item.color_info {
-            Some(heif::ColorInfo::IccProfile(icc)) => Some(icc.clone()),
-            _ => None,
-        };
+        let icc_profile = container.item_icc(primary_item.id).map(<[u8]>::to_vec);
 
         // Try to get info from HEVC config (fast path for direct HEVC items)
         if let Some(ref config) = primary_item.hevc_config
@@ -645,10 +802,12 @@ impl ImageInfo {
         // Fallback to reading image data
         let image_data = container
             .get_item_data(primary_item.id)
-            .map_err(ProbeError::Corrupt)?;
+            .map_err(probe_corrupt)
+            .at()?;
 
         let hevc_info = hevc::get_info(&image_data)
-            .map_err(|e| ProbeError::Corrupt(at!(HeicError::from(e))))?;
+            .map_err(|e| probe_corrupt(crate::error::hevc_at(e)))
+            .at()?;
 
         let (width, height) =
             apply_transform_dimensions(hevc_info.width, hevc_info.height, &primary_item.transforms);
@@ -723,7 +882,27 @@ impl ImageInfo {
     }
 }
 
-/// HDR gain map data extracted from an auxiliary image.
+/// Which container mechanism produced the [`HdrGainMap`].
+///
+/// HEIC stores gain maps via either Apple's iOS 14+ auxiliary item path
+/// (XMP metadata, `urn:com:apple:photo:2020:aux:hdrgainmap`) or the
+/// HEIF Amendment 1 / ISO 23008-12:2025 `tmap` derived image item
+/// (ISO 21496-1 binary metadata, the canonical AVIF tmap variant).
+/// Consumers branch on this when interpreting the metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GainMapOrigin {
+    /// Apple HEIC auxiliary item with the
+    /// `urn:com:apple:photo:2020:aux:hdrgainmap` URN.
+    /// Metadata lives in [`HdrGainMap::xmp`].
+    AppleAuxItem,
+    /// HEIF Amendment 1 `tmap` derived image item. Metadata lives in
+    /// [`HdrGainMap::iso21496`] as the AVIF tmap byte payload (per
+    /// ISO 21496-1, version byte first).
+    HeifTmap,
+}
+
+/// HDR gain map data extracted from an auxiliary image or tone-map item.
 ///
 /// The gain map is a grayscale image (typically lower resolution than the
 /// primary) used with the Apple HDR or ISO 21496-1 formula to reconstruct HDR:
@@ -733,9 +912,12 @@ impl ImageInfo {
 /// scale = 1.0 + (headroom - 1.0) * gainmap_linear
 /// hdr_linear = sdr_linear * scale
 /// ```
-/// Where `headroom` and other parameters come from the XMP metadata
-/// (ISO 21496-1 / Apple HDR namespaces). Parse the [`xmp`](Self::xmp)
-/// field with `ultrahdr-core` or similar to extract those parameters.
+/// Where `headroom` and other parameters come from either [`xmp`](Self::xmp)
+/// (Apple aux-item path) or [`iso21496`](Self::iso21496) (HEIF Amendment 1
+/// tmap path). [`origin`](Self::origin) names which mechanism produced this
+/// instance. Parse the metadata with `ultrahdr-core` (for XMP) or
+/// `zencodec::gainmap::parse_iso21496_fmt(..., Iso21496Format::AvifTmap)`
+/// (for the binary payload).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct HdrGainMap {
@@ -750,11 +932,24 @@ pub struct HdrGainMap {
     pub height: u32,
     /// Significant bits per sample in the source HEVC stream (typically 8).
     pub bit_depth: u8,
-    /// Raw XMP bytes from the gain map item (contains ISO 21496-1 metadata).
+    /// Raw XMP bytes attached to the gain map item, when present. `None`
+    /// outside the [`AppleAuxItem`] origin.
     ///
-    /// Callers parse this with `ultrahdr-core`'s XMP parser or similar.
-    /// `None` if no XMP metadata is associated with the gain map item.
+    /// Note: Apple's aux-item XMP is a small Apple-specific packet — it does
+    /// NOT carry ISO 21496-1 / `hdrgm:` gain-map parameters. Parameter
+    /// sources are [`iso21496`](Self::iso21496) (`tmap` files) or the EXIF
+    /// MakerNote HDR headroom (legacy Apple files).
+    ///
+    /// [`AppleAuxItem`]: GainMapOrigin::AppleAuxItem
     pub xmp: Option<Vec<u8>>,
+    /// Raw ISO 21496-1 binary metadata from a `tmap` derived item (AVIF
+    /// tmap byte layout: version byte first, then the ISO payload). `None`
+    /// outside the [`HeifTmap`] origin.
+    ///
+    /// [`HeifTmap`]: GainMapOrigin::HeifTmap
+    pub iso21496: Option<Vec<u8>>,
+    /// Which container mechanism this gain map was decoded from.
+    pub origin: GainMapOrigin,
 }
 
 /// Decoder configuration. Reusable across multiple decode operations.
@@ -772,7 +967,18 @@ pub struct HdrGainMap {
 /// ```
 #[derive(Debug, Clone)]
 pub struct DecoderConfig {
-    _private: (),
+    /// Ordered allowlist of HEVC backends to try for each decode.
+    ///
+    /// Empty by default — `DecoderConfig::new()` populates the list with
+    /// [`recommended_backends`] so the most common case (`config.decode(...)`)
+    /// just works. Override with [`Self::with_backends`] or
+    /// [`Self::with_backend`].
+    ///
+    /// See the [`backend`](crate::backend) module for fallthrough semantics.
+    /// As of PR2 the dispatcher is not yet plumbed through the internal
+    /// decode pipeline (still always uses `backend-rust`); subsequent PRs
+    /// land that wiring as the native backends arrive.
+    backends: Vec<Backend>,
 }
 
 impl Default for DecoderConfig {
@@ -783,9 +989,54 @@ impl Default for DecoderConfig {
 
 impl DecoderConfig {
     /// Create a new decoder configuration with sensible defaults.
+    ///
+    /// The default backend allowlist is [`recommended_backends`]: native
+    /// platform backends (when compiled in for the host target) followed by
+    /// the pure-Rust decoder as a last-resort fallback.
     #[must_use]
     pub fn new() -> Self {
-        Self { _private: () }
+        Self {
+            backends: recommended_backends(),
+        }
+    }
+
+    /// Set the ordered allowlist of HEVC backends.
+    ///
+    /// The first entry whose `is_available()` returns true is tried first;
+    /// recoverable failures (backend unavailable, bitstream rejection)
+    /// fall through to subsequent entries. An empty list causes decode to
+    /// return [`HeicError::NoBackendSelected`].
+    ///
+    /// See [`Backend`] for the available variants and the allowlist
+    /// fallthrough semantics.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use heic::{Backend, DecoderConfig};
+    ///
+    /// // Prefer the platform decoder; fall back to pure-Rust if it can't run.
+    /// let config = DecoderConfig::new()
+    ///     .with_backends(&[Backend::VideoToolbox, Backend::Rust]);
+    /// ```
+    #[must_use]
+    pub fn with_backends(mut self, backends: &[Backend]) -> Self {
+        self.backends = backends.to_vec();
+        self
+    }
+
+    /// Convenience shortcut for [`Self::with_backends`] with a single entry.
+    #[must_use]
+    pub fn with_backend(self, backend: Backend) -> Self {
+        self.with_backends(&[backend])
+    }
+
+    /// Return the backend allowlist currently set on this config.
+    ///
+    /// The decode pipeline consults this in order on every HEVC tile.
+    #[must_use]
+    pub fn backends(&self) -> &[Backend] {
+        &self.backends
     }
 
     /// One-shot decode: decode HEIC data to pixels in the requested layout.
@@ -819,6 +1070,7 @@ impl DecoderConfig {
             limits: None,
             stop: None,
             max_threads: None,
+            apply_orientation: true,
         }
     }
 
@@ -832,7 +1084,7 @@ impl DecoderConfig {
     ///
     /// Returns an error if the data is not valid HEIC/HEIF format.
     pub fn decode_to_frame(&self, data: &[u8]) -> Result<hevc::DecodedFrame> {
-        decode::decode_to_frame(data, None, &Unstoppable, None)
+        decode::decode_to_frame(data, None, &Unstoppable, None, self.backends(), true)
     }
 
     /// Estimate the peak memory usage for decoding an image of given dimensions.
@@ -846,25 +1098,37 @@ impl DecoderConfig {
     /// image uses monochrome or if tiles are decoded sequentially.
     #[must_use]
     pub fn estimate_memory(width: u32, height: u32, layout: PixelLayout) -> u64 {
+        // Saturating arithmetic so a hostile SPS (`pic_width_in_luma_
+        // samples = u32::MAX`, etc.) can't wrap the byte estimate to a
+        // small value and slip past `Limits::check_memory`. The
+        // saturation point (u64::MAX bytes ≈ 16 exabytes) is far
+        // above any sensible `max_memory_bytes` cap, so a wrapped
+        // estimate would correctly fail the limit check.
         let w = u64::from(width);
         let h = u64::from(height);
-        let pixels = w * h;
+        let pixels = w.saturating_mul(h);
 
         // YCbCr planes (u16 per sample)
-        let luma_bytes = pixels * 2;
+        let luma_bytes = pixels.saturating_mul(2);
         let chroma_w = w.div_ceil(2);
         let chroma_h = h.div_ceil(2);
-        let chroma_bytes = chroma_w * chroma_h * 2 * 2; // Cb + Cr
+        let chroma_bytes = chroma_w
+            .saturating_mul(chroma_h)
+            .saturating_mul(2)
+            .saturating_mul(2); // Cb + Cr
 
         // Output pixel buffer
-        let output_bytes = pixels * layout.bytes_per_pixel() as u64;
+        let output_bytes = pixels.saturating_mul(layout.bytes_per_pixel() as u64);
 
         // Deblocking metadata (flags + QP map at 4x4 granularity)
         let blocks_w = w.div_ceil(4);
         let blocks_h = h.div_ceil(4);
-        let deblock_bytes = blocks_w * blocks_h * 2; // flags(u8) + qp(i8)
+        let deblock_bytes = blocks_w.saturating_mul(blocks_h).saturating_mul(2);
 
-        luma_bytes + chroma_bytes + output_bytes + deblock_bytes
+        luma_bytes
+            .saturating_add(chroma_bytes)
+            .saturating_add(output_bytes)
+            .saturating_add(deblock_bytes)
     }
 
     /// Check if the primary image has an HDR gain map auxiliary image.
@@ -876,20 +1140,28 @@ impl DecoderConfig {
         decode::has_gain_map(data)
     }
 
-    /// Decode the HDR gain map from an Apple HDR HEIC file.
+    /// Decode the HDR gain map from an Apple HDR or HEIF `tmap` HEIC file.
     ///
     /// Returns the grayscale gain map pixels (scaled to 8-bit), the source
-    /// bit depth, and any XMP metadata associated with the gain map item.
-    /// The gain map is typically lower resolution than the primary image.
+    /// bit depth, and whichever reconstruction metadata the container carries.
+    /// The gain map is typically lower resolution than the primary image, and
+    /// [`HdrGainMap::origin`] names which mechanism produced it.
     ///
-    /// The XMP metadata contains ISO 21496-1 / Apple HDR parameters needed
-    /// to apply the gain map. Parse it with `ultrahdr-core` or similar.
+    /// The parameters needed to apply the gain map come from one of two paths,
+    /// depending on the origin (see [`HdrGainMap`] for the full layout):
+    /// - [`HdrGainMap::xmp`] — Apple aux-item XMP (Apple-specific packet; does
+    ///   NOT carry ISO 21496-1 / `hdrgm:` parameters). Parse with
+    ///   `ultrahdr-core`. `None` for `tmap` gain maps.
+    /// - [`HdrGainMap::iso21496`] — raw ISO 21496-1 binary metadata from a
+    ///   HEIF Amendment 1 `tmap` derived item. Parse with e.g.
+    ///   `zencodec::gainmap::parse_iso21496_fmt(..., Iso21496Format::AvifTmap)`.
+    ///   `None` for the Apple aux-item path.
     ///
     /// # Errors
     ///
     /// Returns an error if the file has no gain map or decoding fails.
     pub fn decode_gain_map(&self, data: &[u8]) -> Result<HdrGainMap> {
-        decode::decode_gain_map(data)
+        decode::decode_gain_map(data, self.backends())
     }
 
     /// Extract raw EXIF (TIFF) data from a HEIC file.
@@ -941,10 +1213,7 @@ impl DecoderConfig {
         let primary_item = container
             .primary_item()
             .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
-        match &primary_item.color_info {
-            Some(heif::ColorInfo::IccProfile(icc)) => Ok(Some(icc.clone())),
-            _ => Ok(None),
-        }
+        Ok(container.item_icc(primary_item.id).map(<[u8]>::to_vec))
     }
 
     /// Decode the thumbnail image from a HEIC file.
@@ -961,7 +1230,7 @@ impl DecoderConfig {
         data: &[u8],
         layout: PixelLayout,
     ) -> Result<Option<DecodeOutput>> {
-        decode::decode_thumbnail(data, layout)
+        decode::decode_thumbnail(data, layout, self.backends())
     }
 
     /// List all auxiliary images linked to the primary image.
@@ -1017,7 +1286,7 @@ impl DecoderConfig {
     /// Returns an error if the file has no depth map, the depth item
     /// cannot be located, or HEVC decoding fails.
     pub fn decode_depth(&self, data: &[u8]) -> Result<DepthMap> {
-        decode::decode_depth(data)
+        decode::decode_depth(data, self.backends())
     }
 
     /// Decode a specific auxiliary image by item ID.
@@ -1038,7 +1307,7 @@ impl DecoderConfig {
         item_id: u32,
         layout: PixelLayout,
     ) -> Result<DecodeOutput> {
-        decode::decode_auxiliary_item(data, item_id, layout)
+        decode::decode_auxiliary_item(data, item_id, layout, self.backends())
     }
 
     /// Decode all available segmentation mattes from a HEIC file.
@@ -1054,7 +1323,7 @@ impl DecoderConfig {
     /// Returns an error if the HEIF container is malformed or matte
     /// decoding fails.
     pub fn decode_mattes(&self, data: &[u8]) -> Result<Vec<SegmentationMatte>> {
-        decode::decode_mattes(data)
+        decode::decode_mattes(data, self.backends())
     }
 
     /// Decode a specific segmentation matte type from a HEIC file.
@@ -1071,7 +1340,7 @@ impl DecoderConfig {
         data: &[u8],
         matte_type: &AuxiliaryImageType,
     ) -> Result<Option<SegmentationMatte>> {
-        decode::decode_matte(data, matte_type)
+        decode::decode_matte(data, matte_type, self.backends())
     }
 }
 
@@ -1093,6 +1362,9 @@ pub struct DecodeRequest<'a> {
     /// is enabled, sequential otherwise). `Some(1)` forces single-threaded
     /// decode even when the `parallel` feature is on.
     max_threads: Option<usize>,
+    /// Whether to bake the image's orientation (`irot`/`imir`) into the
+    /// decoded pixels. Default `true`.
+    apply_orientation: bool,
 }
 
 impl<'a> DecodeRequest<'a> {
@@ -1101,6 +1373,19 @@ impl<'a> DecodeRequest<'a> {
     /// Default is `PixelLayout::Rgba8`.
     pub fn with_output_layout(mut self, layout: PixelLayout) -> Self {
         self.layout = layout;
+        self
+    }
+
+    /// Set whether the image's orientation transforms (`irot`/`imir`) are
+    /// baked into the decoded pixels.
+    ///
+    /// Default `true`: the decoder applies rotation/mirror so the output is in
+    /// display orientation (the historical, convenient behavior). Set `false`
+    /// to keep the pixels in their stored orientation — the caller is then
+    /// responsible for applying the orientation. The clean-aperture crop
+    /// (`clap`) is always applied regardless of this flag.
+    pub fn with_apply_orientation(mut self, apply_orientation: bool) -> Self {
+        self.apply_orientation = apply_orientation;
         self
     }
 
@@ -1145,7 +1430,14 @@ impl<'a> DecodeRequest<'a> {
     /// or the operation is cancelled.
     pub fn decode(self) -> Result<DecodeOutput> {
         let stop: &dyn Stop = self.stop.unwrap_or(&Unstoppable);
-        let frame = decode::decode_to_frame(self.data, self.limits, stop, self.max_threads)?;
+        let frame = decode::decode_to_frame(
+            self.data,
+            self.limits,
+            stop,
+            self.max_threads,
+            self._config.backends(),
+            self.apply_orientation,
+        )?;
 
         let width = frame.cropped_width();
         let height = frame.cropped_height();
@@ -1159,10 +1451,10 @@ impl<'a> DecodeRequest<'a> {
         }
 
         let data = match self.layout {
-            PixelLayout::Rgb8 => frame.to_rgb()?,
-            PixelLayout::Rgba8 => frame.to_rgba()?,
-            PixelLayout::Bgr8 => frame.to_bgr()?,
-            PixelLayout::Bgra8 => frame.to_bgra()?,
+            PixelLayout::Rgb8 => frame.to_rgb().map_err(crate::error::at_core)?,
+            PixelLayout::Rgba8 => frame.to_rgba().map_err(crate::error::at_core)?,
+            PixelLayout::Bgr8 => frame.to_bgr().map_err(crate::error::at_core)?,
+            PixelLayout::Bgra8 => frame.to_bgra().map_err(crate::error::at_core)?,
         };
 
         Ok(DecodeOutput {
@@ -1199,12 +1491,20 @@ impl<'a> DecodeRequest<'a> {
             self.layout,
             output,
             self.max_threads,
+            self._config.backends(),
         )? {
             return Ok(result);
         }
 
         // Fallback: full-frame decode then color convert
-        let frame = decode::decode_to_frame(self.data, self.limits, stop, self.max_threads)?;
+        let frame = decode::decode_to_frame(
+            self.data,
+            self.limits,
+            stop,
+            self.max_threads,
+            self._config.backends(),
+            self.apply_orientation,
+        )?;
 
         let width = frame.cropped_width();
         let height = frame.cropped_height();
@@ -1271,12 +1571,20 @@ impl<'a> DecodeRequest<'a> {
             self.layout,
             sink,
             self.max_threads,
+            self._config.backends(),
         )? {
             return Ok(result);
         }
 
         // Fallback: full-frame decode then write to sink as one strip
-        let frame = decode::decode_to_frame(self.data, self.limits, stop, self.max_threads)?;
+        let frame = decode::decode_to_frame(
+            self.data,
+            self.limits,
+            stop,
+            self.max_threads,
+            self._config.backends(),
+            self.apply_orientation,
+        )?;
 
         let width = frame.cropped_width();
         let height = frame.cropped_height();
@@ -1290,10 +1598,10 @@ impl<'a> DecodeRequest<'a> {
         }
 
         let data = match self.layout {
-            PixelLayout::Rgb8 => frame.to_rgb()?,
-            PixelLayout::Rgba8 => frame.to_rgba()?,
-            PixelLayout::Bgr8 => frame.to_bgr()?,
-            PixelLayout::Bgra8 => frame.to_bgra()?,
+            PixelLayout::Rgb8 => frame.to_rgb().map_err(crate::error::at_core)?,
+            PixelLayout::Rgba8 => frame.to_rgba().map_err(crate::error::at_core)?,
+            PixelLayout::Bgr8 => frame.to_bgr().map_err(crate::error::at_core)?,
+            PixelLayout::Bgra8 => frame.to_bgra().map_err(crate::error::at_core)?,
         };
 
         let bpp = self.layout.bytes_per_pixel();
@@ -1316,7 +1624,14 @@ impl<'a> DecodeRequest<'a> {
     /// or the operation is cancelled.
     pub fn decode_yuv(self) -> Result<hevc::DecodedFrame> {
         let stop: &dyn Stop = self.stop.unwrap_or(&Unstoppable);
-        decode::decode_to_frame(self.data, self.limits, stop, self.max_threads)
+        decode::decode_to_frame(
+            self.data,
+            self.limits,
+            stop,
+            self.max_threads,
+            self._config.backends(),
+            self.apply_orientation,
+        )
     }
 }
 
@@ -1339,5 +1654,93 @@ fn round_f64(x: f64) -> f64 {
         floor_f64(x + 0.5)
     } else {
         -floor_f64(-x + 0.5)
+    }
+}
+
+#[cfg(test)]
+mod limits_default_tests {
+    use super::*;
+
+    /// `Limits::default()` carries the safe fallback (16_384² / 256 MP / 1 GiB),
+    /// identical to `server_defaults()` — NOT the old all-`None` (unlimited)
+    /// value. This is the footgun fix: a default `Limits` is never weaker than
+    /// passing no limits at all.
+    #[test]
+    fn default_is_safe_fallback_not_none() {
+        let d = Limits::default();
+        assert_eq!(d.max_width, Some(16_384));
+        assert_eq!(d.max_height, Some(16_384));
+        assert_eq!(d.max_pixels, Some(268_435_456)); // 256 MP
+        assert_eq!(d.max_memory_bytes, Some(1_073_741_824)); // 1 GiB
+
+        let s = Limits::server_defaults();
+        assert_eq!(d.max_width, s.max_width);
+        assert_eq!(d.max_height, s.max_height);
+        assert_eq!(d.max_pixels, s.max_pixels);
+        assert_eq!(d.max_memory_bytes, s.max_memory_bytes);
+    }
+
+    /// A dimension exceeding the 256-megapixel cap is rejected with
+    /// `Limits::default()` (it would have been silently accepted by the old
+    /// all-`None` default).
+    #[test]
+    fn default_rejects_over_256mp_dimension() {
+        let d = Limits::default();
+        // 20_000 × 20_000 = 400 MP — over both the 16_384 side cap and the
+        // 256 MP pixel cap. Either way, default() must reject it.
+        let r = d.check_dimensions(20_000, 20_000);
+        assert!(
+            matches!(r, Err(ref e) if matches!(e.error(), HeicError::LimitExceeded(_))),
+            "expected LimitExceeded for a >256MP dimension under default limits, got {r:?}"
+        );
+
+        // And a memory estimate above the 1 GiB cap is rejected too.
+        let mem = d.check_memory(2 * 1024 * 1024 * 1024); // 2 GiB
+        assert!(
+            matches!(mem, Err(ref e) if matches!(e.error(), HeicError::LimitExceeded(_))),
+            "expected LimitExceeded for a >1GiB estimate under default limits, got {mem:?}"
+        );
+
+        // A dimension within the caps is accepted.
+        assert!(d.check_dimensions(1280, 854).is_ok());
+    }
+
+    /// The [`Limits`] doc promises `Limits::default()` is *also* the fallback
+    /// the decoder applies internally when a caller omits limits altogether —
+    /// i.e. `Some(Limits::default())` can never be weaker than `None`. Those
+    /// are two separately-written constants (`Limits::server_defaults` here,
+    /// `crate::decode::DEFAULT_LIMITS` there); pin them together so the
+    /// documented guarantee cannot drift when either one is retuned.
+    #[test]
+    fn default_matches_the_omitted_limits_decode_fallback() {
+        let d = Limits::default();
+        let fallback = &crate::decode::DEFAULT_LIMITS;
+        assert_eq!(d.max_width, fallback.max_width, "max_width");
+        assert_eq!(d.max_height, fallback.max_height, "max_height");
+        assert_eq!(d.max_pixels, fallback.max_pixels, "max_pixels");
+        assert_eq!(
+            d.max_memory_bytes, fallback.max_memory_bytes,
+            "max_memory_bytes"
+        );
+    }
+
+    /// Contrast: an explicitly all-`None` `Limits` imposes no cap, so the same
+    /// oversized inputs pass. This documents *why* the default was changed —
+    /// the unbounded behavior is still reachable, just no longer the default.
+    #[test]
+    fn explicit_all_none_is_unbounded() {
+        // All four caps explicitly cleared — the unbounded value the docs say a
+        // caller sets to opt out of every limit. (Built as a struct literal
+        // rather than mutating `Limits::default()`, which carries the safe
+        // fallback, not all-`None`.)
+        let none = Limits {
+            max_width: None,
+            max_height: None,
+            max_pixels: None,
+            max_memory_bytes: None,
+            alloc_pref: crate::alloc_util::AllocPreference::CodecDefault,
+        };
+        assert!(none.check_dimensions(20_000, 20_000).is_ok());
+        assert!(none.check_memory(8 * 1024 * 1024 * 1024).is_ok());
     }
 }

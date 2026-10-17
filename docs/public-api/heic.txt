@@ -1,0 +1,238 @@
+# heic public API — supported surface (default features + backend-rust)
+# (regenerated on every `cargo test` by zenutils-apidoc; ZEN_API_DOC=check verifies, =off skips).
+# Encodings: crate-name prefix stripped; auto traits collapse to a
+# count + exceptions; trait impls collapse to one roster line per
+# type (method signatures live at the trait definition); blanket
+# impls omitted; re-export duplicates annotated `[also: path]`.
+# DO NOT EDIT BY HAND — commit regenerated changes with the code.
+#
+# files: heic.txt 203 lines (supported surface) | heic.features.txt 37 added (features: av1,backend-d3d11va,backend-mediacodec,backend-mediafoundation,backend-rust,backend-vaapi,backend-videotoolbox,fallible-alloc,inventory,parallel,std,unci,zencodec) | heic.internal.txt 453 lines (710 hidden + 0 excluded-feature)
+
+## summary
+#
+#   pub modules                                 1
+#   pub types (struct/enum/trait/alias)        20
+#   pub consts/statics                          4
+#   free functions                              1
+#   inherent methods                           38
+#   struct fields                              58
+#   enum variants                              51
+#   re-exports                                  8
+#   trait roster entries (type × trait)        66
+#   auto-trait-complete types                  15
+#   auto-trait exceptions                       3
+#
+# per-module pub lines:
+#   (root)                          181
+
+## items (181 lines)
+
+pub mod heic
+pub use At
+pub use DecodedFrame
+pub use Stop
+pub use StopReason
+pub use Unstoppable
+pub use VideoDecoder
+pub use at
+pub use at
+#[non_exhaustive] pub enum AuxiliaryImageType
+pub AuxiliaryImageType::Alpha
+pub AuxiliaryImageType::Depth
+pub AuxiliaryImageType::GlassesMatte
+pub AuxiliaryImageType::HairMatte
+pub AuxiliaryImageType::HdrGainMap
+pub AuxiliaryImageType::Other(alloc::string::String)
+pub AuxiliaryImageType::PortraitMatte
+pub AuxiliaryImageType::SkinMatte
+pub AuxiliaryImageType::TeethMatte
+pub fn AuxiliaryImageType::from_urn(&str) -> Self
+pub fn AuxiliaryImageType::urn(&self) -> &str
+#[non_exhaustive] pub enum Backend
+pub Backend::Rust
+pub const fn Backend::name(self) -> &'static str
+#[non_exhaustive] pub enum DepthRepresentationType
+pub DepthRepresentationType::NonuniformDisparity
+pub DepthRepresentationType::UniformDisparity
+pub DepthRepresentationType::UniformInverseZ
+pub DepthRepresentationType::UniformZ
+pub fn DepthRepresentationType::code(self) -> u8
+pub fn DepthRepresentationType::from_code(u8) -> core::option::Option<Self>
+#[non_exhaustive] pub enum GainMapOrigin
+pub GainMapOrigin::AppleAuxItem
+pub GainMapOrigin::HeifTmap
+#[non_exhaustive] pub enum HeicError
+pub HeicError::AllBackendsFailed
+pub HeicError::AllBackendsFailed::detail: alloc::string::String
+pub HeicError::AllBackendsFailed::rejected_bitstream: bool
+pub HeicError::BufferTooSmall
+pub HeicError::BufferTooSmall::actual: usize
+pub HeicError::BufferTooSmall::required: usize
+pub HeicError::Cancelled(enough::reason::StopReason)
+pub HeicError::HevcDecode(HevcError)
+pub HeicError::InvalidContainer(&'static str)
+pub HeicError::InvalidData(&'static str)
+pub HeicError::InvalidRequest(&'static str)
+pub HeicError::LimitExceeded(&'static str)
+pub HeicError::NoBackendSelected
+pub HeicError::NoPrimaryImage
+pub HeicError::NotHeif(&'static str)
+pub HeicError::OutOfMemory
+pub HeicError::Sink(alloc::boxed::Box<(dyn core::error::Error + core::marker::Send + core::marker::Sync)>)
+pub HeicError::Truncated(&'static str)
+pub HeicError::Unsupported(&'static str)
+pub HeicError::UnsupportedCodec(&'static str)
+#[non_exhaustive] pub enum HevcError
+pub HevcError::AllocationFailed
+pub HevcError::CabacError(&'static str)
+pub HevcError::Cancelled(enough::reason::StopReason)
+pub HevcError::CoreUnclassified(alloc::string::String)
+pub HevcError::DecodingError(&'static str)
+pub HevcError::DimensionOverflow
+pub HevcError::InvalidBitstream(&'static str)
+pub HevcError::InvalidNalUnit(&'static str)
+pub HevcError::InvalidParameterSet
+pub HevcError::InvalidParameterSet::kind: &'static str
+pub HevcError::InvalidParameterSet::msg: alloc::string::String
+pub HevcError::MissingParameterSet(&'static str)
+pub HevcError::Unsupported(&'static str)
+pub HevcError::UnsupportedProfile
+pub HevcError::UnsupportedProfile::level: u8
+pub HevcError::UnsupportedProfile::profile: u8
+#[non_exhaustive] pub enum PixelLayout
+pub PixelLayout::Bgr8
+pub PixelLayout::Bgra8
+pub PixelLayout::Rgb8
+pub PixelLayout::Rgba8
+pub const fn PixelLayout::bytes_per_pixel(self) -> usize
+pub const fn PixelLayout::has_alpha(self) -> bool
+#[non_exhaustive] pub enum ProbeError
+pub ProbeError::Corrupt(HeicError)
+pub ProbeError::InvalidFormat
+pub ProbeError::NeedMoreData
+#[non_exhaustive] pub struct AuxiliaryImageDescriptor
+pub AuxiliaryImageDescriptor::aux_type: AuxiliaryImageType
+pub AuxiliaryImageDescriptor::dimensions: core::option::Option<(u32, u32)>
+pub AuxiliaryImageDescriptor::item_id: u32
+pub struct DecodeOutput
+pub DecodeOutput::data: alloc::vec::Vec<u8>
+pub DecodeOutput::height: u32
+pub DecodeOutput::layout: PixelLayout
+pub DecodeOutput::width: u32
+pub struct DecodeRequest<'a>
+pub fn DecodeRequest<'a>::decode(self) -> Result<DecodeOutput>
+pub fn DecodeRequest<'a>::decode_into(self, &mut [u8]) -> Result<(u32, u32)>
+pub fn DecodeRequest<'a>::decode_rows(self, &mut dyn RowSink) -> Result<(u32, u32)>
+pub fn DecodeRequest<'a>::decode_yuv(self) -> Result<heic_core::frame::DecodedFrame>
+pub fn DecodeRequest<'a>::with_apply_orientation(self, bool) -> Self
+pub fn DecodeRequest<'a>::with_limits(self, &'a Limits) -> Self
+pub fn DecodeRequest<'a>::with_max_threads(self, usize) -> Self
+pub fn DecodeRequest<'a>::with_output_layout(self, PixelLayout) -> Self
+pub fn DecodeRequest<'a>::with_stop(self, &'a dyn enough::Stop) -> Self
+pub struct DecoderConfig
+pub fn DecoderConfig::auxiliary_images(&self, &[u8]) -> Result<alloc::vec::Vec<AuxiliaryImageDescriptor>>
+pub fn DecoderConfig::auxiliary_types(&self, &[u8]) -> Result<alloc::vec::Vec<AuxiliaryImageType>>
+pub fn DecoderConfig::backends(&self) -> &[Backend]
+pub fn DecoderConfig::decode(&self, &[u8], PixelLayout) -> Result<DecodeOutput>
+pub fn DecoderConfig::decode_auxiliary(&self, &[u8], u32, PixelLayout) -> Result<DecodeOutput>
+pub fn DecoderConfig::decode_depth(&self, &[u8]) -> Result<DepthMap>
+pub fn DecoderConfig::decode_gain_map(&self, &[u8]) -> Result<HdrGainMap>
+pub fn DecoderConfig::decode_matte(&self, &[u8], &AuxiliaryImageType) -> Result<core::option::Option<SegmentationMatte>>
+pub fn DecoderConfig::decode_mattes(&self, &[u8]) -> Result<alloc::vec::Vec<SegmentationMatte>>
+pub fn DecoderConfig::decode_request<'a>(&'a self, &'a [u8]) -> DecodeRequest<'a>
+pub fn DecoderConfig::decode_thumbnail(&self, &[u8], PixelLayout) -> Result<core::option::Option<DecodeOutput>>
+pub fn DecoderConfig::decode_to_frame(&self, &[u8]) -> Result<heic_core::frame::DecodedFrame>
+pub fn DecoderConfig::estimate_memory(u32, u32, PixelLayout) -> u64
+pub fn DecoderConfig::extract_exif<'a>(&self, &'a [u8]) -> Result<core::option::Option<alloc::borrow::Cow<'a, [u8]>>>
+pub fn DecoderConfig::extract_icc(&self, &[u8]) -> Result<core::option::Option<alloc::vec::Vec<u8>>>
+pub fn DecoderConfig::extract_xmp<'a>(&self, &'a [u8]) -> Result<core::option::Option<alloc::borrow::Cow<'a, [u8]>>>
+pub fn DecoderConfig::has_depth(&self, &[u8]) -> Result<bool>
+pub fn DecoderConfig::has_gain_map(&self, &[u8]) -> Result<bool>
+pub fn DecoderConfig::new() -> Self
+pub fn DecoderConfig::with_backend(self, Backend) -> Self
+pub fn DecoderConfig::with_backends(self, &[Backend]) -> Self
+#[non_exhaustive] pub struct DepthMap
+pub DepthMap::bit_depth: u8
+pub DepthMap::data: alloc::vec::Vec<u16>
+pub DepthMap::depth_info: DepthRepresentationInfo
+pub DepthMap::height: u32
+pub DepthMap::width: u32
+#[non_exhaustive] pub struct DepthRepresentationInfo
+pub DepthRepresentationInfo::d_max: core::option::Option<f64>
+pub DepthRepresentationInfo::d_min: core::option::Option<f64>
+pub DepthRepresentationInfo::representation_type: DepthRepresentationType
+pub DepthRepresentationInfo::z_far: core::option::Option<f64>
+pub DepthRepresentationInfo::z_near: core::option::Option<f64>
+#[non_exhaustive] pub struct HdrGainMap
+pub HdrGainMap::bit_depth: u8
+pub HdrGainMap::data: alloc::vec::Vec<u8>
+pub HdrGainMap::height: u32
+pub HdrGainMap::iso21496: core::option::Option<alloc::vec::Vec<u8>>
+pub HdrGainMap::origin: GainMapOrigin
+pub HdrGainMap::width: u32
+pub HdrGainMap::xmp: core::option::Option<alloc::vec::Vec<u8>>
+pub struct ImageInfo
+pub ImageInfo::bit_depth: u8
+pub ImageInfo::chroma_format: u8
+pub ImageInfo::color_primaries: u16
+pub ImageInfo::exif: core::option::Option<alloc::vec::Vec<u8>>
+pub ImageInfo::has_alpha: bool
+pub ImageInfo::has_depth: bool
+pub ImageInfo::has_exif: bool
+pub ImageInfo::has_gain_map: bool
+pub ImageInfo::has_icc_profile: bool
+pub ImageInfo::has_thumbnail: bool
+pub ImageInfo::has_xmp: bool
+pub ImageInfo::height: u32
+pub ImageInfo::icc_profile: core::option::Option<alloc::vec::Vec<u8>>
+pub ImageInfo::matrix_coefficients: u16
+pub ImageInfo::transfer_characteristics: u16
+pub ImageInfo::video_full_range: bool
+pub ImageInfo::width: u32
+pub ImageInfo::xmp: core::option::Option<alloc::vec::Vec<u8>>
+pub const ImageInfo::PROBE_BYTES: usize
+pub fn ImageInfo::from_bytes(&[u8]) -> core::result::Result<Self, whereat::at::At<ProbeError>>
+pub fn ImageInfo::output_buffer_size(self, PixelLayout) -> core::option::Option<usize>
+#[non_exhaustive] pub struct Limits
+pub Limits::max_height: core::option::Option<u64>
+pub Limits::max_memory_bytes: core::option::Option<u64>
+pub Limits::max_pixels: core::option::Option<u64>
+pub Limits::max_width: core::option::Option<u64>
+pub fn Limits::server_defaults() -> Self
+#[non_exhaustive] pub struct SegmentationMatte
+pub SegmentationMatte::data: alloc::vec::Vec<u8>
+pub SegmentationMatte::height: u32
+pub SegmentationMatte::matte_type: AuxiliaryImageType
+pub SegmentationMatte::width: u32
+pub trait RowSink
+pub fn RowSink::demand(&mut self, u32, u32, usize) -> &mut [u8]
+pub fn recommended_backends() -> alloc::vec::Vec<Backend>
+pub type Result<T> = core::result::Result<T, whereat::at::At<HeicError>>
+
+## trait impls (18 types)
+
+AuxiliaryImageDescriptor: Clone, Debug
+AuxiliaryImageType: Clone, Debug, Display, Eq, PartialEq
+Backend: Clone, Copy, Debug, Eq, Hash, PartialEq
+DecodeOutput: Clone, Debug
+DecoderConfig: Clone, Debug, Default
+DepthMap: Clone, Debug
+DepthRepresentationInfo: Clone, Debug, Default
+DepthRepresentationType: Clone, Copy, Debug, Default, Display, Eq, PartialEq
+GainMapOrigin: Clone, Copy, Debug, Eq, PartialEq
+HdrGainMap: Clone, Debug
+HeicError: Debug, Display, Error, From<HevcError>, From<alloc::collections::TryReserveError>, From<enough::reason::StopReason>, From<heic_core::error::HevcError>
+HevcError: Debug, Display, Error, From<alloc::collections::TryReserveError>, From<heic_core::error::HevcError>
+ImageInfo: Clone, Debug
+Limits: Clone, Debug, Default
+PixelLayout: Clone, Copy, Debug, Eq, Hash, PartialEq
+ProbeError: Debug, Display, Error
+SegmentationMatte: Clone, Debug
+whereat::at::At<HeicError>: From<HevcError>
+
+## auto traits
+
+15 types implement all of: Freeze, RefUnwindSafe, Send, Sync, Unpin, UnwindSafe
+DecodeRequest<'a>: !RefUnwindSafe !UnwindSafe
+HeicError: !RefUnwindSafe !UnwindSafe
+ProbeError: !RefUnwindSafe !UnwindSafe

@@ -1,0 +1,21 @@
+   Compiling heic v0.2.0 (/Users/lilith/work/zen/heic)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.48s
+     Running unittests src/lib.rs (target/debug/deps/heic-e100dd87b3623c61)
+
+running 1 test
+
+thread 'hevc::transform_simd::residual_range_tests::residual_add_matches_widened_scalar_at_every_prediction_value' (143906809) panicked at src/hevc/transform_simd.rs:2047:29:
+assertion `left == right` failed: depth=8 size=8 residual=32766 prediction base=0
+  left: [21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 255, 255, 0, 0, 0, 0, 0, 0, 21930, 21930, 21930, 21930, 21930, 0, 0, 0, 0, 0, 0, 0, 0, 21930, 21930, 21930, 21930, 21930, 0, 0, 0, 0, 0, 0, 0, 0, 21930, 21930, 21930, 21930, 21930, 0, 0, 0, 0, 0, 0, 0, 0, 21930, 21930, 21930, 21930, 21930, 0, 0, 0, 0, 0, 0, 0, 0, 21930, 21930, 21930, 21930, 21930, 0, 0, 0, 0, 0, 0, 0, 0, 21930, 21930, 21930, 21930, 21930, 0, 0, 0, 0, 0, 0, 0, 0, 21930, 21930, 21930, 21930, 21930, 0, 0, 0, 0, 0, 0, 0, 0, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930]
+ right: [21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 255, 255, 255, 255, 255, 255, 255, 255, 21930, 21930, 21930, 21930, 21930, 255, 255, 255, 255, 255, 255, 255, 255, 21930, 21930, 21930, 21930, 21930, 255, 255, 255, 255, 255, 255, 255, 255, 21930, 21930, 21930, 21930, 21930, 255, 255, 255, 255, 255, 255, 255, 255, 21930, 21930, 21930, 21930, 21930, 255, 255, 255, 255, 255, 255, 255, 255, 21930, 21930, 21930, 21930, 21930, 255, 255, 255, 255, 255, 255, 255, 255, 21930, 21930, 21930, 21930, 21930, 255, 255, 255, 255, 255, 255, 255, 255, 21930, 21930, 21930, 21930, 21930, 255, 255, 255, 255, 255, 255, 255, 255, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930, 21930]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test hevc::transform_simd::residual_range_tests::residual_add_matches_widened_scalar_at_every_prediction_value ... FAILED
+
+failures:
+
+failures:
+    hevc::transform_simd::residual_range_tests::residual_add_matches_widened_scalar_at_every_prediction_value
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 81 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p heic --lib`
