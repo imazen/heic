@@ -103,6 +103,7 @@ zencodec = [
 inventory = ["zencodec"]
 av1 = ["std", "dep:rav1d-safe"]
 unci = ["dep:zenflate"]
+image = ["std", "dep:image"]
 
 [dependencies]
 heic-core = { workspace = true }
@@ -128,6 +129,7 @@ garb = { version = "0.2.8", default-features = false, optional = true }
 rav1d-safe = { version = "0.6.0", optional = true, default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
 zenflate = { version = "0.4.0", optional = true, default-features = false }
 ultrahdr-core = { version = "0.6.0", git = "https://github.com/imazen/ultrahdr", rev = "e6abe1cd7103c57beb04e09e73f571a26a0cf1e0", optional = true, default-features = false, features = ["f16"] }
+image = { version = "0.25.10", default-features = false, optional = true }
 
 [dev-dependencies]
 zenbench = "0.1.10"
