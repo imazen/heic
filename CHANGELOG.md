@@ -4,6 +4,10 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 ## [Unreleased]
 
+### Dependency compatibility
+
+- Admit archmage/magetypes 0.9.31-beta.1 in the current-main tool graph while retaining compatible stable requirements (`a33fa848`). Strict library lint and the std/backend-rust library suites pass (84 and 25 tests).
+
 ### Added
 
 - `image` feature: `register_decoding_hook()` registers HEIC/HEIF decoding with the `image` crate's hook system (`image::open` by extension; `load_from_memory` for files whose major brand is an HEVC brand). Contributed by SimonIT (#5). Test: `image_hook_pixels_match_direct_decode`.
