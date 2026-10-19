@@ -233,3 +233,10 @@ shared-contract-check:
     cargo test --features backend-rust,std,inventory --test shared_contracts
     cargo test --features backend-rust,std,zencodec --test shared_contracts
     cargo clippy --features backend-rust,std,inventory --test shared_contracts -- -D warnings
+
+# Contract identity, native decoder tests and standalone inventory target.
+contract-pin-check:
+    just shared-contract-check
+    cargo clippy --workspace --features backend-rust -- -D warnings
+    cargo test --features backend-rust,std --lib
+    just metadata-fuzz-check

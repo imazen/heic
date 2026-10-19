@@ -19,7 +19,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-zencodec = { git = "https://github.com/imazen/zencodec", rev = "fa49f7ce0fc75e65b88da1a0eb90b17378297ceb" }
+zencodec = { git = "https://github.com/imazen/zencodec", rev = "d327434b0826a3e39633665c76f5081c0ceb34cc" }
 
 [dependencies.heic]
 path = ".."
@@ -78,7 +78,7 @@ doc = false
 bench = false
 
 [patch.crates-io]
-zencodec = { git = "https://github.com/imazen/zencodec", rev = "fa49f7ce0fc75e65b88da1a0eb90b17378297ceb" }
+zencodec = { git = "https://github.com/imazen/zencodec", rev = "d327434b0826a3e39633665c76f5081c0ceb34cc" }
 
 [[bin]]
 name = "fuzz_inventory"

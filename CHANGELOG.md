@@ -14,6 +14,8 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 ### Dependency integration
 
+- Use zencodec/zenmeta/testkit `d327434b` and ultrahdr `a834b2cc` together so the streaming consumer shares the gain-map parameter type. Native library and policy/inventory tests, workspace lint and standalone inventory fuzz compilation pass (`just contract-pin-check`).
+
 - Align temporary zencodec/zenmeta/testkit pins with the checked fidelity and operation-matrix contracts (`4fda4391`). Replace coordinated git pins with released versions before publication.
 
 
