@@ -240,3 +240,9 @@ contract-pin-check:
     cargo clippy --workspace --features backend-rust -- -D warnings
     cargo test --features backend-rust,std --lib
     just metadata-fuzz-check
+
+# Check compatibility after admitting the current archmage/magetypes beta.
+beta-cohort-check:
+    cargo fmt --check
+    cargo clippy --locked -p heic -p heic-core --features std,backend-rust --lib -- -D warnings
+    cargo test --locked -p heic -p heic-core --features std,backend-rust --lib --no-fail-fast

@@ -114,8 +114,8 @@ heic-backend-vaapi = { version = "0.2.0", path = "heic-backend-vaapi", optional 
 heic-backend-d3d11va = { version = "0.2.0", path = "heic-backend-d3d11va", optional = true }
 enough = "0.4.4"
 whereat = { version = "0.1.5"}
-archmage = { version = "0.9.29", default-features = false, features = ["macros"] }
-magetypes = { version = "0.9.29", default-features = false }
+archmage = { version = ">=0.9.29, <=0.9.31-beta.1", default-features = false, features = ["macros"] }
+magetypes = { version = ">=0.9.29, <=0.9.31-beta.1", default-features = false }
 safe_unaligned_simd = "0.2.5"
 memchr = { version = "2.8.3", default-features = false }
 rayon = { version = "1.12.0", optional = true }
