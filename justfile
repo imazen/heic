@@ -246,3 +246,9 @@ beta-cohort-check:
     cargo fmt --check
     cargo clippy --locked -p heic -p heic-core --features std,backend-rust --lib -- -D warnings
     cargo test --locked -p heic -p heic-core --features std,backend-rust --lib --no-fail-fast
+
+# Source proposal controls; execute only under the serialized qualification grant.
+pulse-migration-check:
+    cargo test --features backend-rust,zencodec --test pulse_progress
+    cargo test --features backend-rust,zencodec --test sansio
+    cargo clippy --features backend-rust,zencodec --all-targets -- -D warnings

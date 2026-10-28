@@ -4,6 +4,23 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 ## [Unreleased]
 
+### Added
+
+- Source proposal: additive `DecodeRequest::with_pulse(&dyn how_far::Pulse)`
+  and retained SharedPulse in zencodec jobs, one-shot and pull sessions.
+  Native phases cover parse/primary/alpha and adapter supplement work; grid
+  paths report converted tiles/rows. Old stop builders remain available.
+  Native pixel, typed-cause, declined-plan and session controls are prepared;
+  Rust/API/native qualification is pending.
+
+### Fixed
+
+- Source proposal: preserve timeout reasons at HEVC entry and CTU checks,
+  forward cancellation inside sequential grid row decodes, and keep alpha,
+  gain-map and depth cancellation terminal at the zencodec boundary. Existing
+  best-effort handling of other optional auxiliary failures remains.
+
+
 ### Dependency compatibility
 
 - Admit archmage/magetypes 0.9.31-beta.1 in the current-main tool graph while retaining compatible stable requirements (`a33fa848`). Strict library lint and the std/backend-rust library suites pass (84 and 25 tests).

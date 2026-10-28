@@ -464,6 +464,14 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 
 ## Known Bugs
 
+### Pulse adapter migration (source proposal, qualification pending)
+
+The current adapter omits required DecodeJob::with_pulse. Existing HEVC entry
+and CTU checks also collapse deadline causes into generic cancellation; native
+sequential grid-row decoding bypasses the stop-aware entry. The proposed Pulse
+migration and controls are described in Investigation Notes. Source parsing
+passes; Rust compilation, exact-pixel controls and API review remain unrun.
+
 ### Fixed during metadata integration: inventory fixture walker overflowed on i686
 
 The PR 57 mutation helper checked a declared box end with `p + size`.
@@ -780,6 +788,26 @@ d3d11va_vs_rust_corpus_diff` to see the full corpus output;
 `d3d11va_vs_rust_synthetic_corpus` is the bit-exact subset gate.
 
 ## Investigation Notes
+
+### Full Pulse migration — source proposal (2026-10-28)
+
+Current base a9ea9f67 lacks DecodeJob::with_pulse although its shared-core pin
+requires it. The proposed adapter retains SharedPulse in jobs/decoders/pull
+sessions, combines explicit stop policies, and borrows full observation through
+native DecodeRequest::with_pulse. Native frame stages are parse/primary/alpha;
+grid output counts tiles/rows, not elapsed time. Optional gain-map/depth paths
+receive the active cancellation policy; alpha no longer discards a typed stop.
+HEVC entry and CTU checks preserve TimedOut instead of collapsing it to Cancelled.
+Full-frame conversion and external backends still have indivisible intervals.
+Standalone auxiliary/probe public signatures are unchanged. Public addition:
+`DecodeRequest<'a>::with_pulse(self, &'a dyn how_far::Pulse) -> Self`.
+
+`tests/pulse_progress.rs` drafts native U8/U16 exact-sample comparisons,
+phase-boundary timeout through typed/erased jobs, retained pull-session stops,
+declined-plan destination effects and grid row accounting. Source formatting
+is checked; these controls are uncompiled/unrun, as are lint/API snapshots.
+No graph pin, lockfile, orientation contract or prior assertion changed.
+
 
 ### Metadata consolidation (2026-10-12)
 
