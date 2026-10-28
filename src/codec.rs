@@ -475,6 +475,11 @@ impl HeicDecodeJob {
             .check_input_size(data.len() as u64)
             .map_err(|e| at!(HeicError::ResourceLimit(e)))?;
         crate::error::check_stop(&observation(self.pulse.as_ref(), self.stop.as_ref()))?;
+        let pulse = self.pulse.clone();
+        let stop = self.stop.clone();
+        let observation = observation(pulse.as_ref(), stop.as_ref());
+        crate::error::check_stop(&observation)?;
+
         // Probe for image properties
         let probe_info = crate::ImageInfo::from_bytes(&data).ok();
         let has_alpha = probe_info.as_ref().is_some_and(|pi| pi.has_alpha);
@@ -496,24 +501,24 @@ impl HeicDecodeJob {
             let desc = ps.descriptor();
             let w = ps.width();
             let h = ps.rows();
+            crate::error::check_stop(&observation)?;
             sink.begin(w, h, desc)
                 .map_err(|e| at!(HeicError::Sink(e)))?;
+            crate::error::check_stop(&observation)?;
             let mut dst = sink
                 .provide_next_buffer(0, h, w, desc)
                 .map_err(|e| at!(HeicError::Sink(e)))?;
             for row in 0..h {
+                crate::error::check_stop(&observation)?;
                 dst.row_mut(row).copy_from_slice(ps.row(row));
             }
             drop(dst);
+            crate::error::check_stop(&observation)?;
             sink.finish().map_err(|e| at!(HeicError::Sink(e)))?;
+            crate::error::check_stop(&observation)?;
             let info = output.info();
             return Ok(OutputInfo::full_decode(info.width, info.height, desc));
         }
-
-        let pulse = self.pulse.clone();
-        let stop = self.stop.clone();
-        let observation = observation(pulse.as_ref(), stop.as_ref());
-        crate::error::check_stop(&observation)?;
 
         // 8-bit: use native decode_rows for grid streaming
         let layout = descriptor_to_layout(negotiated);
@@ -561,15 +566,18 @@ impl HeicDecodeJob {
             .begin(probe_width, probe_height, desc)
             .map_err(|e| at!(HeicError::Sink(e)))?;
 
+        crate::error::check_stop(&observation)?;
         let (w, h) = req.decode_rows(&mut adapter)?;
         // Check for deferred sink errors from demand() calls
         adapter.take_deferred_error()?;
         // Flush the last strip that was written by the native decoder
+        crate::error::check_stop(&observation)?;
         adapter.flush_pending()?;
         adapter
             .inner
             .finish()
             .map_err(|e| at!(HeicError::Sink(e)))?;
+        crate::error::check_stop(&observation)?;
         Ok(OutputInfo::full_decode(w, h, desc))
     }
 
