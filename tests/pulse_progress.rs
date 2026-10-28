@@ -308,3 +308,53 @@ fn native_hevc_entry_preserves_first_stop_reason_without_repolling() {
     ));
     assert_eq!(stop.0.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn push_callback_stop_is_checked_before_output_storage_for_u8_and_u16() {
+    use zencodec::decode::{DecodeRowSink, SinkError};
+    use zenpixels::PixelSliceMut;
+    struct BeginStops {
+        flag: Arc<AtomicBool>,
+        begins: usize,
+    }
+    impl DecodeRowSink for BeginStops {
+        fn begin(&mut self, _: u32, _: u32, _: PixelDescriptor) -> Result<(), SinkError> {
+            self.begins += 1;
+            self.flag.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+        fn provide_next_buffer(
+            &mut self,
+            _: u32,
+            _: u32,
+            _: u32,
+            _: PixelDescriptor,
+        ) -> Result<PixelSliceMut<'_>, SinkError> {
+            panic!("sink requested cancellation at begin; no subsequent storage effect allowed")
+        }
+        fn finish(&mut self) -> Result<(), SinkError> {
+            panic!("cancelled push must not finish output")
+        }
+    }
+    let data = fixture("depth10");
+    for descriptor in [PixelDescriptor::RGB8_SRGB, PixelDescriptor::RGB16_SRGB] {
+        let flag = Arc::new(AtomicBool::new(false));
+        let check = flag.clone();
+        let pulse = FnPulse::new("push", move |_| {
+            if check.load(Ordering::SeqCst) {
+                Err(StopReason::TimedOut)
+            } else {
+                Ok(())
+            }
+        });
+        let mut sink = BeginStops { flag, begins: 0 };
+        let error = HeicDecoderConfig::new()
+            .job()
+            .with_pulse(pulse.share().unwrap())
+            .push_decoder(Cow::Borrowed(&data), &mut sink, &[descriptor])
+            .unwrap_err();
+        native_timeout(&error);
+        assert_eq!(sink.begins, 1);
+        pulse.complete_as(Outcome::Cancelled);
+    }
+}
