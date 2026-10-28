@@ -196,6 +196,7 @@ mod error;
 pub mod heif;
 #[doc(hidden)]
 pub mod hevc;
+mod observation;
 mod progress;
 
 pub use backend::{Backend, recommended_backends};
@@ -1441,10 +1442,7 @@ impl<'a> DecodeRequest<'a> {
     /// Returns an error if the data is invalid, a limit is exceeded,
     /// or the operation is cancelled.
     pub fn decode(self) -> Result<DecodeOutput> {
-        let observation = how_far::WithStop::borrowed(
-            self.pulse.unwrap_or(&how_far::NoPulse),
-            self.stop.unwrap_or(&Unstoppable),
-        );
+        let observation = observation::borrowed(self.pulse, self.stop);
         let mut progress = progress::Sequence::new(&observation, &["Decode pixels"]);
         let result = progress.run(|pulse| self.decode_observed(pulse));
         progress.complete(result)
@@ -1502,10 +1500,7 @@ impl<'a> DecodeRequest<'a> {
     /// Returns [`HeicError::BufferTooSmall`] if the output buffer is too small,
     /// or other errors if decoding fails.
     pub fn decode_into(self, output: &mut [u8]) -> Result<(u32, u32)> {
-        let observation = how_far::WithStop::borrowed(
-            self.pulse.unwrap_or(&how_far::NoPulse),
-            self.stop.unwrap_or(&Unstoppable),
-        );
+        let observation = observation::borrowed(self.pulse, self.stop);
         let mut progress = progress::Sequence::new(&observation, &["Decode into buffer"]);
         let result = progress.run(|pulse| self.decode_into_observed(output, pulse));
         progress.complete(result)
@@ -1594,10 +1589,7 @@ impl<'a> DecodeRequest<'a> {
     /// Returns an error if decoding fails, limits are exceeded,
     /// or the operation is cancelled.
     pub fn decode_rows(self, sink: &mut dyn RowSink) -> Result<(u32, u32)> {
-        let observation = how_far::WithStop::borrowed(
-            self.pulse.unwrap_or(&how_far::NoPulse),
-            self.stop.unwrap_or(&Unstoppable),
-        );
+        let observation = observation::borrowed(self.pulse, self.stop);
         let mut progress = progress::Sequence::new(&observation, &["Decode rows"]);
         let result = progress.run(|pulse| self.decode_rows_observed(sink, pulse));
         progress.complete(result)
@@ -1668,10 +1660,7 @@ impl<'a> DecodeRequest<'a> {
     /// Returns an error if decoding fails, limits are exceeded,
     /// or the operation is cancelled.
     pub fn decode_yuv(self) -> Result<hevc::DecodedFrame> {
-        let observation = how_far::WithStop::borrowed(
-            self.pulse.unwrap_or(&how_far::NoPulse),
-            self.stop.unwrap_or(&Unstoppable),
-        );
+        let observation = observation::borrowed(self.pulse, self.stop);
         let mut progress = progress::Sequence::new(&observation, &["Decode YCbCr"]);
         let result = progress.run(|pulse| self.decode_yuv_observed(pulse));
         progress.complete(result)

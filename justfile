@@ -249,6 +249,7 @@ beta-cohort-check:
 
 # Source proposal controls; execute only under the serialized qualification grant.
 pulse-migration-check:
+    cargo test --features backend-rust,zencodec --lib observation::tests
     cargo test --features backend-rust,zencodec --test pulse_progress
     cargo test --features backend-rust,zencodec --test sansio
     cargo clippy --features backend-rust,zencodec --all-targets -- -D warnings

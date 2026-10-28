@@ -793,7 +793,8 @@ d3d11va_vs_rust_corpus_diff` to see the full corpus output;
 
 Current base a9ea9f67 lacks DecodeJob::with_pulse although its shared-core pin
 requires it. The proposed adapter retains SharedPulse in jobs/decoders/pull
-sessions, combines explicit stop policies, and borrows full observation through
+sessions, combines explicit owned stop policies without losing child sharing, and borrows
+full observation through
 native DecodeRequest::with_pulse. Native frame stages are parse/primary/alpha;
 grid output counts tiles/rows, not elapsed time. Optional gain-map/depth paths
 receive the active cancellation policy; alpha no longer discards a typed stop.

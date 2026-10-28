@@ -34,15 +34,7 @@ use crate::auxiliary::AuxiliaryImageType;
 use crate::error::HeicError;
 
 // Retain the complete observer and combine the legacy explicit stop policy.
-fn observation<'a>(
-    pulse: Option<&'a how_far::SharedPulse>,
-    stop: Option<&'a zencodec::StopToken>,
-) -> how_far::WithStop<'a> {
-    how_far::WithStop::borrowed(
-        pulse.map_or(&how_far::NoPulse as &dyn how_far::Pulse, |p| p),
-        stop.map_or(&enough::Unstoppable as &dyn enough::Stop, |s| s),
-    )
-}
+use crate::observation::observation;
 
 /// Metadata about auxiliary images in a HEIC file.
 ///

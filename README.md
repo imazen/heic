@@ -197,7 +197,9 @@ use `Unstoppable` internally, so they cannot be cancelled — reach for the
 
 `DecodeRequest::with_pulse(&dyn how_far::Pulse)` adds observation while retaining
 `with_stop`. The zencodec job also retains `SharedPulse` through owned one-shot,
-push, incremental and pull sessions. The caller owns root completion.
+push, incremental and pull sessions. Owned job stop policies retain child
+sharing; an explicitly borrowed native stop remains bounded by its borrow.
+The caller owns root completion.
 
 Full-frame native decoding declares parse, primary-image and optional alpha
 phases; these count completed operations, not pixels or elapsed time. Direct grid
