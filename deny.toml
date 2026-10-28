@@ -99,6 +99,6 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
     "https://github.com/imazen/zencodec",
     "https://github.com/imazen/ultrahdr",
-    "https://github.com/imazen/zensim",
+    "https://github.com/imazen/zensimx",
     "https://github.com/imazen/zenanalyze",
 ]
