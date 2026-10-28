@@ -113,6 +113,7 @@ heic-backend-mediacodec = { version = "0.2.0", path = "heic-backend-mediacodec",
 heic-backend-vaapi = { version = "0.2.0", path = "heic-backend-vaapi", optional = true }
 heic-backend-d3d11va = { version = "0.2.0", path = "heic-backend-d3d11va", optional = true }
 enough = "0.4.4"
+how-far = { version = "0.1.0", default-features = false }
 whereat = { version = "0.1.5"}
 archmage = { version = ">=0.9.29, <=0.9.31-beta.1", default-features = false, features = ["macros"] }
 magetypes = { version = ">=0.9.29, <=0.9.31-beta.1", default-features = false }
@@ -132,6 +133,7 @@ ultrahdr-core = { version = "0.6.0", git = "https://github.com/imazen/ultrahdr",
 image = { version = "0.25.10", default-features = false, optional = true }
 
 [dev-dependencies]
+how-far-along = "0.1.0"
 zenbench = "0.1.10"
 criterion = { version = "0.8.2", default-features = false, features = ["plotters", "cargo_bench_support"] }
 fast-ssim2 = { version = "0.8.2", features = ["imgref"] }

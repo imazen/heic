@@ -196,6 +196,7 @@ mod error;
 pub mod heif;
 #[doc(hidden)]
 pub mod hevc;
+mod progress;
 
 pub use backend::{Backend, recommended_backends};
 
@@ -1069,6 +1070,7 @@ impl DecoderConfig {
             layout: PixelLayout::Rgba8,
             limits: None,
             stop: None,
+            pulse: None,
             max_threads: None,
             apply_orientation: true,
         }
@@ -1356,6 +1358,7 @@ pub struct DecodeRequest<'a> {
     layout: PixelLayout,
     limits: Option<&'a Limits>,
     stop: Option<&'a dyn Stop>,
+    pulse: Option<&'a dyn how_far::Pulse>,
     /// Maximum thread count for parallel tile decoding.
     ///
     /// `None` means use the default (global rayon pool when `parallel` feature
@@ -1407,6 +1410,15 @@ impl<'a> DecodeRequest<'a> {
         self
     }
 
+    /// Observe native work without taking completion rights from the caller.
+    ///
+    /// Planning is best effort; cancellation reasons are preserved even when
+    /// the observer declines a plan. An explicit `with_stop` remains active.
+    pub fn with_pulse(mut self, pulse: &'a dyn how_far::Pulse) -> Self {
+        self.pulse = Some(pulse);
+        self
+    }
+
     /// Limit the number of threads used for parallel tile decoding.
     ///
     /// When the `parallel` feature is enabled, tile decoding uses rayon for
@@ -1429,11 +1441,20 @@ impl<'a> DecodeRequest<'a> {
     /// Returns an error if the data is invalid, a limit is exceeded,
     /// or the operation is cancelled.
     pub fn decode(self) -> Result<DecodeOutput> {
-        let stop: &dyn Stop = self.stop.unwrap_or(&Unstoppable);
-        let frame = decode::decode_to_frame(
+        let observation = how_far::WithStop::borrowed(
+            self.pulse.unwrap_or(&how_far::NoPulse),
+            self.stop.unwrap_or(&Unstoppable),
+        );
+        let mut progress = progress::Sequence::new(&observation, &["Decode pixels"]);
+        let result = progress.run(|pulse| self.decode_observed(pulse));
+        progress.complete(result)
+    }
+
+    fn decode_observed(&self, pulse: &dyn how_far::Pulse) -> Result<DecodeOutput> {
+        let frame = decode::decode_to_frame_pulse(
             self.data,
             self.limits,
-            stop,
+            pulse,
             self.max_threads,
             self._config.backends(),
             self.apply_orientation,
@@ -1481,13 +1502,25 @@ impl<'a> DecodeRequest<'a> {
     /// Returns [`HeicError::BufferTooSmall`] if the output buffer is too small,
     /// or other errors if decoding fails.
     pub fn decode_into(self, output: &mut [u8]) -> Result<(u32, u32)> {
-        let stop: &dyn Stop = self.stop.unwrap_or(&Unstoppable);
+        let observation = how_far::WithStop::borrowed(
+            self.pulse.unwrap_or(&how_far::NoPulse),
+            self.stop.unwrap_or(&Unstoppable),
+        );
+        let mut progress = progress::Sequence::new(&observation, &["Decode into buffer"]);
+        let result = progress.run(|pulse| self.decode_into_observed(output, pulse));
+        progress.complete(result)
+    }
 
+    fn decode_into_observed(
+        &self,
+        output: &mut [u8],
+        pulse: &dyn how_far::Pulse,
+    ) -> Result<(u32, u32)> {
         // Try streaming path for eligible grid images (no full-frame YCbCr allocation)
         if let Some(result) = decode::try_decode_grid_streaming(
             self.data,
             self.limits,
-            stop,
+            pulse,
             self.layout,
             output,
             self.max_threads,
@@ -1497,10 +1530,10 @@ impl<'a> DecodeRequest<'a> {
         }
 
         // Fallback: full-frame decode then color convert
-        let frame = decode::decode_to_frame(
+        let frame = decode::decode_to_frame_pulse(
             self.data,
             self.limits,
-            stop,
+            pulse,
             self.max_threads,
             self._config.backends(),
             self.apply_orientation,
@@ -1561,13 +1594,25 @@ impl<'a> DecodeRequest<'a> {
     /// Returns an error if decoding fails, limits are exceeded,
     /// or the operation is cancelled.
     pub fn decode_rows(self, sink: &mut dyn RowSink) -> Result<(u32, u32)> {
-        let stop: &dyn Stop = self.stop.unwrap_or(&Unstoppable);
+        let observation = how_far::WithStop::borrowed(
+            self.pulse.unwrap_or(&how_far::NoPulse),
+            self.stop.unwrap_or(&Unstoppable),
+        );
+        let mut progress = progress::Sequence::new(&observation, &["Decode rows"]);
+        let result = progress.run(|pulse| self.decode_rows_observed(sink, pulse));
+        progress.complete(result)
+    }
 
+    fn decode_rows_observed(
+        &self,
+        sink: &mut dyn RowSink,
+        pulse: &dyn how_far::Pulse,
+    ) -> Result<(u32, u32)> {
         // Try streaming path for eligible grid images
         if let Some(result) = decode::try_decode_grid_to_sink(
             self.data,
             self.limits,
-            stop,
+            pulse,
             self.layout,
             sink,
             self.max_threads,
@@ -1577,10 +1622,10 @@ impl<'a> DecodeRequest<'a> {
         }
 
         // Fallback: full-frame decode then write to sink as one strip
-        let frame = decode::decode_to_frame(
+        let frame = decode::decode_to_frame_pulse(
             self.data,
             self.limits,
-            stop,
+            pulse,
             self.max_threads,
             self._config.backends(),
             self.apply_orientation,
@@ -1623,11 +1668,20 @@ impl<'a> DecodeRequest<'a> {
     /// Returns an error if decoding fails, limits are exceeded,
     /// or the operation is cancelled.
     pub fn decode_yuv(self) -> Result<hevc::DecodedFrame> {
-        let stop: &dyn Stop = self.stop.unwrap_or(&Unstoppable);
-        decode::decode_to_frame(
+        let observation = how_far::WithStop::borrowed(
+            self.pulse.unwrap_or(&how_far::NoPulse),
+            self.stop.unwrap_or(&Unstoppable),
+        );
+        let mut progress = progress::Sequence::new(&observation, &["Decode YCbCr"]);
+        let result = progress.run(|pulse| self.decode_yuv_observed(pulse));
+        progress.complete(result)
+    }
+
+    fn decode_yuv_observed(&self, pulse: &dyn how_far::Pulse) -> Result<hevc::DecodedFrame> {
+        decode::decode_to_frame_pulse(
             self.data,
             self.limits,
-            stop,
+            pulse,
             self.max_threads,
             self._config.backends(),
             self.apply_orientation,

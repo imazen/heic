@@ -78,9 +78,8 @@ pub fn decode_with_config_stop(
     image_data: &[u8],
     stop: &dyn enough::Stop,
 ) -> Result<DecodedFrame> {
-    if stop.should_stop() {
-        return Err(at!(HevcError::Cancelled(enough::StopReason::Cancelled)));
-    }
+    stop.check()
+        .map_err(|reason| at!(HevcError::Cancelled(reason)))?;
     let mut nal_units = Vec::new();
 
     // Parse parameter sets from hvcC
