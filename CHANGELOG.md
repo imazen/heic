@@ -4,6 +4,12 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 ## [Unreleased]
 
+### Dependency integration
+
+- Use version requirements for the shared zencodec/zenmeta dependencies so a
+  consuming application can select one core revision. Standalone development
+  keeps the existing pinned root patches. Codec behavior is unchanged.
+
 ### Added
 
 - Source proposal: additive `DecodeRequest::with_pulse(Option<&dyn how_far::Pulse>)`
