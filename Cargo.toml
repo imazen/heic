@@ -156,16 +156,8 @@ png = "0.18.1"
 # `check_decode_truncation_series` (a truncated input must categorize as an
 # incomplete-input ErrorCategory, never panic, never silently decode).
 #
-# Unification caveat: the *published* `zencodec-testkit 0.1.0` manifest declares
-# `zencodec ^0.1.26` = `>=0.1.26, <0.2.0`. That intersects the `zencodec` dep
-# above on a single registry instance today, so no [patch.crates-io]
-zenmeta = { git = "https://github.com/imazen/zencodec", rev = "feb09f9fd25e90e49a30d7161db8f3b558dfb2a6" }
-zenpixels = { git = "https://github.com/imazen/zenpixels", rev = "283655c5424e0ad7ebc6d2acd94670fac1e29158" }
-zenpixels-convert = { git = "https://github.com/imazen/zenpixels", rev = "283655c5424e0ad7ebc6d2acd94670fac1e29158" } is needed.
-# But once `zencodec 0.2.0` publishes, testkit 0.1.0's caret will NOT admit it
-# and this dev-dep graph would carry TWO zencodec copies. `zencodec-testkit`
-# must republish with the widened `>=0.1.26, <0.3.0` requirement (already in its
-# manifest, zencodec repo `4391021`) BEFORE zencodec 0.2.0 ships.
+# Registry testkit 0.1.0 predates this core family. The root patch below selects
+# the matching unpublished testkit; keep it until a compatible release exists.
 zencodec-testkit = ">=0.1.0, <0.3.0"
 
 [lints.rust]
