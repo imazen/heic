@@ -22,10 +22,10 @@ fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(root.join(format!("{name}.heic"))).unwrap()
 }
 
-// The small `grid` fixture has transforms and takes the buffered fallback.
+// The small named fixtures took the buffered fallback during qualification.
 // Prove the dedicated streaming fixture actually admits the row path.
 fn streaming_grid_fixture() -> Vec<u8> {
-    let data = fixture("nokia_grid3x2");
+    let data = fixture("../libheif-examples/example");
     let container = heic::heif::parse(&data, &how_far::Unstoppable).unwrap();
     let primary = container.primary_item().unwrap();
     assert_eq!(primary.item_type, heic::heif::ItemType::Grid);
