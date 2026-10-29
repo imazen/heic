@@ -193,6 +193,28 @@ The one-shot `DecoderConfig::new().decode(&data, layout)` and probe/extract APIs
 use `Unstoppable` internally, so they cannot be cancelled — reach for the
 `decode_request(..).with_stop(..)` builder when you need to abort.
 
+### Progress observation (source proposal; qualification pending)
+
+`DecodeRequest::with_pulse(&dyn how_far::Pulse)` adds observation while retaining
+`with_stop`. The zencodec job also retains `SharedPulse` through owned one-shot,
+push, incremental and pull sessions. Owned job stop policies retain child
+sharing; an explicitly borrowed native stop remains bounded by its borrow.
+The caller owns root completion.
+
+Full-frame native decoding declares parse, primary-image and optional alpha
+phases; these count completed operations, not pixels or elapsed time. Direct grid
+buffer output counts converted tiles; grid row sinks and pull sessions count
+converted pixel rows, including a clipped final strip. The adapter declares base
+and supplement work separately. Phase weights are approximate and planning
+refusal does not change native errors or cancellation policy.
+
+HEVC checkpoints preserve the original cancellation/deadline cause, including
+inside tile/CTU loops. External backends and full-frame color-conversion calls
+remain indivisible between existing checks. A stop after a successful write
+leaves those bytes published; observation adds no rollback guarantee. Standalone
+auxiliary/probe APIs retain their existing signatures and observation limits.
+These additions and their native pixel controls have not yet been compiled.
+
 ### Bit depth and HDR — what `PixelLayout::Rgba8` gives you
 
 `PixelLayout` is 8-bit only (`Rgb8`, `Rgba8`, `Bgr8`, `Bgra8`). Decoding a

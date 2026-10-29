@@ -200,53 +200,107 @@ pub(crate) fn decode_to_frame(
     backends: &[crate::Backend],
     apply_orientation: bool,
 ) -> Result<crate::hevc::DecodedFrame> {
-    let limits = limits.unwrap_or(&DEFAULT_LIMITS);
+    decode_to_frame_pulse(
+        data,
+        limits,
+        &how_far::StopOnly::borrowed(stop),
+        max_threads,
+        backends,
+        apply_orientation,
+    )
+}
 
-    check_stop(stop)?;
+/// Full observation on real native boundaries; legacy Stop entry points above
+/// adapt only their own cancellation-only input.
+pub(crate) fn decode_to_frame_pulse(
+    data: &[u8],
+    limits: Option<&Limits>,
+    pulse: &dyn how_far::Pulse,
+    max_threads: Option<usize>,
+    backends: &[crate::Backend],
+    apply_orientation: bool,
+) -> Result<crate::hevc::DecodedFrame> {
+    let mut progress =
+        crate::progress::Sequence::new(pulse, &["Parse HEIF", "Primary image", "Alpha image"]);
+    let result = (|| {
+        let limits = limits.unwrap_or(&DEFAULT_LIMITS);
 
-    let container = heif::parse(data, stop)?;
-    let primary_item = container
-        .primary_item()
-        .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
+        check_stop(pulse)?;
 
-    // Check limits on primary item dimensions if available from ispe
-    if let Some((w, h)) = primary_item.dimensions {
-        limits.check_dimensions(w, h)?;
-        // Estimate memory before allocating frames
-        let estimated = DecoderConfig::estimate_memory(w, h, PixelLayout::Rgba8);
-        limits.check_memory(estimated)?;
-    }
+        let container = progress.run(|pulse| {
+            crate::progress::total(pulse, 1);
+            let container = heif::parse(data, pulse)?;
+            pulse.advance(1);
+            Ok(container)
+        })?;
+        let primary_item = container
+            .primary_item()
+            .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
 
-    check_stop(stop)?;
+        // Check limits on primary item dimensions if available from ispe
+        if let Some((w, h)) = primary_item.dimensions {
+            limits.check_dimensions(w, h)?;
+            // Estimate memory before allocating frames
+            let estimated = DecoderConfig::estimate_memory(w, h, PixelLayout::Rgba8);
+            limits.check_memory(estimated)?;
+        }
 
-    let counter = DerivedCounter::new(0);
-    let budget = DecodeBudget::root(&counter, backends).with_apply_orientation(apply_orientation);
-    let mut frame = decode_item(&container, &primary_item, budget, limits, stop, max_threads)?;
+        check_stop(pulse)?;
 
-    check_stop(stop)?;
+        let counter = DerivedCounter::new(0);
+        let budget =
+            DecodeBudget::root(&counter, backends).with_apply_orientation(apply_orientation);
+        let mut frame = progress.run(|pulse| {
+            crate::progress::total(pulse, 1);
+            let frame = decode_item(
+                &container,
+                &primary_item,
+                budget,
+                limits,
+                pulse,
+                max_threads,
+            )?;
+            pulse.advance(1);
+            Ok(frame)
+        })?;
 
-    // Try to decode alpha plane from auxiliary image.
-    let alpha_id = container
-        .find_auxiliary_items(primary_item.id, "urn:mpeg:hevc:2015:auxid:1")
-        .first()
-        .copied()
-        .or_else(|| {
-            container
-                .find_auxiliary_items(
-                    primary_item.id,
-                    "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha",
-                )
-                .first()
-                .copied()
-        });
-    if let Some(alpha_id) = alpha_id
-        && let Some(alpha_plane) =
-            decode_alpha_plane(&container, alpha_id, &frame, limits, stop, backends)
-    {
-        frame.alpha_plane = Some(alpha_plane);
-    }
+        check_stop(pulse)?;
 
-    Ok(frame)
+        // Try to decode alpha plane from auxiliary image.
+        let alpha_id = container
+            .find_auxiliary_items(primary_item.id, "urn:mpeg:hevc:2015:auxid:1")
+            .first()
+            .copied()
+            .or_else(|| {
+                container
+                    .find_auxiliary_items(
+                        primary_item.id,
+                        "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha",
+                    )
+                    .first()
+                    .copied()
+            });
+        if let Some(alpha_id) = alpha_id {
+            progress.run(|pulse| {
+                crate::progress::total(pulse, 1);
+                if let Some(alpha_plane) =
+                    decode_alpha_plane(&container, alpha_id, &frame, limits, pulse, backends)?
+                {
+                    frame.alpha_plane = Some(alpha_plane);
+                }
+                // The existing alpha helper returns Option; cancellation must still
+                // remain terminal rather than being interpreted as missing alpha.
+                check_stop(pulse)?;
+                pulse.advance(1);
+                Ok(())
+            })?;
+        } else {
+            progress.skip();
+        }
+
+        Ok(frame)
+    })();
+    progress.complete(result)
 }
 
 /// Decode an item, handling derived image types (iden, grid, iovl).
@@ -729,6 +783,14 @@ fn decode_iovl(
     Ok(output)
 }
 
+pub(crate) fn optional_unless_stopped<T>(result: Result<T>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if matches!(error.error(), HeicError::Cancelled(_)) => Err(error),
+        Err(_) => Ok(None),
+    }
+}
+
 /// AV1 arm of the alpha-plane codec dispatch in [`decode_alpha_plane`].
 ///
 /// `None` when the item carries no av1C config (it isn't an AV1 item) or the
@@ -740,11 +802,11 @@ fn decode_av1_alpha(
     image_data: &[u8],
     limits: &Limits,
     stop: &dyn Stop,
-) -> Option<crate::hevc::DecodedFrame> {
+) -> Result<Option<crate::hevc::DecodedFrame>> {
     if item.av1_config.is_some() {
-        decode_av1_item(item, image_data, limits, stop).ok()
+        optional_unless_stopped(decode_av1_item(item, image_data, limits, stop))
     } else {
-        None
+        Ok(None)
     }
 }
 
@@ -758,8 +820,8 @@ fn decode_av1_alpha(
     _image_data: &[u8],
     _limits: &Limits,
     _stop: &dyn Stop,
-) -> Option<crate::hevc::DecodedFrame> {
-    None
+) -> Result<Option<crate::hevc::DecodedFrame>> {
+    Ok(None)
 }
 
 /// Decode an AV1-coded image item using rav1d-safe.
@@ -1443,12 +1505,13 @@ fn blit_tile_to_grid(
 pub(crate) fn try_decode_grid_streaming(
     data: &[u8],
     limits: Option<&Limits>,
-    stop: &dyn Stop,
+    pulse: &dyn how_far::Pulse,
     layout: PixelLayout,
     output: &mut [u8],
     max_threads: Option<usize>,
     backends: &[crate::Backend],
 ) -> Result<Option<(u32, u32)>> {
+    let stop: &dyn Stop = pulse;
     let limits = limits.unwrap_or(&DEFAULT_LIMITS);
     // `backends` is only consumed by the sequential fallback path that is
     // cfg-gated to `not(feature = "parallel")`. Silence unused-var warning
@@ -1568,6 +1631,7 @@ pub(crate) fn try_decode_grid_streaming(
         .map(|&tid| container.get_item_data(tid))
         .collect::<core::result::Result<_, _>>()?;
 
+    crate::progress::total(pulse, tile_data_list.len());
     // Stream tiles: decode, color-convert directly to output, drop
     #[cfg(feature = "parallel")]
     {
@@ -1606,6 +1670,8 @@ pub(crate) fn try_decode_grid_streaming(
                     copy_h,
                     output_width,
                 );
+                pulse.advance(1);
+                check_stop(stop)?;
                 let _ = tile_idx; // suppress unused warning
             }
         }
@@ -1648,6 +1714,8 @@ pub(crate) fn try_decode_grid_streaming(
                 copy_h,
                 output_width,
             );
+            pulse.advance(1);
+            check_stop(stop)?;
         }
     }
 
@@ -1663,12 +1731,13 @@ pub(crate) fn try_decode_grid_streaming(
 pub(crate) fn try_decode_grid_to_sink(
     data: &[u8],
     limits: Option<&Limits>,
-    stop: &dyn Stop,
+    pulse: &dyn how_far::Pulse,
     layout: PixelLayout,
     sink: &mut dyn crate::RowSink,
     max_threads: Option<usize>,
     backends: &[crate::Backend],
 ) -> Result<Option<(u32, u32)>> {
+    let stop: &dyn Stop = pulse;
     let limits = limits.unwrap_or(&DEFAULT_LIMITS);
     // `backends` is only consumed by the sequential fallback path that is
     // cfg-gated to `not(feature = "parallel")`. Silence unused-var warning
@@ -1773,6 +1842,7 @@ pub(crate) fn try_decode_grid_to_sink(
 
     let bpp = layout.bytes_per_pixel();
 
+    crate::progress::total(pulse, output_height as usize);
     // Stream tile-rows: decode one row at a time, write to sink, drop
     for row in 0..rows {
         check_stop(stop)?;
@@ -1805,7 +1875,7 @@ pub(crate) fn try_decode_grid_to_sink(
             tile_data_list[row_start..row_end]
                 .iter()
                 .map(|tile_data| {
-                    crate::hevc::decode_with_config(tile_config, tile_data)
+                    crate::hevc::decode_with_config_stop(tile_config, tile_data, stop)
                         .map_err(crate::error::hevc_at)
                         .at()
                 })
@@ -1836,6 +1906,8 @@ pub(crate) fn try_decode_grid_to_sink(
                 output_width,
             );
         }
+        pulse.advance(u64::from(strip_h));
+        check_stop(stop)?;
     }
 
     Ok(Some((output_width, output_height)))
@@ -1990,27 +2062,45 @@ fn decode_alpha_plane(
     limits: &Limits,
     stop: &dyn Stop,
     backends: &[crate::Backend],
-) -> Option<Vec<u16>> {
-    let alpha_item = container.get_item(alpha_id)?;
-    let alpha_data = container.get_item_data(alpha_id).ok()?;
+) -> Result<Option<Vec<u16>>> {
+    let Some(alpha_item) = container.get_item(alpha_id) else {
+        return Ok(None);
+    };
+    let Some(alpha_data) = optional_unless_stopped(container.get_item_data(alpha_id))? else {
+        return Ok(None);
+    };
 
     // Check limits on alpha image dimensions before decoding
     if let Some((w, h)) = alpha_item.dimensions {
-        limits.check_dimensions(w, h).ok()?;
+        if limits.check_dimensions(w, h).is_err() {
+            return Ok(None);
+        }
         let estimated = DecoderConfig::estimate_memory(w, h, PixelLayout::Rgba8);
-        limits.check_memory(estimated).ok()?;
+        if limits.check_memory(estimated).is_err() {
+            return Ok(None);
+        }
     }
 
-    check_stop(stop).ok()?;
+    check_stop(stop)?;
 
     // Multi-codec dispatch: try HEVC first, then AV1 (`decode_av1_alpha` is
     // `None` for a non-AV1 item, and always `None` without the `av1` feature).
     let alpha_frame = match alpha_item.hevc_config.as_ref() {
         Some(config) => {
             let (w, h) = alpha_item.dimensions.unwrap_or((0, 0));
-            crate::backend::decode_one_tile(backends, config, &alpha_data, w, h, stop).ok()?
+            optional_unless_stopped(crate::backend::decode_one_tile(
+                backends,
+                config,
+                &alpha_data,
+                w,
+                h,
+                stop,
+            ))?
         }
         None => decode_av1_alpha(&alpha_item, &alpha_data, limits, stop)?,
+    };
+    let Some(alpha_frame) = alpha_frame else {
+        return Ok(None);
     };
 
     let primary_w = primary_frame.cropped_width();
@@ -2019,12 +2109,20 @@ fn decode_alpha_plane(
     let alpha_h = alpha_frame.cropped_height();
 
     // Use u64 arithmetic to avoid u32 overflow
-    let total_pixels = usize::try_from((primary_w as u64).checked_mul(primary_h as u64)?).ok()?;
-    // Full-image alpha plane, sized from the (untrusted) primary dimensions →
-    // default fallible. This fn returns Option, so an alloc failure maps to
-    // `None` (the same graceful give-up as the other `?`/`.ok()?` sites here).
-    let mut alpha_plane: Vec<u16> =
-        crate::alloc_util::vec_with_capacity(limits.alloc_pref, true, total_pixels).ok()?;
+    let Some(total_pixels) = (primary_w as u64)
+        .checked_mul(primary_h as u64)
+        .and_then(|n| usize::try_from(n).ok())
+    else {
+        return Ok(None);
+    };
+    // Preserve best-effort handling of non-cancellation auxiliary failures.
+    // Cancellation returns its original typed error instead of absent alpha.
+    let Some(mut alpha_plane) = optional_unless_stopped(
+        crate::alloc_util::vec_with_capacity::<u16>(limits.alloc_pref, true, total_pixels),
+    )?
+    else {
+        return Ok(None);
+    };
 
     if alpha_w == primary_w && alpha_h == primary_h {
         // Same dimensions — direct copy of Y plane from cropped region.
@@ -2034,6 +2132,7 @@ fn decode_alpha_plane(
         let x_start = alpha_frame.crop_left;
         let stride = alpha_frame.width as usize;
         for y in 0..primary_h {
+            check_stop(stop)?;
             for x in 0..primary_w {
                 let src_idx =
                     (y_start as usize + y as usize) * stride + (x_start as usize + x as usize);
@@ -2043,6 +2142,7 @@ fn decode_alpha_plane(
     } else {
         // Different dimensions — bilinear resize
         for dy in 0..primary_h {
+            check_stop(stop)?;
             for dx in 0..primary_w {
                 let sx = (dx as f64) * (alpha_w as f64 - 1.0) / (primary_w as f64 - 1.0).max(1.0);
                 let sy = (dy as f64) * (alpha_h as f64 - 1.0) / (primary_h as f64 - 1.0).max(1.0);
@@ -2078,7 +2178,7 @@ fn decode_alpha_plane(
         }
     }
 
-    Some(alpha_plane)
+    Ok(Some(alpha_plane))
 }
 
 /// Decode the HDR gain map from a HEIC/HEIF file.
@@ -2094,7 +2194,30 @@ fn decode_alpha_plane(
 ///
 /// The Apple path is preferred when both are present.
 pub(crate) fn decode_gain_map(data: &[u8], backends: &[crate::Backend]) -> Result<HdrGainMap> {
-    let container = heif::parse(data, &Unstoppable)?;
+    decode_gain_map_observed(data, backends, &how_far::NoPulse)
+}
+
+pub(crate) fn decode_gain_map_observed(
+    data: &[u8],
+    backends: &[crate::Backend],
+    pulse: &dyn how_far::Pulse,
+) -> Result<HdrGainMap> {
+    let mut progress = crate::progress::Sequence::new(pulse, &["Gain map"]);
+    let result = progress.run(|pulse| {
+        crate::progress::total(pulse, 1);
+        let output = decode_gain_map_with_stop(data, backends, pulse)?;
+        pulse.advance(1);
+        Ok(output)
+    });
+    progress.complete(result)
+}
+
+pub(crate) fn decode_gain_map_with_stop(
+    data: &[u8],
+    backends: &[crate::Backend],
+    stop: &dyn Stop,
+) -> Result<HdrGainMap> {
+    let container = heif::parse(data, stop)?;
     let primary_item = container
         .primary_item()
         .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
@@ -2122,6 +2245,7 @@ pub(crate) fn decode_gain_map(data: &[u8], backends: &[crate::Backend]) -> Resul
             Some(iso_bytes),
             GainMapOrigin::HeifTmap,
             backends,
+            stop,
         );
     }
 
@@ -2144,6 +2268,7 @@ pub(crate) fn decode_gain_map(data: &[u8], backends: &[crate::Backend]) -> Resul
             None,
             GainMapOrigin::AppleAuxItem,
             backends,
+            stop,
         );
     }
 
@@ -2180,6 +2305,7 @@ fn decode_gainmap_image_item(
     iso21496: Option<Vec<u8>>,
     origin: GainMapOrigin,
     backends: &[crate::Backend],
+    stop: &dyn Stop,
 ) -> Result<HdrGainMap> {
     let counter = DerivedCounter::new(0);
     let frame = decode_item(
@@ -2187,7 +2313,7 @@ fn decode_gainmap_image_item(
         gainmap_item,
         DecodeBudget::root(&counter, backends),
         &Limits::default(),
-        &Unstoppable,
+        stop,
         None,
     )?;
 
@@ -2213,6 +2339,7 @@ fn decode_gainmap_image_item(
     )?;
 
     for y in 0..height {
+        check_stop(stop)?;
         for x in 0..width {
             let src_idx = ((y_start + y) * frame.width + (x_start + x)) as usize;
             let raw = frame.y_plane[src_idx] as u32;
@@ -2450,9 +2577,17 @@ pub(crate) fn has_depth(data: &[u8]) -> Result<bool> {
 
 /// Decode the depth map auxiliary image.
 pub(crate) fn decode_depth(data: &[u8], backends: &[crate::Backend]) -> Result<crate::DepthMap> {
+    decode_depth_with_stop(data, backends, &Unstoppable)
+}
+
+pub(crate) fn decode_depth_with_stop(
+    data: &[u8],
+    backends: &[crate::Backend],
+    stop: &dyn Stop,
+) -> Result<crate::DepthMap> {
     use crate::auxiliary::{AuxiliaryImageType, parse_depth_representation_info};
 
-    let container = heif::parse(data, &Unstoppable)?;
+    let container = heif::parse(data, stop)?;
     let primary_item = container
         .primary_item()
         .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
@@ -2494,7 +2629,7 @@ pub(crate) fn decode_depth(data: &[u8], backends: &[crate::Backend]) -> Result<c
         &depth_item,
         DecodeBudget::root(&counter, backends),
         &Limits::default(),
-        &Unstoppable,
+        stop,
         None,
     )?;
 
@@ -2518,6 +2653,7 @@ pub(crate) fn decode_depth(data: &[u8], backends: &[crate::Backend]) -> Result<c
     let y_start = frame.crop_top;
     let x_start = frame.crop_left;
     for y in 0..height {
+        check_stop(stop)?;
         for x in 0..width {
             let src_idx = ((y_start + y) * frame.width + (x_start + x)) as usize;
             depth_data.push(frame.y_plane[src_idx]);

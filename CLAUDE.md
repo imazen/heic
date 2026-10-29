@@ -464,6 +464,14 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 
 ## Known Bugs
 
+### Pulse adapter migration (source proposal, qualification pending)
+
+The current adapter omits required DecodeJob::with_pulse. Existing HEVC entry
+and CTU checks also collapse deadline causes into generic cancellation; native
+sequential grid-row decoding bypasses the stop-aware entry. The proposed Pulse
+migration and controls are described in Investigation Notes. Source parsing
+passes; Rust compilation, exact-pixel controls and API review remain unrun.
+
 ### Fixed during metadata integration: inventory fixture walker overflowed on i686
 
 The PR 57 mutation helper checked a declared box end with `p + size`.
@@ -781,6 +789,27 @@ d3d11va_vs_rust_corpus_diff` to see the full corpus output;
 
 ## Investigation Notes
 
+### Full Pulse migration — source proposal (2026-10-28)
+
+Current base a9ea9f67 lacks DecodeJob::with_pulse although its shared-core pin
+requires it. The proposed adapter retains SharedPulse in jobs/decoders/pull
+sessions, combines explicit owned stop policies without losing child sharing, and borrows
+full observation through
+native DecodeRequest::with_pulse. Native frame stages are parse/primary/alpha;
+grid output counts tiles/rows, not elapsed time. Optional gain-map/depth paths
+receive the active cancellation policy; alpha no longer discards a typed stop.
+HEVC entry and CTU checks preserve TimedOut instead of collapsing it to Cancelled.
+Full-frame conversion and external backends still have indivisible intervals.
+Standalone auxiliary/probe public signatures are unchanged. Public addition:
+`DecodeRequest<'a>::with_pulse(self, &'a dyn how_far::Pulse) -> Self`.
+
+`tests/pulse_progress.rs` drafts native U8/U16 exact-sample comparisons,
+phase-boundary timeout through typed/erased jobs, retained pull-session stops,
+declined-plan destination effects and grid row accounting. Source formatting
+is checked; these controls are uncompiled/unrun, as are lint/API snapshots.
+No graph pin, lockfile, orientation contract or prior assertion changed.
+
+
 ### Metadata consolidation (2026-10-12)
 
 The published-source comparison and reusable validation commands live in
@@ -895,3 +924,28 @@ Two caveats on reading that table:
   slower than its own fallback. If per-kernel work is ever wanted here, a
   per-kernel bench is needed first (see zenresize's `benches/kernel_tiers.rs`,
   where exactly that gap was hiding a kernel running at 0.94x).
+
+## Native optional Pulse qualification (2026-10-29)
+
+The review candidate uses `DecodeRequest::with_pulse(Option<&dyn Pulse>)`.
+`None` removes only the borrowed observer; explicit stop/limits remain active.
+Ten native controls pass on b7cf5a60 through `just pulse-contract-check`, using
+exactly tests/pulse_progress.rs, not a copied suite. They cover native U8/U16
+pixel parity, typed/erased timeout causes, declined planning, retained sessions,
+post-sink cancellation and actual selected-grid row progress/cancellation.
+The focused crate has one paired core/pixels/how-far graph. Root regression and
+platform backend qualification remain separate. Receipt: benchmarks/pulse_contract_2026-10-29.md.
+
+Known root test blocker: zensim-regress493c91c pulls zenpng0.1.4/core0.1.26;
+paired pixels makes that core's 360-byte DecodeOutput assertion fail. The metric
+revision and all thresholds remain unchanged. A newer Profile A selects another
+model payload, so repinning is not a neutral graph repair. The isolated contract
+crate does not replace or disable the original root test command.
+
+Known coverage issue: the committed Nokia grid file selects a plain Hvc1 item,
+and libheif-examples/example.heic contains no grid item at all, despite the
+old cov_zencodec.rs fixture comment and grid test names. Multiple buffered strips
+are not proof of native grid streaming. The new Pulse controls select the real
+derived grid already present in Nokia's file by changing only pitm, with guards
+for one grid, box version/size, selected ID, no transforms, alpha and bit depth.
+Existing root grid coverage still needs that same truthful fixture discipline.

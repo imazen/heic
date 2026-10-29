@@ -113,14 +113,15 @@ heic-backend-mediacodec = { version = "0.2.0", path = "heic-backend-mediacodec",
 heic-backend-vaapi = { version = "0.2.0", path = "heic-backend-vaapi", optional = true }
 heic-backend-d3d11va = { version = "0.2.0", path = "heic-backend-d3d11va", optional = true }
 enough = "0.4.4"
+how-far = { version = "0.1.0", default-features = false }
 whereat = { version = "0.1.5"}
 archmage = { version = ">=0.9.29, <=0.9.31-beta.1", default-features = false, features = ["macros"] }
 magetypes = { version = ">=0.9.29, <=0.9.31-beta.1", default-features = false }
 safe_unaligned_simd = "0.2.5"
 memchr = { version = "2.8.3", default-features = false }
 rayon = { version = "1.12.0", optional = true }
-zencodec = { version = ">=0.1.27, <0.3.0", git = "https://github.com/imazen/zencodec", rev = "d327434b0826a3e39633665c76f5081c0ceb34cc", optional = true }
-zenmeta = { version = "0.1.0", git = "https://github.com/imazen/zencodec", rev = "d327434b0826a3e39633665c76f5081c0ceb34cc", default-features = false, features = ["apple"], optional = true }
+zencodec = { version = ">=0.2.0, <0.4.0", optional = true }
+zenmeta = { version = "0.1.0", default-features = false, features = ["apple"], optional = true }
 zenpixels = { version = ">=0.2.11, <0.4.0", default-features = false, features = ["rgb", "imgref"], optional = true }
 rgb = { version = "0.8.53", default-features = false, features = ["as-bytes"], optional = true }
 bytemuck = { version = "1.25.2", default-features = false, features = ["extern_crate_alloc"], optional = true }
@@ -128,10 +129,11 @@ imgref = { version = "1.12.3", optional = true }
 garb = { version = "0.2.8", default-features = false, optional = true }
 rav1d-safe = { version = "0.6.0", optional = true, default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
 zenflate = { version = "0.4.0", optional = true, default-features = false }
-ultrahdr-core = { version = "0.6.0", git = "https://github.com/imazen/ultrahdr", rev = "a834b2ccedc2b99b1fec3200365f00127a6baea6", optional = true, default-features = false, features = ["f16"] }
+ultrahdr-core = { version = "0.6.0", git = "https://github.com/imazen/ultrahdr", rev = "7e9d296c9e037e626234c9f0e8673d48278f83f0", optional = true, default-features = false, features = ["f16"] }
 image = { version = "0.25.10", default-features = false, optional = true }
 
 [dev-dependencies]
+how-far-along = "0.1.0"
 zenbench = "0.1.10"
 criterion = { version = "0.8.2", default-features = false, features = ["plotters", "cargo_bench_support"] }
 fast-ssim2 = { version = "0.8.2", features = ["imgref"] }
@@ -154,13 +156,8 @@ png = "0.18.1"
 # `check_decode_truncation_series` (a truncated input must categorize as an
 # incomplete-input ErrorCategory, never panic, never silently decode).
 #
-# Unification caveat: the *published* `zencodec-testkit 0.1.0` manifest declares
-# `zencodec ^0.1.26` = `>=0.1.26, <0.2.0`. That intersects the `zencodec` dep
-# above on a single registry instance today, so no [patch.crates-io] is needed.
-# But once `zencodec 0.2.0` publishes, testkit 0.1.0's caret will NOT admit it
-# and this dev-dep graph would carry TWO zencodec copies. `zencodec-testkit`
-# must republish with the widened `>=0.1.26, <0.3.0` requirement (already in its
-# manifest, zencodec repo `4391021`) BEFORE zencodec 0.2.0 ships.
+# Registry testkit 0.1.0 predates this core family. The root patch below selects
+# the matching unpublished testkit; keep it until a compatible release exists.
 zencodec-testkit = ">=0.1.0, <0.3.0"
 
 [lints.rust]
@@ -235,8 +232,11 @@ harness = false
 
 # Temporary metadata integration pins; replace with released versions before publication.
 [patch.crates-io]
-zencodec = { git = "https://github.com/imazen/zencodec", rev = "d327434b0826a3e39633665c76f5081c0ceb34cc" }
-zencodec-testkit = { git = "https://github.com/imazen/zencodec", rev = "d327434b0826a3e39633665c76f5081c0ceb34cc" }
+zenmeta = { git = "https://github.com/imazen/zencodec", rev = "feb09f9fd25e90e49a30d7161db8f3b558dfb2a6" }
+zenpixels = { git = "https://github.com/imazen/zenpixels", rev = "283655c5424e0ad7ebc6d2acd94670fac1e29158" }
+zenpixels-convert = { git = "https://github.com/imazen/zenpixels", rev = "283655c5424e0ad7ebc6d2acd94670fac1e29158" }
+zencodec = { git = "https://github.com/imazen/zencodec", rev = "feb09f9fd25e90e49a30d7161db8f3b558dfb2a6" }
+zencodec-testkit = { git = "https://github.com/imazen/zencodec", rev = "feb09f9fd25e90e49a30d7161db8f3b558dfb2a6" }
 
 [[example]]
 name = "gm20_probe"

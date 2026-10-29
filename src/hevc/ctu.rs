@@ -905,8 +905,9 @@ impl<'a> SliceContext<'a> {
             // hoisted out of `decode_ctu`'s per-sample work; one masked compare
             // per CTU is negligible against a CTU's decode cost. Mirrors the
             // slice-entry check in `mod::decode_with_config_stop`.
-            if ctu_count.is_multiple_of(STOP_CHECK_CTU_INTERVAL) && stop.should_stop() {
-                return Err(at!(HevcError::Cancelled(enough::StopReason::Cancelled)));
+            if ctu_count.is_multiple_of(STOP_CHECK_CTU_INTERVAL) {
+                stop.check()
+                    .map_err(|reason| at!(HevcError::Cancelled(reason)))?;
             }
 
             // Bail out of a truncated/over-declaring slice. A conformant slice
