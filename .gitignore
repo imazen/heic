@@ -78,3 +78,5 @@ copter-report/
 .external-cache/
 Cargo.toml.original.txt
 *.rs.local
+
+!tools/pulse-contract-check/Cargo.lock

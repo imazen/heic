@@ -924,3 +924,28 @@ Two caveats on reading that table:
   slower than its own fallback. If per-kernel work is ever wanted here, a
   per-kernel bench is needed first (see zenresize's `benches/kernel_tiers.rs`,
   where exactly that gap was hiding a kernel running at 0.94x).
+
+## Native optional Pulse qualification (2026-10-29)
+
+The review candidate uses `DecodeRequest::with_pulse(Option<&dyn Pulse>)`.
+`None` removes only the borrowed observer; explicit stop/limits remain active.
+Ten native controls pass on b7cf5a60 through `just pulse-contract-check`, using
+exactly tests/pulse_progress.rs, not a copied suite. They cover native U8/U16
+pixel parity, typed/erased timeout causes, declined planning, retained sessions,
+post-sink cancellation and actual selected-grid row progress/cancellation.
+The focused crate has one paired core/pixels/how-far graph. Root regression and
+platform backend qualification remain separate. Receipt: benchmarks/pulse_contract_2026-10-29.md.
+
+Known root test blocker: zensim-regress493c91c pulls zenpng0.1.4/core0.1.26;
+paired pixels makes that core's 360-byte DecodeOutput assertion fail. The metric
+revision and all thresholds remain unchanged. A newer Profile A selects another
+model payload, so repinning is not a neutral graph repair. The isolated contract
+crate does not replace or disable the original root test command.
+
+Known coverage issue: the committed Nokia grid file selects a plain Hvc1 item,
+and libheif-examples/example.heic contains no grid item at all, despite the
+old cov_zencodec.rs fixture comment and grid test names. Multiple buffered strips
+are not proof of native grid streaming. The new Pulse controls select the real
+derived grid already present in Nokia's file by changing only pitm, with guards
+for one grid, box version/size, selected ID, no transforms, alpha and bit depth.
+Existing root grid coverage still needs that same truthful fixture discipline.

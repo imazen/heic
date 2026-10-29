@@ -578,3 +578,12 @@ Initial release of the `heic` crate (renamed from `heic-decoder`). Pure-Rust HEI
 
 ### Performance
 - Reuse MC scratch buffer instead of per-block allocation (8e11ec3)
+
+### Native Pulse candidate qualification (2026-10-29)
+
+- Ten focused native controls pass with optional borrowed Pulse and retained
+  owned job controls; None/Some preserve samples and explicit stops survive None.
+  The same test source is runnable in an isolated unpublished contract crate.
+- Core/metadata/testkit pins align with feb09f9f and paired zenpixels283655c5;
+  UltraHDR uses7e9d296c. Root metric-tool graph remains incompatible; no platform
+  backend or whole-release qualification is implied by the focused tests.

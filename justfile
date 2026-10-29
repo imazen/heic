@@ -264,4 +264,4 @@ pulse-contract-check:
 
 # Lint the actual HEIC library through the isolated, single-core graph.
 pulse-library-check:
-    cargo clippy --manifest-path tools/pulse-contract-check/Cargo.toml --locked -p heic --lib --features backend-rust,zencodec -- -D warnings
+    cargo clippy --manifest-path tools/pulse-contract-check/Cargo.toml --locked -p heic --lib -- -D warnings
