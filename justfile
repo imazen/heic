@@ -253,3 +253,11 @@ pulse-migration-check:
     cargo test --features backend-rust,zencodec --test pulse_progress
     cargo test --features backend-rust,zencodec --test sansio
     cargo clippy --features backend-rust,zencodec --all-targets -- -D warnings
+
+# Same native Pulse controls, isolated from the historical metric's PNG graph.
+pulse-contract-resolve:
+    cargo metadata --manifest-path tools/pulse-contract-check/Cargo.toml --format-version 1 > /dev/null
+
+pulse-contract-check:
+    HEIC_PULSE_FIXTURES="$PWD/testdata/features" cargo test --manifest-path tools/pulse-contract-check/Cargo.toml --locked --test native_pulse -- --nocapture
+    cargo clippy --manifest-path tools/pulse-contract-check/Cargo.toml --locked --all-targets -- -D warnings

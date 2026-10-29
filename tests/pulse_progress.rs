@@ -14,11 +14,12 @@ use zencodec::decode::{Decode, DecodeJob, DecoderConfig, DynDecoderConfig, Strea
 use zenpixels::PixelDescriptor;
 
 fn fixture(name: &str) -> Vec<u8> {
-    std::fs::read(format!(
-        "{}/testdata/features/{name}.heic",
-        env!("CARGO_MANIFEST_DIR")
-    ))
-    .unwrap()
+    let root = std::env::var_os("HEIC_PULSE_FIXTURES")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/features")
+        });
+    std::fs::read(root.join(format!("{name}.heic"))).unwrap()
 }
 
 fn native_timeout(error: &(dyn std::error::Error + 'static)) {

@@ -1,0 +1,30 @@
+[package]
+name = "heic-pulse-contract-check"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[features]
+default = ["backend-rust", "zencodec"]
+backend-rust = ["heic/backend-rust"]
+zencodec = ["heic/zencodec"]
+
+[dependencies]
+heic = { path = "../..", default-features = false }
+enough = "0.4.4"
+how-far = { version = "0.1.0", default-features = false }
+how-far-along = "0.1.0"
+zencodec = { version = ">=0.2.0, <0.4.0", git = "https://github.com/imazen/zencodec", rev = "feb09f9fd25e90e49a30d7161db8f3b558dfb2a6" }
+zenpixels = { version = ">=0.2.11, <0.4.0", default-features = false }
+
+[[test]]
+name = "native_pulse"
+path = "../../tests/pulse_progress.rs"
+
+[patch.crates-io]
+zencodec = { git = "https://github.com/imazen/zencodec", rev = "feb09f9fd25e90e49a30d7161db8f3b558dfb2a6" }
+zenmeta = { git = "https://github.com/imazen/zencodec", rev = "feb09f9fd25e90e49a30d7161db8f3b558dfb2a6" }
+zenpixels = { git = "https://github.com/imazen/zenpixels", rev = "283655c5424e0ad7ebc6d2acd94670fac1e29158" }
+zenpixels-convert = { git = "https://github.com/imazen/zenpixels", rev = "283655c5424e0ad7ebc6d2acd94670fac1e29158" }
