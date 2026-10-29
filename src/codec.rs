@@ -26,7 +26,6 @@ use zencodec::{
 };
 use zenpixels::{Cicp, ColorPrimaries, PixelBuffer, PixelDescriptor, TransferFunction};
 
-use enough::Stop as _;
 use how_far::{Pulse as _, Report as _};
 use whereat::{At, ResultAtExt, at};
 

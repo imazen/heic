@@ -22,6 +22,20 @@ fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(root.join(format!("{name}.heic"))).unwrap()
 }
 
+// The small `grid` fixture has transforms and takes the buffered fallback.
+// Prove the dedicated streaming fixture actually admits the row path.
+fn streaming_grid_fixture() -> Vec<u8> {
+    let data = fixture("nokia_grid3x2");
+    let container = heic::heif::parse(&data, &how_far::Unstoppable).unwrap();
+    let primary = container.primary_item().unwrap();
+    assert_eq!(primary.item_type, heic::heif::ItemType::Grid);
+    assert!(primary.transforms.is_empty());
+    let info = heic::ImageInfo::from_bytes(&data).unwrap();
+    assert!(!info.has_alpha);
+    assert!(info.bit_depth <= 8);
+    data
+}
+
 fn native_timeout(error: &(dyn std::error::Error + 'static)) {
     let native =
         zencodec::find_cause::<HeicError>(error).expect("native cancellation cause retained");
@@ -212,6 +226,7 @@ fn explicit_stop_combines_with_shared_pulse_and_preserves_reason() {
     }
     let data = fixture("single");
     let pulse = PulseTree::new(Phase::new("HEIC", Total::Unknown), how_far::Unstoppable);
+    #[allow(deprecated)] // Explicitly exercise retained legacy stop composition.
     let job = HeicDecoderConfig::new()
         .job()
         .with_pulse(pulse.share().unwrap())
@@ -223,7 +238,7 @@ fn explicit_stop_combines_with_shared_pulse_and_preserves_reason() {
 
 #[test]
 fn grid_pull_counts_completed_rows_and_preserves_every_pixel() {
-    let data = fixture("grid");
+    let data = streaming_grid_fixture();
     let baseline = HeicDecoderConfig::new()
         .job()
         .decoder(Cow::Borrowed(&data), &[PixelDescriptor::RGB8_SRGB])
@@ -260,7 +275,7 @@ fn grid_pull_counts_completed_rows_and_preserves_every_pixel() {
 
 #[test]
 fn grid_report_callback_timeout_refuses_batch_after_actual_work() {
-    let data = fixture("grid");
+    let data = streaming_grid_fixture();
     let pulse = FnPulse::new("grid rows", |cx| {
         if cx.snapshot().completed > 0 {
             Err(StopReason::TimedOut)
