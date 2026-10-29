@@ -261,3 +261,7 @@ pulse-contract-resolve:
 pulse-contract-check:
     HEIC_PULSE_FIXTURES="$PWD/testdata/features" cargo test --manifest-path tools/pulse-contract-check/Cargo.toml --locked --test native_pulse -- --nocapture
     cargo clippy --manifest-path tools/pulse-contract-check/Cargo.toml --locked --all-targets -- -D warnings
+
+# Lint the actual HEIC library through the isolated, single-core graph.
+pulse-library-check:
+    cargo clippy --manifest-path tools/pulse-contract-check/Cargo.toml --locked -p heic --lib --features backend-rust,zencodec -- -D warnings
