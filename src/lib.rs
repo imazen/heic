@@ -1414,9 +1414,10 @@ impl<'a> DecodeRequest<'a> {
     /// Observe native work without taking completion rights from the caller.
     ///
     /// Planning is best effort; cancellation reasons are preserved even when
-    /// the observer declines a plan. An explicit `with_stop` remains active.
-    pub fn with_pulse(mut self, pulse: &'a dyn how_far::Pulse) -> Self {
-        self.pulse = Some(pulse);
+    /// the observer declines a plan. `None` removes only this borrowed observer;
+    /// an explicit `with_stop` and resource limits remain active.
+    pub fn with_pulse(mut self, pulse: Option<&'a dyn how_far::Pulse>) -> Self {
+        self.pulse = pulse;
         self
     }
 

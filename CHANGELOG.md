@@ -6,7 +6,7 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 ### Added
 
-- Source proposal: additive `DecodeRequest::with_pulse(&dyn how_far::Pulse)`
+- Source proposal: additive `DecodeRequest::with_pulse(Option<&dyn how_far::Pulse>)`
   and retained SharedPulse in zencodec jobs, one-shot and pull sessions.
   Native phases cover parse/primary/alpha and adapter supplement work; grid
   paths report converted tiles/rows. Old stop builders remain available.

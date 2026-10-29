@@ -193,7 +193,7 @@ fn rejected_plan_keeps_original_timeout_and_destination_untouched() {
     let config = heic::DecoderConfig::new();
     let error = config
         .decode_request(&data)
-        .with_pulse(&pulse)
+        .with_pulse(Some(&pulse))
         .decode_into(&mut destination)
         .unwrap_err();
     native_timeout(&error);
@@ -356,5 +356,43 @@ fn push_callback_stop_is_checked_before_output_storage_for_u8_and_u16() {
         native_timeout(&error);
         assert_eq!(sink.begins, 1);
         pulse.complete_as(Outcome::Cancelled);
+    }
+}
+
+#[test]
+fn optional_native_pulse_preserves_pixels_and_none_keeps_explicit_stop() {
+    struct Timeout;
+    impl Stop for Timeout {
+        fn check(&self) -> Result<(), StopReason> {
+            Err(StopReason::TimedOut)
+        }
+    }
+    let config = heic::DecoderConfig::new();
+    for name in ["single", "depth10", "grid"] {
+        let data = fixture(name);
+        let baseline = config.decode_request(&data).decode().unwrap();
+        for pulse in [None, Some(&how_far::NoPulse as &dyn Pulse)] {
+            let output = config
+                .decode_request(&data)
+                .with_pulse(pulse)
+                .decode()
+                .unwrap();
+            assert_eq!(output.data, baseline.data);
+            assert_eq!(
+                (output.width, output.height),
+                (baseline.width, baseline.height)
+            );
+        }
+        let mut destination = vec![0xa5; baseline.data.len()];
+        let before = destination.clone();
+        let error = config
+            .decode_request(&data)
+            .with_stop(&Timeout)
+            .with_pulse(Some(&how_far::NoPulse))
+            .with_pulse(None)
+            .decode_into(&mut destination)
+            .unwrap_err();
+        native_timeout(&error);
+        assert_eq!(destination, before);
     }
 }

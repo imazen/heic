@@ -554,7 +554,7 @@ impl HeicDecodeJob {
         if let Some(ref limits) = native_limits {
             req = req.with_limits(limits);
         }
-        req = req.with_pulse(&observation);
+        req = req.with_pulse(Some(&observation));
         if thread_count > 0 {
             req = req.with_max_threads(thread_count);
         }
@@ -963,7 +963,7 @@ impl HeicDecoder<'_> {
                         if let Some(ref limits) = self.limits {
                             req = req.with_limits(limits);
                         }
-                        req = req.with_pulse(pulse);
+                        req = req.with_pulse(Some(pulse));
                         if self.thread_count > 0 {
                             req = req.with_max_threads(self.thread_count);
                         }
@@ -1017,7 +1017,7 @@ impl HeicDecoder<'_> {
                         if let Some(ref limits) = self.limits {
                             req = req.with_limits(limits);
                         }
-                        req = req.with_pulse(pulse);
+                        req = req.with_pulse(Some(pulse));
                         if self.thread_count > 0 {
                             req = req.with_max_threads(self.thread_count);
                         }
@@ -1328,7 +1328,7 @@ impl HeicStreamDecoder {
             if let Some(lim) = limits {
                 req = req.with_limits(lim);
             }
-            req = req.with_pulse(&observation);
+            req = req.with_pulse(Some(&observation));
             if thread_count > 0 {
                 req = req.with_max_threads(thread_count);
             }
@@ -1374,7 +1374,7 @@ impl HeicStreamDecoder {
             if let Some(lim) = limits {
                 req = req.with_limits(lim);
             }
-            req = req.with_pulse(&observation);
+            req = req.with_pulse(Some(&observation));
             if thread_count > 0 {
                 req = req.with_max_threads(thread_count);
             }
