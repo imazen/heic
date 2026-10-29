@@ -22,14 +22,36 @@ fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(root.join(format!("{name}.heic"))).unwrap()
 }
 
-// The small named fixtures took the buffered fallback during qualification.
-// Prove the dedicated streaming fixture actually admits the row path.
+// The Nokia file contains a real derived grid, but selects a single tile as
+// primary. Select that existing grid without changing any coded tile bytes.
 fn streaming_grid_fixture() -> Vec<u8> {
-    let data = fixture("../libheif-examples/example");
+    let mut data = fixture("nokia_grid3x2");
     let container = heic::heif::parse(&data, &how_far::Unstoppable).unwrap();
-    let primary = container.primary_item().unwrap();
-    assert_eq!(primary.item_type, heic::heif::ItemType::Grid);
-    assert!(primary.transforms.is_empty());
+    let old_primary = u16::try_from(container.primary_item().unwrap().id).unwrap();
+    let grids: Vec<_> = container
+        .items()
+        .filter(|item| item.item_type == heic::heif::ItemType::Grid)
+        .collect();
+    assert_eq!(grids.len(), 1);
+    let grid = u16::try_from(grids[0].id).unwrap();
+    assert!(grids[0].transforms.is_empty());
+    drop(container);
+    let positions: Vec<_> = data
+        .windows(4)
+        .enumerate()
+        .filter_map(|(i, bytes)| (bytes == b"pitm").then_some(i))
+        .collect();
+    assert_eq!(positions.len(), 1);
+    let at = positions[0];
+    assert_eq!(&data[at - 4..at], &14u32.to_be_bytes());
+    assert_eq!(&data[at + 4..at + 8], &[0; 4]);
+    assert_eq!(&data[at + 8..at + 10], &old_primary.to_be_bytes());
+    data[at + 8..at + 10].copy_from_slice(&grid.to_be_bytes());
+    let container = heic::heif::parse(&data, &how_far::Unstoppable).unwrap();
+    assert_eq!(
+        container.primary_item().unwrap().item_type,
+        heic::heif::ItemType::Grid
+    );
     let info = heic::ImageInfo::from_bytes(&data).unwrap();
     assert!(!info.has_alpha);
     assert!(info.bit_depth <= 8);
