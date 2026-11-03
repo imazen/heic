@@ -1205,6 +1205,76 @@ fn scale_to_u16(val: i32, max_native: i32) -> u16 {
     }
 }
 
+#[cfg(feature = "zenpixels")]
+impl DecodedFrame {
+    /// Borrow the decoded planes as zenpixels planes, without copying.
+    ///
+    /// Returns the layout and one [`zenpixels::plane::AnyPlane::U16`] per plane,
+    /// in layout order: Luma, then Cb and Cr (absent for monochrome), then
+    /// Alpha when present. Samples are `bit_depth`-bit codes aligned to the low
+    /// bits of each `u16`. The planes cover the full coded frame
+    /// (`width` x `height`); the conformance window (`crop_*`) is not applied.
+    /// Chroma siting is [`zenpixels::sample::ChromaSiting::Unknown`]: the frame
+    /// does not record it.
+    ///
+    /// # Errors
+    ///
+    /// [`HevcError::PlaneLayout`] when the bit depth is not representable, the
+    /// chroma format is not 0-3, or a plane is shorter than its geometry.
+    pub fn planes(
+        &self,
+    ) -> core::result::Result<
+        (
+            zenpixels::plane::PlanarLayout,
+            Vec<zenpixels::plane::AnyPlane<'_>>,
+        ),
+        HevcError,
+    > {
+        use zenpixels::ChannelType;
+        use zenpixels::plane::{
+            AnyPlane, PlanarLayout, PlaneEncoding, PlaneRef, PlaneRole, PlaneSpec,
+        };
+        use zenpixels::sample::{ChromaSiting, ChromaSubsampling, SampleEncoding};
+
+        let err = |_| HevcError::PlaneLayout;
+        let encoding = PlaneEncoding::Code(
+            SampleEncoding::new(ChannelType::U16, self.bit_depth, 0).map_err(err)?,
+        );
+        let subsampling = match self.chroma_format {
+            0 => ChromaSubsampling::Mono,
+            1 => ChromaSubsampling::Yuv420,
+            2 => ChromaSubsampling::Yuv422,
+            3 => ChromaSubsampling::Yuv444,
+            _ => return Err(HevcError::PlaneLayout),
+        };
+        let (w, h) = (self.width as usize, self.height as usize);
+        fn plane(buf: &[u16], pw: usize, ph: usize) -> Result<AnyPlane<'_>> {
+            PlaneRef::new(buf, pw, ph, pw)
+                .map(AnyPlane::U16)
+                .map_err(|_| HevcError::PlaneLayout)
+        }
+
+        let mut specs = Vec::with_capacity(4);
+        let mut planes = Vec::with_capacity(4);
+        specs.push(PlaneSpec::new(PlaneRole::Luma, encoding));
+        planes.push(plane(&self.y_plane, w, h)?);
+        if let Some((cw, ch)) = subsampling.chroma_size(self.width, self.height) {
+            let (cw, ch) = (cw as usize, ch as usize);
+            specs.push(PlaneSpec::new(PlaneRole::Cb, encoding));
+            planes.push(plane(&self.cb_plane, cw, ch)?);
+            specs.push(PlaneSpec::new(PlaneRole::Cr, encoding));
+            planes.push(plane(&self.cr_plane, cw, ch)?);
+        }
+        if let Some(alpha) = &self.alpha_plane {
+            specs.push(PlaneSpec::new(PlaneRole::Alpha, encoding));
+            planes.push(plane(alpha, w, h)?);
+        }
+        let layout = PlanarLayout::new(specs, subsampling, ChromaSiting::Unknown)
+            .map_err(|_| HevcError::PlaneLayout)?;
+        Ok((layout, planes))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1365,5 +1435,52 @@ mod tests {
         assert!(frame.cropped_height() >= 1);
         assert!(frame.cropped_width() <= frame.width);
         assert!(frame.cropped_height() <= frame.height);
+    }
+
+    #[cfg(feature = "zenpixels")]
+    #[test]
+    fn planes_borrow_frame_vecs() {
+        use zenpixels::plane::{AnyPlane, PlaneRole};
+        use zenpixels::sample::{ChromaSiting, ChromaSubsampling};
+
+        let mut frame = DecodedFrame::with_params(5, 3, 10, 1).unwrap();
+        frame.alpha_plane = Some(vec![0u16; 15]);
+        let (layout, planes) = frame.planes().unwrap();
+
+        assert_eq!(layout.subsampling(), ChromaSubsampling::Yuv420);
+        assert_eq!(layout.siting(), ChromaSiting::Unknown);
+        let roles: Vec<_> = layout.planes().iter().map(|p| p.role()).collect();
+        assert_eq!(
+            roles,
+            [
+                PlaneRole::Luma,
+                PlaneRole::Cb,
+                PlaneRole::Cr,
+                PlaneRole::Alpha
+            ]
+        );
+        layout.check(&planes, 5, 3).unwrap();
+
+        let expect: [(&[u16], usize, usize); 4] = [
+            (&frame.y_plane, 5, 3),
+            (&frame.cb_plane, 3, 2),
+            (&frame.cr_plane, 3, 2),
+            (frame.alpha_plane.as_deref().unwrap(), 5, 3),
+        ];
+        for (plane, (buf, w, h)) in planes.iter().zip(expect) {
+            let AnyPlane::U16(p) = plane else {
+                panic!("expected u16 plane")
+            };
+            assert_eq!((p.width(), p.height(), p.stride()), (w, h, w));
+            for y in 0..h {
+                assert!(core::ptr::eq(p.row(y).unwrap(), &buf[y * w..y * w + w]));
+            }
+        }
+
+        let mono = DecodedFrame::with_params(4, 2, 8, 0).unwrap();
+        let (layout, planes) = mono.planes().unwrap();
+        assert_eq!(layout.subsampling(), ChromaSubsampling::Mono);
+        assert_eq!(layout.planes().len(), 1);
+        assert_eq!(planes.len(), 1);
     }
 }

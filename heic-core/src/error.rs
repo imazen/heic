@@ -21,6 +21,8 @@ pub enum HevcError {
     DimensionOverflow,
     /// Memory allocation failed.
     AllocationFailed,
+    /// The frame's planes do not match its dimensions or chroma format.
+    PlaneLayout,
 }
 
 impl core::fmt::Display for HevcError {
@@ -28,6 +30,7 @@ impl core::fmt::Display for HevcError {
         match self {
             Self::DimensionOverflow => f.write_str("frame dimensions overflow"),
             Self::AllocationFailed => f.write_str("allocation failed"),
+            Self::PlaneLayout => f.write_str("planes do not match the frame layout"),
         }
     }
 }
