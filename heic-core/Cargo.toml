@@ -13,6 +13,8 @@ categories = ["multimedia::images"]
 default = []
 std = ["archmage/std"]
 fallible-alloc = []
+# Borrow decoded frames as zenpixels planes (`DecodedFrame::planes`).
+zenpixels = ["dep:zenpixels"]
 
 [dependencies]
 enough = { workspace = true }
@@ -20,6 +22,7 @@ whereat = { workspace = true }
 archmage = { version = ">=0.9.29, <=0.9.31-beta.1", default-features = false, features = ["macros"] }
 magetypes = { version = ">=0.9.29, <=0.9.31-beta.1", default-features = false }
 safe_unaligned_simd = "0.2.5"
+zenpixels = { git = "https://github.com/imazen/zenpixels", rev = "5bf81d640752793454802d7a94346c3c1e97c81e", default-features = false, optional = true }
 
 [lints.rust]
 unsafe_code = "forbid"
