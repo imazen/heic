@@ -256,6 +256,7 @@ impl zencodec::decode::DecoderConfig for HeicDecoderConfig {
             extract_gain_map,
             extract_depth,
             gain_map_render: zencodec::GainMapRender::default(),
+            pulse: None,
         }
     }
 }
@@ -280,6 +281,9 @@ pub struct HeicDecodeJob {
     /// additionally surfaces the decoded gain map as a
     /// [`zencodec::decode::DecodedGainMap`]. Default `BaseOnly`.
     gain_map_render: zencodec::GainMapRender,
+    /// Retained pulse (progress + cancellation). `stop` is derived from it so
+    /// every existing cancellation site sees pulse cancellation too.
+    pulse: Option<how_far::SharedPulse>,
 }
 
 /// Apply [`DecodePolicy`] to an [`ImageInfo`], stripping metadata fields
@@ -647,6 +651,12 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
 
     fn with_stop(mut self, stop: zencodec::StopToken) -> Self {
         self.stop = Some(stop);
+        self
+    }
+
+    fn with_pulse(mut self, pulse: how_far::SharedPulse) -> Self {
+        self.stop = Some(zencodec::StopToken::new(pulse.clone()));
+        self.pulse = Some(pulse);
         self
     }
 
