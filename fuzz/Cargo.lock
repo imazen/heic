@@ -252,6 +252,7 @@ dependencies = [
  "enough",
  "garb",
  "heic-core",
+ "how-far",
  "imgref",
  "magetypes",
  "memchr",
@@ -769,7 +770,7 @@ dependencies = [
 [[package]]
 name = "ultrahdr-core"
 version = "0.6.0"
-source = "git+https://github.com/imazen/ultrahdr?rev=a834b2ccedc2b99b1fec3200365f00127a6baea6#a834b2ccedc2b99b1fec3200365f00127a6baea6"
+source = "git+https://github.com/imazen/ultrahdr?rev=7e9d296c9e037e626234c9f0e8673d48278f83f0#7e9d296c9e037e626234c9f0e8673d48278f83f0"
 dependencies = [
  "archmage",
  "bytemuck",
@@ -836,12 +837,14 @@ dependencies = [
 
 [[package]]
 name = "zencodec"
-version = "0.1.27"
-source = "git+https://github.com/imazen/zencodec?rev=d327434b0826a3e39633665c76f5081c0ceb34cc#d327434b0826a3e39633665c76f5081c0ceb34cc"
+version = "0.2.0"
+source = "git+https://github.com/imazen/zencodec?rev=a51d4119d363678273758f1f196062694175bb1a#a51d4119d363678273758f1f196062694175bb1a"
 dependencies = [
  "almost-enough",
  "enough",
  "how-far",
+ "libm",
+ "spin",
  "whereat",
  "zenpixels",
 ]
@@ -858,7 +861,7 @@ dependencies = [
 [[package]]
 name = "zenmeta"
 version = "0.1.0"
-source = "git+https://github.com/imazen/zencodec?rev=d327434b0826a3e39633665c76f5081c0ceb34cc#d327434b0826a3e39633665c76f5081c0ceb34cc"
+source = "git+https://github.com/imazen/zencodec?rev=a51d4119d363678273758f1f196062694175bb1a#a51d4119d363678273758f1f196062694175bb1a"
 dependencies = [
  "zencodec",
  "zenpixels",
@@ -866,9 +869,8 @@ dependencies = [
 
 [[package]]
 name = "zenpixels"
-version = "0.2.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5851fd39b312749a3c367a0cd3522bd95d43276cfa613e9c18df748447cef3a8"
+version = "0.3.1"
+source = "git+https://github.com/imazen/zenpixels?rev=f23ac7535be1144a22d0dc6b71f866a08b151f34#f23ac7535be1144a22d0dc6b71f866a08b151f34"
 dependencies = [
  "bytemuck",
  "imgref",
@@ -878,9 +880,8 @@ dependencies = [
 
 [[package]]
 name = "zenpixels-convert"
-version = "0.2.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf516a64a98f08fa2aa19e86f1389e49894f750441044d65369687cf88a1b8dd"
+version = "0.3.1"
+source = "git+https://github.com/imazen/zenpixels?rev=f23ac7535be1144a22d0dc6b71f866a08b151f34#f23ac7535be1144a22d0dc6b71f866a08b151f34"
 dependencies = [
  "archmage",
  "bytemuck",
