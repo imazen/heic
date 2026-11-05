@@ -965,7 +965,7 @@ impl HeicDecoder<'_> {
                     let pb = PixelBuffer::from_pixels_erased(pixels, w, h)
                         .map_err_at(|_| HeicError::InvalidData("pixel count mismatch"))?
                         .with_descriptor(desc);
-                    (pb, w, h, true)
+                    (state_widened_depth(pb, frame.bit_depth), w, h, true)
                 } else {
                     let desc = cicp_descriptor(
                         PixelDescriptor::RGB16_SRGB,
@@ -977,7 +977,7 @@ impl HeicDecoder<'_> {
                     let pb = PixelBuffer::from_pixels_erased(pixels, w, h)
                         .map_err_at(|_| HeicError::InvalidData("pixel count mismatch"))?
                         .with_descriptor(desc);
-                    (pb, w, h, false)
+                    (state_widened_depth(pb, frame.bit_depth), w, h, false)
                 }
             } else {
                 // 8-bit path: use negotiated layout for decode.
@@ -1289,9 +1289,10 @@ impl HeicStreamDecoder {
                     .collect();
                 let w = frame.cropped_width();
                 let h = frame.cropped_height();
-                PixelBuffer::from_pixels_erased(pixels, w, h)
+                let widened = PixelBuffer::from_pixels_erased(pixels, w, h)
                     .map_err_at(|_| HeicError::InvalidData("pixel count mismatch"))?
-                    .with_descriptor(desc)
+                    .with_descriptor(desc);
+                state_widened_depth(widened, frame.bit_depth)
             } else {
                 let desc = cicp_descriptor(
                     PixelDescriptor::RGB16_SRGB,
@@ -1302,9 +1303,10 @@ impl HeicStreamDecoder {
                 let pixels = u16_vec_to_rgb(rgb_data);
                 let w = frame.cropped_width();
                 let h = frame.cropped_height();
-                PixelBuffer::from_pixels_erased(pixels, w, h)
+                let widened = PixelBuffer::from_pixels_erased(pixels, w, h)
                     .map_err_at(|_| HeicError::InvalidData("pixel count mismatch"))?
-                    .with_descriptor(desc)
+                    .with_descriptor(desc);
+                state_widened_depth(widened, frame.bit_depth)
             }
         } else {
             let layout = descriptor_to_layout(negotiated);
@@ -2191,6 +2193,17 @@ fn probe_error_to_heic(e: At<crate::ProbeError>) -> At<HeicError> {
 /// Reinterpret `Vec<u16>` as `Vec<Rgb<u16>>` via bytemuck.
 /// Zero-copy when alignment is compatible (always for u16→Rgb<u16>),
 /// falls back to a single memcpy otherwise.
+/// States that `to_rgb16` or `to_rgba16` widened these samples from `bits`-bit
+/// codes: both round to nearest full scale, and alpha uses the frame's depth.
+/// A refusal means no depth was stated, which only loses the evidence.
+fn state_widened_depth(mut buffer: PixelBuffer, bits: u8) -> PixelBuffer {
+    use zenpixels::{SignalRange, sample::ExactDepth};
+    if let Ok(exact) = ExactDepth::new(zenpixels::ChannelType::U16, SignalRange::Full, bits, bits) {
+        let _ = buffer.set_exact_depth(Some(exact));
+    }
+    buffer
+}
+
 fn u16_vec_to_rgb(data: alloc::vec::Vec<u16>) -> alloc::vec::Vec<Rgb<u16>> {
     match bytemuck::try_cast_vec(data) {
         Ok(pixels) => pixels,

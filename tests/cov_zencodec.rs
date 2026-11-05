@@ -41,15 +41,8 @@ const EXAMPLE_H: u32 = 854;
 /// A small synthetic single-image HEIC (non-grid path).
 const SYNTH_REL: &str = "synthetic/synth_8bit_q95.heic";
 
-// NOTE: the adapter's 16-bit decode branch (RGB16/RGBA16 via `to_rgb16`/
-// `to_rgba16`) is NOT exercised here because the committed corpus has no
-// 16-bit primary image that this build can decode: the `uncompressed_*_16*`
-// fixtures need 16-bit unci component support (currently "only 8-bit unsigned
-// integer components supported"), and the apple-hdr sample's *primary* image
-// is 8-bit HEVC (the 10-bit data lives in the gain-map auxiliary). The 16-bit
-// path is therefore a documented coverage gap pending a 10-bit HEVC primary
-// fixture. The 16-bit descriptors are still asserted as *advertised* in
-// `formats_and_descriptors_advertised`.
+// The adapter's 16-bit decode branch is covered through `features/depth10.heic`,
+// the corpus's 10-bit HEVC primary: see `ten_bit_primary_states_its_depth`.
 
 fn read_fixture(rel: &str) -> Vec<u8> {
     let path = testdata_dir().join(rel);
@@ -1174,4 +1167,40 @@ fn estimate_decode_resources_models_peak_and_time() {
         est_large.wall_ms() >= est_small.wall_ms(),
         "larger image must not be estimated faster"
     );
+}
+
+/// The widened U16 exit says which depth it came from, and every sample keeps
+/// to that grid. An 8-bit preference is the caller's choice and states nothing.
+#[test]
+fn ten_bit_primary_states_its_depth() {
+    let data = std::fs::read(testdata_dir().join("features/depth10.heic")).unwrap();
+    let output = HeicDecoderConfig::new()
+        .job()
+        .decoder(Cow::Borrowed(&data), &[])
+        .unwrap()
+        .decode()
+        .unwrap();
+    let pixels = output.pixels();
+    assert_eq!(
+        pixels.descriptor().channel_type(),
+        zenpixels::ChannelType::U16
+    );
+    assert_eq!(output.info().source_color.bit_depth, Some(10));
+    let exact = pixels.exact_depth().expect("widened samples state a depth");
+    assert!(exact.color_exact_at(10));
+    for y in 0..pixels.rows() {
+        for sample in pixels.row(y).as_chunks::<2>().0 {
+            let sample = u32::from(u16::from_ne_bytes(*sample));
+            let code = (sample * 1023 + 32767) / 65535;
+            assert_eq!((code * 65535 + 511) / 1023, sample, "row {y}");
+        }
+    }
+
+    let narrowed = HeicDecoderConfig::new()
+        .job()
+        .decoder(Cow::Borrowed(&data), &[PixelDescriptor::RGB8_SRGB])
+        .unwrap()
+        .decode()
+        .unwrap();
+    assert_eq!(narrowed.pixels().exact_depth(), None);
 }
