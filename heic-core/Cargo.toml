@@ -15,6 +15,7 @@ std = ["archmage/std"]
 fallible-alloc = []
 
 [dependencies]
+bytemuck = { version = "1.25.2", default-features = false, features = ["extern_crate_alloc"] }
 enough = { workspace = true }
 whereat = { workspace = true }
 archmage = { version = ">=0.9.29, <=0.9.31-beta.1", default-features = false, features = ["macros"] }

@@ -156,11 +156,14 @@ whereat::define_at_crate_info!();
 ///
 /// With `fallible-alloc` feature: uses `try_reserve` + `resize` (never panics on OOM).
 /// Without `fallible-alloc` (default): uses `vec![val; len]` (fast memset path,
-/// panics on OOM like standard Rust, but wraps result in `Ok`).
+/// uses the allocation-error handler on OOM like standard Rust, but wraps result in `Ok`).
 ///
 /// Always returns `Result<Vec<T>, HevcError>` so callers use `try_vec![...; ...]?`
 /// — the `?` is visible at the call site, not hidden in the macro.
 macro_rules! try_vec {
+    (0u16; $len:expr) => { $crate::alloc_hevc_zeroed::<u16>($len) };
+    (0u32; $len:expr) => { $crate::alloc_hevc_zeroed::<u32>($len) };
+    (false; $len:expr) => { $crate::alloc_hevc_zeroed::<bool>($len) };
     ($val:expr; $len:expr) => {{
         #[cfg(feature = "fallible-alloc")]
         {
@@ -171,6 +174,19 @@ macro_rules! try_vec {
             Ok::<::alloc::vec::Vec<_>, $crate::error::HevcError>(::alloc::vec![$val; $len])
         }
     }};
+}
+
+/// Allocate only values with a valid all-zero representation.
+pub(crate) fn alloc_hevc_zeroed<T: bytemuck::Zeroable>(
+    len: usize,
+) -> core::result::Result<alloc::vec::Vec<T>, error::HevcError> {
+    bytemuck::allocation::try_zeroed_vec(len).map_err(|()| {
+        if !cfg!(feature = "fallible-alloc") {
+            let layout = core::alloc::Layout::array::<T>(len).expect("capacity overflow");
+            alloc::alloc::handle_alloc_error(layout);
+        }
+        error::HevcError::AllocationFailed
+    })
 }
 
 /// Fallible vec allocation — called by `try_vec!` when `fallible-alloc` is enabled.

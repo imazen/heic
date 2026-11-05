@@ -8,6 +8,17 @@ use crate::try_vec;
 
 type Result<T> = core::result::Result<T, HevcError>;
 
+/// Allocate only values with a valid all-zero representation.
+fn zeroed_vec<T: bytemuck::Zeroable>(len: usize) -> Result<Vec<T>> {
+    bytemuck::allocation::try_zeroed_vec(len).map_err(|()| {
+        if !cfg!(feature = "fallible-alloc") {
+            let layout = core::alloc::Layout::array::<T>(len).expect("capacity overflow");
+            alloc::alloc::handle_alloc_error(layout);
+        }
+        HevcError::AllocationFailed
+    })
+}
+
 /// Sentinel value for uninitialized pixels.
 ///
 /// The pure-Rust decoder uses this during decoding to distinguish decoded
@@ -124,8 +135,8 @@ impl DecodedFrame {
         let y_plane = try_vec![UNINIT_SAMPLE; luma_size]?;
         let cb_plane = try_vec![UNINIT_SAMPLE; chroma_size]?;
         let cr_plane = try_vec![UNINIT_SAMPLE; chroma_size]?;
-        let deblock_flags = try_vec![0u8; deblock_size]?;
-        let qp_map = try_vec![0i8; deblock_size]?;
+        let deblock_flags = zeroed_vec(deblock_size)?;
+        let qp_map = zeroed_vec(deblock_size)?;
 
         Ok(Self {
             width,
@@ -418,7 +429,7 @@ impl DecodedFrame {
     ///
     /// Uses SIMD-accelerated conversion for 4:2:0 chroma (AVX2 on x86-64).
     pub fn to_rgb(&self) -> Result<Vec<u8>> {
-        let mut rgb = try_vec![0u8; self.total_cropped_bytes(3)]?;
+        let mut rgb = zeroed_vec(self.total_cropped_bytes(3))?;
         let shift = self.bit_depth - 8;
 
         let y_start = self.crop_top;
@@ -968,7 +979,7 @@ impl DecodedFrame {
     /// instead of truncating to 8-bit.
     pub fn to_rgb16(&self) -> Result<Vec<u16>> {
         let total_elems = self.total_cropped_bytes(3); // pixels * 3 channels
-        let mut rgb = try_vec![0u16; total_elems]?;
+        let mut rgb = zeroed_vec(total_elems)?;
 
         let y_start = self.crop_top;
         let y_end = self.height.saturating_sub(self.crop_bottom);
@@ -1240,6 +1251,19 @@ mod tests {
     /// Verify that total_cropped_pixels uses u64 arithmetic, not u32.
     /// Before the fix, `(65536u32 * 65536u32)` would overflow u32 to 0.
     /// After the fix, it correctly computes 4,294,967,296 via u64.
+    #[test]
+    fn zero_only_buffers_preserve_sentinel_frames() {
+        let frame = DecodedFrame::with_params(16, 16, 8, 1).unwrap();
+        assert!(frame.y_plane.iter().all(|&sample| sample == UNINIT_SAMPLE));
+        let values = zeroed_vec::<u16>(4097).unwrap();
+        assert_eq!(values.len(), 4097);
+        assert!(values.iter().all(|&sample| sample == 0));
+        let zst = zeroed_vec::<()>(usize::MAX).unwrap();
+        assert_eq!(zst.len(), usize::MAX);
+        #[cfg(feature = "fallible-alloc")]
+        assert!(zeroed_vec::<u16>(usize::MAX).is_err());
+    }
+
     #[test]
     #[cfg(target_pointer_width = "64")]
     fn total_cropped_pixels_no_u32_overflow() {

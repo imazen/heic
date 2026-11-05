@@ -246,3 +246,10 @@ beta-cohort-check:
     cargo fmt --check
     cargo clippy --locked -p heic -p heic-core --features std,backend-rust --lib -- -D warnings
     cargo test --locked -p heic -p heic-core --features std,backend-rust --lib --no-fail-fast
+
+# Check zero-only HEVC allocations with both allocation policies.
+zeroed-hevc-check:
+    cargo test --locked -p heic-core --features std,fallible-alloc --lib
+    cargo test --locked -p heic-core --features std --lib
+    cargo clippy --locked -p heic -p heic-core --features backend-rust,fallible-alloc --lib -- -D warnings
+    cargo clippy --locked -p heic -p heic-core --features backend-rust --lib -- -D warnings

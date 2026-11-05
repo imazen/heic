@@ -4,6 +4,8 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 ## [Unreleased]
 
+- HEVC zero-only frame maps and transform buffers request allocator-zeroed storage; nonzero sample and prediction sentinels retain their original fills.
+
 - The source policy explicitly admits the pixel repository already pinned in the manifest, retaining denial of other undeclared Git sources.
 
 - Standalone fuzz builds repeat the shared metadata and pixel patches. Production HEIC and UltraHDR buffers select the same pixel types; legacy metric test dependencies remain separate. All fuzz targets and the root inventory library compile with the repaired lockfiles.
