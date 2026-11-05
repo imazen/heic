@@ -4,6 +4,10 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 ## [Unreleased]
 
+### Fixed
+
+- ICC is now the color authority when a `prof` box and `nclx` are both present, matching zenavif and every color-managed reader measured. `nclx` stays available for the matrix and range.
+
 ### Dependency compatibility
 
 - Admit archmage/magetypes 0.9.31-beta.1 in the current-main tool graph while retaining compatible stable requirements (`a33fa848`). Strict library lint and the std/backend-rust library suites pass (84 and 25 tests).

@@ -1778,14 +1778,18 @@ fn build_image_info_lightweight(
 
     // Set CICP if we have non-default values
     if pi.color_primaries != 2 || pi.transfer_characteristics != 2 || pi.matrix_coefficients != 2 {
-        info = info
-            .with_cicp(Cicp::new(
-                pi.color_primaries as u8,
-                pi.transfer_characteristics as u8,
-                pi.matrix_coefficients as u8,
-                pi.video_full_range,
-            ))
-            .with_color_authority(zencodec::ColorAuthority::Cicp);
+        info = info.with_cicp(Cicp::new(
+            pi.color_primaries as u8,
+            pi.transfer_characteristics as u8,
+            pi.matrix_coefficients as u8,
+            pi.video_full_range,
+        ));
+        // ICC outranks nclx when both exist, as AVIF does and as every color-managed
+        // reader measured does, including ImageIO and WIC. nclx still supplies the
+        // matrix and range for the YUV step.
+        if !pi.has_icc_profile {
+            info = info.with_color_authority(zencodec::ColorAuthority::Cicp);
+        }
     }
 
     // Set gain map presence based on probe info
@@ -1836,14 +1840,18 @@ fn build_image_info_full(
 
     // Set CICP if we have non-default values
     if pi.color_primaries != 2 || pi.transfer_characteristics != 2 || pi.matrix_coefficients != 2 {
-        info = info
-            .with_cicp(Cicp::new(
-                pi.color_primaries as u8,
-                pi.transfer_characteristics as u8,
-                pi.matrix_coefficients as u8,
-                pi.video_full_range,
-            ))
-            .with_color_authority(zencodec::ColorAuthority::Cicp);
+        info = info.with_cicp(Cicp::new(
+            pi.color_primaries as u8,
+            pi.transfer_characteristics as u8,
+            pi.matrix_coefficients as u8,
+            pi.video_full_range,
+        ));
+        // ICC outranks nclx when both exist, as AVIF does and as every color-managed
+        // reader measured does, including ImageIO and WIC. nclx still supplies the
+        // matrix and range for the YUV step.
+        if !pi.has_icc_profile {
+            info = info.with_color_authority(zencodec::ColorAuthority::Cicp);
+        }
     }
 
     // Extract all metadata from the pre-parsed container
@@ -2204,6 +2212,43 @@ fn u16_vec_to_rgba(data: alloc::vec::Vec<u16>) -> alloc::vec::Vec<Rgba<u16>> {
 
 #[cfg(test)]
 mod tests {
+    /// ICC outranks nclx when both exist. Readers measured in image-compat round 14
+    /// that use color at all do the same, and AVIF's adapter already does.
+    #[test]
+    fn icc_is_the_authority_when_nclx_and_a_profile_both_exist() {
+        let probe = |has_icc_profile| crate::ImageInfo {
+            width: 1,
+            height: 1,
+            has_alpha: false,
+            bit_depth: 8,
+            chroma_format: 1,
+            has_exif: false,
+            has_xmp: false,
+            has_thumbnail: false,
+            color_primaries: 1,
+            transfer_characteristics: 13,
+            matrix_coefficients: 6,
+            video_full_range: true,
+            has_icc_profile,
+            has_depth: false,
+            has_gain_map: false,
+            exif: None,
+            xmp: None,
+            icc_profile: None,
+        };
+        use zencodec::ColorAuthority::{Cicp, Icc};
+        for (has_icc, want) in [(true, Icc), (false, Cicp)] {
+            let pi = probe(has_icc);
+            let light =
+                super::build_image_info_lightweight(&pi, 1, 1, super::Orientation::Identity);
+            let full = super::build_image_info_full(&pi, None, 1, 1, super::Orientation::Identity);
+            for info in [light, full] {
+                assert_eq!(info.source_color.color_authority, want, "has_icc={has_icc}");
+                assert!(info.source_color.cicp.is_some(), "nclx stays available");
+            }
+        }
+    }
+
     use super::*;
 
     /// ISO 21496-1 tmap payload is the authoritative params source and
