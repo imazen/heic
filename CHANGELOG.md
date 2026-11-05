@@ -4,6 +4,8 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 ## [Unreleased]
 
+- Uncompressed-item output explicitly uses zeroed byte allocation, independent of zencodec. Forward fallible allocation to shared HEVC frame storage, preserving its nonzero sample sentinel. Standalone builds pin zenmeta to the existing shared-contract revision.
+
 ### Fixed
 
 - ICC is now the color authority when a `prof` box and `nclx` are both present, matching zenavif and every color-managed reader measured. `nclx` stays available for the matrix and range.

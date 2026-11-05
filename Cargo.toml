@@ -88,7 +88,7 @@ backend-d3d11va = ["std", "dep:heic-backend-d3d11va"]
 
 # ── Cross-cutting flags ──────────────────────────────────────────────────
 std = ["archmage/std", "heic-core/std", "ultrahdr-core?/std"]
-fallible-alloc = []
+fallible-alloc = ["heic-core/fallible-alloc"]
 parallel = ["std", "dep:rayon"]
 zencodec = [
     "std",
@@ -103,7 +103,7 @@ zencodec = [
 ]
 inventory = ["zencodec"]
 av1 = ["std", "dep:rav1d-safe"]
-unci = ["dep:zenflate"]
+unci = ["dep:zenflate", "dep:bytemuck"]
 image = ["std", "dep:image"]
 
 [dependencies]
@@ -242,6 +242,7 @@ harness = false
 
 # Temporary metadata integration pins; replace with released versions before publication.
 [patch.crates-io]
+zenmeta = { git = "https://github.com/imazen/zencodec", rev = "a51d4119d363678273758f1f196062694175bb1a" }
 zencodec = { git = "https://github.com/imazen/zencodec", rev = "a51d4119d363678273758f1f196062694175bb1a" }
 zencodec-testkit = { git = "https://github.com/imazen/zencodec", rev = "a51d4119d363678273758f1f196062694175bb1a" }
 # zencodec 0.2.0 requires zenpixels >=0.2.17 (registry 0.3.0 is yanked); same

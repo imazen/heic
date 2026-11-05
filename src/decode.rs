@@ -1022,7 +1022,7 @@ fn decode_unci_item(
             // Full decompressed `unci` surface (size bounded above by
             // min(512 MiB, max_memory_bytes)). Untrusted, so default fallible.
             let mut decompressed: Vec<u8> =
-                crate::alloc_util::alloc_filled(limits.alloc_pref, true, expected_size)?;
+                crate::alloc_util::alloc_zeroed(limits.alloc_pref, true, expected_size)?;
 
             let mut decompressor = zenflate::Decompressor::new();
             let result = match &cmp_config.compression_type.0 {

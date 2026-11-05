@@ -98,6 +98,22 @@ pub(crate) fn resolve_fallible(pref: AllocPreference, site_default_fallible: boo
     }
 }
 
+/// Allocate zeroed bytes for the decompressed uncompressed-item surface.
+#[cfg(feature = "unci")]
+pub(crate) fn alloc_zeroed(
+    pref: AllocPreference,
+    site_default_fallible: bool,
+    n: usize,
+) -> Result<Vec<u8>, At<HeicError>> {
+    bytemuck::allocation::try_zeroed_vec(n).map_err(|()| {
+        if !resolve_fallible(pref, site_default_fallible) {
+            let layout = core::alloc::Layout::array::<u8>(n).expect("capacity overflow");
+            alloc::alloc::handle_alloc_error(layout);
+        }
+        at!(HeicError::OutOfMemory)
+    })
+}
+
 /// Allocate `n` elements of `T::default()`, honoring the per-site fallibility.
 ///
 /// `pref` is the caller's [`AllocPreference`]; `site_default_fallible` is this
@@ -111,7 +127,7 @@ pub(crate) fn resolve_fallible(pref: AllocPreference, site_default_fallible: boo
 /// decompressed surface ([`crate::decode`]). The capacity-only sites use
 /// [`vec_with_capacity`] instead, so this helper has no caller when `unci` is
 /// off.
-#[cfg(feature = "unci")]
+#[cfg(all(feature = "unci", test))]
 pub(crate) fn alloc_filled<T: Clone + Default>(
     pref: AllocPreference,
     site_default_fallible: bool,
@@ -183,6 +199,32 @@ mod tests {
     fn explicit_infallible_overrides_any_site_default() {
         assert!(!resolve_fallible(AllocPreference::Infallible, true));
         assert!(!resolve_fallible(AllocPreference::Infallible, false));
+    }
+
+    #[cfg(feature = "unci")]
+    #[test]
+    fn unci_zero_storage_preserves_policy_and_errors() {
+        for pref in [
+            AllocPreference::CodecDefault,
+            AllocPreference::Fallible,
+            AllocPreference::Infallible,
+        ] {
+            for site in [false, true] {
+                for n in [0, 1, 4095, 4096, 4097] {
+                    let v = alloc_zeroed(pref, site, n).unwrap();
+                    assert_eq!(v.len(), n);
+                    assert!(v.iter().all(|&b| b == 0));
+                }
+            }
+        }
+        assert!(alloc_zeroed(AllocPreference::Fallible, true, usize::MAX).is_err());
+    }
+
+    #[cfg(feature = "unci")]
+    #[test]
+    #[should_panic(expected = "capacity overflow")]
+    fn unci_infallible_layout_overflow_panics() {
+        let _ = alloc_zeroed(AllocPreference::Infallible, true, usize::MAX);
     }
 
     #[cfg(feature = "unci")]
