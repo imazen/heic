@@ -4,6 +4,8 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 ## [Unreleased]
 
+- The source policy explicitly admits the pixel repository already pinned in the manifest, retaining denial of other undeclared Git sources.
+
 - Standalone fuzz builds repeat the shared metadata and pixel patches. Production HEIC and UltraHDR buffers select the same pixel types; legacy metric test dependencies remain separate. All fuzz targets and the root inventory library compile with the repaired lockfiles.
 
 - Uncompressed-item output explicitly uses zeroed byte allocation, independent of zencodec. Forward fallible allocation to shared HEVC frame storage, preserving its nonzero sample sentinel. Standalone builds pin zenmeta to the existing shared-contract revision.
