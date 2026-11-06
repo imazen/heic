@@ -2261,6 +2261,10 @@ impl<'a> SliceContext<'a> {
             self.decode_quantization_parameters(x0, y0, cu_x, cu_y);
             // Store QPY in the QP map for neighbor lookups
             self.store_qpy(cu_x, cu_y, cu_log2, self.current_qpy);
+            // Earlier zero-residual TUs in this CU were visited before the
+            // first coded cu_qp_delta. Their deblocking map must receive the
+            // CU's final QPY too (H.265 8.6.1), not retain its predictor.
+            frame.store_block_qp(cu_x, cu_y, 1u32 << cu_log2, self.current_qpy as i8);
         }
 
         // Mark TU boundary and store QP for deblocking

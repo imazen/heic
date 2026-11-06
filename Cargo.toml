@@ -52,6 +52,8 @@ include = [
 autoexamples = false
 
 [features]
+# Explicit caller-selected real portrait depth regression.
+depth-corpus = ["std", "backend-rust"]
 # DEFAULT IS EMPTY. The crate requires at least one HEVC backend feature to
 # compile; default `cargo build` emits a `compile_error!` from src/lib.rs. See
 # the README for the available backends and their target_os requirements.
@@ -115,8 +117,8 @@ heic-backend-d3d11va = { version = "0.2.0", path = "heic-backend-d3d11va", optio
 enough = "0.4.4"
 how-far = "0.1.0"
 whereat = { version = "0.1.5"}
-archmage = { version = ">=0.9.29, <0.10.0", default-features = false, features = ["macros"] }
-magetypes = { version = ">=0.9.29, <0.10.0", default-features = false }
+archmage = { version = ">=0.9.31-beta.2, <0.10.0", default-features = false, features = ["macros"] }
+magetypes = { version = ">=0.9.31-beta.2, <0.10.0", default-features = false }
 safe_unaligned_simd = "0.2.5"
 memchr = { version = "2.8.3", default-features = false }
 rayon = { version = "1.12.0", optional = true }
@@ -134,10 +136,12 @@ imgref = { version = "1.12.3", optional = true }
 garb = { version = "0.2.8", default-features = false, optional = true }
 rav1d-safe = { version = "0.6.0", optional = true, default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
 zenflate = { version = "0.4.0", optional = true, default-features = false }
-ultrahdr-core = { version = "0.6.0", git = "https://github.com/imazen/ultrahdr", rev = "7e9d296c9e037e626234c9f0e8673d48278f83f0", optional = true, default-features = false, features = ["f16"] }
+ultrahdr-core = { version = "0.6.0", git = "https://github.com/imazen/ultrahdr", rev = "174b1aff22b76ce2f8963e221edb94b50f84d823", optional = true, default-features = false, features = ["f16"] }
 image = { version = "0.25.10", default-features = false, optional = true }
 
 [dev-dependencies]
+codec-corpus = "1.1.0"
+sha2 = "0.11.1"
 zenbench = "0.1.10"
 criterion = { version = "0.8.2", default-features = false, features = ["plotters", "cargo_bench_support"] }
 fast-ssim2 = { version = "0.8.2", features = ["imgref"] }
@@ -241,13 +245,19 @@ harness = false
 
 # Temporary metadata integration pins; replace with released versions before publication.
 [patch.crates-io]
-zenmeta = { git = "https://github.com/imazen/zencodec", rev = "a51d4119d363678273758f1f196062694175bb1a" }
-zencodec = { git = "https://github.com/imazen/zencodec", rev = "a51d4119d363678273758f1f196062694175bb1a" }
-zencodec-testkit = { git = "https://github.com/imazen/zencodec", rev = "a51d4119d363678273758f1f196062694175bb1a" }
+zenmeta = { git = "https://github.com/imazen/zencodec", rev = "1fb997bb88e7405e6a315bf1f0b22f71e99be272" }
+zencodec = { git = "https://github.com/imazen/zencodec", rev = "1fb997bb88e7405e6a315bf1f0b22f71e99be272" }
+zencodec-testkit = { git = "https://github.com/imazen/zencodec", rev = "1fb997bb88e7405e6a315bf1f0b22f71e99be272" }
 # zencodec 0.2.0 requires zenpixels >=0.2.17 (registry 0.3.0 is yanked); same
 # rev zenavif's table uses. Drop at the zenpixels 0.3.x publish.
-zenpixels = { git = "https://github.com/imazen/zenpixels", rev = "f23ac7535be1144a22d0dc6b71f866a08b151f34" }
-zenpixels-convert = { git = "https://github.com/imazen/zenpixels", rev = "f23ac7535be1144a22d0dc6b71f866a08b151f34" }
+zenpixels = { git = "https://github.com/imazen/zenpixels", rev = "fde59b96632557592cffa9b7301acd8db96ed078" }
+zenpixels-convert = { git = "https://github.com/imazen/zenpixels", rev = "fde59b96632557592cffa9b7301acd8db96ed078" }
+
+linear-srgb = { git = "https://github.com/imazen/linear-srgb", rev = "52896f4b24664315586bd60e5f048253b1f69052" }
+
+garb = { git = "https://github.com/imazen/garb", rev = "605276d717ea0b31a1cd2a36ae05301383c7b8b5" }
+
+zentone = { git = "https://github.com/imazen/zentone", rev = "4b5ab710157743e3018b7de3a79f336c2f61113e" }
 
 [[example]]
 name = "gm20_probe"
@@ -256,3 +266,7 @@ required-features = ["zencodec", "backend-rust"]
 [[example]]
 name = "inventory"
 required-features = ["backend-rust", "inventory"]
+
+[[test]]
+name = "depth_bounded"
+required-features = ["depth-corpus"]

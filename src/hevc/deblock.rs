@@ -69,8 +69,16 @@ fn trace_edge(
     // helper safe to call from production code with the trace
     // toggle accidentally left on (server boxes with restricted
     // tmpfs would otherwise crash on the first deblock edge).
-    static TRACE_FILE: LazyLock<Mutex<Option<std::fs::File>>> =
-        LazyLock::new(|| Mutex::new(std::fs::File::create("/tmp/our_deblock_trace.txt").ok()));
+    static TRACE_FILE: LazyLock<Mutex<Option<std::fs::File>>> = LazyLock::new(|| {
+        Mutex::new(
+            std::fs::File::create(
+                std::env::var_os("HEIC_DEBLOCK_TRACE_PATH")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| std::env::temp_dir().join("our_deblock_trace.txt")),
+            )
+            .ok(),
+        )
+    });
     let mut guard = match TRACE_FILE.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),

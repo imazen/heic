@@ -253,3 +253,7 @@ zeroed-hevc-check:
     cargo test --locked -p heic-core --features std --lib
     cargo clippy --locked -p heic -p heic-core --features backend-rust,fallible-alloc --lib -- -D warnings
     cargo clippy --locked -p heic -p heic-core --features backend-rust --lib -- -D warnings
+
+# Pinned real portrait, exact sample-code oracle and depth representation.
+depth-corpus *CARGO_ARGS:
+    cargo test {{CARGO_ARGS}} --no-default-features --features depth-corpus --test depth_bounded

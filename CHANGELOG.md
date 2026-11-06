@@ -4,6 +4,17 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 ## [Unreleased]
 
+### QUEUED BREAKING CHANGES
+
+None.
+
+- Correct deblocking QP for zero-residual TUs preceding a CU's coded QP delta;
+  the portrait depth plane now matches the independent libheif oracle exactly.
+- Add `DecoderConfig::decode_depth_with_limits`, with cancellation, caller
+  limits and strict length-prefixed HEVC depth-representation SEI parsing.
+- Admit the current pixel cohort's published archmage/magetypes beta.2 and
+  compatible stable 0.9 releases in the depth consumer graph.
+
 - U16 decodes state `ExactDepth` at the frame's depth, so a later step can tell a 10-bit source from full 16-bit samples. Covers `to_rgb16` and `to_rgba16` output through the zencodec adapter.
 
 - HEVC zero-only frame maps and transform buffers request allocator-zeroed storage; nonzero sample and prediction sentinels retain their original fills.
@@ -82,6 +93,9 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 - **`zencodec` bumped to the released `0.1.26`, `zencodec-testkit` to the released `0.1.0`** (`Cargo.toml`, `deny.toml`), which ship the two-level origin-first `ErrorCategory` reshape (PR #116) this feature adopts. Both now resolve from crates.io as plain version deps: the temporary `[patch.crates-io]` zencodec git pin (used while 0.1.26 was unreleased, then briefly retained tag-pinned to `v0.1.26` for graph unification while `zencodec-testkit` was still git-only) is fully removed, along with `deny.toml`'s matching `imazen/zencodec` allow-git entry. The published `zencodec-testkit 0.1.0` declares `zencodec ^0.1.26`, so both deps unify on a single registry crate instance with no patch.
 
 ### Changed
+
+- Pin standalone codec/pixel operation dependencies to the verified saliency consumer cohort.
+  Full standalone resolution still needs other optional/dev crates to admit SIMD beta.2.
 
 - Accept the archmage and magetypes 0.9.31 stable release.
 - `av1` feature: `rav1d-safe` 0.5 → 0.6; `unci` feature: `zenflate` 0.3 → 0.4. Neither appears in heic's public API; both need Rust 1.89, as heic does (db53554).
