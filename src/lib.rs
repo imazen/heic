@@ -1305,6 +1305,26 @@ impl DecoderConfig {
         decode::decode_depth(data, self.backends())
     }
 
+    /// Decode embedded depth with caller limits and cooperative cancellation.
+    ///
+    /// Requires explicit, valid HEVC depth representation SEI in auxC. Unlike
+    /// the legacy helper, missing or malformed representation metadata is an
+    /// error. The depth item's own clean aperture and orientation transforms
+    /// are applied, giving display-oriented samples without color conversion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for missing/unsupported depth, invalid representation,
+    /// exceeded limits, cancellation, or an underlying decode failure.
+    pub fn decode_depth_with_limits(
+        &self,
+        data: &[u8],
+        limits: &Limits,
+        stop: &dyn enough::Stop,
+    ) -> Result<DepthMap> {
+        decode::decode_depth_with_options(data, self.backends(), limits, stop, true)
+    }
+
     /// Decode a specific auxiliary image by item ID.
     ///
     /// Use [`auxiliary_images`](Self::auxiliary_images) to discover item IDs,
