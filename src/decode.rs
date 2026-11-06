@@ -2450,9 +2450,20 @@ pub(crate) fn has_depth(data: &[u8]) -> Result<bool> {
 
 /// Decode the depth map auxiliary image.
 pub(crate) fn decode_depth(data: &[u8], backends: &[crate::Backend]) -> Result<crate::DepthMap> {
-    use crate::auxiliary::{AuxiliaryImageType, parse_depth_representation_info};
+    decode_depth_with_options(data, backends, &Limits::default(), &Unstoppable, false)
+}
 
-    let container = heif::parse(data, &Unstoppable)?;
+pub(crate) fn decode_depth_with_options(
+    data: &[u8],
+    backends: &[crate::Backend],
+    limits: &Limits,
+    stop: &dyn Stop,
+    strict: bool,
+) -> Result<crate::DepthMap> {
+    use crate::auxiliary::{parse_auxc_depth_info, parse_depth_representation_info};
+    check_stop(stop)?;
+
+    let container = heif::parse(data, stop)?;
     let primary_item = container
         .primary_item()
         .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
@@ -2477,30 +2488,38 @@ pub(crate) fn decode_depth(data: &[u8], backends: &[crate::Backend]) -> Result<c
         .get_item(depth_id)
         .ok_or_else(|| at!(HeicError::InvalidData("depth item not found")))?;
 
-    // Parse depth representation info from auxC subtype data
-    let depth_info = depth_item
+    let subtype = depth_item
         .auxiliary_type_property
         .as_ref()
-        .map(|atp| {
-            let _ = AuxiliaryImageType::from_urn(&atp.aux_type); // validates it's depth
-            parse_depth_representation_info(&atp.subtype_data)
-        })
-        .unwrap_or_default();
-
+        .map(|p| p.subtype_data.as_slice())
+        .unwrap_or(&[]);
+    limits.check_memory(subtype.len() as u64)?;
+    let depth_info = if strict || (subtype.len() >= 4 && subtype[0] == 0) {
+        parse_auxc_depth_info(subtype)?
+    } else {
+        // Compatibility for callers of the historical unbounded helper. The
+        // strict bounded entry point never guesses a representation.
+        parse_depth_representation_info(subtype)
+    };
+    if let Some((w, h)) = depth_item.dimensions {
+        limits.check_dimensions(w, h)?;
+    }
     // Decode the depth image using the same item decode pipeline
     let counter = DerivedCounter::new(0);
     let frame = decode_item(
         &container,
         &depth_item,
         DecodeBudget::root(&counter, backends),
-        &Limits::default(),
-        &Unstoppable,
+        limits,
+        stop,
         None,
     )?;
 
     let width = frame.cropped_width();
     let height = frame.cropped_height();
     let bit_depth = frame.bit_depth;
+    limits.check_dimensions(width, height)?;
+    check_stop(stop)?;
 
     // Extract the Y (luma) plane as the grayscale depth data
     let total_pixels = (width as usize)

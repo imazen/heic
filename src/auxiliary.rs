@@ -12,6 +12,9 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+mod sei;
+pub(crate) use sei::parse as parse_auxc_depth_info;
+
 /// Identifies the type of an auxiliary image in a HEIF container.
 ///
 /// Auxiliary images are linked to the primary image via `auxl` references

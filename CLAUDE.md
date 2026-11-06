@@ -464,6 +464,15 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 
 ## Known Bugs
 
+### FIXED 2026-11-06: late CU QP delta left stale deblocking QP on earlier TUs
+
+Zero-residual TUs visited before a CU's first coded QP delta retained the
+predicted QP in the frame deblocking map. Update that whole CU when the delta
+is decoded. The pinned portrait depth fixture differed from libheif by 1 at
+12 of 442,368 samples before the fix and matches every sample afterward.
+`tests/depth_bounded.rs` checks the exact little-endian u16 plane hash and
+explicit SEI disparity metadata. Run through `just depth-corpus`.
+
 ### Fixed during metadata integration: inventory fixture walker overflowed on i686
 
 The PR 57 mutation helper checked a declared box end with `p + size`.

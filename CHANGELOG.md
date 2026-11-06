@@ -4,6 +4,17 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 ## [Unreleased]
 
+### QUEUED BREAKING CHANGES
+
+None.
+
+- Correct deblocking QP for zero-residual TUs preceding a CU's coded QP delta;
+  the portrait depth plane now matches the independent libheif oracle exactly.
+- Add `DecoderConfig::decode_depth_with_limits`, with cancellation, caller
+  limits and strict length-prefixed HEVC depth-representation SEI parsing.
+- Admit the current pixel cohort's published archmage/magetypes beta.2 and
+  compatible stable 0.9 releases in the depth consumer graph.
+
 - U16 decodes state `ExactDepth` at the frame's depth, so a later step can tell a 10-bit source from full 16-bit samples. Covers `to_rgb16` and `to_rgba16` output through the zencodec adapter.
 
 - HEVC zero-only frame maps and transform buffers request allocator-zeroed storage; nonzero sample and prediction sentinels retain their original fills.
