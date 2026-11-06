@@ -94,6 +94,9 @@ None.
 
 ### Changed
 
+- Pin standalone codec/pixel operation dependencies to the verified saliency consumer cohort.
+  Full standalone resolution still needs other optional/dev crates to admit SIMD beta.2.
+
 - Accept the archmage and magetypes 0.9.31 stable release.
 - `av1` feature: `rav1d-safe` 0.5 → 0.6; `unci` feature: `zenflate` 0.3 → 0.4. Neither appears in heic's public API; both need Rust 1.89, as heic does (db53554).
 - Dependency floors raised to the tested versions across the workspace (`archmage`/`magetypes` 0.9.29, `rayon` 1.12.0, `bytemuck` 1.25.2, backend crates' `windows`/`objc2` requirements). `ultrahdr-core` 0.6 needs Rust 1.92 and stays on its git patch (d0d481e).
