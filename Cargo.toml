@@ -129,7 +129,7 @@ imgref = { version = "1.12.3", optional = true }
 garb = { version = "0.2.8", default-features = false, optional = true }
 rav1d-safe = { version = "0.6.0", optional = true, default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
 zenflate = { version = "0.4.0", optional = true, default-features = false }
-ultrahdr-core = { version = "0.6.0", git = "https://github.com/imazen/ultrahdr", rev = "7e9d296c9e037e626234c9f0e8673d48278f83f0", optional = true, default-features = false, features = ["f16"] }
+ultrahdr-core = { version = "0.6.0", git = "https://github.com/imazen/ultrahdr", rev = "ade3c857f5541aaff3828e0c7fad073bfe109fd9", optional = true, default-features = false, features = ["f16"] }
 image = { version = "0.25.10", default-features = false, optional = true }
 
 [dev-dependencies]
