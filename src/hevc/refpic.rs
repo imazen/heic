@@ -126,12 +126,20 @@ pub fn parse_short_term_rps(
         // Collect all delta POC values from the reference set
         let mut ref_delta_pocs = [0i32; 32];
         let mut ref_count = 0;
-        for i in 0..ref_set.num_negative_pics as usize {
-            ref_delta_pocs[ref_count] = ref_set.delta_poc_s0[i];
+        for &delta in ref_set
+            .delta_poc_s0
+            .iter()
+            .take(ref_set.num_negative_pics as usize)
+        {
+            ref_delta_pocs[ref_count] = delta;
             ref_count += 1;
         }
-        for i in 0..ref_set.num_positive_pics as usize {
-            ref_delta_pocs[ref_count] = ref_set.delta_poc_s1[i];
+        for &delta in ref_set
+            .delta_poc_s1
+            .iter()
+            .take(ref_set.num_positive_pics as usize)
+        {
+            ref_delta_pocs[ref_count] = delta;
             ref_count += 1;
         }
 

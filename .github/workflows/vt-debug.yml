@@ -31,8 +31,6 @@ on:
         type: choice
         options:
           - 'macos-latest'
-          - 'macos-15-intel'
-          - 'macos-13'
       test_filter:
         description: 'Test-name filter (passed to `cargo test ... <filter>`)'
         required: false

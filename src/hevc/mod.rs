@@ -540,11 +540,19 @@ impl VideoDecoder {
                 };
                 // Compute the set of POC values referenced by this picture
                 let mut ref_pocs = Vec::new();
-                for i in 0..active_rps.num_negative_pics as usize {
-                    ref_pocs.push(curr_poc + active_rps.delta_poc_s0[i]);
+                for &delta in active_rps
+                    .delta_poc_s0
+                    .iter()
+                    .take(active_rps.num_negative_pics as usize)
+                {
+                    ref_pocs.push(curr_poc + delta);
                 }
-                for i in 0..active_rps.num_positive_pics as usize {
-                    ref_pocs.push(curr_poc + active_rps.delta_poc_s1[i]);
+                for &delta in active_rps
+                    .delta_poc_s1
+                    .iter()
+                    .take(active_rps.num_positive_pics as usize)
+                {
+                    ref_pocs.push(curr_poc + delta);
                 }
                 self.dpb.mark_unused(&ref_pocs);
             }
@@ -606,8 +614,10 @@ impl VideoDecoder {
             // Determine which DPB slots are actually referenced
             let mut needed = [false; 16]; // MAX_DPB_SIZE
             for list in 0..2 {
-                for i in 0..ref_pic_lists.num_ref_idx_active[list] as usize {
-                    let di = ref_pic_lists.dpb_index[list][i];
+                for &di in ref_pic_lists.dpb_index[list]
+                    .iter()
+                    .take(ref_pic_lists.num_ref_idx_active[list] as usize)
+                {
                     if di >= 0 && (di as usize) < needed.len() {
                         needed[di as usize] = true;
                     }

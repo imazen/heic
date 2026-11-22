@@ -264,12 +264,12 @@ impl ScalingListData {
             28, 33, 33, 33, 33, 33, 41, 41, 41, 41, 54, 54, 54, 71, 71, 91,
         ];
 
-        for size_id in 1..4 {
-            for matrix_id in 0..3 {
-                data.lists[size_id][matrix_id] = DEFAULT_INTRA_8X8;
+        for matrices in &mut data.lists[1..4] {
+            for matrix in &mut matrices[0..3] {
+                *matrix = DEFAULT_INTRA_8X8;
             }
-            for matrix_id in 3..6 {
-                data.lists[size_id][matrix_id] = DEFAULT_INTER_8X8;
+            for matrix in &mut matrices[3..6] {
+                *matrix = DEFAULT_INTER_8X8;
             }
         }
 
@@ -1197,8 +1197,8 @@ fn parse_profile_tier_level(
         ptl.general_tier_flag = reader.read_bit()? != 0;
         ptl.general_profile_idc = reader.read_bits(5)? as u8;
 
-        for i in 0..32 {
-            ptl.general_profile_compatibility_flag[i] = reader.read_bit()? != 0;
+        for flag in &mut ptl.general_profile_compatibility_flag {
+            *flag = reader.read_bit()? != 0;
         }
 
         ptl.general_progressive_source_flag = reader.read_bit()? != 0;
@@ -1288,10 +1288,10 @@ fn parse_scaling_list_data(reader: &mut BitstreamReader<'_>) -> Result<ScalingLi
                     next_coef = dc_coef_minus8 + 8;
                     data.dc_coef[size_id - 2][matrix_id] = ((next_coef + 256) % 256) as u8;
                 }
-                for i in 0..coef_num {
+                for slot in data.lists[size_id][matrix_id].iter_mut().take(coef_num) {
                     let delta = reader.read_se()?;
                     next_coef = (next_coef.wrapping_add(delta).wrapping_add(256)) & 255;
-                    data.lists[size_id][matrix_id][i] = next_coef as u8;
+                    *slot = next_coef as u8;
                 }
             }
             matrix_id += matrix_step;

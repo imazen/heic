@@ -697,13 +697,21 @@ fn count_curr_pics(sps: &Sps, rps_idx: u8, inline_rps: &Option<refpic::ShortTerm
     };
 
     let mut count = 0u32;
-    for i in 0..rps.num_negative_pics as usize {
-        if rps.used_by_curr_pic_s0[i] {
+    for &used in rps
+        .used_by_curr_pic_s0
+        .iter()
+        .take(rps.num_negative_pics as usize)
+    {
+        if used {
             count += 1;
         }
     }
-    for i in 0..rps.num_positive_pics as usize {
-        if rps.used_by_curr_pic_s1[i] {
+    for &used in rps
+        .used_by_curr_pic_s1
+        .iter()
+        .take(rps.num_positive_pics as usize)
+    {
+        if used {
             count += 1;
         }
     }
@@ -762,12 +770,15 @@ fn parse_pred_weight_table(
     };
 
     // L0 flags
-    for i in 0..num_ref_l0 as usize {
-        wt.luma_weight_flag[0][i] = reader.read_bit()? != 0;
+    for flag in wt.luma_weight_flag[0].iter_mut().take(num_ref_l0 as usize) {
+        *flag = reader.read_bit()? != 0;
     }
     if sps.chroma_array_type() != 0 {
-        for i in 0..num_ref_l0 as usize {
-            wt.chroma_weight_flag[0][i] = reader.read_bit()? != 0;
+        for flag in wt.chroma_weight_flag[0]
+            .iter_mut()
+            .take(num_ref_l0 as usize)
+        {
+            *flag = reader.read_bit()? != 0;
         }
     }
 
@@ -806,12 +817,15 @@ fn parse_pred_weight_table(
     // L1 weights/offsets (B-slices only)
     if slice_type == SliceType::B {
         // L1 flags
-        for i in 0..num_ref_l1 as usize {
-            wt.luma_weight_flag[1][i] = reader.read_bit()? != 0;
+        for flag in wt.luma_weight_flag[1].iter_mut().take(num_ref_l1 as usize) {
+            *flag = reader.read_bit()? != 0;
         }
         if sps.chroma_array_type() != 0 {
-            for i in 0..num_ref_l1 as usize {
-                wt.chroma_weight_flag[1][i] = reader.read_bit()? != 0;
+            for flag in wt.chroma_weight_flag[1]
+                .iter_mut()
+                .take(num_ref_l1 as usize)
+            {
+                *flag = reader.read_bit()? != 0;
             }
         }
 

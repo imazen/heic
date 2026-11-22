@@ -4,6 +4,8 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 ## [Unreleased]
 
+- Upgrade `archmage` and `magetypes` to `0.9.33`, refresh `fuzz/Cargo.lock`, fix Clippy 1.100 `needless_range_loop` warnings in `src/hevc/`, remove banned Intel macOS runners from `vt-debug.yml`, and set `CROSS_CONTAINER_OPTS: --security-opt seccomp=unconfined` on the `i686` `cross` CI job.
+
 - U16 decodes state `ExactDepth` at the frame's depth, so a later step can tell a 10-bit source from full 16-bit samples. Covers `to_rgb16` and `to_rgba16` output through the zencodec adapter.
 
 - HEVC zero-only frame maps and transform buffers request allocator-zeroed storage; nonzero sample and prediction sentinels retain their original fills.

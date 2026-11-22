@@ -269,6 +269,8 @@ jobs:
   i686:
     name: Test (i686)
     runs-on: ubuntu-latest
+    env:
+      CROSS_CONTAINER_OPTS: --security-opt seccomp=unconfined
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
