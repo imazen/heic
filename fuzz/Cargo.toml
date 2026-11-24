@@ -19,7 +19,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-zencodec = { git = "https://github.com/imazen/zencodec", rev = "a51d4119d363678273758f1f196062694175bb1a" }
+zencodec = ">=0.2.0, <0.3.0"
 
 [dependencies.heic]
 path = ".."
@@ -77,12 +77,15 @@ test = false
 doc = false
 bench = false
 
+# Standalone roots must repeat the parent family pins.
 [patch.crates-io]
-# Standalone roots must repeat the parent family's patches.
-zenmeta = { git = "https://github.com/imazen/zencodec", rev = "a51d4119d363678273758f1f196062694175bb1a" }
-zenpixels = { git = "https://github.com/imazen/zenpixels", rev = "18afc75f1fd40c7feafeef6deae4df8e97e5e1b9" }
-zenpixels-convert = { git = "https://github.com/imazen/zenpixels", rev = "18afc75f1fd40c7feafeef6deae4df8e97e5e1b9" }
-zencodec = { git = "https://github.com/imazen/zencodec", rev = "a51d4119d363678273758f1f196062694175bb1a" }
+zenpixels = { git = "https://github.com/imazen/zenpixels", rev = "42a0c5c83c5c418950eb528d92d57788f6700bcf" }
+zenpixels-convert = { git = "https://github.com/imazen/zenpixels", rev = "42a0c5c83c5c418950eb528d92d57788f6700bcf" }
+garb = { git = "https://github.com/imazen/garb", rev = "457ff8b9153e9d675a39dc098052b2ffeb6206fa" }
+linear-srgb = { git = "https://github.com/imazen/linear-srgb", rev = "ae83f19426737635fee3dd16f228681019f52585" }
+zencodec = { git = "https://github.com/imazen/zencodec", rev = "037ef59b57ae003f853a5b6624b173edfee22d6a" }
+zenmeta = { git = "https://github.com/imazen/zencodec", rev = "037ef59b57ae003f853a5b6624b173edfee22d6a" }
+ultrahdr-core = { git = "https://github.com/imazen/ultrahdr", rev = "607614ce9b1027edac600b52e61c99fe18f5cb46" }
 
 [[bin]]
 name = "fuzz_inventory"

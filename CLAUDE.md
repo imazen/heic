@@ -464,6 +464,27 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 
 ## Known Bugs
 
+### OPEN 2026-11-23: high-bit RGB16 attenuates chroma
+
+Lossless 10/12-bit 4:2:0, 4:2:2 and 4:4:4 raw planes matched the x265
+input and FFmpeg output. `heic-core/src/frame.rs::ycbcr_to_rgb_native`
+uses 8-bit chroma coefficients with a depth-dependent right shift in
+both full and limited range. This divides the native-depth chroma
+contribution by 4 at 10 bits and 16 at 12 bits. On a limited BT.709
+12-bit `(Y,Cb,Cr)=(480,1536,1760)` sample, the native RGB codes are
+`[229,278,194]`. The floating BT.709 matrix and range give
+`[0,525,0]` after clipping and quantization. This predates the
+zenpixels 0.5 adapter. The fix needs full- and limited-range reference tests.
+
+### OPEN 2026-11-23: auxiliary alpha loses its own depth and registration
+
+`decode_alpha_plane` copies or resizes the auxiliary luma after the
+primary geometry is applied. A code of 30 from an 8-bit alpha paired
+with a 12-bit primary widens to 480 in `to_rgba16` (independent 8-bit
+scaling gives 7710). A spatially varying auxiliary also needs its
+registration mapped through the primary's `irot`/`imir` when baking
+orientation. The current path resizes it to the display dimensions.
+
 ### Fixed during metadata integration: inventory fixture walker overflowed on i686
 
 The PR 57 mutation helper checked a declared box end with `p + size`.

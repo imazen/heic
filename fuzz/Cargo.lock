@@ -191,13 +191,11 @@ checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
 name = "garb"
-version = "0.2.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b968bb36272be4662f264fd123e96915e7dd51c8ca529c2d35f621817ff4207"
+version = "0.2.9"
+source = "git+https://github.com/imazen/garb?rev=457ff8b9153e9d675a39dc098052b2ffeb6206fa#457ff8b9153e9d675a39dc098052b2ffeb6206fa"
 dependencies = [
  "archmage",
- "bytemuck",
- "paste",
+ "magetypes",
 ]
 
 [[package]]
@@ -250,7 +248,6 @@ dependencies = [
  "archmage",
  "bytemuck",
  "enough",
- "garb",
  "heic-core",
  "how-far",
  "imgref",
@@ -343,12 +340,12 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "linear-srgb"
-version = "0.6.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe0e61c33d85bc56dcaf27cdf48ca32b8e34af7236584eb1d8a47316c49e0be1"
+version = "0.6.13"
+source = "git+https://github.com/imazen/linear-srgb?rev=ae83f19426737635fee3dd16f228681019f52585#ae83f19426737635fee3dd16f228681019f52585"
 dependencies = [
  "archmage",
  "bytemuck",
+ "magemath",
  "magetypes",
  "num-traits",
 ]
@@ -379,6 +376,16 @@ dependencies = [
  "scoped-tls",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "magemath"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62f25cb4021b6804927a86171a7263361f19bfce90440967c712c042ce444780"
+dependencies = [
+ "archmage",
+ "magetypes",
 ]
 
 [[package]]
@@ -469,6 +476,12 @@ name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+
+[[package]]
+name = "pastey"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
 name = "pin-project-lite"
@@ -770,7 +783,7 @@ dependencies = [
 [[package]]
 name = "ultrahdr-core"
 version = "0.6.0"
-source = "git+https://github.com/imazen/ultrahdr?rev=b7ec2894ca99398a285c1fd48dce89c2eeccc353#b7ec2894ca99398a285c1fd48dce89c2eeccc353"
+source = "git+https://github.com/imazen/ultrahdr?rev=607614ce9b1027edac600b52e61c99fe18f5cb46#607614ce9b1027edac600b52e61c99fe18f5cb46"
 dependencies = [
  "archmage",
  "bytemuck",
@@ -778,6 +791,7 @@ dependencies = [
  "half",
  "linear-srgb",
  "magetypes",
+ "num-traits",
  "thiserror",
  "whereat",
  "zencodec",
@@ -838,9 +852,10 @@ dependencies = [
 [[package]]
 name = "zencodec"
 version = "0.2.0"
-source = "git+https://github.com/imazen/zencodec?rev=a51d4119d363678273758f1f196062694175bb1a#a51d4119d363678273758f1f196062694175bb1a"
+source = "git+https://github.com/imazen/zencodec?rev=037ef59b57ae003f853a5b6624b173edfee22d6a#037ef59b57ae003f853a5b6624b173edfee22d6a"
 dependencies = [
  "almost-enough",
+ "bytemuck",
  "enough",
  "how-far",
  "libm",
@@ -861,7 +876,7 @@ dependencies = [
 [[package]]
 name = "zenmeta"
 version = "0.1.0"
-source = "git+https://github.com/imazen/zencodec?rev=a51d4119d363678273758f1f196062694175bb1a#a51d4119d363678273758f1f196062694175bb1a"
+source = "git+https://github.com/imazen/zencodec?rev=037ef59b57ae003f853a5b6624b173edfee22d6a#037ef59b57ae003f853a5b6624b173edfee22d6a"
 dependencies = [
  "zencodec",
  "zenpixels",
@@ -869,8 +884,8 @@ dependencies = [
 
 [[package]]
 name = "zenpixels"
-version = "0.3.1"
-source = "git+https://github.com/imazen/zenpixels?rev=18afc75f1fd40c7feafeef6deae4df8e97e5e1b9#18afc75f1fd40c7feafeef6deae4df8e97e5e1b9"
+version = "0.5.0"
+source = "git+https://github.com/imazen/zenpixels?rev=42a0c5c83c5c418950eb528d92d57788f6700bcf#42a0c5c83c5c418950eb528d92d57788f6700bcf"
 dependencies = [
  "bytemuck",
  "imgref",
@@ -880,17 +895,19 @@ dependencies = [
 
 [[package]]
 name = "zenpixels-convert"
-version = "0.3.1"
-source = "git+https://github.com/imazen/zenpixels?rev=18afc75f1fd40c7feafeef6deae4df8e97e5e1b9#18afc75f1fd40c7feafeef6deae4df8e97e5e1b9"
+version = "0.5.0"
+source = "git+https://github.com/imazen/zenpixels?rev=42a0c5c83c5c418950eb528d92d57788f6700bcf#42a0c5c83c5c418950eb528d92d57788f6700bcf"
 dependencies = [
  "archmage",
  "bytemuck",
+ "enough",
  "garb",
  "libm",
  "linear-srgb",
+ "magemath",
  "magetypes",
  "once_cell",
- "paste",
+ "pastey",
  "whereat",
  "zenpixels",
 ]
