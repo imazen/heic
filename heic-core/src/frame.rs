@@ -81,6 +81,10 @@ pub struct DecodedFrame {
     pub crop_bottom: u32,
     /// Alpha plane (optional, from auxiliary alpha image)
     pub alpha_plane: Option<Vec<u16>>,
+    /// Significant bits in the auxiliary alpha plane. A missing value uses the
+    /// primary depth for frames constructed by a backend or application.
+    #[doc(hidden)]
+    pub alpha_bit_depth: Option<u8>,
     /// Video full range flag (from SPS VUI). true = full \[0,255\], false = limited \[16,235\]
     pub full_range: bool,
     /// Matrix coefficients (from SPS VUI). 1=BT.709, 5/6=BT.601, 9=BT.2020, 2=unspecified
@@ -154,6 +158,7 @@ impl DecodedFrame {
             deblock_stride,
             qp_map,
             alpha_plane: None,
+            alpha_bit_depth: None,
             full_range: false,
             matrix_coeffs: 2,
             color_primaries: 2,
@@ -192,6 +197,7 @@ impl DecodedFrame {
             deblock_stride: 0,
             qp_map: Vec::new(),
             alpha_plane: None,
+            alpha_bit_depth: None,
             full_range,
             matrix_coeffs,
             color_primaries: 1,
@@ -541,15 +547,7 @@ impl DecodedFrame {
                 bgra.push(g);
                 bgra.push(r);
 
-                let alpha = if let Some(ref alpha) = self.alpha_plane {
-                    if pixel_idx < alpha.len() {
-                        (alpha[pixel_idx] >> shift).min(255) as u8
-                    } else {
-                        255
-                    }
-                } else {
-                    255
-                };
+                let alpha = self.alpha8(pixel_idx);
                 bgra.push(alpha);
 
                 pixel_idx += 1;
@@ -662,15 +660,7 @@ impl DecodedFrame {
                 let y_val = (self.y_plane[y_idx] >> shift) as i32;
                 let (cb_val, cr_val) = self.get_chroma(x, y, shift);
                 let (r, g, b) = self.ycbcr_to_rgb(y_val, cb_val, cr_val);
-                let alpha = if let Some(ref alpha) = self.alpha_plane {
-                    if pixel_idx < alpha.len() {
-                        (alpha[pixel_idx] >> shift).min(255) as u8
-                    } else {
-                        255
-                    }
-                } else {
-                    255
-                };
+                let alpha = self.alpha8(pixel_idx);
                 if offset + 4 <= output.len() {
                     output[offset] = r;
                     output[offset + 1] = g;
@@ -704,15 +694,7 @@ impl DecodedFrame {
                 let y_val = (self.y_plane[y_idx] >> shift) as i32;
                 let (cb_val, cr_val) = self.get_chroma(x, y, shift);
                 let (r, g, b) = self.ycbcr_to_rgb(y_val, cb_val, cr_val);
-                let alpha = if let Some(ref alpha) = self.alpha_plane {
-                    if pixel_idx < alpha.len() {
-                        (alpha[pixel_idx] >> shift).min(255) as u8
-                    } else {
-                        255
-                    }
-                } else {
-                    255
-                };
+                let alpha = self.alpha8(pixel_idx);
                 if offset + 4 <= output.len() {
                     output[offset] = b;
                     output[offset + 1] = g;
@@ -783,15 +765,7 @@ impl DecodedFrame {
                 rgba.push(g);
                 rgba.push(b);
 
-                let alpha = if let Some(ref alpha) = self.alpha_plane {
-                    if pixel_idx < alpha.len() {
-                        (alpha[pixel_idx] >> shift).min(255) as u8
-                    } else {
-                        255
-                    }
-                } else {
-                    255
-                };
+                let alpha = self.alpha8(pixel_idx);
                 rgba.push(alpha);
 
                 pixel_idx += 1;
@@ -988,7 +962,7 @@ impl DecodedFrame {
         let w = self.width as usize;
 
         let max_val = ((1u32 << self.bit_depth) - 1) as i32;
-        let neutral = 1i32 << (self.bit_depth - 1);
+        let convert = Rgb16Matrix::new(self, max_val);
 
         let mut out_idx = 0;
 
@@ -997,7 +971,7 @@ impl DecodedFrame {
                 let y_idx = y as usize * w + x as usize;
                 let y_val = self.y_plane[y_idx] as i32;
                 let (cb_val, cr_val) = self.get_chroma_native(x, y);
-                let (r, g, b) = self.ycbcr_to_rgb_native(y_val, cb_val, cr_val, max_val, neutral);
+                let (r, g, b) = convert.rgb(y_val, cb_val, cr_val);
                 rgb[out_idx] = scale_to_u16(r, max_val);
                 rgb[out_idx + 1] = scale_to_u16(g, max_val);
                 rgb[out_idx + 2] = scale_to_u16(b, max_val);
@@ -1022,7 +996,8 @@ impl DecodedFrame {
         let x_end = self.width.saturating_sub(self.crop_right);
 
         let max_val = ((1u32 << self.bit_depth) - 1) as i32;
-        let neutral = 1i32 << (self.bit_depth - 1);
+        let convert = Rgb16Matrix::new(self, max_val);
+        let alpha_max = (1i32 << self.alpha_bit_depth.unwrap_or(self.bit_depth)) - 1;
 
         let mut pixel_idx = 0usize;
         for y in y_start..y_end {
@@ -1030,20 +1005,16 @@ impl DecodedFrame {
                 let y_idx = y as usize * self.width as usize + x as usize;
                 let y_val = self.y_plane[y_idx] as i32;
                 let (cb_val, cr_val) = self.get_chroma_native(x, y);
-                let (r, g, b) = self.ycbcr_to_rgb_native(y_val, cb_val, cr_val, max_val, neutral);
+                let (r, g, b) = convert.rgb(y_val, cb_val, cr_val);
                 rgba.push(scale_to_u16(r, max_val));
                 rgba.push(scale_to_u16(g, max_val));
                 rgba.push(scale_to_u16(b, max_val));
 
-                let alpha = if let Some(ref alpha) = self.alpha_plane {
-                    if pixel_idx < alpha.len() {
-                        scale_to_u16(alpha[pixel_idx] as i32, max_val)
-                    } else {
-                        u16::MAX
-                    }
-                } else {
-                    u16::MAX
-                };
+                let alpha = self
+                    .alpha_plane
+                    .as_ref()
+                    .and_then(|plane| plane.get(pixel_idx))
+                    .map_or(u16::MAX, |&a| scale_to_u16(i32::from(a), alpha_max));
                 rgba.push(alpha);
 
                 pixel_idx += 1;
@@ -1109,87 +1080,144 @@ impl DecodedFrame {
         }
     }
 
-    /// YCbCr to RGB at native bit depth. Returns clamped [0, max_val] values.
-    ///
-    /// Works at any bit depth by using the neutral chroma point and max value
-    /// as parameters. Same matrix coefficients as `ycbcr_to_rgb`, but arithmetic
-    /// is scaled for the native bit depth.
-    fn ycbcr_to_rgb_native(
-        &self,
-        y_val: i32,
-        cb_val: i32,
-        cr_val: i32,
-        max_val: i32,
-        neutral: i32,
-    ) -> (i32, i32, i32) {
-        // Clamp samples to the native range up front: out-of-range values can't
-        // be legitimate luma/chroma, and clamping keeps the fixed-point products
-        // below (notably the limited-range Y term scaled by `scale`) within i32.
-        let y_val = y_val.clamp(0, max_val);
-        let cb = cb_val.clamp(0, max_val) - neutral;
-        let cr = cr_val.clamp(0, max_val) - neutral;
+    fn alpha8(&self, index: usize) -> u8 {
+        let shift = self
+            .alpha_bit_depth
+            .unwrap_or(self.bit_depth)
+            .saturating_sub(8);
+        self.alpha_plane
+            .as_ref()
+            .and_then(|plane| plane.get(index))
+            .map_or(255, |&a| (a >> shift).min(255) as u8)
+    }
+}
 
-        if self.full_range {
-            // Full-range: same coefficients as 8-bit, but scaled for bit depth.
-            // Coefficients are ×256 fixed-point of the matrix values.
-            // For N-bit input, we shift by 8 + (bit_depth - 8) = bit_depth.
-            // But the coefficients are designed for 8-bit neutral=128 range,
-            // so we need to adjust: coefficients work on cb/cr centered at 0
-            // with magnitude ±128 (8-bit) or ±512 (10-bit), etc.
-            // The key: coefficient * cb_native / neutral * 128 = coefficient * cb_8bit
-            // So: result = y_val + (coeff * cr + neutral) >> 8
-            // But cr is at native scale, not 8-bit. The coefficients assume 8-bit
-            // cb/cr range. Since neutral = 1 << (bit_depth-1), and for 8-bit
-            // neutral = 128, the cb/cr values are already 4x larger for 10-bit.
-            // The fixed-point coefficients need no change — the shift compensates.
-            let shift = self.bit_depth as i32;
-            let half = 1 << (shift - 1);
-            let (cr_r, cb_g, cr_g, cb_b) = match self.matrix_coeffs {
-                1 => (403, -48, -120, 475), // BT.709
-                9 => (377, -42, -146, 482), // BT.2020
-                _ => (359, -88, -183, 454), // BT.601 (default/unspecified)
+/// Precomputed exact rational coefficients for a frame's native RGB code grid.
+struct Rgb16Matrix {
+    max: i64,
+    neutral: i64,
+    y_offset: i64,
+    y_scale: i64,
+    cr_r: i64,
+    cb_g: i64,
+    cr_g: i64,
+    cb_b: i64,
+    green_factor: i64,
+    divisor: i64,
+    scale: i64,
+    identity: bool,
+}
+
+impl Rgb16Matrix {
+    fn new(frame: &DecodedFrame, max: i32) -> Self {
+        let depth_scale = 1 << (frame.bit_depth - 8);
+        let identity = frame.matrix_coeffs == 0 && frame.chroma_format == 3;
+        if frame.bit_depth == 8 {
+            // Retain established 8-bit rounding when widening to U16.
+            let (y_offset, y_scale, divisor, coefficients) = if frame.full_range {
+                let chroma = match frame.matrix_coeffs {
+                    1 => [403, -48, -120, 475],
+                    9 => [377, -42, -146, 482],
+                    _ => [359, -88, -183, 454],
+                };
+                (0, 256, 256, chroma)
+            } else {
+                let chroma = match frame.matrix_coeffs {
+                    1 => [14744, -1754, -4383, 17373],
+                    9 => [13806, -1541, -5349, 17615],
+                    _ => [13126, -3222, -6686, 16591],
+                };
+                (16, 9576, 8192, chroma)
             };
-            let r = y_val + ((cr_r * cr + half) >> shift);
-            let g = y_val + ((cb_g * cb + cr_g * cr + half) >> shift);
-            let b = y_val + ((cb_b * cb + half) >> shift);
-            (
-                r.clamp(0, max_val),
-                g.clamp(0, max_val),
-                b.clamp(0, max_val),
-            )
-        } else {
-            // Limited-range at native bit depth.
-            // The limited range for N-bit is [16 << (N-8), 235 << (N-8)] for Y,
-            // [16 << (N-8), 240 << (N-8)] for Cb/Cr.
-            let scale = 1 << (self.bit_depth - 8);
-            let y_offset = 16 * scale;
-            // Y_scale = max_val / (219 * scale), C_scale = max_val / (224 * scale)
-            // Using ×8192 fixed-point like the 8-bit version, but with bit_depth shift.
-            let shift = 13 + (self.bit_depth as i32 - 8);
-            let half = 1 << (shift - 1);
-            let (cr_r, cb_g, cr_g, cb_b) = match self.matrix_coeffs {
-                1 => (14744, -1754, -4383, 17373), // BT.709
-                9 => (13806, -1541, -5349, 17615), // BT.2020
-                _ => (13126, -3222, -6686, 16591), // BT.601 (default/unspecified)
+            let [cr_r, cb_g, cr_g, cb_b] = coefficients;
+            return Self {
+                max: i64::from(max),
+                neutral: 128,
+                y_offset,
+                y_scale,
+                cr_r,
+                cb_g,
+                cr_g,
+                cb_b,
+                green_factor: 1,
+                divisor,
+                scale: 1,
+                identity,
             };
-            // The Y scale MUST grow with bit depth. 9576 = round((256/219)·2^13)
-            // is the *8-bit* fixed-point Y scale, valid only at shift==13. Here
-            // `shift = 13 + (bit_depth-8)` grows with depth but 9576 was NOT
-            // rescaled, so luma came out divided by an extra 2^(bit_depth-8):
-            // 10/12-bit limited-range white clipped at ~25% brightness. Multiply
-            // by `scale` (=2^(bit_depth-8)) so white (Y=235·scale) maps to
-            // max_val. The chroma coefficients need no change — native chroma is
-            // already `scale`× larger and the larger `shift` compensates it.
-            let yv = (y_val - y_offset) * 9576 * scale;
-            let r = (yv + cr_r * cr + half) >> shift;
-            let g = (yv + cb_g * cb + cr_g * cr + half) >> shift;
-            let b = (yv + cb_b * cb + half) >> shift;
-            (
-                r.clamp(0, max_val),
-                g.clamp(0, max_val),
-                b.clamp(0, max_val),
-            )
         }
+
+        const ONE: i64 = 10_000;
+        let (kr, kb) = match frame.matrix_coeffs {
+            1 => (2126, 722),
+            9 => (2627, 593),
+            _ => (2990, 1140),
+        };
+        let kg = ONE - kr - kb;
+        // Full range already uses the output code grid. Narrow range uses
+        // 219 luma and 224 chroma steps per 8-bit unit, expanded after the
+        // matrix so that luma and chroma receive the same output scale.
+        let (y_offset, y_scale, chroma_scale, divisor, scale) = if frame.full_range {
+            (0, ONE, 1, ONE, 1)
+        } else {
+            (
+                16 * depth_scale,
+                ONE * 224,
+                219,
+                ONE * 219 * 224 * depth_scale,
+                i64::from(max),
+            )
+        };
+        Self {
+            max: i64::from(max),
+            neutral: 128 * depth_scale,
+            y_offset,
+            y_scale,
+            cr_r: 2 * (ONE - kr) * chroma_scale,
+            cb_g: -2 * kb * (ONE - kb) * chroma_scale,
+            cr_g: -2 * kr * (ONE - kr) * chroma_scale,
+            cb_b: 2 * (ONE - kb) * chroma_scale,
+            green_factor: kg,
+            divisor,
+            scale,
+            identity,
+        }
+    }
+
+    #[inline]
+    fn rgb(&self, y: i32, cb: i32, cr: i32) -> (i32, i32, i32) {
+        let y = i64::from(y).clamp(0, self.max);
+        let cb = i64::from(cb).clamp(0, self.max);
+        let cr = i64::from(cr).clamp(0, self.max);
+        if self.identity {
+            return (cr as i32, y as i32, cb as i32);
+        }
+        let y = (y - self.y_offset) * self.y_scale;
+        let cb = cb - self.neutral;
+        let cr = cr - self.neutral;
+        let code = |component: i64, divisor: i64| {
+            if component <= 0 {
+                return 0;
+            }
+            let half = divisor / 2;
+            let value = if let Some(n) = component
+                .checked_mul(self.scale)
+                .and_then(|n| n.checked_add(half))
+            {
+                n / divisor
+            } else {
+                ((i128::from(component) * i128::from(self.scale) + i128::from(half))
+                    / i128::from(divisor)) as i64
+            };
+            value.min(self.max) as i32
+        };
+        (
+            code(y + self.cr_r * cr, self.divisor),
+            code(
+                y * self.green_factor + self.cb_g * cb + self.cr_g * cr,
+                self.divisor * self.green_factor,
+            ),
+            code(y + self.cb_b * cb, self.divisor),
+        )
     }
 }
 
@@ -1218,6 +1246,19 @@ fn scale_to_u16(val: i32, max_native: i32) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_bt709_full_range_rounds_exact_half_up() {
+        let mut frame = DecodedFrame::with_params(2, 2, 12, 3).unwrap();
+        frame.full_range = true;
+        frame.matrix_coeffs = 1;
+        frame.y_plane.fill(3000);
+        frame.cb_plane.fill(2048);
+        frame.cr_plane.fill(798);
+        // 3000 + (798 - 2048) × 1.5748 = 1031.5.
+        let rgb = frame.to_rgb16().unwrap();
+        assert_eq!(rgb[0], scale_to_u16(1032, 4095));
+    }
+
     use super::*;
     use alloc::vec;
 
@@ -1241,6 +1282,7 @@ mod tests {
             deblock_stride: 0,
             qp_map: vec![],
             alpha_plane: None,
+            alpha_bit_depth: None,
             full_range: false,
             matrix_coeffs: 1,
             color_primaries: 1,

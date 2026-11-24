@@ -1257,7 +1257,8 @@ fn tmap_file(tail: &[u8]) -> Vec<u8> {
     let iso = zencodec::gainmap::serialize_iso21496_fmt(
         &params,
         zencodec::gainmap::Iso21496Format::AvifTmap,
-    );
+    )
+    .unwrap();
     assert!(
         zencodec::gainmap::parse_iso21496_fmt(&iso, zencodec::gainmap::Iso21496Format::AvifTmap)
             .is_ok()

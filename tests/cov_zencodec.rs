@@ -1249,7 +1249,7 @@ fn ten_bit_primary_states_its_depth() {
     let pixels = output.pixels();
     assert_eq!(pixels.spec().layout.sample, zenpixels::SampleType::U16);
     assert_eq!(output.info().source_color.bit_depth, Some(10));
-    assert_eq!(pixels.facts().exact.effective_bits, 10);
+    assert_eq!(pixels.facts().depth.unwrap().color_bits(), 10);
     for y in 0..pixels.rows() {
         for sample in pixels.row(y).as_chunks::<2>().0 {
             let sample = u32::from(u16::from_ne_bytes(*sample));
@@ -1264,5 +1264,5 @@ fn ten_bit_primary_states_its_depth() {
         .unwrap()
         .decode()
         .unwrap();
-    assert_eq!(narrowed.pixels().facts().exact.effective_bits, 0);
+    assert_eq!(narrowed.pixels().facts().depth, None);
 }

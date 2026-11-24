@@ -55,16 +55,8 @@ struct DecodeBudget<'a> {
     /// (derived items, grid tiles, alpha, gain map) inherits the same
     /// list so a single allowlist governs the whole decode request.
     backends: &'a [crate::Backend],
-    /// Whether to apply the primary item's orientation transforms (`irot`,
-    /// `imir`) to the decoded pixels. Set at the top-level entry; `clap`
-    /// (clean-aperture crop) is always applied regardless. `true` matches the
-    /// historical default (bake orientation → display pixels). The zencodec
-    /// adapter sets `false` for `OrientationHint::Preserve` so the decoded
-    /// pixels stay in stored orientation and the orientation is reported on
-    /// `ImageInfo` instead. Only honored at `depth == 0` (the primary item);
-    /// derived sub-items always apply their own transforms as part of
-    /// composition.
-    apply_orientation: bool,
+    /// Let the primary request register alpha before applying item transforms.
+    defer_transforms: bool,
 }
 
 impl<'a> DecodeBudget<'a> {
@@ -73,15 +65,8 @@ impl<'a> DecodeBudget<'a> {
             depth: 0,
             invocations,
             backends,
-            apply_orientation: true,
+            defer_transforms: false,
         }
-    }
-
-    /// Set whether the primary item's orientation transforms are baked into
-    /// the decoded pixels (default `true`). See [`DecodeBudget::apply_orientation`].
-    fn with_apply_orientation(mut self, apply: bool) -> Self {
-        self.apply_orientation = apply;
-        self
     }
 
     fn deeper(&self) -> Self {
@@ -89,7 +74,7 @@ impl<'a> DecodeBudget<'a> {
             depth: self.depth + 1,
             invocations: self.invocations,
             backends: self.backends,
-            apply_orientation: self.apply_orientation,
+            defer_transforms: false,
         }
     }
 
@@ -206,7 +191,7 @@ pub(crate) fn decode_to_frame(
 
     let container = heif::parse(data, stop)?;
     let primary_item = container
-        .primary_item()
+        .base_rendition_item()
         .ok_or_else(|| at!(HeicError::NoPrimaryImage))?;
 
     // Check limits on primary item dimensions if available from ispe
@@ -220,7 +205,10 @@ pub(crate) fn decode_to_frame(
     check_stop(stop)?;
 
     let counter = DerivedCounter::new(0);
-    let budget = DecodeBudget::root(&counter, backends).with_apply_orientation(apply_orientation);
+    let budget = DecodeBudget {
+        defer_transforms: true,
+        ..DecodeBudget::root(&counter, backends)
+    };
     let mut frame = decode_item(&container, &primary_item, budget, limits, stop, max_threads)?;
 
     check_stop(stop)?;
@@ -240,13 +228,14 @@ pub(crate) fn decode_to_frame(
                 .copied()
         });
     if let Some(alpha_id) = alpha_id
-        && let Some(alpha_plane) =
+        && let Some((alpha_plane, bit_depth)) =
             decode_alpha_plane(&container, alpha_id, &frame, limits, stop, backends)
     {
         frame.alpha_plane = Some(alpha_plane);
+        frame.alpha_bit_depth = Some(bit_depth);
     }
 
-    Ok(frame)
+    apply_item_transforms(frame, &primary_item.transforms, apply_orientation)
 }
 
 /// Decode an item, handling derived image types (iden, grid, iovl).
@@ -349,12 +338,13 @@ fn decode_item(
     };
 
     // Set color conversion parameters from colr nclx box if present.
-    if let Some(ColorInfo::Nclx {
-        full_range,
-        matrix_coefficients,
-        color_primaries,
-        transfer_characteristics,
-    }) = container.item_nclx(item.id)
+    if item.item_type != ItemType::Tmap
+        && let Some(ColorInfo::Nclx {
+            full_range,
+            matrix_coefficients,
+            color_primaries,
+            transfer_characteristics,
+        }) = container.item_nclx(item.id)
     {
         frame.full_range = *full_range;
         frame.matrix_coeffs = *matrix_coefficients as u8;
@@ -362,14 +352,20 @@ fn decode_item(
         frame.transfer_characteristics = *transfer_characteristics as u8;
     }
 
-    // Apply transformative properties in ipma listing order (HEIF spec requirement).
-    // `clap` (clean-aperture crop) always applies; orientation (`irot`/`imir`)
-    // is gated by `apply_orientation` at the top level (depth 0). Derived
-    // sub-items (depth > 0) always apply their own orientation as part of
-    // composition. When orientation is skipped, the pixels stay in stored
-    // orientation and the caller reports the orientation on `ImageInfo`.
-    let apply_orientation = budget.apply_orientation || budget.depth > 0;
-    for transform in &item.transforms {
+    if budget.defer_transforms {
+        Ok(frame)
+    } else {
+        apply_item_transforms(frame, &item.transforms, true)
+    }
+}
+
+/// Apply transformative properties in ipma order to the registered image.
+fn apply_item_transforms(
+    mut frame: crate::hevc::DecodedFrame,
+    transforms: &[Transform],
+    apply_orientation: bool,
+) -> Result<crate::hevc::DecodedFrame> {
+    for transform in transforms {
         match transform {
             Transform::CleanAperture(clap) => {
                 apply_clean_aperture(&mut frame, clap);
@@ -1990,7 +1986,7 @@ fn decode_alpha_plane(
     limits: &Limits,
     stop: &dyn Stop,
     backends: &[crate::Backend],
-) -> Option<Vec<u16>> {
+) -> Option<(Vec<u16>, u8)> {
     let alpha_item = container.get_item(alpha_id)?;
     let alpha_data = container.get_item_data(alpha_id).ok()?;
 
@@ -2017,6 +2013,10 @@ fn decode_alpha_plane(
     let primary_h = primary_frame.cropped_height();
     let alpha_w = alpha_frame.cropped_width();
     let alpha_h = alpha_frame.cropped_height();
+
+    if primary_w == 0 || primary_h == 0 || alpha_w == 0 || alpha_h == 0 {
+        return None;
+    }
 
     // Use u64 arithmetic to avoid u32 overflow
     let total_pixels = usize::try_from((primary_w as u64).checked_mul(primary_h as u64)?).ok()?;
@@ -2078,7 +2078,7 @@ fn decode_alpha_plane(
         }
     }
 
-    Some(alpha_plane)
+    Some((alpha_plane, alpha_frame.bit_depth))
 }
 
 /// Decode the HDR gain map from a HEIC/HEIF file.
@@ -2090,9 +2090,9 @@ fn decode_alpha_plane(
 /// 2. **HEIF Amendment 1 `tmap`** (ISO 23008-12:2025) — `tmap` derived image
 ///    item whose payload is the ISO 21496-1 binary blob (AVIF tmap variant).
 ///    `dimg` references point at `[base_image, gain_map_image]`; the second
-///    reference is decoded as the grayscale gain map.
+///    reference is decoded as a numeric grayscale or RGB gain map.
 ///
-/// The Apple path is preferred when both are present.
+/// The ISO path is preferred when both are present.
 pub(crate) fn decode_gain_map(data: &[u8], backends: &[crate::Backend]) -> Result<HdrGainMap> {
     let container = heif::parse(data, &Unstoppable)?;
     let primary_item = container
@@ -2161,18 +2161,22 @@ pub(crate) fn find_tmap_gain_map(
     for tmap in container.items().filter(|i| i.item_type == ItemType::Tmap) {
         let refs = container.get_item_references(tmap.id, FourCC::DIMG);
         // Need at least two references (base + gain map); skip otherwise.
-        let &gainmap_id = refs.get(1)?;
+        let [base_id, gainmap_id, ..] = refs.as_slice() else {
+            continue;
+        };
+        if tmap.id != container.primary_item_id && *base_id != container.primary_item_id {
+            continue;
+        }
         let iso_bytes = container.get_item_data(tmap.id).ok()?.into_owned();
         if iso_bytes.is_empty() {
             continue;
         }
-        return Some((tmap.id, gainmap_id, iso_bytes));
+        return Some((tmap.id, *gainmap_id, iso_bytes));
     }
     None
 }
 
-/// Shared post-processing: decode the gain map HEVC item, take its Y plane,
-/// scale to 8-bit, and assemble the public [`HdrGainMap`].
+/// Decode the numeric gain image, preserving separate RGB samples for ISO items.
 fn decode_gainmap_image_item(
     container: &heif::HeifContainer<'_>,
     gainmap_item: &heif::Item,
@@ -2194,6 +2198,40 @@ fn decode_gainmap_image_item(
     let width = frame.cropped_width();
     let height = frame.cropped_height();
     let bit_depth = frame.bit_depth;
+
+    let channels = if origin == GainMapOrigin::HeifTmap && frame.chroma_format != 0 {
+        3
+    } else {
+        1
+    };
+    if channels == 3 {
+        let data = if bit_depth == 8 {
+            frame.to_rgb().map_err(crate::error::at_core)?
+        } else {
+            let widened = frame.to_rgb16().map_err(crate::error::at_core)?;
+            let mut data = crate::alloc_util::vec_with_capacity(
+                crate::alloc_util::AllocPreference::CodecDefault,
+                true,
+                widened.len(),
+            )?;
+            data.extend(
+                widened
+                    .into_iter()
+                    .map(|v| ((u32::from(v) + 128) / 257) as u8),
+            );
+            data
+        };
+        return Ok(HdrGainMap {
+            data,
+            width,
+            height,
+            bit_depth,
+            channels,
+            xmp,
+            iso21496,
+            origin,
+        });
+    }
 
     let total_pixels = (width as usize)
         .checked_mul(height as usize)
@@ -2227,6 +2265,7 @@ fn decode_gainmap_image_item(
 
     Ok(HdrGainMap {
         data: grayscale,
+        channels,
         width,
         height,
         bit_depth,
@@ -2297,6 +2336,16 @@ fn apply_clean_aperture(frame: &mut crate::hevc::DecodedFrame, clap: &CleanApert
         .min(max_extra_vert);
     let extra_right = max_extra_horiz.saturating_sub(extra_left);
     let extra_bottom = max_extra_vert.saturating_sub(extra_top);
+
+    if let Some(alpha) = &mut frame.alpha_plane {
+        let w = (conf_width - max_extra_horiz) as usize;
+        let h = (conf_height - max_extra_vert) as usize;
+        for row in 0..h {
+            let src = (row + extra_top as usize) * conf_width as usize + extra_left as usize;
+            alpha.copy_within(src..src + w, row * w);
+        }
+        alpha.truncate(w * h);
+    }
 
     frame.crop_left += extra_left;
     frame.crop_right += extra_right;

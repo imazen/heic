@@ -826,6 +826,7 @@ fn clone_frame_for_ref(f: &DecodedFrame) -> DecodedFrame {
     out.deblock_stride = 0;
     out.qp_map = Vec::new();
     out.alpha_plane = None;
+    out.alpha_bit_depth = None;
     out
 }
 

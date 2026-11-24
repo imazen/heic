@@ -53,21 +53,7 @@ impl DecodedFrameTransformExt for DecodedFrame {
         }
 
         // Rotate alpha plane (same transform as luma)
-        let alpha_plane = self
-            .alpha_plane
-            .as_ref()
-            .map(|alpha| -> Result<Vec<u16>> {
-                let mut rotated = try_vec![0u16; (nw * nh) as usize]
-                    .map_err(|_| at!(HevcError::AllocationFailed))?;
-                for dy in 0..nh {
-                    for dx in 0..nw {
-                        rotated[(dy * nw + dx) as usize] =
-                            alpha[((oh - 1 - dx) * ow + dy) as usize];
-                    }
-                }
-                Ok(rotated)
-            })
-            .transpose()?;
+        let alpha_plane = transform_alpha(self, true, |x, y, _, h| (y, h - 1 - x))?;
 
         // Rotate chroma planes
         let (ocw, och) = self.chroma_dims();
@@ -108,6 +94,7 @@ impl DecodedFrameTransformExt for DecodedFrame {
             deblock_stride: 0,
             qp_map: Vec::new(),
             alpha_plane,
+            alpha_bit_depth: self.alpha_bit_depth,
             full_range: self.full_range,
             matrix_coeffs: self.matrix_coeffs,
             color_primaries: self.color_primaries,
@@ -133,21 +120,7 @@ impl DecodedFrameTransformExt for DecodedFrame {
         }
 
         // Rotate alpha plane
-        let alpha_plane = self
-            .alpha_plane
-            .as_ref()
-            .map(|alpha| -> Result<Vec<u16>> {
-                let mut rotated = try_vec![0u16; (w * h) as usize]
-                    .map_err(|_| at!(HevcError::AllocationFailed))?;
-                for dy in 0..h {
-                    for dx in 0..w {
-                        rotated[(dy * w + dx) as usize] =
-                            alpha[((h - 1 - dy) * w + (w - 1 - dx)) as usize];
-                    }
-                }
-                Ok(rotated)
-            })
-            .transpose()?;
+        let alpha_plane = transform_alpha(self, false, |x, y, w, h| (w - 1 - x, h - 1 - y))?;
 
         // Rotate chroma planes
         let (cw, ch) = self.chroma_dims();
@@ -186,6 +159,7 @@ impl DecodedFrameTransformExt for DecodedFrame {
             deblock_stride: 0,
             qp_map: Vec::new(),
             alpha_plane,
+            alpha_bit_depth: self.alpha_bit_depth,
             full_range: self.full_range,
             matrix_coeffs: self.matrix_coeffs,
             color_primaries: self.color_primaries,
@@ -213,21 +187,7 @@ impl DecodedFrameTransformExt for DecodedFrame {
         }
 
         // Rotate alpha plane
-        let alpha_plane = self
-            .alpha_plane
-            .as_ref()
-            .map(|alpha| -> Result<Vec<u16>> {
-                let mut rotated = try_vec![0u16; (nw * nh) as usize]
-                    .map_err(|_| at!(HevcError::AllocationFailed))?;
-                for dy in 0..nh {
-                    for dx in 0..nw {
-                        rotated[(dy * nw + dx) as usize] =
-                            alpha[(dx * ow + (ow - 1 - dy)) as usize];
-                    }
-                }
-                Ok(rotated)
-            })
-            .transpose()?;
+        let alpha_plane = transform_alpha(self, true, |x, y, w, _| (w - 1 - y, x))?;
 
         // Rotate chroma planes
         let (ocw, och) = self.chroma_dims();
@@ -268,6 +228,7 @@ impl DecodedFrameTransformExt for DecodedFrame {
             deblock_stride: 0,
             qp_map: Vec::new(),
             alpha_plane,
+            alpha_bit_depth: self.alpha_bit_depth,
             full_range: self.full_range,
             matrix_coeffs: self.matrix_coeffs,
             color_primaries: self.color_primaries,
@@ -290,20 +251,7 @@ impl DecodedFrameTransformExt for DecodedFrame {
             }
         }
 
-        let alpha_plane = self
-            .alpha_plane
-            .as_ref()
-            .map(|alpha| -> Result<Vec<u16>> {
-                let mut mirrored = try_vec![0u16; (w * h) as usize]
-                    .map_err(|_| at!(HevcError::AllocationFailed))?;
-                for dy in 0..h {
-                    for dx in 0..w {
-                        mirrored[(dy * w + dx) as usize] = alpha[(dy * w + (w - 1 - dx)) as usize];
-                    }
-                }
-                Ok(mirrored)
-            })
-            .transpose()?;
+        let alpha_plane = transform_alpha(self, false, |x, y, w, _| (w - 1 - x, y))?;
 
         let (cw, ch) = self.chroma_dims();
         let (cb_plane, cr_plane) = if cw > 0 && ch > 0 {
@@ -341,6 +289,7 @@ impl DecodedFrameTransformExt for DecodedFrame {
             deblock_stride: 0,
             qp_map: Vec::new(),
             alpha_plane,
+            alpha_bit_depth: self.alpha_bit_depth,
             full_range: self.full_range,
             matrix_coeffs: self.matrix_coeffs,
             color_primaries: self.color_primaries,
@@ -363,20 +312,7 @@ impl DecodedFrameTransformExt for DecodedFrame {
             }
         }
 
-        let alpha_plane = self
-            .alpha_plane
-            .as_ref()
-            .map(|alpha| -> Result<Vec<u16>> {
-                let mut mirrored = try_vec![0u16; (w * h) as usize]
-                    .map_err(|_| at!(HevcError::AllocationFailed))?;
-                for dy in 0..h {
-                    for dx in 0..w {
-                        mirrored[(dy * w + dx) as usize] = alpha[((h - 1 - dy) * w + dx) as usize];
-                    }
-                }
-                Ok(mirrored)
-            })
-            .transpose()?;
+        let alpha_plane = transform_alpha(self, false, |x, y, _, h| (x, h - 1 - y))?;
 
         let (cw, ch) = self.chroma_dims();
         let (cb_plane, cr_plane) = if cw > 0 && ch > 0 {
@@ -414,12 +350,36 @@ impl DecodedFrameTransformExt for DecodedFrame {
             deblock_stride: 0,
             qp_map: Vec::new(),
             alpha_plane,
+            alpha_bit_depth: self.alpha_bit_depth,
             full_range: self.full_range,
             matrix_coeffs: self.matrix_coeffs,
             color_primaries: self.color_primaries,
             transfer_characteristics: self.transfer_characteristics,
         })
     }
+}
+
+/// Alpha is registered to the visible rectangle and has no coded padding.
+fn transform_alpha(
+    frame: &DecodedFrame,
+    swap_axes: bool,
+    source_xy: impl Fn(u32, u32, u32, u32) -> (u32, u32),
+) -> Result<Option<Vec<u16>>> {
+    let Some(alpha) = &frame.alpha_plane else {
+        return Ok(None);
+    };
+    let (w, h) = (frame.cropped_width(), frame.cropped_height());
+    let (dw, dh) = if swap_axes { (h, w) } else { (w, h) };
+    debug_assert_eq!(alpha.len(), w as usize * h as usize);
+    let mut result = try_vec![0u16; alpha.len()].map_err(|_| at!(HevcError::AllocationFailed))?;
+    for y in 0..dh {
+        for x in 0..dw {
+            let (sx, sy) = source_xy(x, y, w, h);
+            result[y as usize * dw as usize + x as usize] =
+                alpha[sy as usize * w as usize + sx as usize];
+        }
+    }
+    Ok(Some(result))
 }
 
 #[cfg(test)]

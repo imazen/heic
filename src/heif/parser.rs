@@ -164,7 +164,7 @@ impl<'a> HeifContainer<'a> {
             .find(|c| matches!(c, ColorInfo::Nclx { .. }))
     }
 
-    /// The item's `prof` ICC profile; see [`Self::item_nclx`].
+    /// The item's `prof` or `rICC` ICC profile; see [`Self::item_nclx`].
     pub(crate) fn item_icc(&self, item_id: u32) -> Option<&[u8]> {
         self.item_colr(item_id).find_map(|c| match c {
             ColorInfo::IccProfile(icc) => Some(icc.as_slice()),
@@ -192,6 +192,19 @@ impl<'a> HeifContainer<'a> {
     /// Get the primary item
     pub fn primary_item(&self) -> Option<Item> {
         self.get_item(self.primary_item_id)
+    }
+
+    /// Return the primary item's base rendition and its ordered transforms.
+    /// The primary tmap's color properties describe the alternate rendition.
+    pub(crate) fn base_rendition_item(&self) -> Option<Item> {
+        let mut primary = self.primary_item()?;
+        if primary.item_type != ItemType::Tmap {
+            return Some(primary);
+        }
+        let refs = self.get_item_references(primary.id, FourCC::DIMG);
+        let mut base = self.get_item(*refs.first()?)?;
+        base.transforms.append(&mut primary.transforms);
+        Some(base)
     }
 
     /// Iterate every item declared in `iinf`, materialised through
@@ -1434,16 +1447,54 @@ fn parse_colr(colr: &Box<'_>) -> Result<ColorInfo> {
                 full_range: (content[10] >> 7) != 0,
             })
         }
-        b"prof" | b"ricc" => {
+        b"prof" | b"rICC" => {
             // ICC profile
             let icc_data = &content[4..];
             if icc_data.len() > MAX_ICC_PROFILE_SIZE {
                 return Err(at!(HeicError::LimitExceeded("ICC profile too large")));
             }
+            if &color_type.0 == b"rICC" && !restricted_icc_is_well_formed(icc_data) {
+                return Err(at!(HeicError::InvalidContainer(
+                    "malformed restricted ICC profile"
+                )));
+            }
             Ok(ColorInfo::IccProfile(icc_data.to_vec()))
         }
         _ => Err(at!(HeicError::InvalidContainer("unknown color type"))),
     }
+}
+
+/// Check the ICC envelope and tag extents before accepting restricted RGB or Gray profiles.
+fn restricted_icc_is_well_formed(profile: &[u8]) -> bool {
+    fn be32(bytes: &[u8]) -> usize {
+        u32::from_be_bytes(bytes.try_into().expect("four-byte ICC field")) as usize
+    }
+
+    if profile.len() < 132
+        || !matches!(&profile[16..20], b"RGB " | b"GRAY")
+        || &profile[20..24] != b"XYZ "
+        || &profile[36..40] != b"acsp"
+    {
+        return false;
+    }
+    let declared = be32(&profile[..4]);
+    let count = be32(&profile[128..132]);
+    if declared != profile.len() || count == 0 || count > (declared - 132) / 12 {
+        return false;
+    }
+    let table_end = 132 + count * 12;
+    profile[132..table_end]
+        .as_chunks::<12>()
+        .0
+        .iter()
+        .all(|tag| {
+            let offset = be32(&tag[4..8]);
+            let size = be32(&tag[8..12]);
+            offset >= table_end
+                && offset & 3 == 0
+                && size >= 8
+                && offset.checked_add(size).is_some_and(|end| end <= declared)
+        })
 }
 
 fn parse_iref(iref: &Box<'_>, container: &mut HeifContainer<'_>, stop: &dyn Stop) -> Result<()> {

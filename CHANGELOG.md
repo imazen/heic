@@ -4,6 +4,17 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 ## [Unreleased]
 
+- Fix full- and narrow-range native high-bit YUV conversion, and scale
+  auxiliary alpha at its own depth. Register alpha before clean aperture
+  and orientation transforms.
+- Recognize case-sensitive restricted ICC (`rICC`). Report malformed
+  restricted ICC payloads separately from unknown color types.
+- Preserve native HDR-base precision on gain-map decode and carry separate
+  HDR gain sample and ISO curve arity. Alternate color and measured content
+  light levels accompany reconstructed output.
+- Adopt the pinned zencodec 0.3 and zenpixels 0.5 cohort on this branch.
+
+
 - Port the optional zencodec adapter to zenpixels 0.5 and the coordinated
   zencodec/UltraHDR revisions. Decoded owners carry the source color claims,
   active RGB color and HDR metadata. Native YUV conversion and gain-map
@@ -70,6 +81,11 @@ All notable changes to the `heic` crate are documented in this file. Format foll
   collected only for inspection, and inventory-only helpers are feature-gated.
 
 ### QUEUED BREAKING CHANGES
+
+- `HdrGainMap::data` uses `width * height * channels` bytes. Legacy Apple
+  maps still have one channel. ISO maps may carry three interleaved
+  numeric RGB channels. `DecodedFrame` records optional alpha depth.
+
 
 - `DecodedFrame` remains re-exported as `heic::DecodedFrame`, but its six
   allocating conversion methods (`to_rgb`, `to_rgba`, `to_bgr`, `to_bgra`,

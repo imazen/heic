@@ -437,6 +437,7 @@ pub(crate) fn decode_one_frame(
         crop_top: 0,
         crop_bottom: 0,
         alpha_plane: None,
+        alpha_bit_depth: None,
         full_range: config.full_range,
         matrix_coeffs: config.matrix_coeffs,
         color_primaries: config.color_primaries,
