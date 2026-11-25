@@ -6,7 +6,7 @@
 # impls omitted; re-export duplicates annotated `[also: path]`.
 # DO NOT EDIT BY HAND — commit regenerated changes with the code.
 #
-# files: heic-core.txt 210 lines (supported surface) | heic-core.features.txt 2 added (features: fallible-alloc,std) | heic-core.internal.txt 24 lines (24 hidden + 0 excluded-feature)
+# files: heic-core.txt 210 lines (supported surface) | heic-core.features.txt 2 added (features: fallible-alloc,std) | heic-core.internal.txt 25 lines (25 hidden + 0 excluded-feature)
 
 ## summary
 #

@@ -136,8 +136,14 @@ impl DecodeRowSink for CollectSink {
         let len = height as usize * stride;
         let end = start + len;
         let region = &mut self.buf[start..end];
-        Ok(PixelViewMut::new(region, width, height, stride, descriptor)
-            .expect("strip region sized correctly"))
+        Ok(PixelViewMut::new_with_spec_cow(
+            region,
+            width,
+            height,
+            stride,
+            zenpixels::SpecCow::from_owned(descriptor),
+        )
+        .expect("strip region sized correctly"))
     }
 
     fn finish(&mut self) -> Result<(), zencodec::decode::SinkError> {
@@ -155,12 +161,12 @@ fn formats_and_descriptors_advertised() {
         &[ImageFormat::Heic]
     );
     let descs = <HeicDecoderConfig as DecoderConfig>::supported_descriptors();
-    assert!(descs.contains(&ImageSpec::rgb8_srgb()));
-    assert!(descs.contains(&ImageSpec::rgba8_srgb()));
-    assert!(descs.contains(&ImageSpec::bgra8_srgb()));
+    assert!(descs.contains(&ImageSpec::RGB8_SRGB));
+    assert!(descs.contains(&ImageSpec::RGBA8_SRGB));
+    assert!(descs.contains(&ImageSpec::BGRA8_SRGB));
     // 16-bit native formats must be present (capabilities advertise native_16bit).
-    assert!(descs.contains(&ImageSpec::rgb16_srgb()));
-    assert!(descs.contains(&ImageSpec::rgba16_srgb()));
+    assert!(descs.contains(&ImageSpec::RGB16_SRGB));
+    assert!(descs.contains(&ImageSpec::RGBA16_SRGB));
 
     let caps = <HeicDecoderConfig as DecoderConfig>::capabilities();
     assert!(caps.streaming(), "adapter advertises streaming");
@@ -244,7 +250,7 @@ fn adapter_decode_grid_matches_native_rgb() {
     let data = read_fixture(EXAMPLE_REL);
     let job = HeicDecoderConfig::new().job();
     let decoder: HeicZenDecoder<'_> = job
-        .decoder(Cow::Borrowed(&data), &[ImageSpec::rgb8_srgb()])
+        .decoder(Cow::Borrowed(&data), &[ImageSpec::RGB8_SRGB])
         .expect("decoder creation");
     let output = decoder.decode().expect("adapter decode");
 
@@ -287,7 +293,7 @@ fn adapter_decode_rgba_negotiation_adds_opaque_alpha() {
     let data = read_fixture(EXAMPLE_REL);
     let job = HeicDecoderConfig::new().job();
     let decoder = job
-        .decoder(Cow::Borrowed(&data), &[ImageSpec::rgba8_srgb()])
+        .decoder(Cow::Borrowed(&data), &[ImageSpec::RGBA8_SRGB])
         .expect("decoder creation");
     let output = decoder.decode().expect("adapter rgba decode");
     let pixels = output.pixels();
@@ -315,7 +321,7 @@ fn adapter_decode_synthetic_single_image() {
 
     let decoder = HeicDecoderConfig::new()
         .job()
-        .decoder(Cow::Borrowed(&data), &[ImageSpec::rgb8_srgb()])
+        .decoder(Cow::Borrowed(&data), &[ImageSpec::RGB8_SRGB])
         .expect("decoder");
     let output = decoder.decode().expect("decode synthetic");
     assert_eq!(output.info().width, pw);
@@ -338,7 +344,7 @@ fn streaming_grid_reassembles_to_one_shot() {
     // Streaming: assemble strips into a full-frame buffer.
     let mut stream: HeicStreamDecoder = HeicDecoderConfig::new()
         .job()
-        .streaming_decoder(Cow::Borrowed(&data), &[ImageSpec::rgb8_srgb()])
+        .streaming_decoder(Cow::Borrowed(&data), &[ImageSpec::RGB8_SRGB])
         .expect("streaming decoder");
 
     // The trait info() must report the full image geometry.
@@ -393,7 +399,7 @@ fn streaming_nongrid_fallback_emits_full_image() {
 
     let mut stream = HeicDecoderConfig::new()
         .job()
-        .streaming_decoder(Cow::Borrowed(&data), &[ImageSpec::rgb8_srgb()])
+        .streaming_decoder(Cow::Borrowed(&data), &[ImageSpec::RGB8_SRGB])
         .expect("streaming decoder");
     assert_eq!(stream.info().width, w);
     assert_eq!(stream.info().height, h);
@@ -422,7 +428,7 @@ fn push_decoder_grid_reassembles_to_one_shot() {
     let mut sink = CollectSink::new();
     let out_info = HeicDecoderConfig::new()
         .job()
-        .push_decoder(Cow::Borrowed(&data), &mut sink, &[ImageSpec::rgb8_srgb()])
+        .push_decoder(Cow::Borrowed(&data), &mut sink, &[ImageSpec::RGB8_SRGB])
         .expect("push_decoder");
 
     assert_eq!(out_info.width, EXAMPLE_W);
@@ -455,7 +461,7 @@ fn tight_max_input_bytes_rejected_at_decoder() {
     // HeicZenDecoder has no Debug impl, so match instead of expect_err. The
     // trait boundary returns `At<CodecError>` (Pattern B) — route on
     // `.category()`, not a downcast to the native `HeicError`.
-    match job.decoder(Cow::Borrowed(&data), &[ImageSpec::rgb8_srgb()]) {
+    match job.decoder(Cow::Borrowed(&data), &[ImageSpec::RGB8_SRGB]) {
         Ok(_) => panic!("64-byte input cap must reject a multi-KB file"),
         Err(err) => assert_eq!(
             err.category(),
@@ -474,7 +480,7 @@ fn tight_max_pixels_propagates_to_native_decode() {
     let decoder = HeicDecoderConfig::new()
         .job()
         .with_limits(limits)
-        .decoder(Cow::Borrowed(&data), &[ImageSpec::rgb8_srgb()])
+        .decoder(Cow::Borrowed(&data), &[ImageSpec::RGB8_SRGB])
         .expect("decoder construction passes the input-size gate");
     let result = decoder.decode();
     assert!(
@@ -492,7 +498,7 @@ fn tight_dimension_limit_rejected_by_streaming_grid_setup() {
     let result = HeicDecoderConfig::new()
         .job()
         .with_limits(limits)
-        .streaming_decoder(Cow::Borrowed(&data), &[ImageSpec::rgb8_srgb()]);
+        .streaming_decoder(Cow::Borrowed(&data), &[ImageSpec::RGB8_SRGB]);
     assert!(
         result.is_err(),
         "max_width=16 must reject the 1280-wide grid in streaming setup"
@@ -512,7 +518,7 @@ fn generous_limits_allow_decode() {
     let decoder = HeicDecoderConfig::new()
         .job()
         .with_limits(limits)
-        .decoder(Cow::Borrowed(&data), &[ImageSpec::rgb8_srgb()])
+        .decoder(Cow::Borrowed(&data), &[ImageSpec::RGB8_SRGB])
         .expect("generous limits should permit the decoder");
     let output = decoder.decode().expect("generous limits decode");
     assert_eq!(output.info().width, EXAMPLE_W);
@@ -531,7 +537,7 @@ fn sequential_threading_decodes_same_pixels_as_default() {
     let decoder = HeicDecoderConfig::new()
         .job()
         .with_limits(limits)
-        .decoder(Cow::Borrowed(&data), &[ImageSpec::rgb8_srgb()])
+        .decoder(Cow::Borrowed(&data), &[ImageSpec::RGB8_SRGB])
         .expect("sequential decoder");
     let output = decoder.decode().expect("sequential decode");
     let pixels = output.pixels();
@@ -552,7 +558,7 @@ fn negotiation_honors_bgra_preference_for_grid() {
 
     let decoder = HeicDecoderConfig::new()
         .job()
-        .decoder(Cow::Borrowed(&data), &[ImageSpec::bgra8_srgb()])
+        .decoder(Cow::Borrowed(&data), &[ImageSpec::BGRA8_SRGB])
         .expect("decoder");
     let output = decoder.decode().expect("bgra decode");
     let pixels = output.pixels();
@@ -570,14 +576,14 @@ fn negotiation_honors_bgra_preference_for_grid() {
     // Sanity: the re-exported negotiator returns BGRA when the source has no
     // alpha and BGRA is preferred and available.
     let chosen = negotiate_pixel_format(
-        &[ImageSpec::bgra8_srgb()],
+        &[ImageSpec::BGRA8_SRGB],
         &[
-            ImageSpec::rgb8_srgb(),
-            ImageSpec::rgba8_srgb(),
-            ImageSpec::bgra8_srgb(),
+            ImageSpec::RGB8_SRGB,
+            ImageSpec::RGBA8_SRGB,
+            ImageSpec::BGRA8_SRGB,
         ],
     );
-    assert_eq!(chosen, Some(ImageSpec::bgra8_srgb()));
+    assert_eq!(chosen, Some(ImageSpec::BGRA8_SRGB));
 }
 
 // ── Malformed / truncated / crafted input → clean Err, never panic ──────────
@@ -601,7 +607,7 @@ fn truncated_example_returns_err_not_panic() {
         );
         match HeicDecoderConfig::new()
             .job()
-            .decoder(Cow::Borrowed(data), &[ImageSpec::rgb8_srgb()])
+            .decoder(Cow::Borrowed(data), &[ImageSpec::RGB8_SRGB])
         {
             Ok(dec) => assert!(
                 dec.decode().is_err(),
@@ -620,7 +626,7 @@ fn truncated_example_returns_err_not_panic() {
         if let Ok(dec) = HeicDecoderConfig::new()
             .job()
             .with_limits(limits)
-            .decoder(Cow::Borrowed(data), &[ImageSpec::rgb8_srgb()])
+            .decoder(Cow::Borrowed(data), &[ImageSpec::RGB8_SRGB])
         {
             // Result is don't-care; the point is it must return, not panic.
             let _ = dec.decode();
@@ -664,7 +670,7 @@ fn fuzz_regression_seeds_never_panic_through_adapter() {
         if let Ok(dec) = HeicDecoderConfig::new()
             .job()
             .with_limits(limits)
-            .decoder(Cow::Owned(data.clone()), &[ImageSpec::rgb8_srgb()])
+            .decoder(Cow::Owned(data.clone()), &[ImageSpec::RGB8_SRGB])
         {
             let _ = dec.decode();
         }
@@ -673,7 +679,7 @@ fn fuzz_regression_seeds_never_panic_through_adapter() {
         let _ = HeicDecoderConfig::new()
             .job()
             .with_limits(limits)
-            .streaming_decoder(Cow::Owned(data), &[ImageSpec::rgb8_srgb()]);
+            .streaming_decoder(Cow::Owned(data), &[ImageSpec::RGB8_SRGB]);
     }
     assert!(count > 0, "expected at least one fuzz/regression seed");
     eprintln!("ran {count} crafted seeds through the adapter without panic");
@@ -704,7 +710,7 @@ fn crafted_grid_descriptor_garbage_rejected() {
     // Decoder path likewise.
     match HeicDecoderConfig::new()
         .job()
-        .decoder(Cow::Borrowed(&data), &[ImageSpec::rgb8_srgb()])
+        .decoder(Cow::Borrowed(&data), &[ImageSpec::RGB8_SRGB])
     {
         Ok(dec) => assert!(dec.decode().is_err()),
         Err(_) => { /* rejected at construction — also fine */ }
@@ -721,7 +727,7 @@ fn animation_unsupported() {
     let data = read_fixture(EXAMPLE_REL);
     let result = HeicDecoderConfig::new()
         .job()
-        .animation_frame_decoder(Cow::Borrowed(&data), &[ImageSpec::rgb8_srgb()]);
+        .animation_frame_decoder(Cow::Borrowed(&data), &[ImageSpec::RGB8_SRGB]);
     assert!(result.is_err(), "animation must be unsupported");
     let err = result.err().unwrap();
     assert_eq!(
@@ -811,7 +817,7 @@ fn orientation_decode_dims_match_probe_for_both_hints() {
     // output ImageInfo dims match the pixels.
     let preserve = HeicDecoderConfig::new()
         .job()
-        .decoder(Cow::Borrowed(&data), &[ImageSpec::rgb8_srgb()])
+        .decoder(Cow::Borrowed(&data), &[ImageSpec::RGB8_SRGB])
         .expect("decoder")
         .decode()
         .expect("decode");
@@ -841,7 +847,7 @@ fn orientation_decode_dims_match_probe_for_both_hints() {
     let correct = HeicDecoderConfig::new()
         .with_orientation(zencodec::OrientationHint::Correct)
         .job()
-        .decoder(Cow::Borrowed(&data), &[ImageSpec::rgb8_srgb()])
+        .decoder(Cow::Borrowed(&data), &[ImageSpec::RGB8_SRGB])
         .expect("decoder")
         .decode()
         .expect("decode");
@@ -1133,7 +1139,7 @@ fn decode_rgb_bytes(data: &[u8], pref: Option<zencodec::AllocPreference>) -> Vec
         None => job,
     };
     let output = job
-        .decoder(Cow::Borrowed(data), &[ImageSpec::rgb8_srgb()])
+        .decoder(Cow::Borrowed(data), &[ImageSpec::RGB8_SRGB])
         .expect("decoder creation")
         .decode()
         .expect("decode of committed fixture should succeed");
@@ -1199,8 +1205,8 @@ fn estimate_decode_resources_models_peak_and_time() {
     let cfg = HeicDecoderConfig::new();
     let compute = ComputeEnvironment::conservative().with_cores(4);
 
-    let small = ImageCharacteristics::new(256, 256, ImageSpec::rgb8_srgb());
-    let large = ImageCharacteristics::new(4096, 4096, ImageSpec::rgba8_srgb());
+    let small = ImageCharacteristics::new(256, 256, ImageSpec::RGB8_SRGB);
+    let large = ImageCharacteristics::new(4096, 4096, ImageSpec::RGBA8_SRGB);
 
     let est_small = cfg.estimate_decode_resources(&small, &compute);
     let est_large = cfg.estimate_decode_resources(&large, &compute);
@@ -1260,7 +1266,7 @@ fn ten_bit_primary_states_its_depth() {
 
     let narrowed = HeicDecoderConfig::new()
         .job()
-        .decoder(Cow::Borrowed(&data), &[ImageSpec::rgb8_srgb()])
+        .decoder(Cow::Borrowed(&data), &[ImageSpec::RGB8_SRGB])
         .unwrap()
         .decode()
         .unwrap();

@@ -182,7 +182,14 @@ impl DecodeRowSink for PaddedSink {
     ) -> Result<PixelViewMut<'_>, SinkError> {
         assert!(h <= 3);
         let bytes = &mut self.data[y as usize * self.stride..(y + h) as usize * self.stride];
-        Ok(PixelViewMut::new(bytes, w, h, self.stride, spec).unwrap())
+        Ok(PixelViewMut::new_with_spec_cow(
+            bytes,
+            w,
+            h,
+            self.stride,
+            zenpixels::SpecCow::from_owned(spec),
+        )
+        .unwrap())
     }
 }
 
@@ -582,7 +589,7 @@ fn raw_nclx_icc_and_all_hdr_metadata_survive_bake_and_identity_conversion() {
         zenpixels_convert::apply_orientation(&stored.pixels(), Orientation::Transpose).unwrap();
     // The checked identity copy retains ICC-authoritative metadata. An
     // ImagePlan independently exercises identity on the active PQ route below.
-    let identical = baked.as_view().try_to_tight_buf().unwrap();
+    let identical = baked.as_view().to_tight_buf().unwrap();
     for owner in [&baked, &identical, correct.buffer()] {
         assert_eq!(owner.origin(), origin);
         assert_eq!(owner.spec(), stored.pixels().spec());
@@ -602,7 +609,7 @@ fn raw_nclx_icc_and_all_hdr_metadata_survive_bake_and_identity_conversion() {
     }
     let pq = tmap_case(false, false, false, true, true);
     let pq = decode(&pq, OrientationHint::Preserve, GainMapRender::BaseOnly);
-    let same = zenpixels_convert::convert_buf(
+    let same = zenpixels_convert::convert_to_buf_with_peak(
         &pq.pixels(),
         pq.descriptor(),
         &Default::default(),

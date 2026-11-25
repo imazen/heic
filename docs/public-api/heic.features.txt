@@ -1,5 +1,5 @@
 # heic public API — additions from non-default features
-# features: av1,backend-d3d11va,backend-mediacodec,backend-mediafoundation,backend-rust,backend-vaapi,backend-videotoolbox,fallible-alloc,inventory,parallel,std,unci,zencodec
+# features: av1,backend-d3d11va,backend-mediacodec,backend-mediafoundation,backend-rust,backend-vaapi,backend-videotoolbox,fallible-alloc,image,inventory,parallel,std,unci,zencodec
 # (regenerated on every `cargo test` by zenutils-apidoc; ZEN_API_DOC=check verifies, =off skips).
 # Encodings: crate-name prefix stripped; auto traits collapse to a
 # count + exceptions; trait impls collapse to one roster line per
@@ -10,7 +10,7 @@
 ## summary
 #
 #   pub types (struct/enum/trait/alias)         5
-#   free functions                              2
+#   free functions                              3
 #   inherent methods                            5
 #   struct fields                               8
 #   enum variants                               4
@@ -19,9 +19,9 @@
 #   auto-trait exceptions                       3
 #
 # per-module pub lines:
-#   (root)                           24
+#   (root)                           25
 
-## items (24 lines)
+## items (25 lines)
 
 pub Backend::Vaapi
 pub HeicError::Inventory(zencodec::inventory::InventoryError)
@@ -47,6 +47,7 @@ pub struct HeicStreamDecoder
 pub struct HeicZenDecoder<'a>
 pub fn cabac_bin_trace(u32)
 pub fn enable_deblock_trace()
+pub fn register_decoding_hook() -> bool
 
 ## trait impls (9 types)
 
