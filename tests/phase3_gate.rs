@@ -10,7 +10,7 @@ use zencodec::decode::{
 };
 use zencodec::{CodecErrorExt, GainMapRender, OrientationHint};
 use zenpixels::{
-    Cicp, ColorSpace, DiffuseWhite, ImageSpec, Orientation, PixelViewMut, Primaries, SampleType,
+    Cicp, ColorSpace, DiffuseWhite, Orientation, PixelFormat, PixelViewMut, Primaries, SampleType,
     SignalRange, Transfer,
 };
 
@@ -162,7 +162,7 @@ struct PaddedSink {
 }
 
 impl DecodeRowSink for PaddedSink {
-    fn begin(&mut self, w: u32, h: u32, spec: ImageSpec) -> Result<(), SinkError> {
+    fn begin(&mut self, w: u32, h: u32, spec: PixelFormat) -> Result<(), SinkError> {
         assert_eq!(spec.layout, zenpixels::SampleLayout::RGBA8);
         self.stride = w as usize * 4 + 7;
         self.data = vec![0xcd; self.stride * h as usize];
@@ -178,16 +178,16 @@ impl DecodeRowSink for PaddedSink {
         y: u32,
         h: u32,
         w: u32,
-        spec: ImageSpec,
+        spec: PixelFormat,
     ) -> Result<PixelViewMut<'_>, SinkError> {
         assert!(h <= 3);
         let bytes = &mut self.data[y as usize * self.stride..(y + h) as usize * self.stride];
-        Ok(PixelViewMut::new_with_spec_cow(
+        Ok(PixelViewMut::new_with_format_cow(
             bytes,
             w,
             h,
             self.stride,
-            zenpixels::SpecCow::from_owned(spec),
+            zenpixels::FormatCow::from_owned(spec),
         )
         .unwrap())
     }
@@ -351,10 +351,10 @@ fn iso_gain_sample_arity_is_independent_of_exact_parameter_arity() {
                 Some(Cicp::new(9, 16, 9, false))
             );
             let exact = p.exact_metadata().unwrap();
-            assert_eq!(exact.channel(0).max_gain_stops.num, 2);
-            assert_eq!(exact.channel(0).max_gain_stops.den.get(), 2);
+            assert_eq!(exact.channel(0).max_gain_stops.numerator, 2);
+            assert_eq!(exact.channel(0).max_gain_stops.denominator.get(), 2);
             assert_eq!(
-                exact.channel(2).max_gain_stops.num,
+                exact.channel(2).max_gain_stops.numerator,
                 if multi { 6 } else { 2 }
             );
             let original = comp.extras::<heic::HdrGainMap>().unwrap();
@@ -592,7 +592,7 @@ fn raw_nclx_icc_and_all_hdr_metadata_survive_bake_and_identity_conversion() {
     let identical = baked.as_view().to_tight_buf().unwrap();
     for owner in [&baked, &identical, correct.buffer()] {
         assert_eq!(owner.origin(), origin);
-        assert_eq!(owner.spec(), stored.pixels().spec());
+        assert_eq!(owner.format(), stored.pixels().format());
         assert_eq!(owner.hdr(), hdr);
         assert_eq!(
             owner.as_view().as_contiguous_bytes(),
@@ -663,7 +663,7 @@ fn apple_one_times_gain_is_exact_linear_base_and_separate_from_nominal_capacity(
     );
     let view = unity.pixels();
     assert!(matches!(
-        view.spec().color,
+        view.format().color,
         ColorSpace::Rgb {
             primaries: Primaries::Bt709,
             transfer: Transfer::Linear,
@@ -672,7 +672,7 @@ fn apple_one_times_gain_is_exact_linear_base_and_separate_from_nominal_capacity(
             ..
         }
     ));
-    assert_eq!(view.spec().color.white(), Some(DiffuseWhite::BT2408));
+    assert_eq!(view.format().color.white(), Some(DiffuseWhite::BT2408));
     let mut peak = 0.0f64;
     let mut sum = 0.0f64;
     let stops = full

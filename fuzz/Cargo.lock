@@ -784,7 +784,7 @@ dependencies = [
 [[package]]
 name = "ultrahdr-core"
 version = "0.6.0"
-source = "git+https://github.com/imazen/ultrahdr?rev=590afee17f115bc8f0bd26de3dd452efaf85f796#590afee17f115bc8f0bd26de3dd452efaf85f796"
+source = "git+https://github.com/imazen/ultrahdr?rev=b5316594e6770fd282f84256bd61ad222a785b3d#b5316594e6770fd282f84256bd61ad222a785b3d"
 dependencies = [
  "archmage",
  "bytemuck",
@@ -853,7 +853,7 @@ dependencies = [
 [[package]]
 name = "zencodec"
 version = "0.3.0"
-source = "git+https://github.com/imazen/zencodec?rev=3a10011b6b05d2269e29db5e40db71888d0fcfce#3a10011b6b05d2269e29db5e40db71888d0fcfce"
+source = "git+https://github.com/imazen/zencodec?rev=06298db38616157ae287471a86ec5f071e4b47c3#06298db38616157ae287471a86ec5f071e4b47c3"
 dependencies = [
  "almost-enough",
  "bytemuck",
@@ -877,7 +877,7 @@ dependencies = [
 [[package]]
 name = "zenmeta"
 version = "0.2.0"
-source = "git+https://github.com/imazen/zencodec?rev=3a10011b6b05d2269e29db5e40db71888d0fcfce#3a10011b6b05d2269e29db5e40db71888d0fcfce"
+source = "git+https://github.com/imazen/zencodec?rev=06298db38616157ae287471a86ec5f071e4b47c3#06298db38616157ae287471a86ec5f071e4b47c3"
 dependencies = [
  "zencodec",
  "zenpixels",
@@ -886,7 +886,7 @@ dependencies = [
 [[package]]
 name = "zenpixels"
 version = "0.5.0"
-source = "git+https://github.com/imazen/zenpixels?rev=9686936bfa49df370a1e71666b252b9f48f744b4#9686936bfa49df370a1e71666b252b9f48f744b4"
+source = "git+https://github.com/imazen/zenpixels?rev=0dd7af2a00d7ec4e573d80b764d323467c61cb5d#0dd7af2a00d7ec4e573d80b764d323467c61cb5d"
 dependencies = [
  "bytemuck",
  "imgref",
@@ -897,7 +897,7 @@ dependencies = [
 [[package]]
 name = "zenpixels-convert"
 version = "0.5.0"
-source = "git+https://github.com/imazen/zenpixels?rev=9686936bfa49df370a1e71666b252b9f48f744b4#9686936bfa49df370a1e71666b252b9f48f744b4"
+source = "git+https://github.com/imazen/zenpixels?rev=0dd7af2a00d7ec4e573d80b764d323467c61cb5d#0dd7af2a00d7ec4e573d80b764d323467c61cb5d"
 dependencies = [
  "archmage",
  "bytemuck",

@@ -128,7 +128,7 @@ fn main() {
         "adapter out: {}x{} {:?}",
         out.pixels().width(),
         out.pixels().rows(),
-        out.pixels().spec().layout
+        out.pixels().format().layout
     );
 
     let adapter_bytes = out

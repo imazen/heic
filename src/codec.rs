@@ -24,7 +24,7 @@ use zencodec::{
     MasteringDisplay, Orientation, ResourceLimits, Supplements, ThreadingPolicy, Unsupported,
 };
 use zenpixels::{
-    Cicp, ColorOrigin, HdrMetadata, ImageSpec, PixelBuf, PixelView, SampleLayout, SampleType,
+    Cicp, ColorOrigin, HdrMetadata, PixelBuf, PixelFormat, PixelView, SampleLayout, SampleType,
 };
 
 use enough::Stop as _;
@@ -100,12 +100,12 @@ static HEIC_DECODE_CAPS: DecodeCapabilities = DecodeCapabilities::new()
 // ── Supported descriptors ──────────────────────────────────────────────────
 
 /// Pixel formats this decoder can produce natively (8-bit and 16-bit).
-static DECODE_DESCRIPTORS: &[ImageSpec] = &[
-    ImageSpec::RGB8_SRGB,
-    ImageSpec::RGBA8_SRGB,
-    ImageSpec::BGRA8_SRGB,
-    ImageSpec::RGB16_SRGB,
-    ImageSpec::RGBA16_SRGB,
+static DECODE_DESCRIPTORS: &[PixelFormat] = &[
+    PixelFormat::RGB8_SRGB,
+    PixelFormat::RGBA8_SRGB,
+    PixelFormat::BGRA8_SRGB,
+    PixelFormat::RGB16_SRGB,
+    PixelFormat::RGBA16_SRGB,
 ];
 
 // ── Decoder Config ─────────────────────────────────────────────────────────
@@ -207,7 +207,7 @@ impl zencodec::decode::DecoderConfig for HeicDecoderConfig {
         &[ImageFormat::Heic]
     }
 
-    fn supported_descriptors() -> &'static [ImageSpec] {
+    fn supported_descriptors() -> &'static [PixelFormat] {
         DECODE_DESCRIPTORS
     }
 
@@ -446,7 +446,7 @@ impl HeicDecodeJob {
     fn decoder_inner<'a>(
         mut self,
         data: Cow<'a, [u8]>,
-        preferred: &[ImageSpec],
+        preferred: &[PixelFormat],
     ) -> Result<HeicDecoder<'a>, At<HeicError>> {
         self.limits
             .check_input_size(data.len() as u64)
@@ -472,7 +472,7 @@ impl HeicDecodeJob {
         self,
         data: Cow<'a, [u8]>,
         sink: &mut dyn DecodeRowSink,
-        preferred: &[ImageSpec],
+        preferred: &[PixelFormat],
     ) -> Result<OutputInfo, At<HeicError>> {
         self.limits
             .check_input_size(data.len() as u64)
@@ -515,7 +515,7 @@ impl HeicDecodeJob {
         {
             let output = self.decoder_inner(data, preferred)?.decode_inner()?;
             let pixels = output.pixels();
-            let desc = pixels.spec();
+            let desc = pixels.format();
             sink.begin(pixels.width(), pixels.rows(), desc.clone())
                 .map_err(|e| at!(HeicError::Sink(e)))?;
             zencodec::helpers::copy_rows_to_sink(
@@ -593,7 +593,7 @@ impl HeicDecodeJob {
     fn streaming_decoder_inner<'a>(
         self,
         data: Cow<'a, [u8]>,
-        preferred: &[ImageSpec],
+        preferred: &[PixelFormat],
     ) -> Result<HeicStreamDecoder, At<HeicError>> {
         HeicStreamDecoder::new(self.decoder_inner(data, preferred)?)
     }
@@ -601,33 +601,33 @@ impl HeicDecodeJob {
 
 /// Build the "available descriptors" list for format negotiation based on
 /// image properties (alpha, bit depth).
-fn available_descriptors(has_alpha: bool, bit_depth: u8) -> alloc::vec::Vec<ImageSpec> {
+fn available_descriptors(has_alpha: bool, bit_depth: u8) -> alloc::vec::Vec<PixelFormat> {
     let mut available = alloc::vec::Vec::with_capacity(5);
     if bit_depth > 8 {
         // 16-bit formats first when source is >8-bit
         if has_alpha {
-            available.push(ImageSpec::RGBA16_SRGB);
-            available.push(ImageSpec::RGB16_SRGB);
+            available.push(PixelFormat::RGBA16_SRGB);
+            available.push(PixelFormat::RGB16_SRGB);
         } else {
-            available.push(ImageSpec::RGB16_SRGB);
-            available.push(ImageSpec::RGBA16_SRGB);
+            available.push(PixelFormat::RGB16_SRGB);
+            available.push(PixelFormat::RGBA16_SRGB);
         }
     }
     // 8-bit formats
     if has_alpha {
-        available.push(ImageSpec::RGBA8_SRGB);
-        available.push(ImageSpec::BGRA8_SRGB);
-        available.push(ImageSpec::RGB8_SRGB);
+        available.push(PixelFormat::RGBA8_SRGB);
+        available.push(PixelFormat::BGRA8_SRGB);
+        available.push(PixelFormat::RGB8_SRGB);
     } else {
-        available.push(ImageSpec::RGB8_SRGB);
-        available.push(ImageSpec::RGBA8_SRGB);
-        available.push(ImageSpec::BGRA8_SRGB);
+        available.push(PixelFormat::RGB8_SRGB);
+        available.push(PixelFormat::RGBA8_SRGB);
+        available.push(PixelFormat::BGRA8_SRGB);
     }
     available
 }
 
 /// Check whether a negotiated descriptor is a 16-bit format.
-fn is_16bit(desc: &ImageSpec) -> bool {
+fn is_16bit(desc: &PixelFormat) -> bool {
     desc.layout.sample == SampleType::U16
 }
 
@@ -638,7 +638,7 @@ fn is_16bit(desc: &ImageSpec) -> bool {
 /// representable here — but the estimate's dominant term is the u16 YCbCr
 /// working set from `estimate_memory`, which already scales with bit depth, so
 /// an alpha-presence choice (Rgb8 vs Rgba8) is a sound conservative bound.
-fn layout_for_descriptor(desc: &ImageSpec) -> crate::PixelLayout {
+fn layout_for_descriptor(desc: &PixelFormat) -> crate::PixelLayout {
     if desc.layout.order.has_alpha_slot() {
         crate::PixelLayout::Rgba8
     } else {
@@ -646,8 +646,8 @@ fn layout_for_descriptor(desc: &ImageSpec) -> crate::PixelLayout {
     }
 }
 
-/// Map a negotiated ImageSpec to a native PixelLayout for 8-bit decode.
-fn descriptor_to_layout(desc: &ImageSpec) -> crate::PixelLayout {
+/// Map a negotiated PixelFormat to a native PixelLayout for 8-bit decode.
+fn descriptor_to_layout(desc: &PixelFormat) -> crate::PixelLayout {
     if desc.layout == SampleLayout::BGRA8 {
         crate::PixelLayout::Bgra8
     } else if desc.layout == SampleLayout::RGBA8 {
@@ -740,7 +740,7 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
     fn decoder(
         self,
         data: Cow<'a, [u8]>,
-        preferred: &[ImageSpec],
+        preferred: &[PixelFormat],
     ) -> Result<HeicDecoder<'a>, At<zencodec::CodecError>> {
         self.decoder_inner(data, preferred)
             .map_err(zencodec::CodecError::of)
@@ -750,7 +750,7 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
         self,
         data: Cow<'a, [u8]>,
         sink: &mut dyn DecodeRowSink,
-        preferred: &[ImageSpec],
+        preferred: &[PixelFormat],
     ) -> Result<OutputInfo, At<zencodec::CodecError>> {
         self.push_decoder_inner(data, sink, preferred)
             .map_err(zencodec::CodecError::of)
@@ -759,7 +759,7 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
     fn streaming_decoder(
         self,
         data: Cow<'a, [u8]>,
-        preferred: &[ImageSpec],
+        preferred: &[PixelFormat],
     ) -> Result<HeicStreamDecoder, At<zencodec::CodecError>> {
         self.streaming_decoder_inner(data, preferred)
             .map_err(zencodec::CodecError::of)
@@ -768,7 +768,7 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
     fn animation_frame_decoder(
         self,
         _data: Cow<'a, [u8]>,
-        _preferred: &[ImageSpec],
+        _preferred: &[PixelFormat],
     ) -> Result<Unsupported<At<zencodec::CodecError>>, At<zencodec::CodecError>> {
         // Invocation-origin, not image-bytes-origin: HEIC has no concept of
         // an animation at all, so this is "the caller asked for an
@@ -785,7 +785,7 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
     /// the items a decode needs is a follow-up.
     fn dyn_incremental_decoder(
         self,
-        preferred: &[ImageSpec],
+        preferred: &[PixelFormat],
     ) -> Result<
         alloc::boxed::Box<zencodec::decode::DynIncrementalDecoder>,
         zencodec::decode::BoxedError,
@@ -805,7 +805,7 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
 /// flushes it to the zencodec sink on the next `demand()` call.
 struct RowSinkAdapter<'a> {
     inner: &'a mut dyn DecodeRowSink,
-    descriptor: ImageSpec,
+    descriptor: PixelFormat,
     origin: ColorOrigin,
     hdr: HdrMetadata,
     width: u32,
@@ -879,7 +879,7 @@ impl crate::RowSink for RowSinkAdapter<'_> {
 pub struct HeicDecoder<'a> {
     config: HeicDecoderConfig,
     data: Cow<'a, [u8]>,
-    preferred: alloc::vec::Vec<ImageSpec>,
+    preferred: alloc::vec::Vec<PixelFormat>,
     stop: Option<zencodec::StopToken>,
     limits: Option<crate::Limits>,
     /// Thread count from threading policy (0 = unlimited/default).
@@ -996,9 +996,9 @@ impl HeicDecoder<'_> {
 
             let wants_alpha = use_wide_base || negotiated.layout == SampleLayout::RGBA16;
             let (samples, spec) = if has_alpha || wants_alpha {
-                (frame.to_rgba16(), ImageSpec::RGBA16_SRGB)
+                (frame.to_rgba16(), PixelFormat::RGBA16_SRGB)
             } else {
-                (frame.to_rgb16(), ImageSpec::RGB16_SRGB)
+                (frame.to_rgb16(), PixelFormat::RGB16_SRGB)
             };
             let pb = PixelBuf::from_samples(samples.map_err(crate::error::at_core)?, w, h, spec)
                 .map_err_at(|_| HeicError::InvalidData("pixel buffer size mismatch"))?;
@@ -1092,7 +1092,7 @@ impl HeicDecoder<'_> {
             ),
         );
         let origin = color_origin(&info, native_cicp(pi_ref, container.as_ref()));
-        let spec = decoded_spec(buf.spec().layout, &info)?;
+        let spec = decoded_spec(buf.format().layout, &info)?;
         let facts = buf.facts();
         let mut buf = buf
             .relabel_color(spec.color)
@@ -1204,7 +1204,7 @@ struct GridState {
 /// single strip for non-grid images.
 pub struct HeicStreamDecoder {
     info: ImageInfo,
-    descriptor: ImageSpec,
+    descriptor: PixelFormat,
     origin: ColorOrigin,
     y_offset: u32,
     grid: Option<GridState>,
@@ -1270,7 +1270,7 @@ impl HeicStreamDecoder {
         let output = decoder.decode_inner()?;
         let (pixels, details) = output.into_parts();
         let info = details.info;
-        let descriptor = pixels.spec().clone();
+        let descriptor = pixels.format().clone();
         Ok(Self {
             origin: ColorOrigin::assumed(),
             info,
@@ -1287,7 +1287,7 @@ impl HeicStreamDecoder {
     /// Try to initialize grid streaming state. Returns None if not eligible.
     fn try_init_grid(
         container: &crate::heif::HeifContainer<'_>,
-        preferred: &[ImageSpec],
+        preferred: &[PixelFormat],
         limits: Option<&crate::Limits>,
         stop: &dyn enough::Stop,
     ) -> Result<Option<GridState>, At<HeicError>> {
@@ -2059,7 +2059,7 @@ fn gain_map_pixels(
             )));
         }
     };
-    let spec = ImageSpec::new(
+    let spec = PixelFormat::new(
         layout,
         zenpixels::ColorSpace::Untagged {
             channels,
@@ -2120,7 +2120,7 @@ fn reconstruct_hdr_base(
     data: &[u8],
     gain_info: GainMapInfo,
     target: Option<f32>,
-    preferred: &[ImageSpec],
+    preferred: &[PixelFormat],
     stop: &dyn enough::Stop,
 ) -> Result<(PixelBuf, ImageInfo), At<HeicError>> {
     use ultrahdr_core::gainmap::{HdrOutputFormat, apply_gainmap};
@@ -2156,9 +2156,9 @@ fn reconstruct_hdr_base(
                 .map_err_at(|_| {
                     HeicError::UnsupportedOperation(zencodec::UnsupportedOperation::PixelFormat)
                 })?;
-            config = config.with_dst_spec(ImageSpec::new(
+            config = config.with_destination_format(PixelFormat::new(
                 SampleLayout::RGBAF16,
-                applier.dst_spec().color.clone(),
+                applier.destination_format().color.clone(),
             ));
         }
         apply_gain_map_with(&dual, &config, stop).map_err_at(|_| {
@@ -2167,7 +2167,7 @@ fn reconstruct_hdr_base(
     } else {
         // UltraHDR accepts sRGB-coded RGB. Use the recognized ICC gamut
         // for Apple images, while keeping the original profile as provenance.
-        let primaries = match &base.spec().color {
+        let primaries = match &base.format().color {
             ColorSpace::Icc { profile, .. } => zenpixels::icc::IccIdentification::from_icc(profile)
                 .filter(|id| id.transfer == Transfer::Srgb)
                 .map(|id| id.primaries),
@@ -2175,7 +2175,7 @@ fn reconstruct_hdr_base(
             _ => None,
         }
         .unwrap_or(Primaries::Bt709);
-        let color = ImageSpec::RGBA8_SRGB.with_primaries(primaries).color;
+        let color = PixelFormat::RGBA8_SRGB.with_primaries(primaries).color;
         let base = base
             .relabel_color(color)
             .map_err_at(|_| HeicError::InvalidData("invalid Apple gain-map base color"))?;
@@ -2206,7 +2206,7 @@ fn reconstruct_hdr_base(
     info.source_color.content_light_level = Some(cll);
     info.source_color.diffuse_white = Some(DiffuseWhite::BT2408);
     if info.source_color.mastering_display.is_none()
-        && let ColorSpace::Rgb { primaries, .. } = hdr.spec().color
+        && let ColorSpace::Rgb { primaries, .. } = hdr.format().color
         && let Some((r, g, b)) = primaries.chromaticity()
         && let Some(white) = primaries.white_point()
     {
@@ -2225,7 +2225,7 @@ fn reconstruct_hdr_base(
 }
 
 /// Declare the full-range RGB samples after native YUV matrix/range conversion.
-fn decoded_spec(layout: SampleLayout, info: &ImageInfo) -> Result<ImageSpec, At<HeicError>> {
+fn decoded_spec(layout: SampleLayout, info: &ImageInfo) -> Result<PixelFormat, At<HeicError>> {
     zencodec::helpers::descriptor_for_decoded_pixels_v2(layout, &info.source_color, None)
         .map_err_at(|_| {
             HeicError::UnsupportedOperation(zencodec::UnsupportedOperation::PixelFormat)
@@ -2239,13 +2239,13 @@ fn hdr_metadata(info: &ImageInfo) -> HdrMetadata {
     }
 }
 
-/// Map a native `PixelLayout` to a `ImageSpec`.
-fn layout_to_descriptor(layout: crate::PixelLayout) -> ImageSpec {
+/// Map a native `PixelLayout` to a `PixelFormat`.
+fn layout_to_descriptor(layout: crate::PixelLayout) -> PixelFormat {
     match layout {
-        crate::PixelLayout::Rgb8 => ImageSpec::RGB8_SRGB,
-        crate::PixelLayout::Rgba8 => ImageSpec::RGBA8_SRGB,
-        crate::PixelLayout::Bgr8 => ImageSpec::RGB8_SRGB,
-        crate::PixelLayout::Bgra8 => ImageSpec::BGRA8_SRGB,
+        crate::PixelLayout::Rgb8 => PixelFormat::RGB8_SRGB,
+        crate::PixelLayout::Rgba8 => PixelFormat::RGBA8_SRGB,
+        crate::PixelLayout::Bgr8 => PixelFormat::RGB8_SRGB,
+        crate::PixelLayout::Bgra8 => PixelFormat::BGRA8_SRGB,
     }
 }
 
@@ -2281,7 +2281,7 @@ fn state_widened_depth(mut buffer: PixelBuf, color: u8, alpha: u8) -> PixelBuf {
         alpha,
     )
     .ok();
-    buffer.assume_facts(buffer.facts().with_depth_opt(depth));
+    buffer.assume_facts(buffer.facts().with_depth(depth));
     buffer
 }
 
@@ -2412,9 +2412,9 @@ mod tests {
         let descriptors =
             <HeicDecoderConfig as zencodec::decode::DecoderConfig>::supported_descriptors();
         assert!(!descriptors.is_empty());
-        assert!(descriptors.contains(&ImageSpec::RGB8_SRGB));
-        assert!(descriptors.contains(&ImageSpec::RGBA8_SRGB));
-        assert!(descriptors.contains(&ImageSpec::BGRA8_SRGB));
+        assert!(descriptors.contains(&PixelFormat::RGB8_SRGB));
+        assert!(descriptors.contains(&PixelFormat::RGBA8_SRGB));
+        assert!(descriptors.contains(&PixelFormat::BGRA8_SRGB));
         let _ = config;
     }
 
@@ -2472,28 +2472,28 @@ mod tests {
     fn negotiate_no_preference_no_alpha() {
         let available = available_descriptors(false, 8);
         let desc = negotiate_pixel_format(&[], &available);
-        assert_eq!(desc, Some(ImageSpec::RGB8_SRGB));
+        assert_eq!(desc, Some(PixelFormat::RGB8_SRGB));
     }
 
     #[test]
     fn negotiate_no_preference_with_alpha() {
         let available = available_descriptors(true, 8);
         let desc = negotiate_pixel_format(&[], &available);
-        assert_eq!(desc, Some(ImageSpec::RGBA8_SRGB));
+        assert_eq!(desc, Some(PixelFormat::RGBA8_SRGB));
     }
 
     #[test]
     fn negotiate_rgba_preference() {
         let available = available_descriptors(false, 8);
-        let desc = negotiate_pixel_format(&[ImageSpec::RGBA8_SRGB], &available);
-        assert_eq!(desc, Some(ImageSpec::RGBA8_SRGB));
+        let desc = negotiate_pixel_format(&[PixelFormat::RGBA8_SRGB], &available);
+        assert_eq!(desc, Some(PixelFormat::RGBA8_SRGB));
     }
 
     #[test]
     fn negotiate_bgra_preference() {
         let available = available_descriptors(false, 8);
-        let desc = negotiate_pixel_format(&[ImageSpec::BGRA8_SRGB], &available);
-        assert_eq!(desc, Some(ImageSpec::BGRA8_SRGB));
+        let desc = negotiate_pixel_format(&[PixelFormat::BGRA8_SRGB], &available);
+        assert_eq!(desc, Some(PixelFormat::BGRA8_SRGB));
     }
 
     #[test]
@@ -2501,15 +2501,15 @@ mod tests {
         let available = available_descriptors(false, 10);
         let desc = negotiate_pixel_format(&[], &available);
         // 16-bit source with no preference → default to 16-bit
-        assert_eq!(desc, Some(ImageSpec::RGB16_SRGB));
+        assert_eq!(desc, Some(PixelFormat::RGB16_SRGB));
     }
 
     #[test]
     fn negotiate_16bit_source_8bit_preference() {
         let available = available_descriptors(false, 10);
-        let desc = negotiate_pixel_format(&[ImageSpec::RGB8_SRGB], &available);
+        let desc = negotiate_pixel_format(&[PixelFormat::RGB8_SRGB], &available);
         // Caller explicitly prefers 8-bit
-        assert_eq!(desc, Some(ImageSpec::RGB8_SRGB));
+        assert_eq!(desc, Some(PixelFormat::RGB8_SRGB));
     }
 
     #[test]
@@ -2615,15 +2615,15 @@ mod tests {
     #[test]
     fn descriptor_to_layout_mapping() {
         assert_eq!(
-            descriptor_to_layout(&ImageSpec::RGB8_SRGB),
+            descriptor_to_layout(&PixelFormat::RGB8_SRGB),
             crate::PixelLayout::Rgb8
         );
         assert_eq!(
-            descriptor_to_layout(&ImageSpec::RGBA8_SRGB),
+            descriptor_to_layout(&PixelFormat::RGBA8_SRGB),
             crate::PixelLayout::Rgba8
         );
         assert_eq!(
-            descriptor_to_layout(&ImageSpec::BGRA8_SRGB),
+            descriptor_to_layout(&PixelFormat::BGRA8_SRGB),
             crate::PixelLayout::Bgra8
         );
     }
@@ -2654,7 +2654,7 @@ mod tests {
         let limits = ResourceLimits::none().with_threading(ThreadingPolicy::Sequential);
         let job = config.job().with_limits(limits);
         let decoder = job
-            .decoder(Cow::Borrowed(&data), &[ImageSpec::RGB8_SRGB])
+            .decoder(Cow::Borrowed(&data), &[PixelFormat::RGB8_SRGB])
             .expect("decoder creation");
         let output = decoder.decode().expect("single-thread decode");
 
@@ -2760,7 +2760,7 @@ mod tests {
         let config = HeicDecoderConfig::new();
         let limits = ResourceLimits::none().with_max_input_bytes(100);
         let job = config.job().with_limits(limits);
-        let result = job.decoder(Cow::Borrowed(&data), &[ImageSpec::RGB8_SRGB]);
+        let result = job.decoder(Cow::Borrowed(&data), &[PixelFormat::RGB8_SRGB]);
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert_eq!(
