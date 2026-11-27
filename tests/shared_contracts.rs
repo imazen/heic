@@ -17,7 +17,7 @@ fn native_fixture_policy_and_inventory_contracts() {
         .metadata();
     for (policy, accepted) in [
         (DecodePolicy::none(), true),
-        (DecodePolicy::strict(), false),
+        (DecodePolicy::untrusted_minimal(), false),
     ] {
         zencodec_testkit::check_decode_policy_admission(
             dec.clone(),

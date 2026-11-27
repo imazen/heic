@@ -207,7 +207,7 @@ impl zencodec::decode::DecoderConfig for HeicDecoderConfig {
         &[ImageFormat::Heic]
     }
 
-    fn supported_descriptors() -> &'static [PixelFormat] {
+    fn supported_pixel_formats() -> &'static [PixelFormat] {
         DECODE_DESCRIPTORS
     }
 
@@ -229,7 +229,7 @@ impl zencodec::decode::DecoderConfig for HeicDecoderConfig {
         // the output strip-by-strip), so it is a safe upper bound. The HEVC
         // AV1-tile/grid assembly buffers it covers are heic's own; the inner
         // HEVC decoder's transient per-CTU scratch is bounded and not modelled.
-        let layout = layout_for_descriptor(image.descriptor());
+        let layout = layout_for_descriptor(image.pixel_format());
         let peak = crate::DecoderConfig::estimate_memory(image.width(), image.height(), layout);
 
         // Wall time: HEVC intra decode is heavy. Measured single-thread on this
@@ -663,11 +663,6 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
     type StreamDec = HeicStreamDecoder;
     type AnimationFrameDec = Unsupported<At<zencodec::CodecError>>;
 
-    fn with_stop(mut self, stop: zencodec::StopToken) -> Self {
-        self.stop = Some(stop);
-        self
-    }
-
     fn with_pulse(mut self, pulse: how_far::SharedPulse) -> Self {
         self.stop = Some(zencodec::StopToken::new(pulse.clone()));
         self.pulse = Some(pulse);
@@ -684,11 +679,6 @@ impl<'a> zencodec::decode::DecodeJob<'a> for HeicDecodeJob {
     /// linear floating-point samples with measured content-light levels.
     fn with_gain_map_render(mut self, render: zencodec::GainMapRender) -> Self {
         self.gain_map_render = render;
-        self
-    }
-
-    fn with_policy(mut self, policy: DecodePolicy) -> Self {
-        self.policy = Some(policy);
         self
     }
 
@@ -2226,10 +2216,9 @@ fn reconstruct_hdr_base(
 
 /// Declare the full-range RGB samples after native YUV matrix/range conversion.
 fn decoded_spec(layout: SampleLayout, info: &ImageInfo) -> Result<PixelFormat, At<HeicError>> {
-    zencodec::helpers::descriptor_for_decoded_pixels_v2(layout, &info.source_color, None)
-        .map_err_at(|_| {
-            HeicError::UnsupportedOperation(zencodec::UnsupportedOperation::PixelFormat)
-        })
+    zencodec::helpers::pixel_format_for_decoded_pixels(layout, &info.source_color, None).map_err_at(
+        |_| HeicError::UnsupportedOperation(zencodec::UnsupportedOperation::PixelFormat),
+    )
 }
 
 fn hdr_metadata(info: &ImageInfo) -> HdrMetadata {
@@ -2410,7 +2399,7 @@ mod tests {
             &[ImageFormat::Heic]
         );
         let descriptors =
-            <HeicDecoderConfig as zencodec::decode::DecoderConfig>::supported_descriptors();
+            <HeicDecoderConfig as zencodec::decode::DecoderConfig>::supported_pixel_formats();
         assert!(!descriptors.is_empty());
         assert!(descriptors.contains(&PixelFormat::RGB8_SRGB));
         assert!(descriptors.contains(&PixelFormat::RGBA8_SRGB));

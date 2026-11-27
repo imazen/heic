@@ -81,7 +81,7 @@ fn reconstruct_hdr(data: &[u8]) {
         .and_then(|d| d.decode());
     match result {
         Ok(out) => {
-            let desc = out.descriptor();
+            let desc = out.pixel_format();
             let transfer = match &desc.color {
                 zenpixels::ColorSpace::Rgb { transfer, .. } => *transfer,
                 _ => zenpixels::Transfer::Unknown,

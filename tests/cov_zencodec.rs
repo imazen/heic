@@ -20,7 +20,8 @@ use std::path::{Path, PathBuf};
 use heic::{HeicDecoderConfig, HeicStreamDecoder, HeicZenDecoder};
 
 use zencodec::decode::{
-    Decode, DecodeJob, DecodeRowSink, DecoderConfig, StreamingDecode, negotiate_pixel_format,
+    Decode, DecodeJob, DecodeRowSink, DecoderConfig, RowStrip, StreamingDecode,
+    negotiate_pixel_format,
 };
 use zencodec::{ImageFormat, ResourceLimits, ThreadingPolicy};
 use zenpixels::{PixelFormat, PixelViewMut};
@@ -123,25 +124,23 @@ impl DecodeRowSink for CollectSink {
 
     fn provide_next_buffer(
         &mut self,
-        y: u32,
-        height: u32,
-        width: u32,
-        descriptor: PixelFormat,
+        strip: RowStrip,
+        format: PixelFormat,
     ) -> Result<PixelViewMut<'_>, zencodec::decode::SinkError> {
-        assert!(height <= self.max_rows.get());
+        assert!(strip.height <= self.max_rows.get());
         self.strips += 1;
-        let bpp = descriptor.layout.bytes_per_pixel();
-        let stride = width as usize * bpp + self.row_padding;
-        let start = y as usize * (self.width as usize * self.bpp + self.row_padding);
-        let len = height as usize * stride;
+        let bpp = format.layout.bytes_per_pixel();
+        let stride = strip.width as usize * bpp + self.row_padding;
+        let start = strip.y as usize * (self.width as usize * self.bpp + self.row_padding);
+        let len = strip.height as usize * stride;
         let end = start + len;
         let region = &mut self.buf[start..end];
         Ok(PixelViewMut::new_with_format_cow(
             region,
-            width,
-            height,
+            strip.width,
+            strip.height,
             stride,
-            zenpixels::FormatCow::from_owned(descriptor),
+            zenpixels::FormatCow::from_owned(format),
         )
         .expect("strip region sized correctly"))
     }
@@ -160,7 +159,7 @@ fn formats_and_descriptors_advertised() {
         <HeicDecoderConfig as DecoderConfig>::formats(),
         &[ImageFormat::Heic]
     );
-    let descs = <HeicDecoderConfig as DecoderConfig>::supported_descriptors();
+    let descs = <HeicDecoderConfig as DecoderConfig>::supported_pixel_formats();
     assert!(descs.contains(&PixelFormat::RGB8_SRGB));
     assert!(descs.contains(&PixelFormat::RGBA8_SRGB));
     assert!(descs.contains(&PixelFormat::BGRA8_SRGB));
@@ -989,7 +988,7 @@ fn gain_map_render_reconstruct_applies_gain_map() {
         .decode()
         .expect("decode");
 
-    let desc = out.descriptor();
+    let desc = out.pixel_format();
     assert_eq!(desc.layout.sample, zenpixels::SampleType::F32);
     assert!(matches!(
         desc.color,

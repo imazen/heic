@@ -6,7 +6,7 @@ use fixtures::*;
 
 use heic::{DecoderConfig, HeicDecoderConfig};
 use zencodec::decode::{
-    Decode, DecodeJob, DecodeOutput, DecodeRowSink, DecoderConfig as _, SinkError,
+    Decode, DecodeJob, DecodeOutput, DecodeRowSink, DecoderConfig as _, RowStrip, SinkError,
 };
 use zencodec::{CodecErrorExt, GainMapRender, OrientationHint};
 use zenpixels::{
@@ -175,19 +175,18 @@ impl DecodeRowSink for PaddedSink {
     }
     fn provide_next_buffer(
         &mut self,
-        y: u32,
-        h: u32,
-        w: u32,
-        spec: PixelFormat,
+        strip: RowStrip,
+        format: PixelFormat,
     ) -> Result<PixelViewMut<'_>, SinkError> {
-        assert!(h <= 3);
-        let bytes = &mut self.data[y as usize * self.stride..(y + h) as usize * self.stride];
+        assert!(strip.height <= 3);
+        let bytes = &mut self.data
+            [strip.y as usize * self.stride..(strip.y + strip.height) as usize * self.stride];
         Ok(PixelViewMut::new_with_format_cow(
             bytes,
-            w,
-            h,
+            strip.width,
+            strip.height,
             self.stride,
-            zenpixels::FormatCow::from_owned(spec),
+            zenpixels::FormatCow::from_owned(format),
         )
         .unwrap())
     }
@@ -290,15 +289,15 @@ fn hdr_base_retains_pq_precision_and_refuses_lower_rendition_before_sink() {
             },
         );
         assert!(matches!(
-            same.descriptor().color,
+            same.pixel_format().color,
             ColorSpace::Rgb {
                 primaries: Primaries::Bt2020,
                 transfer: Transfer::Pq,
                 ..
             }
         ));
-        assert_eq!(same.descriptor().layout.sample, SampleType::U16);
-        assert_eq!(same.descriptor(), base.descriptor());
+        assert_eq!(same.pixel_format().layout.sample, SampleType::U16);
+        assert_eq!(same.pixel_format(), base.pixel_format());
         assert_eq!(words(&same), words(&base));
         assert_eq!(same.pixels().facts(), base.pixels().facts());
         assert_eq!(same.pixels().hdr(), base.pixels().hdr());
@@ -382,14 +381,14 @@ fn iso_gain_sample_arity_is_independent_of_exact_parameter_arity() {
                 },
             );
             assert!(matches!(
-                out.descriptor().color,
+                out.pixel_format().color,
                 ColorSpace::Rgb {
                     primaries: Primaries::Bt2020,
                     transfer: Transfer::Linear,
                     ..
                 }
             ));
-            assert_eq!(out.descriptor().color.white(), Some(DiffuseWhite::BT2408));
+            assert_eq!(out.pixel_format().color.white(), Some(DiffuseWhite::BT2408));
         }
     }
     let missing = tmap_case(true, true, true, false, false);
@@ -503,7 +502,7 @@ fn restricted_icc_recognizes_rgb_gray_and_separate_negative_cases() {
             }
         );
         if present && gray {
-            let spec = zencodec::helpers::descriptor_for_decoded_pixels_v2(
+            let spec = zencodec::helpers::pixel_format_for_decoded_pixels(
                 zenpixels::SampleLayout::GRAY8,
                 &info.source_color,
                 None,
@@ -516,11 +515,11 @@ fn restricted_icc_recognizes_rgb_gray_and_separate_negative_cases() {
             let out = decode(&data, OrientationHint::Preserve, GainMapRender::BaseOnly);
             if present {
                 assert!(
-                    matches!(out.descriptor().color, ColorSpace::Icc { color_channels: 3, profile, .. } if *profile == icc)
+                    matches!(out.pixel_format().color, ColorSpace::Icc { color_channels: 3, ref profile, .. } if profile.as_ref() == icc.as_slice())
                 );
             } else {
                 assert!(matches!(
-                    out.descriptor().color,
+                    out.pixel_format().color,
                     ColorSpace::Rgb {
                         primaries: Primaries::Bt709,
                         ..
@@ -623,7 +622,7 @@ fn raw_nclx_icc_and_all_hdr_metadata_survive_bake_and_identity_conversion() {
     let pq = decode(&pq, OrientationHint::Preserve, GainMapRender::BaseOnly);
     let same = zenpixels_convert::convert_to_buf_with_peak(
         &pq.pixels(),
-        pq.descriptor(),
+        pq.pixel_format(),
         &Default::default(),
         zenpixels_convert::PeakSource::Declared,
     )
