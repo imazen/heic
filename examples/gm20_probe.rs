@@ -127,7 +127,7 @@ fn main() {
     println!(
         "adapter out: {}x{} {:?}",
         out.pixels().width(),
-        out.pixels().rows(),
+        out.pixels().height(),
         out.pixels().format().layout
     );
 

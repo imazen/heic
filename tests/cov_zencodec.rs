@@ -260,7 +260,7 @@ fn adapter_decode_grid_matches_native_rgb() {
 
     let pixels = output.pixels();
     assert_eq!(pixels.width(), EXAMPLE_W);
-    assert_eq!(pixels.rows(), EXAMPLE_H);
+    assert_eq!(pixels.height(), EXAMPLE_H);
     assert_eq!(pixels.format().layout.bytes_per_pixel(), 3);
     // Non-degenerate: a real photo has variation, not a flat buffer.
     let first = pixels.row(0);
@@ -298,7 +298,7 @@ fn adapter_decode_rgba_negotiation_adds_opaque_alpha() {
     let output = decoder.decode().expect("adapter rgba decode");
     let pixels = output.pixels();
     assert_eq!(pixels.width(), EXAMPLE_W);
-    assert_eq!(pixels.rows(), EXAMPLE_H);
+    assert_eq!(pixels.height(), EXAMPLE_H);
     assert_eq!(pixels.format().layout.bytes_per_pixel(), 4);
     // Every 4th byte (alpha) should be fully opaque for a no-alpha source.
     let row = pixels.row(10);
@@ -363,7 +363,7 @@ fn streaming_grid_reassembles_to_one_shot() {
             "strip width must equal image width"
         );
         assert_eq!(slice.format().layout.bytes_per_pixel(), 3);
-        let h = slice.rows();
+        let h = slice.height();
         assert!(h > 0, "a strip must contain at least one row");
         assert!(y >= max_y_seen, "strips must arrive top-to-bottom");
         max_y_seen = y;
@@ -409,8 +409,8 @@ fn streaming_nongrid_fallback_emits_full_image() {
     while let Some((y, slice)) = stream.next_batch().expect("next_batch") {
         assert_eq!(slice.width(), w);
         assert_eq!(y, prev_end, "non-grid strips must be contiguous");
-        prev_end = y + slice.rows();
-        rows_seen += slice.rows();
+        prev_end = y + slice.height();
+        rows_seen += slice.height();
         // Sanity: each row carries the advertised number of bytes.
         assert!(slice.row(0).len() >= w as usize * slice.format().layout.bytes_per_pixel());
     }
@@ -902,10 +902,10 @@ fn oriented_rows_match_one_shot_with_bounded_padded_sink() {
         let mut rows = 0;
         while let Some((y, batch)) = stream.next_batch().unwrap() {
             assert_eq!(y, rows);
-            for row in 0..batch.rows() {
+            for row in 0..batch.height() {
                 assert_eq!(batch.row(row), expected.row(y + row));
             }
-            rows += batch.rows();
+            rows += batch.height();
         }
         assert_eq!(rows, output.height());
     }
@@ -1082,8 +1082,8 @@ fn reconstruct_hdr_on_plain_heic_decodes_base() {
         .expect("ReconstructHdr on a plain HEIC must not error");
 
     assert_eq!(
-        (base.pixels().width(), base.pixels().rows()),
-        (reconstruct.pixels().width(), reconstruct.pixels().rows())
+        (base.pixels().width(), base.pixels().height()),
+        (reconstruct.pixels().width(), reconstruct.pixels().height())
     );
     assert_eq!(
         base.pixels().as_contiguous_bytes().expect("packed pixels"),
@@ -1145,7 +1145,7 @@ fn decode_rgb_bytes(data: &[u8], pref: Option<zencodec::AllocPreference>) -> Vec
         .expect("decode of committed fixture should succeed");
     let pixels = output.pixels();
     let w = pixels.width();
-    let h = pixels.rows();
+    let h = pixels.height();
     let mut packed = Vec::with_capacity(w as usize * h as usize * 3);
     for y in 0..h {
         packed.extend_from_slice(pixels.row(y));
@@ -1256,7 +1256,7 @@ fn ten_bit_primary_states_its_depth() {
     assert_eq!(pixels.format().layout.sample, zenpixels::SampleType::U16);
     assert_eq!(output.info().source_color.bit_depth, Some(10));
     assert_eq!(pixels.facts().depth.unwrap().color_bits(), 10);
-    for y in 0..pixels.rows() {
+    for y in 0..pixels.height() {
         for sample in pixels.row(y).as_chunks::<2>().0 {
             let sample = u32::from(u16::from_ne_bytes(*sample));
             let code = (sample * 1023 + 32767) / 65535;

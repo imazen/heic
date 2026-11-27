@@ -516,7 +516,7 @@ impl HeicDecodeJob {
             let output = self.decoder_inner(data, preferred)?.decode_inner()?;
             let pixels = output.pixels();
             let desc = pixels.format();
-            sink.begin(pixels.width(), pixels.rows(), desc.clone())
+            sink.begin(pixels.width(), pixels.height(), desc.clone())
                 .map_err(|e| at!(HeicError::Sink(e)))?;
             zencodec::helpers::copy_rows_to_sink(
                 sink,
@@ -526,7 +526,7 @@ impl HeicDecodeJob {
             .map_err(|e| at!(HeicError::Sink(e)))?;
             sink.finish().map_err(|e| at!(HeicError::Sink(e)))?;
             return Ok(
-                OutputInfo::full_decode(pixels.width(), pixels.rows(), desc.clone())
+                OutputInfo::full_decode(pixels.width(), pixels.height(), desc.clone())
                     .with_orientation_applied(applied),
             );
         }
@@ -2062,7 +2062,7 @@ fn gain_map_pixels(
     let spec = PixelFormat::new(
         layout,
         zenpixels::ColorSpace::Untagged {
-            channels,
+            total_channels: channels,
             alpha: zenpixels::AlphaMode::None,
         },
     );
@@ -2080,9 +2080,9 @@ fn gain_map_alternate_space(
             Some(zenpixels::IccColorSpace::Gray) => Some(1),
             _ => None,
         };
-        channels.map(|channels| ColorSpace::Icc {
+        channels.map(|color_channels| ColorSpace::Icc {
             profile: profile.clone(),
-            channels,
+            color_channels,
             alpha: AlphaMode::None,
             intent: zenpixels::RenderingIntent::RelativeColorimetric,
         })
@@ -2194,7 +2194,7 @@ fn reconstruct_hdr_base(
             .map_err_at(|_| HeicError::InvalidData("Apple gain-map apply failed"))?
     };
     crate::error::check_stop(stop)?;
-    let cll = zenpixels_convert::measure_cll(
+    let cll = zenpixels_convert::measure_content_light_level(
         &hdr.as_view(),
         DiffuseWhite::BT2408,
         None,
@@ -2234,7 +2234,7 @@ fn decoded_spec(layout: SampleLayout, info: &ImageInfo) -> Result<PixelFormat, A
 
 fn hdr_metadata(info: &ImageInfo) -> HdrMetadata {
     HdrMetadata {
-        cll: info.source_color.content_light_level,
+        content_light_level: info.source_color.content_light_level,
         mastering: info.source_color.mastering_display,
     }
 }
@@ -2664,7 +2664,7 @@ mod tests {
 
         let pixels = output.pixels();
         assert_eq!(pixels.width(), 1280);
-        assert_eq!(pixels.rows(), 854);
+        assert_eq!(pixels.height(), 854);
         // Verify non-zero data (actual image was decoded)
         assert!(pixels.row(0).iter().any(|&b| b != 0));
     }

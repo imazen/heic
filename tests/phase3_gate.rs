@@ -27,7 +27,7 @@ fn decode(data: &[u8], hint: OrientationHint, render: GainMapRender) -> DecodeOu
 
 fn words(output: &DecodeOutput) -> Vec<u16> {
     let view = output.pixels();
-    (0..view.rows())
+    (0..view.height())
         .flat_map(|y| view.row_as::<u16>(y).unwrap())
         .copied()
         .collect()
@@ -303,7 +303,11 @@ fn hdr_base_retains_pq_precision_and_refuses_lower_rendition_before_sink() {
         assert_eq!(same.pixels().facts(), base.pixels().facts());
         assert_eq!(same.pixels().hdr(), base.pixels().hdr());
         assert_eq!(
-            same.pixels().hdr().cll.unwrap().max_content_light_level,
+            same.pixels()
+                .hdr()
+                .content_light_level
+                .unwrap()
+                .max_content_light_level,
             1000
         );
         let mut sink = PaddedSink::default();
@@ -435,7 +439,10 @@ fn iso_components_register_to_preserved_base_coordinates() {
         .unwrap()
         .pixels
         .as_view();
-    assert_eq!((pm.width(), pm.rows(), cm.width(), cm.rows()), (W, H, H, W));
+    assert_eq!(
+        (pm.width(), pm.height(), cm.width(), cm.height()),
+        (W, H, H, W)
+    );
     for y in 0..W {
         for x in 0..H {
             assert_eq!(cm.row(y)[x as usize], pm.row(H - 1 - x)[y as usize]);
@@ -502,12 +509,14 @@ fn restricted_icc_recognizes_rgb_gray_and_separate_negative_cases() {
                 None,
             )
             .unwrap();
-            assert!(matches!(spec.color,ColorSpace::Icc{channels:1,profile,..} if *profile==icc));
+            assert!(
+                matches!(spec.color, ColorSpace::Icc { color_channels: 1, profile, .. } if *profile == icc)
+            );
         } else {
             let out = decode(&data, OrientationHint::Preserve, GainMapRender::BaseOnly);
             if present {
                 assert!(
-                    matches!(out.descriptor().color,ColorSpace::Icc{channels:3,profile,..} if *profile==icc)
+                    matches!(out.descriptor().color, ColorSpace::Icc { color_channels: 3, profile, .. } if *profile == icc)
                 );
             } else {
                 assert!(matches!(
@@ -575,7 +584,10 @@ fn raw_nclx_icc_and_all_hdr_metadata_survive_bake_and_identity_conversion() {
     assert_eq!(origin.cicp, Some(Cicp::new(1, 1, 1, false)));
     assert_eq!(origin.icc.as_deref(), Some(icc.as_slice()));
     let hdr = stored.pixels().hdr();
-    assert_eq!(hdr.cll, Some(zenpixels::ContentLightLevel::new(1000, 400)));
+    assert_eq!(
+        hdr.content_light_level,
+        Some(zenpixels::ContentLightLevel::new(1000, 400))
+    );
     assert_eq!(
         hdr.mastering,
         Some(zenpixels::MasteringDisplay::new(
@@ -709,7 +721,7 @@ fn apple_one_times_gain_is_exact_linear_base_and_separate_from_nominal_capacity(
             sum += nits;
         }
     }
-    let measured = full.pixels().hdr().cll.unwrap();
+    let measured = full.pixels().hdr().content_light_level.unwrap();
     assert_eq!(
         measured,
         zenpixels::ContentLightLevel::new(
