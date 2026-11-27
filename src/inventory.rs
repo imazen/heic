@@ -1388,7 +1388,7 @@ fn inner_parts(
         (Ctx::Ipco, b"mdcv") => tail(&mut out, 24, "after the 24 bytes heic reads"),
         (Ctx::Ipco, b"colr") | (Ctx::SampleEntry { used: true }, b"colr") => match c.get(..4) {
             Some(b"nclx") => tail(&mut out, 11, "after the nclx fields heic reads"),
-            Some(b"prof" | b"ricc") => {
+            Some(b"prof" | b"rICC") => {
                 // The profile's own header declares its size.
                 if let Some(declared) = be32(c, 4) {
                     let end = 4u64.saturating_add(declared);
@@ -2961,8 +2961,8 @@ impl Walker<'_> {
             } else if matches!(rec.prop, ItemProperty::Unknown) {
                 if &rec.typ == b"colr" && rec.colour_type == Some(*b"rICC") {
                     (
-                        Disposition::Unknown,
-                        "colour type rICC: heic matches lowercase `ricc` (parser.rs parse_colr), so it treats this ICC profile as unknown".to_string(),
+                        Disposition::Malformed,
+                        "the parser rejected the restricted ICC profile payload".to_string(),
                     )
                 } else if &rec.typ == b"colr" {
                     (

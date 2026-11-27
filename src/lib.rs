@@ -604,7 +604,7 @@ impl ImageInfo {
             .at()?;
 
         let primary_item = container
-            .primary_item()
+            .base_rendition_item()
             .ok_or_else(|| at!(ProbeError::Corrupt(HeicError::NoPrimaryImage)))?;
 
         // Check for alpha auxiliary image
@@ -647,8 +647,11 @@ impl ImageInfo {
             .find_auxiliary_items(primary_item.id, "urn:com:apple:photo:2020:aux:hdrgainmap")
             .is_empty()
             || container.items().any(|i| {
-                i.item_type == ItemType::Tmap
-                    && container.get_item_references(i.id, FourCC::DIMG).len() >= 2
+                if i.item_type != ItemType::Tmap {
+                    return false;
+                }
+                let refs = container.get_item_references(i.id, FourCC::DIMG);
+                refs.len() >= 2 && (i.id == container.primary_item_id || refs[0] == primary_item.id)
             });
 
         // Extract CICP from colr nclx box on the primary item
@@ -920,28 +923,21 @@ pub enum GainMapOrigin {
 
 /// HDR gain map data extracted from an auxiliary image or tone-map item.
 ///
-/// The gain map is a grayscale image (typically lower resolution than the
-/// primary) used with the Apple HDR or ISO 21496-1 formula to reconstruct HDR:
-/// ```text
-/// sdr_linear = sRGB_EOTF(sdr_pixel)
-/// gainmap_linear = sRGB_EOTF(gainmap_pixel)
-/// scale = 1.0 + (headroom - 1.0) * gainmap_linear
-/// hdr_linear = sdr_linear * scale
-/// ```
-/// Where `headroom` and other parameters come from either [`xmp`](Self::xmp)
-/// (Apple aux-item path) or [`iso21496`](Self::iso21496) (HEIF Amendment 1
-/// tmap path). [`origin`](Self::origin) names which mechanism produced this
-/// instance. Parse the metadata with `ultrahdr-core` (for XMP) or
-/// `zencodec::gainmap::parse_iso21496_fmt(..., Iso21496Format::AvifTmap)`
-/// (for the binary payload).
+/// Numeric gain samples are typically lower resolution than the base image.
+/// Legacy Apple maps carry one sample per pixel and use MakerNote headroom.
+/// ISO 21496-1 maps may carry three samples per pixel and an independent
+/// number of parameter records. Parse the raw ISO payload with
+/// `zencodec::gainmap::parse_iso21496_fmt` and `Iso21496Format::AvifTmap`.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct HdrGainMap {
-    /// Grayscale gain map pixels (u8).
+    /// Interleaved numeric gain samples, one gray or three RGB bytes per pixel.
     ///
     /// For sources with `bit_depth > 8`, values are scaled to 8-bit.
-    /// Length is `width * height`.
+    /// Length is `width * height * channels`.
     pub data: Vec<u8>,
+    /// Gain image channels, independent of the number of parameter records.
+    pub channels: u8,
     /// Gain map width in pixels.
     pub width: u32,
     /// Gain map height in pixels.
@@ -1158,16 +1154,15 @@ impl DecoderConfig {
 
     /// Decode the HDR gain map from an Apple HDR or HEIF `tmap` HEIC file.
     ///
-    /// Returns the grayscale gain map pixels (scaled to 8-bit), the source
+    /// Returns the numeric gray or RGB gain samples (scaled to 8-bit), the source
     /// bit depth, and whichever reconstruction metadata the container carries.
     /// The gain map is typically lower resolution than the primary image, and
     /// [`HdrGainMap::origin`] names which mechanism produced it.
     ///
     /// The parameters needed to apply the gain map come from one of two paths,
     /// depending on the origin (see [`HdrGainMap`] for the full layout):
-    /// - [`HdrGainMap::xmp`] — Apple aux-item XMP (Apple-specific packet; does
-    ///   NOT carry ISO 21496-1 / `hdrgm:` parameters). Parse with
-    ///   `ultrahdr-core`. `None` for `tmap` gain maps.
+    /// - Apple MakerNote headroom in the image EXIF is the basis for the
+    ///   legacy curve. [`HdrGainMap::xmp`] carries any auxiliary XMP packet.
     /// - [`HdrGainMap::iso21496`] — raw ISO 21496-1 binary metadata from a
     ///   HEIF Amendment 1 `tmap` derived item. Parse with e.g.
     ///   `zencodec::gainmap::parse_iso21496_fmt(..., Iso21496Format::AvifTmap)`.

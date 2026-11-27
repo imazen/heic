@@ -2,7 +2,7 @@
 //!
 //! [`compare_backends_via_zensim`] is the workhorse: it sweeps a list of
 //! corpus directories, decodes each HEIC file via two backends, and uses
-//! `zensim_regress::check_regression` to gate inter-decoder drift. Tests
+//! `zensim::Zensim::classify` to gate inter-decoder drift. Tests
 //! parameterize the pair of backends + the `RegressionTolerance` they
 //! expect; this lets every native backend reuse the same harness instead
 //! of duplicating the loop in `tests/backend_dispatch.rs`.
@@ -28,6 +28,38 @@ pub fn pack_rgba(bytes: &[u8]) -> &[[u8; 4]] {
     // same alignment (1) as `u8`, and both are plain bytes.
     let len = bytes.len() / 4;
     unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<[u8; 4]>(), len) }
+}
+
+/// Existing cross-backend gate using the pinned profile's delta statistics.
+pub struct RegressionTolerance {
+    max_delta: u8,
+    max_pixels_different: f64,
+    min_similarity: f64,
+}
+
+impl RegressionTolerance {
+    pub fn off_by_one() -> Self {
+        Self {
+            max_delta: 1,
+            max_pixels_different: 1.0,
+            min_similarity: 85.0,
+        }
+    }
+
+    pub fn with_max_delta(mut self, value: u8) -> Self {
+        self.max_delta = value;
+        self
+    }
+
+    pub fn with_max_pixels_different(mut self, value: f64) -> Self {
+        self.max_pixels_different = value;
+        self
+    }
+
+    pub fn with_min_similarity(mut self, value: f64) -> Self {
+        self.min_similarity = value;
+        self
+    }
 }
 
 /// Outcome of one backend vs backend comparison sweep.
@@ -72,11 +104,10 @@ impl DiffReport {
 pub fn compare_backends_via_zensim(
     reference: Backend,
     under_test: Backend,
-    tolerance: &zensim_regress::testing::RegressionTolerance,
+    tolerance: &RegressionTolerance,
     dirs: &[&str],
 ) -> DiffReport {
     use zensim::{RgbaSlice, Zensim, ZensimProfile};
-    use zensim_regress::testing::check_regression;
 
     let zensim = Zensim::new(ZensimProfile::A);
     let mut report = DiffReport::default();
@@ -143,29 +174,45 @@ pub fn compare_backends_via_zensim(
             let ref_src = RgbaSlice::new(ref_pixels, w, h);
             let test_src = RgbaSlice::new(test_pixels, w, h);
 
-            match check_regression(&zensim, &ref_src, &test_src, tolerance) {
-                Ok(r) if r.passed() => {
-                    eprintln!(
-                        "OK {}: {w}x{h} similarity={:.4} max_delta={:?}",
-                        path.display(),
-                        r.score(),
-                        r.max_channel_delta()
-                    );
-                    report.matched += 1;
+            match zensim.classify(&ref_src, &test_src) {
+                Ok(classified) => {
+                    let ds = &classified.delta_stats;
+                    let delta = ds
+                        .max_abs_delta
+                        .map(|v| (v * 255.0).round().min(255.0) as u8);
+                    let fraction = if ds.pixel_count == 0 {
+                        0.0
+                    } else {
+                        ds.pixels_differing as f64 / ds.pixel_count as f64
+                    };
+                    let score =
+                        if ds.pixels_differing == 0 && (!ds.has_alpha || ds.alpha_max_delta == 0) {
+                            100.0
+                        } else {
+                            classified.result.score()
+                        };
+                    // Same RGB thresholds and mandatory exact alpha as the
+                    // previous report builder. Diagnostics use the same deltas.
+                    if delta.into_iter().all(|d| d <= tolerance.max_delta)
+                        && fraction <= tolerance.max_pixels_different
+                        && score >= tolerance.min_similarity
+                        && (!ds.has_alpha || ds.alpha_max_delta == 0)
+                    {
+                        eprintln!(
+                            "OK {}: {w}x{h} similarity={score:.4} max_delta={delta:?}",
+                            path.display()
+                        );
+                        report.matched += 1;
+                    } else {
+                        report.failures.push(format!(
+                            "{}: zensim regression failed — score={score:.4} max_delta={delta:?} differing_fraction={fraction:.4} alpha_max_delta={}",
+                            path.display(), ds.alpha_max_delta,
+                        ));
+                    }
                 }
-                Ok(r) => {
-                    report.failures.push(format!(
-                        "{}: zensim regression failed — score={:.4} max_delta={:?}\n  {r}",
-                        path.display(),
-                        r.score(),
-                        r.max_channel_delta()
-                    ));
-                }
-                Err(e) => {
-                    report
-                        .failures
-                        .push(format!("{}: zensim error: {e}", path.display()));
-                }
+                Err(e) => report
+                    .failures
+                    .push(format!("{}: zensim error: {e}", path.display())),
             }
         }
     }

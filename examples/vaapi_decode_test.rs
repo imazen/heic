@@ -94,7 +94,13 @@ mod imp {
         let mut max_delta = [0u8; 3];
         let mut sum_abs = [0u64; 3];
         let mut diff_pix = 0u64;
-        for (r, v) in rust.data.chunks_exact(4).zip(vaapi.data.chunks_exact(4)) {
+        for (r, v) in rust
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(vaapi.data.as_chunks::<4>().0)
+        {
             let mut differs = false;
             for c in 0..3 {
                 let d = r[c].abs_diff(v[c]);

@@ -464,6 +464,23 @@ let thumb: Option<DecodeOutput> = DecoderConfig::new().decode_thumbnail(&data, P
 
 ## Known Bugs
 
+### FIXED 2026-11-24: high-bit RGB16 attenuated chroma
+
+The high-depth RGB matrix now uses the native code grid and rounds the
+exact rational result once. The prior implementation used 8-bit chroma
+coefficients with a depth-dependent shift. The committed HEVC plane and
+BT.709 RGB witnesses cover full and narrow 10/12-bit input and a crop
+starting at coded x=1. A separate 12-bit tie witness pins half-up
+rounding. See `tests/phase3_gate.rs` and `heic-core/src/frame.rs`.
+
+### FIXED 2026-11-24: auxiliary alpha lost its own depth and registration
+
+Register alpha to the primary's visible stored rectangle before cropping
+or applying its orientation. Packed conversion widens alpha from the
+auxiliary's own bit depth. The tests enforce every sample of the 8-bit
+ramp over a 12-bit image and both orders of a 90-degree rotation and
+mirror with a bounded, padded row sink.
+
 ### Fixed during metadata integration: inventory fixture walker overflowed on i686
 
 The PR 57 mutation helper checked a declared box end with `p + size`.

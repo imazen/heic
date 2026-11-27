@@ -4,6 +4,25 @@ All notable changes to the `heic` crate are documented in this file. Format foll
 
 ## [Unreleased]
 
+- Fix full- and narrow-range native high-bit YUV conversion, and scale
+  auxiliary alpha at its own depth. Register alpha before clean aperture
+  and orientation transforms.
+- Recognize case-sensitive restricted ICC (`rICC`). Report malformed
+  restricted ICC payloads separately from unknown color types.
+- Preserve native HDR-base precision on gain-map decode and carry separate
+  HDR gain sample and ISO curve arity. Alternate color and measured content
+  light levels accompany reconstructed output.
+- Adopt the pinned zencodec 0.3 and zenpixels 0.5 cohort on this branch.
+
+
+- Port the optional zencodec adapter to zenpixels 0.5 and the coordinated
+  zencodec/UltraHDR revisions. Decoded owners carry the source color claims,
+  active RGB color and HDR metadata. Native YUV conversion and gain-map
+  rendering retain their existing sample paths.
+- Push and pull decoding honor Preserve and Correct on transformed images.
+  The push adapter respects caller-declared row bounds and destination strides.
+  Gain-map components carry an untagged numeric pixel spec.
+
 - Upgrade `archmage` and `magetypes` to `0.9.33`, refresh `fuzz/Cargo.lock`, fix Clippy 1.100 `needless_range_loop` warnings in `src/hevc/`, remove banned Intel macOS runners from `vt-debug.yml`, and set `CROSS_CONTAINER_OPTS: --security-opt seccomp=unconfined` on the `i686` `cross` CI job.
 
 - U16 decodes state `ExactDepth` at the frame's depth, so a later step can tell a 10-bit source from full 16-bit samples. Covers `to_rgb16` and `to_rgba16` output through the zencodec adapter.
@@ -62,6 +81,11 @@ All notable changes to the `heic` crate are documented in this file. Format foll
   collected only for inspection, and inventory-only helpers are feature-gated.
 
 ### QUEUED BREAKING CHANGES
+
+- `HdrGainMap::data` uses `width * height * channels` bytes. Legacy Apple
+  maps still have one channel. ISO maps may carry three interleaved
+  numeric RGB channels. `DecodedFrame` records optional alpha depth.
+
 
 - `DecodedFrame` remains re-exported as `heic::DecodedFrame`, but its six
   allocating conversion methods (`to_rgb`, `to_rgba`, `to_bgr`, `to_bgra`,

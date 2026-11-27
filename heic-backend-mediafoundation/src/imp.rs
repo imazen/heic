@@ -429,6 +429,7 @@ fn decode_one_frame(
         crop_top: 0,
         crop_bottom: 0,
         alpha_plane: None,
+        alpha_bit_depth: None,
         // VUI color metadata is parsed once by the parent crate from the
         // SPS and threaded in via HvccParams — using the wrong values here
         // produces color-shifted output that's perceptually obvious

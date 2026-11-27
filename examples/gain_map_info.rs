@@ -81,10 +81,15 @@ fn reconstruct_hdr(data: &[u8]) {
         .and_then(|d| d.decode());
     match result {
         Ok(out) => {
-            let desc = out.pixels().descriptor();
+            let desc = out.pixel_format();
+            let transfer = match &desc.color {
+                zenpixels::ColorSpace::Rgb { transfer, .. } => *transfer,
+                _ => zenpixels::Transfer::Unknown,
+            };
             let max = out
                 .pixels()
-                .contiguous_bytes()
+                .as_contiguous_bytes()
+                .expect("packed pixels")
                 .as_chunks::<4>()
                 .0
                 .iter()
@@ -95,8 +100,8 @@ fn reconstruct_hdr(data: &[u8]) {
                 "  reconstruct: {}x{} {:?}/{:?} max_linear={max:.3} cll={:?}",
                 out.width(),
                 out.height(),
-                desc.channel_type(),
-                desc.transfer(),
+                desc.layout.sample,
+                transfer,
                 cll.map(|c| c.max_content_light_level),
             );
         }

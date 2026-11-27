@@ -88,7 +88,7 @@ fn main() {
             prim.data.clone(),
             w,
             h,
-            PixelFormat::Rgb8,
+            PixelFormat::RGB8,
             ColorPrimaries::DisplayP3, // v2 resolved Apple unspecified+ICC -> P3
             TransferFunction::Srgb,
         )
@@ -127,24 +127,27 @@ fn main() {
     println!(
         "adapter out: {}x{} {:?}",
         out.pixels().width(),
-        out.pixels().rows(),
-        out.pixels().descriptor().pixel_format()
+        out.pixels().height(),
+        out.pixels().format().layout
     );
 
-    let adapter_bytes = out.pixels().contiguous_bytes();
+    let adapter_bytes = out
+        .pixels()
+        .as_contiguous_bytes()
+        .expect("packed HDR pixels");
     f32_diff_summary(
         "adapter vs raw(v2 boost)        ",
-        &adapter_bytes,
-        raw_v2.as_slice().as_strided_bytes(),
+        adapter_bytes,
+        raw_v2.as_view().as_strided_bytes(),
     );
     f32_diff_summary(
         "adapter vs raw(adapter boost)   ",
-        &adapter_bytes,
-        raw_adapter_boost.as_slice().as_strided_bytes(),
+        adapter_bytes,
+        raw_adapter_boost.as_view().as_strided_bytes(),
     );
     f32_diff_summary(
         "raw(v2 boost) vs raw(adapter boost)",
-        raw_v2.as_slice().as_strided_bytes(),
-        raw_adapter_boost.as_slice().as_strided_bytes(),
+        raw_v2.as_view().as_strided_bytes(),
+        raw_adapter_boost.as_view().as_strided_bytes(),
     );
 }

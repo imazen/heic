@@ -61,15 +61,15 @@ fn configured_limits_and_cancellation_survive_dispatch() {
             Err(enough::StopReason::Cancelled)
         }
     }
-    let stop = zencodec::StopToken::new(Cancelled);
+    let pulse = how_far::SharedPulse::new(how_far::StopOnly::new(Cancelled));
     let native = config
         .clone()
         .job()
-        .with_stop(stop.clone())
+        .with_pulse(pulse.clone())
         .inventory(&data)
         .unwrap_err();
     let mut erased_job = dynamic.dyn_job();
-    erased_job.set_stop(stop);
+    erased_job.set_pulse(pulse);
     let erased = erased_job.inventory(&data).unwrap_err();
     assert_eq!(
         native.category(),
@@ -98,12 +98,16 @@ fn mid_walk_timeout_preserves_first_reason_in_both_dispatch_paths() {
     let generic = config
         .clone()
         .job()
-        .with_stop(zencodec::StopToken::new(TimeoutOnce(AtomicUsize::new(0))))
+        .with_pulse(how_far::SharedPulse::new(how_far::StopOnly::new(
+            TimeoutOnce(AtomicUsize::new(0)),
+        )))
         .inventory(&data)
         .unwrap_err();
     let dynamic: &dyn DynDecoderConfig = &config;
     let mut job = dynamic.dyn_job();
-    job.set_stop(zencodec::StopToken::new(TimeoutOnce(AtomicUsize::new(0))));
+    job.set_pulse(how_far::SharedPulse::new(how_far::StopOnly::new(
+        TimeoutOnce(AtomicUsize::new(0)),
+    )));
     let erased = job.inventory(&data).unwrap_err();
     let expected = ErrorCategory::Stopped(enough::StopReason::TimedOut);
     assert_eq!(generic.category(), expected);

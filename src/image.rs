@@ -87,8 +87,9 @@ use std::io::Read;
 /// - **Decoding hooks** for the `heic` and `heif` file extensions, so
 ///   `image::open("photo.heic")` and `image::open("photo.heif")` work.
 /// - **Format detection hooks** for each HEVC brand, so `load_from_memory`
-///   works for files with an unambiguous major brand. See [module docs](self)
-///   for the `mif1` limitation.
+///   works for files with an unambiguous major brand (`mif1`-branded files
+///   require `ImageReader::with_format`, as `image` only inspects the first
+///   16 bytes for magic detection).
 ///
 /// Returns `true` if both decoding hooks were registered (they may fail
 /// if another crate already registered for the same extension).

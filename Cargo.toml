@@ -94,9 +94,9 @@ zencodec = [
     "std",
     "dep:zencodec",
     "dep:zenpixels",
+    "dep:zenpixels-convert",
     "dep:rgb",
     "dep:imgref",
-    "dep:garb",
     "dep:ultrahdr-core",
     "dep:zenmeta",
 ]
@@ -120,54 +120,35 @@ magetypes = { version = "0.9.33", default-features = false }
 safe_unaligned_simd = "0.2.5"
 memchr = { version = "2.8.3", default-features = false }
 rayon = { version = "1.12.0", optional = true }
-# Version-only edges so the CONSUMER's [patch.crates-io] chooses the zencodec
-# family source — a hard `git+rev` dep would bypass every consumer patch and
-# split the graph into two zencodec copies (the zenpipe pulse-family stack
-# resolves the family at 79676215; this repo's own patch pins a51d411 for
-# standalone builds).
-zencodec = { version = ">=0.1.27, <0.3.0", optional = true }
-zenmeta = { version = "0.1.0", default-features = false, features = ["apple"], optional = true }
-zenpixels = { version = ">=0.3.1, <0.4.0", default-features = false, features = ["rgb", "imgref", "icc"], optional = true }
+# Version-only edges let a downstream workspace select one coordinated family.
+zencodec = { version = ">=0.3.0, <0.5.0", optional = true }
+zenmeta = { version = "0.2.0", default-features = false, features = ["apple"], optional = true }
+zenpixels = { version = ">=0.5.0, <0.6.0", default-features = false, features = ["rgb", "imgref", "icc"], optional = true }
+zenpixels-convert = { version = "0.5.0", optional = true, default-features = false, features = ["std", "gainmap", "hdr-transfers"] }
 rgb = { version = "0.8.53", default-features = false, features = ["as-bytes"], optional = true }
 bytemuck = { version = "1.25.2", default-features = false, features = ["extern_crate_alloc"] }
 imgref = { version = "1.12.3", optional = true }
-garb = { version = "0.2.8", default-features = false, optional = true }
 rav1d-safe = { version = "0.6.0", optional = true, default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
 zenflate = { version = "0.4.0", optional = true, default-features = false }
-ultrahdr-core = { version = "0.6.0", git = "https://github.com/imazen/ultrahdr", rev = "b7ec2894ca99398a285c1fd48dce89c2eeccc353", optional = true, default-features = false, features = ["f16"] }
+ultrahdr-core = { version = "0.6.0", optional = true, default-features = false, features = ["f16"] }
 image = { version = "0.25.10", default-features = false, optional = true }
 
 [dev-dependencies]
+zenpixels-convert = { version = "0.5.0", features = ["icc-db"] }
+linear-srgb = "0.6.13"
 zenbench = "0.1.10"
 criterion = { version = "0.8.2", default-features = false, features = ["plotters", "cargo_bench_support"] }
 fast-ssim2 = { version = "0.8.2", features = ["imgref"] }
 imgref = "1.12.3"
-# Perceptual cross-backend RGBA comparison for the dispatcher integration
-# tests — zensim does multi-scale XYB similarity scoring; zensim-regress
-# wraps it with structured tolerance / report semantics for diff testing.
-# Pinned to the imazen/zensim `main` rev that removed the legacy linear
-# PreviewV0_1/PreviewV0_2 profiles (A-only): published zensim 0.2.7 predates
-# `ZensimProfile::A`, so the diff harness (which now scores with `A`) needs
-# the unreleased 0.3.x. Drop the git pins for plain versions once zensim
-# 0.3.x + zensim-regress 0.4.x publish to crates.io.
-zensim = { version = "0.3.0", git = "https://github.com/imazen/zensimx", rev = "493c91cdd7af" }
-zensim-regress = { version = "0.4.0", git = "https://github.com/imazen/zensimx", rev = "493c91cdd7af" }
+# Keep the pinned A-profile metric and classification API. The PNG/resize
+# reporting wrappers use an older pixel and codec dependency cohort.
+zensim = { version = "0.3.0", git = "https://github.com/imazen/zensimx", rev = "493c91cdd7af", features = ["classification"] }
 # heic-wasm-rs: reference decoder for comparison tests
 # Uncomment + RUSTFLAGS='--cfg heic_reference' cargo test to enable
 # heic-wasm-rs = { path = "../../heic/heic-wasm-rs" }
 png = "0.18.1"
-# zencodec conformance harness (crates.io). Provides
-# `check_decode_truncation_series` (a truncated input must categorize as an
-# incomplete-input ErrorCategory, never panic, never silently decode).
-#
-# Unification caveat: the *published* `zencodec-testkit 0.1.0` manifest declares
-# `zencodec ^0.1.26` = `>=0.1.26, <0.2.0`. That intersects the `zencodec` dep
-# above on a single registry instance today, so no [patch.crates-io] is needed.
-# But once `zencodec 0.2.0` publishes, testkit 0.1.0's caret will NOT admit it
-# and this dev-dep graph would carry TWO zencodec copies. `zencodec-testkit`
-# must republish with the widened `>=0.1.26, <0.3.0` requirement (already in its
-# manifest, zencodec repo `4391021`) BEFORE zencodec 0.2.0 ships.
-zencodec-testkit = ">=0.1.0, <0.3.0"
+# Shared conformance harness, pinned alongside zencodec below.
+zencodec-testkit = ">=0.3.0, <0.5.0"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(heic_reference)', 'cfg(fuzzing)'] }
@@ -239,15 +220,16 @@ harness = false
 
 
 
-# Temporary metadata integration pins; replace with released versions before publication.
+# Temporary integration pins for the coordinated zenpixels 0.5 family.
 [patch.crates-io]
-zenmeta = { git = "https://github.com/imazen/zencodec", rev = "a51d4119d363678273758f1f196062694175bb1a" }
-zencodec = { git = "https://github.com/imazen/zencodec", rev = "a51d4119d363678273758f1f196062694175bb1a" }
-zencodec-testkit = { git = "https://github.com/imazen/zencodec", rev = "a51d4119d363678273758f1f196062694175bb1a" }
-# zencodec 0.2.0 requires zenpixels >=0.2.17 (registry 0.3.0 is yanked); same
-# rev zenavif's table uses. Drop at the zenpixels 0.3.x publish.
-zenpixels = { git = "https://github.com/imazen/zenpixels", rev = "18afc75f1fd40c7feafeef6deae4df8e97e5e1b9" }
-zenpixels-convert = { git = "https://github.com/imazen/zenpixels", rev = "18afc75f1fd40c7feafeef6deae4df8e97e5e1b9" }
+zenpixels = { git = "https://github.com/imazen/zenpixels", rev = "7fa068834f8074c2630a352b25f355f7c90751f8" }
+zenpixels-convert = { git = "https://github.com/imazen/zenpixels", rev = "7fa068834f8074c2630a352b25f355f7c90751f8" }
+garb = { git = "https://github.com/imazen/garb", rev = "457ff8b9153e9d675a39dc098052b2ffeb6206fa" }
+linear-srgb = { git = "https://github.com/imazen/linear-srgb", rev = "ae83f19426737635fee3dd16f228681019f52585" }
+zencodec = { git = "https://github.com/imazen/zencodec", rev = "5d4f6c473404c09c95f404543f8a16a1e3cb8477" }
+zencodec-testkit = { git = "https://github.com/imazen/zencodec", rev = "5d4f6c473404c09c95f404543f8a16a1e3cb8477" }
+zenmeta = { git = "https://github.com/imazen/zencodec", rev = "5d4f6c473404c09c95f404543f8a16a1e3cb8477" }
+ultrahdr-core = { git = "https://github.com/imazen/ultrahdr", rev = "26bea4bcc01849a5113127f3766af73ae35e50f4" }
 
 [[example]]
 name = "gm20_probe"

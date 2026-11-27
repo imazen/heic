@@ -13,7 +13,7 @@
 #   pub types (struct/enum/trait/alias)        30
 #   pub consts/statics                         48
 #   free functions                             10
-#   inherent methods                           94
+#   inherent methods                           90
 #   struct fields                             206
 #   enum variants                              30
 #   re-exports                                  1
@@ -21,11 +21,11 @@
 #   auto-trait-complete types                  28
 #
 # per-module pub lines:
-#   (root)                           11
+#   (root)                            7
 #   heif                            239
 #   hevc                            172
 
-## items (421 lines)
+## items (417 lines)
 
 #[non_exhaustive] pub enum heif::ItemType
 pub const heif::FourCC::AUXC: Self
@@ -80,28 +80,24 @@ pub enum heif::ColorInfo
 pub enum heif::ItemProperty
 pub enum heif::Transform
 pub fn AuxiliaryImageType::assert_fields_are_eq(&self)
-pub fn Backend::assert_fields_are_eq(&self)
-pub fn DepthRepresentationType::assert_fields_are_eq(&self)
-pub fn GainMapOrigin::assert_fields_are_eq(&self)
-pub fn PixelLayout::assert_fields_are_eq(&self)
-pub fn heif::AuxiliaryTypeProperty::clone(&self) -> heif::AuxiliaryTypeProperty
+pub fn heif::AuxiliaryTypeProperty::clone(&self) -> Self
 pub fn heif::AuxiliaryTypeProperty::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn heif::Av1DecoderConfig::bit_depth(&self) -> u8
 pub fn heif::Av1DecoderConfig::chroma_format(&self) -> u8
-pub fn heif::Av1DecoderConfig::clone(&self) -> heif::Av1DecoderConfig
+pub fn heif::Av1DecoderConfig::clone(&self) -> Self
 pub fn heif::Av1DecoderConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub fn heif::CleanAperture::clone(&self) -> heif::CleanAperture
+pub fn heif::CleanAperture::clone(&self) -> Self
 pub fn heif::CleanAperture::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub fn heif::ColorInfo::clone(&self) -> heif::ColorInfo
+pub fn heif::ColorInfo::clone(&self) -> Self
 pub fn heif::ColorInfo::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub fn heif::CompressionConfig::clone(&self) -> heif::CompressionConfig
+pub fn heif::CompressionConfig::clone(&self) -> Self
 pub fn heif::CompressionConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub fn heif::ContentLightLevelBox::clone(&self) -> heif::ContentLightLevelBox
+pub fn heif::ContentLightLevelBox::clone(&self) -> Self
 pub fn heif::ContentLightLevelBox::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn heif::FourCC::as_str(&self) -> &str
 pub fn heif::FourCC::assert_fields_are_eq(&self)
-pub fn heif::FourCC::clone(&self) -> heif::FourCC
-pub fn heif::FourCC::eq(&self, &heif::FourCC) -> bool
+pub fn heif::FourCC::clone(&self) -> Self
+pub fn heif::FourCC::eq(&self, &Self) -> bool
 pub fn heif::FourCC::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn heif::FourCC::from_bytes(&[u8]) -> core::option::Option<Self>
 pub fn heif::HeifContainer<'a>::find_all_auxiliary_items(&self, u32) -> alloc::vec::Vec<(u32, alloc::string::String)>
@@ -114,32 +110,32 @@ pub fn heif::HeifContainer<'a>::get_item_data(&self, u32) -> Result<alloc::borro
 pub fn heif::HeifContainer<'a>::get_item_references(&self, u32, heif::FourCC) -> alloc::vec::Vec<u32>
 pub fn heif::HeifContainer<'a>::items(&self) -> impl core::iter::traits::iterator::Iterator<Item = heif::Item> + '_
 pub fn heif::HeifContainer<'a>::primary_item(&self) -> core::option::Option<heif::Item>
-pub fn heif::HevcDecoderConfig::clone(&self) -> heif::HevcDecoderConfig
+pub fn heif::HevcDecoderConfig::clone(&self) -> Self
 pub fn heif::HevcDecoderConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub fn heif::ImageMirror::clone(&self) -> heif::ImageMirror
+pub fn heif::ImageMirror::clone(&self) -> Self
 pub fn heif::ImageMirror::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub fn heif::ImageRotation::clone(&self) -> heif::ImageRotation
+pub fn heif::ImageRotation::clone(&self) -> Self
 pub fn heif::ImageRotation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub fn heif::ImageSpatialExtents::clone(&self) -> heif::ImageSpatialExtents
+pub fn heif::ImageSpatialExtents::clone(&self) -> Self
 pub fn heif::ImageSpatialExtents::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn heif::Item::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub fn heif::ItemProperty::clone(&self) -> heif::ItemProperty
+pub fn heif::ItemProperty::clone(&self) -> Self
 pub fn heif::ItemProperty::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn heif::ItemType::assert_fields_are_eq(&self)
-pub fn heif::ItemType::clone(&self) -> heif::ItemType
-pub fn heif::ItemType::eq(&self, &heif::ItemType) -> bool
+pub fn heif::ItemType::clone(&self) -> Self
+pub fn heif::ItemType::eq(&self, &Self) -> bool
 pub fn heif::ItemType::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn heif::ItemType::from(heif::FourCC) -> Self
-pub fn heif::MasteringDisplayBox::clone(&self) -> heif::MasteringDisplayBox
+pub fn heif::MasteringDisplayBox::clone(&self) -> Self
 pub fn heif::MasteringDisplayBox::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub fn heif::Transform::clone(&self) -> heif::Transform
+pub fn heif::Transform::clone(&self) -> Self
 pub fn heif::Transform::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub fn heif::UncompressedComponent::clone(&self) -> heif::UncompressedComponent
+pub fn heif::UncompressedComponent::clone(&self) -> Self
 pub fn heif::UncompressedComponent::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub fn heif::UncompressedConfig::clone(&self) -> heif::UncompressedConfig
+pub fn heif::UncompressedConfig::clone(&self) -> Self
 pub fn heif::UncompressedConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn heif::parse<'a>(&'a [u8], &dyn enough::Stop) -> Result<heif::HeifContainer<'a>>
-pub fn hevc::ImageInfo::clone(&self) -> hevc::ImageInfo
+pub fn hevc::ImageInfo::clone(&self) -> Self
 pub fn hevc::ImageInfo::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn hevc::VideoDecoder::decode_annex_b(&mut self, &[u8]) -> hevc::Result<alloc::vec::Vec<heic_core::frame::DecodedFrame>>
 pub fn hevc::VideoDecoder::decode_nal(&mut self, &hevc::bitstream::NalUnit<'_>) -> hevc::Result<core::option::Option<heic_core::frame::DecodedFrame>>
@@ -151,14 +147,14 @@ pub fn hevc::decode_with_config_stop(&heif::HevcDecoderConfig, &[u8], &dyn enoug
 pub fn hevc::enable_deblock_trace()
 pub fn hevc::get_info(&[u8]) -> hevc::Result<hevc::ImageInfo>
 pub fn hevc::get_info_from_config(&heif::HevcDecoderConfig) -> hevc::Result<hevc::ImageInfo>
-pub fn hevc::params::PcmParams::clone(&self) -> hevc::params::PcmParams
+pub fn hevc::params::PcmParams::clone(&self) -> Self
 pub fn hevc::params::PcmParams::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub fn hevc::params::Pps::clone(&self) -> hevc::params::Pps
+pub fn hevc::params::Pps::clone(&self) -> Self
 pub fn hevc::params::Pps::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub fn hevc::params::ProfileTierLevel::clone(&self) -> hevc::params::ProfileTierLevel
-pub fn hevc::params::ProfileTierLevel::default() -> hevc::params::ProfileTierLevel
+pub fn hevc::params::ProfileTierLevel::clone(&self) -> Self
+pub fn hevc::params::ProfileTierLevel::default() -> Self
 pub fn hevc::params::ProfileTierLevel::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub fn hevc::params::ScalingListData::clone(&self) -> hevc::params::ScalingListData
+pub fn hevc::params::ScalingListData::clone(&self) -> Self
 pub fn hevc::params::ScalingListData::default() -> Self
 pub fn hevc::params::ScalingListData::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn hevc::params::ScalingListData::get_scaling_factor(&self, u8, u8, u32, u32) -> u8
@@ -167,7 +163,7 @@ pub fn hevc::params::ScalingListData::new_flat() -> Self
 pub fn hevc::params::Sps::bit_depth_c(&self) -> u8
 pub fn hevc::params::Sps::bit_depth_y(&self) -> u8
 pub fn hevc::params::Sps::chroma_array_type(&self) -> u8
-pub fn hevc::params::Sps::clone(&self) -> hevc::params::Sps
+pub fn hevc::params::Sps::clone(&self) -> Self
 pub fn hevc::params::Sps::ctb_size(&self) -> u32
 pub fn hevc::params::Sps::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn hevc::params::Sps::log2_ctb_size(&self) -> u8
@@ -176,9 +172,9 @@ pub fn hevc::params::Sps::log2_min_cb_size(&self) -> u8
 pub fn hevc::params::Sps::log2_min_tb_size(&self) -> u8
 pub fn hevc::params::Sps::pic_height_in_ctbs(&self) -> u32
 pub fn hevc::params::Sps::pic_width_in_ctbs(&self) -> u32
-pub fn hevc::params::TileInfo::clone(&self) -> hevc::params::TileInfo
+pub fn hevc::params::TileInfo::clone(&self) -> Self
 pub fn hevc::params::TileInfo::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub fn hevc::params::Vps::clone(&self) -> hevc::params::Vps
+pub fn hevc::params::Vps::clone(&self) -> Self
 pub fn hevc::params::Vps::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn hevc::params::parse_pps(&[u8]) -> hevc::Result<hevc::params::Pps>
 pub fn hevc::params::parse_sps(&[u8]) -> hevc::Result<hevc::params::Sps>

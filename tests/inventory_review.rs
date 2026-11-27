@@ -37,7 +37,12 @@ fn pixels(cfg: HeicDecoderConfig, data: &[u8]) -> Result<Vec<u8>, String> {
     cfg.job()
         .decoder(Cow::Borrowed(data), &[])
         .and_then(|d| d.decode())
-        .map(|o| o.pixels().contiguous_bytes().to_vec())
+        .map(|o| {
+            o.pixels()
+                .as_contiguous_bytes()
+                .expect("packed pixels")
+                .to_vec()
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -812,7 +817,9 @@ fn many_extents_outside_mdat_return_promptly() {
     let t = std::time::Instant::now();
     let r = HeicDecoderConfig::new()
         .job()
-        .with_stop(zencodec::StopToken::new(Flag(flag)))
+        .with_pulse(how_far::SharedPulse::new(how_far::StopOnly::new(Flag(
+            flag,
+        ))))
         .inventory(&data);
     let el = t.elapsed();
     eprintln!(
@@ -981,7 +988,8 @@ fn policy_stripped_exif_still_feeds_gain_map_params() {
     let policy = zencodec::decode::DecodePolicy::none().with_allow_exif(false);
     let info = HeicDecoderConfig::new()
         .job()
-        .with_policy(policy)
+        .try_with_policy(policy)
+        .unwrap()
         .probe_full(&data)
         .unwrap();
     assert!(info.embedded_metadata.exif.is_none());
@@ -992,7 +1000,8 @@ fn policy_stripped_exif_still_feeds_gain_map_params() {
     );
     let inv = HeicDecoderConfig::new()
         .job()
-        .with_policy(policy)
+        .try_with_policy(policy)
+        .unwrap()
         .inventory(&data)
         .unwrap();
     let exif = inv
@@ -1248,7 +1257,8 @@ fn tmap_file(tail: &[u8]) -> Vec<u8> {
     let iso = zencodec::gainmap::serialize_iso21496_fmt(
         &params,
         zencodec::gainmap::Iso21496Format::AvifTmap,
-    );
+    )
+    .unwrap();
     assert!(
         zencodec::gainmap::parse_iso21496_fmt(&iso, zencodec::gainmap::Iso21496Format::AvifTmap)
             .is_ok()

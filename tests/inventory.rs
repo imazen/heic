@@ -644,7 +644,7 @@ box meta 24..928 structure
       property ispe 595..618 structure
         gap - 615..618 dropped
       property colr 618..637 dropped \"nclx\"
-      property colr 637..665 unknown \"rICC\"
+      property colr 637..665 malformed \"rICC\"
       property irot 665..674 metadata(orientation)
       property pixi 674..690 unknown
       property zPrv 690..714 unknown

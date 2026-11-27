@@ -294,7 +294,7 @@ let thumb = decoder.decode_thumbnail(&data, PixelLayout::Rgb8)?;  // smaller pre
 
 ```rust
 let gainmap = DecoderConfig::new().decode_gain_map(&data)?;
-// gainmap.data: Vec<u8> (8-bit grayscale gain map pixels), gainmap.width, gainmap.height
+// gainmap.data: interleaved u8 samples, with gainmap.width, gainmap.height, gainmap.channels
 // Apply Apple HDR reconstruction:
 //   sdr_linear = sRGB_EOTF(sdr_pixel)
 //   gain_linear = sRGB_EOTF(gainmap_pixel)

@@ -173,7 +173,7 @@ fn mediafoundation_alone_decodes_when_required() {
 /// Cross-backend corpus sweep using the shared
 /// [`common::compare_backends_via_zensim`] helper. Treats the rust
 /// backend as ground truth and gates MF output via
-/// [`zensim_regress::testing::check_regression`].
+/// [`common::compare_backends_via_zensim`].
 ///
 /// Tolerance: documented inter-decoder rounding noise — chroma upsample
 /// + matrix-coefficient drift can produce ~21-step deltas; allow up to
@@ -187,7 +187,7 @@ fn mediafoundation_alone_decodes_when_required() {
 ))]
 #[test]
 fn mediafoundation_vs_rust_corpus_diff() {
-    use zensim_regress::testing::RegressionTolerance;
+    use common::RegressionTolerance;
 
     if !mf_hevc_required() {
         eprintln!("HEIC_REQUIRE_MF_HEVC not enabled: skipping corpus diff");
@@ -256,7 +256,7 @@ fn videotoolbox_decodes_example() {
 ))]
 #[test]
 fn videotoolbox_vs_rust_corpus_diff() {
-    use zensim_regress::testing::RegressionTolerance;
+    use common::RegressionTolerance;
     let tolerance = RegressionTolerance::off_by_one()
         .with_max_delta(40)
         .with_max_pixels_different(100.0)
@@ -318,7 +318,7 @@ fn d3d11va_decodes_example_on_hardware() {
 ))]
 #[test]
 fn d3d11va_vs_rust_synthetic_corpus() {
-    use zensim_regress::testing::RegressionTolerance;
+    use common::RegressionTolerance;
     if std::env::var_os("HEIC_D3D11VA_HW").is_none() {
         eprintln!("HEIC_D3D11VA_HW not set: skipping D3D11VA corpus diff");
         return;
@@ -393,7 +393,7 @@ fn vaapi_decodes_example_on_hardware() {
 ))]
 #[test]
 fn vaapi_vs_rust_corpus_diff() {
-    use zensim_regress::testing::RegressionTolerance;
+    use common::RegressionTolerance;
     if std::env::var_os("HEIC_VAAPI_HW").is_none() {
         eprintln!("HEIC_VAAPI_HW not set: skipping VA-API corpus diff");
         return;

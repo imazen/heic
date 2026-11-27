@@ -98,6 +98,8 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # Remove both together with the git pins once zensim publishes a matching release.
 allow-git = [
     "https://github.com/imazen/zenpixels",
+    "https://github.com/imazen/garb",
+    "https://github.com/imazen/linear-srgb",
     "https://github.com/imazen/zencodec",
     "https://github.com/imazen/ultrahdr",
     "https://github.com/imazen/zensimx",

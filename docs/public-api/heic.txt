@@ -6,7 +6,7 @@
 # impls omitted; re-export duplicates annotated `[also: path]`.
 # DO NOT EDIT BY HAND — commit regenerated changes with the code.
 #
-# files: heic.txt 203 lines (supported surface) | heic.features.txt 37 added (features: av1,backend-d3d11va,backend-mediacodec,backend-mediafoundation,backend-rust,backend-vaapi,backend-videotoolbox,fallible-alloc,inventory,parallel,std,unci,zencodec) | heic.internal.txt 453 lines (710 hidden + 0 excluded-feature)
+# files: heic.txt 204 lines (supported surface) | heic.features.txt 38 added (features: av1,backend-d3d11va,backend-mediacodec,backend-mediafoundation,backend-rust,backend-vaapi,backend-videotoolbox,fallible-alloc,image,inventory,parallel,std,unci,zencodec) | heic.internal.txt 449 lines (706 hidden + 0 excluded-feature)
 
 ## summary
 #
@@ -15,7 +15,7 @@
 #   pub consts/statics                          4
 #   free functions                              1
 #   inherent methods                           38
-#   struct fields                              58
+#   struct fields                              59
 #   enum variants                              51
 #   re-exports                                  8
 #   trait roster entries (type × trait)        66
@@ -23,9 +23,9 @@
 #   auto-trait exceptions                       3
 #
 # per-module pub lines:
-#   (root)                          181
+#   (root)                          182
 
-## items (181 lines)
+## items (182 lines)
 
 pub mod heic
 pub use At
@@ -165,6 +165,7 @@ pub DepthRepresentationInfo::z_far: core::option::Option<f64>
 pub DepthRepresentationInfo::z_near: core::option::Option<f64>
 #[non_exhaustive] pub struct HdrGainMap
 pub HdrGainMap::bit_depth: u8
+pub HdrGainMap::channels: u8
 pub HdrGainMap::data: alloc::vec::Vec<u8>
 pub HdrGainMap::height: u32
 pub HdrGainMap::iso21496: core::option::Option<alloc::vec::Vec<u8>>
